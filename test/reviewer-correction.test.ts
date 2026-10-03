@@ -188,7 +188,7 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[]; original?: string; write?: string[] } = {}) {
+async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[]; original?: string; write?: string[]; keepReviewOpen?: boolean; backgroundReview?: boolean } = {}) {
   const original = options.original ?? "Produce ready output, validate, commit it, preserve all constraints and independently review.";
   await f.prompt("root", original);
   await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
@@ -201,11 +201,294 @@ async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readon
   for (const command of options.validation ?? ["node check.mjs"]) await f.shell("worker", command);
   await f.finish(worker, "worker", "Implemented");
   const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
-  const dispatch = await f.before("root", "subagent", f.task(review.task));
+  const dispatch = await f.before("root", "subagent", { ...f.task(review.task), ...(options.backgroundReview ? { background: true } : {}) });
   await f.prompt("author", dispatch.input.prompt);
-   await f.finish(dispatch, "author", "FINDINGS\nMedium: result.txt is wrong rather than ready; correct its content.\nMedium: preserve the ready output contract.\nMedium: keep required validation and clean commit semantics.");
-  return { original, run: await f.run(), mission: await f.missions.required("root") };
+   if (!options.keepReviewOpen) await f.finish(dispatch, "author", "FINDINGS\nMedium: result.txt is wrong rather than ready; correct its content.\nMedium: preserve the ready output contract.\nMedium: keep required validation and clean commit semantics.");
+   return { original, dispatch, run: await f.run(), mission: await f.missions.required("root") };
 }
+
+test("initial Reviewer records findings, corrects and validates in one native Task without a handoff reread", async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
+    const promptID = started.mission.review!.promptID;
+    const findings = "FINDINGS\nMedium: result.txt is wrong rather than ready; preserve result, checks and clean delivery.";
+    const begun = await f.tool("author", "repair_review", { findings });
+    assert.equal(begun.execution, "same-native-task");
+    assert.equal(begun.findings, findings);
+    assert.equal(begun.task, undefined);
+    const active = await f.run();
+    assert.equal(active.units[0]!.directExecution?.actor, "author");
+    assert.equal(active.units[0]!.reviewerCorrection?.promptID, promptID);
+    const handoff = JSON.parse(await readFile(active.units[0]!.handoffPath, "utf8"));
+    assert.equal(handoff.ext["sortie-dogs/mission-context"].correction_context.findings, findings);
+    assert.equal(handoff.ext["sortie-dogs/mission-context"].correction_context.initialPrompt, undefined);
+    assert.equal((await f.tool("author", "repair_review", { findings })).status, "correction-running");
+    assert.equal((await f.missions.required("root")).corrections!.length, 1);
+    const available = ["read", "shell", "patch", "sortie_v010_repair_review", "sortie_v010_finish_direct_unit", "sortie_v010_bind_write_gate"];
+    assert(available.every(name => !whollyDisabled(name === "patch" ? "edit" : name, f.registry()[f.agents.author!.agent]!.permissions)), "controls survive the real native snapshot");
+    const system = { sessionID: "author", agent: f.agents.author!.agent, tools: Object.fromEntries(available.map(name => [name, {}])), system: [] };
+    await f.context(system);
+    assert.match(JSON.stringify(system.system), /SORTIE_REVIEWER_CONTINUOUS_CONTEXT/);
+    assert.doesNotMatch(JSON.stringify(system.system), /SORTIE_WORKER_CONTEXT|Read the retained handoff/);
+    assert.deepEqual(Object.keys(system.tools).sort(), available.sort());
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation");
+    await f.edit("author", "ready corrected");
+    await f.shell("author", "node required-test.mjs");
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add -- result.txt");
+    await f.shell("author", "git commit -m correction");
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+    const validatedSystem = { ...system, system: [] };
+    await f.context(validatedSystem);
+    const fixedContext = (event: ObjectValue) => event.system.find((part: ObjectValue) => String(part.text).startsWith("SORTIE_REVIEWER_CONTINUOUS_CONTEXT"));
+    assert.deepEqual(fixedContext(validatedSystem), fixedContext(system), "fixed prefix remains through final self-recheck, without changing counters or phase");
+    await assert.rejects(f.edit("author", "not allowed after settlement"), /mission-reviewer-readonly/);
+    assert.equal((await f.missions.required("root")).review!.verdict, "findings", "finish tool is not a native terminal or approval");
+    await assert.rejects(f.tool("root", "complete_mission"), /mission-review-required-or-stale/);
+    const self = 'SELF_RECHECKED\nself_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}\nCompared the original requirements, retained defect and impacted results with actual checks and clean commit; author self-recheck, not independent approval.';
+    const returned = JSON.parse(await f.finish(started.dispatch, "author", self));
+    assert.equal(returned.status, "review-correction-recorded");
+    assert.equal(returned.independent, false);
+    assert(returned.acceptance_summary);
+    assert.match(returned.next_action, /no routine operator_status/);
+    const done = await f.missions.required("root");
+    assert.equal(done.review!.verdict, "self-rechecked");
+    assert.equal(done.review!.selfRecheck!.callID, started.dispatch.id);
+    assert.equal(done.review!.selfRecheck!.promptID, promptID);
+    assert.equal(done.corrections![0]!.inlineReview!.callID, started.dispatch.id);
+    assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
+    const unit = (await f.run()).units[0]!;
+    assert(unit.directExecution!.finishedAt);
+    assert.equal(done.attempts!.at(-1)!.kind, "direct_execution");
+    assert.equal(done.attempts!.at(-1)!.terminal, undefined, "no fabricated second native Task terminal");
+    assert.equal(unit.reviewerCorrection!.checks!.length, 2);
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["live", "cold-reload", "failed-native-recovery"] as const) test(`running continuous correction retains additional findings without redispatch: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true, backgroundReview: mode === "cold-reload",
+      validation: ["node required-test.mjs", "node check.mjs"] });
+    if (mode === "cold-reload") await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
+    const first = "FINDINGS\nMedium: result must be ready; preserve the initial investigation.";
+    const extra = "FINDINGS\nAdditional Medium: ready output loses callback errors; preserve the independently reproduced behavior.";
+    await f.tool("author", "repair_review", { findings: first });
+    await f.edit("author", "ready initial correction");
+    await f.shell("author", "node required-test.mjs");
+    const before = await f.run(), budget = (await f.ledger()).state;
+    const handoff = await readFile(before.units[0]!.handoffPath, "utf8");
+    if (mode === "cold-reload") await f.start();
+    const continued = await f.tool("author", "repair_review", { findings: extra });
+    assert.equal(continued.execution, "same-native-task");
+    assert(continued.findings.includes(extra), "the real repeated native tool call must retain and return the new finding");
+    await f.tool("author", "repair_review", { findings: extra });
+    await f.tool("author", "repair_review", { findings: extra.replace(/^FINDINGS\n/u, "") });
+    await f.tool("author", "repair_review");
+    const mission = await f.missions.required("root"), after = await f.run();
+    const correction = mission.corrections![0]!;
+    assert.equal(mission.corrections!.length, 1);
+    assert.equal(correction.findings, `${first}\n\n${extra}`, "exact retained submissions, idempotent header/no-header retries");
+    assert.equal(mission.review!.result, first, "do not relabel a later author finding as the independent initial report");
+    assert.equal(correction.reviewIdentity, before.units[0]!.reviewerCorrection!.reviewIdentity);
+    assert.equal(after.runID, before.runID);
+    assert.deepEqual(after.units[0]!.directExecution, before.units[0]!.directExecution);
+    assert.deepEqual(after.units[0]!.reviewerCorrection, before.units[0]!.reviewerCorrection);
+    assert.equal(await readFile(after.units[0]!.handoffPath, "utf8"), handoff, "immutable original handoff/check contract");
+    assert.equal((await f.ledger()).state.consumed_units, budget.consumed_units);
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, budget.outstanding_reservations.length);
+    const context = { sessionID: "author", agent: f.agents.author!.agent, tools: {}, system: [] };
+    await f.context(context);
+    assert(JSON.stringify(context.system).includes("Additional Medium"), "outgoing context reconstructs all known findings from durable state");
+    if (mode === "failed-native-recovery") {
+      f.terminal("author", "Native correction failed before remaining formal checks", true);
+      await f.after(started.dispatch, "Native correction failed", { sessionID: "author", status: "failed" }, "error");
+      const recovery = await f.tool("root", "repair_review");
+      const resumed = await f.before("root", "subagent", f.task(recovery.task));
+      await f.prompt("author", resumed.input.prompt); await f.bind("author");
+      const recovered = await f.missions.required("root"), unit = (await f.run()).units[0]!;
+      assert.equal(recovered.corrections!.at(-1)!.findings, correction.findings);
+      assert.equal(JSON.parse(await readFile(unit.handoffPath, "utf8")).ext["sortie-dogs/mission-context"].correction_context.findings, correction.findings);
+      await f.edit("author", "ready all findings corrected");
+      await f.shell("author", "git add -- result.txt && git commit -m all-findings-correction");
+      await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
+      await f.finish(resumed, "author", inlineReport());
+    } else {
+      await f.edit("author", "ready all findings corrected");
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation", "added defects do not waive source freshness");
+      await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
+      await f.shell("author", "git add -- result.txt && git commit -m all-findings-correction");
+      await f.tool("author", "finish_direct_unit");
+      await f.finish(started.dispatch, "author", inlineReport());
+      assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
+      assert.equal((await f.ledger()).state.consumed_units, 2);
+    }
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+  } finally { await f.dispose(); }
+});
+
+test("additional continuous findings are serialized, original-author and generation bound", async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { keepReviewOpen: true });
+    const first = "Medium: retain the original ready result contract.";
+    await f.tool("author", "repair_review", { findings: first });
+    const extra = ["Medium: callback errors are lost.", "Medium: reflected interface values are rejected."];
+    await Promise.all(extra.map(findings => f.tool("author", "repair_review", { findings })));
+    const mission = await f.missions.required("root");
+    const findings = mission.corrections![0]!.findings.split("\n\n");
+    assert.equal(findings.shift(), `FINDINGS\n${first}`);
+    assert.deepEqual(findings.sort(), [...extra].sort(), "concurrent arrivals retain each complete finding once, irrespective of arrival order");
+    const retained = structuredClone(mission.corrections);
+    await assert.rejects(f.tool("final", "repair_review", { findings: "Medium: wrong actor" }), /mission-review-correction-reviewer-not-current/);
+    assert.deepEqual((await f.missions.required("root")).corrections, retained);
+    const promptID = mission.review!.promptID;
+    await f.missions.update("root", item => { item.review!.promptID = "different-native-generation"; });
+    await assert.rejects(f.tool("author", "repair_review", { findings: "Medium: stale generation" }), /mission-review-correction-generation-stale/);
+    assert.deepEqual((await f.missions.required("root")).corrections, retained);
+    await f.missions.update("root", item => { item.review!.promptID = promptID; });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\n" });
+    await f.tool("author", "repair_review", { findings: " \n" });
+    assert.deepEqual((await f.missions.required("root")).corrections, retained);
+    assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
+    assert.equal((await f.missions.required("root")).review!.result, `FINDINGS\n${first}`);
+  } finally { await f.dispose(); }
+});
+
+test("inline correction keeps the actual Reviewer and current source binding", async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { keepReviewOpen: true });
+    const findings = "FINDINGS\nMedium: result must be ready.";
+    await assert.rejects(f.tool("final", "repair_review", { findings }), /mission-review-correction-reviewer-not-current/);
+    await writeFile(join(f.directory, "result.txt"), "changed outside review\n");
+    await assert.rejects(f.tool("author", "repair_review", { findings }), /mission-review-correction-source-stale/);
+    assert.equal((await f.missions.required("root")).corrections, undefined);
+  } finally { await f.dispose(); }
+});
+
+test("an unfinished inline correction cannot borrow a native terminal and releases its reserved direct unit", async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const returned = JSON.parse(await f.finish(started.dispatch, "author", 'SELF_RECHECKED\nself_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}'));
+    assert.equal(returned.status, "review-correction-incomplete");
+    assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+    assert.equal((await f.run()).units[0]!.status, "failed");
+    await assert.rejects(f.tool("root", "complete_mission"));
+    const recovered = await f.tool("root", "repair_review");
+    assert.equal(recovered.task.task_id, "author", "only actual incomplete terminal needs a continuation Task");
+    const resumed = await f.before("root", "subagent", f.task(recovered.task));
+    await f.prompt("author", resumed.input.prompt); await f.bind("author");
+    await f.edit("author", "ready resumed");
+    await f.shell("author", "git add -- result.txt && git commit -m resumed-correction");
+    await f.shell("author", "node check.mjs");
+    await f.finish(resumed, "author", inlineReport());
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 3);
+  } finally { await f.dispose(); }
+});
+
+test("continuous Reviewer background Task survives cold reload before and after direct validation", async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true, backgroundReview: true });
+    await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
+    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.start();
+    await f.edit("author", "ready continuous");
+    await f.shell("author", "git add -- result.txt && git commit -m continuous-correction");
+    await f.shell("author", "node check.mjs");
+    await f.tool("author", "finish_direct_unit");
+    await f.start();
+    assert.match(f.agents.author!.agent, /^dog-reviewer-correction-/);
+    assert.equal((await f.missions.required("root")).review!.verdict, "findings");
+    f.terminal("author", inlineReport());
+    await f.tool("root", "operator_status");
+    const done = await f.missions.required("root");
+    assert.equal(done.review!.verdict, "self-rechecked");
+    assert.equal(done.review!.selfRecheck!.callID, started.dispatch.id);
+    assert.equal(done.review!.selfRecheck!.promptID, started.mission.review!.promptID);
+    assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["failed-check", "changed-source", "unresolved-medium", "native-failure", "missing-self-report", "cancel"] as const) test(`continuous Reviewer preserves formal validation and actual terminal: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
+    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.edit("author", "ready corrected");
+    await f.shell("author", "node required-test.mjs", mode === "failed-check" ? 1 : 0);
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add -- result.txt && git commit -m continuous-guard");
+    if (mode === "changed-source") await f.edit("author", "ready changed after checks");
+    if (mode === "cancel") {
+      await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+      assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+      assert.equal((await f.missions.required("root")).corrections![0]!.status, "cancelled");
+      assert.equal(f.agents.author!.outcome, "interrupted", "cancellation stops the actual still-running native Review, not only its direct grant");
+    } else if (["changed-source", "failed-check"].includes(mode)) {
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation");
+      await f.finish(started.dispatch, "author", inlineReport());
+      assert.equal((await f.missions.required("root")).corrections![0]!.status, "failed");
+    } else {
+      await f.tool("author", "finish_direct_unit");
+      if (mode === "native-failure") {
+        f.terminal("author", inlineReport(), true);
+        await f.after(started.dispatch, inlineReport(), { sessionID: "author", status: "failed" }, "error");
+      } else if (mode === "missing-self-report") await f.finish(started.dispatch, "author", "Correction done, no actual self-recheck report.");
+      else await f.finish(started.dispatch, "author", inlineReport(["Medium: original ready requirement remains wrong."]));
+    }
+    assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    if (mode === "cancel") assert.notEqual((await f.tool("root", "complete_mission")).status, "succeeded");
+    else await assert.rejects(f.tool("root", "complete_mission"));
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+    if (mode === "native-failure" || mode === "missing-self-report") {
+      const formalCalls = f.history.author!.flatMap(message => message.content ?? []).filter(part => part.type === "tool" &&
+        ["node required-test.mjs", "node check.mjs"].includes(part.state.input.command)).length;
+      assert.equal(formalCalls, 2);
+      const fallback = await f.tool("root", "review_mission", { risk_tags: [] });
+      assert.equal(fallback.status, "self-recheck-required");
+      assert.equal(fallback.task.task_id, "author");
+      const resumed = await f.before("root", "subagent", f.task(fallback.task));
+      await f.prompt("author", resumed.input.prompt);
+      await assert.rejects(f.edit("author", "read-only fallback"), /mission-reviewer-readonly/);
+      await f.finish(resumed, "author", inlineReport([], null, (await f.missions.required("root")).review!.source));
+      assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+      assert.equal((await f.ledger()).state.consumed_units, 2, "only missing self-recheck, no new correction/validation unit");
+    }
+  } finally { await f.dispose(); }
+});
+
+test("cancellation after continuous validation still stops the actual native self-recheck", async () => {
+  const f = await fixture();
+  try {
+    await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.edit("author", "ready corrected");
+    await f.shell("author", "git add -- result.txt && git commit -m continuous-cancel");
+    await f.shell("author", "node check.mjs");
+    await f.tool("author", "finish_direct_unit");
+    await f.start();
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.agents.author!.outcome, "interrupted");
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal((await f.missions.required("root")).phase, "cancelled");
+    assert.equal((await f.missions.required("root")).corrections![0]!.status, "cancelled");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
 
 async function stagedInitial(f: Awaited<ReturnType<typeof fixture>>) {
   await writeFile(join(f.directory, "README.md"), "draft\n");
@@ -255,8 +538,11 @@ test("claimed Mission correction activates before limit-bearing Read or shell, w
     const unit = (await f.run()).units[0]!;
     const read = await f.before("author", "read", { path: unit.handoffPath, limit: 2000 });
     const clipped = 'Read file, lines 1-1\n1: ' + (await readFile(unit.handoffPath, "utf8")).slice(0, 2000) + '... (line truncated to 2000 chars)';
-    assert.equal(await f.after(read, clipped, { truncated: false }), clipped, "limited content is never relabeled as a full native Read");
-    await f.shell("author", `cat ${unit.handoffPath}`);
+    assert.match(await f.after(read, clipped, { truncated: false }), /SORTIE_EXACT_CONTRACT_VIEW/u,
+      "limit is a line count; a full-file request receives exact values despite native line clipping");
+    const partial = await f.before("author", "read", { path: unit.handoffPath, offset: 2, limit: 1 });
+    assert.equal(await f.after(partial, "partial line", { truncated: false }), "partial line",
+      "a true partial range does not acquire a full projection");
     await f.shell("author", "node check.mjs");
     const checks = (await f.run()).units[0]!.reviewerCorrection!.checks;
     assert.equal(checks?.length, 1, "exact admission must bind before a model-chosen Read or its first actual formal check");

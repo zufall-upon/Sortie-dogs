@@ -136,6 +136,58 @@ test("V2 optional condition objects admit omission without manufacturing provena
   } finally { cleanup?.(); }
 });
 
+test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
+  const fixture = contextFixture();
+  const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";
+  const packet = { status: "succeeded", run_id: "run", acceptance_fingerprint: "sha256:accepted",
+    receipt: { status: "succeeded", goal_id: "goal", evidence_refs: ["sha256:check"] },
+    limitations: ["unknown usage"], return_report: card, return_report_instruction: "do not transcribe" };
+  const result = (name: string, value: unknown) => ({ type: "tool-result", id: name, name, result: value,
+    metadata: { keep: true }, providerMetadata: { openai: { keep: true } } });
+  const file = { type: "file", uri: "file:///saved-evidence", mime: "text/plain" };
+  const messages = [
+    { role: "user", content: [{ type: "text", text: JSON.stringify(packet) }] },
+    { role: "assistant", content: [{ type: "text", text: card }] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "text", value: JSON.stringify(packet) })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "json", value: packet })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "content", value: [{ type: "text", text: JSON.stringify(packet) }, file] })] },
+    { role: "tool", content: [result("other_tool", { type: "text", value: JSON.stringify(packet) })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "error", value: JSON.stringify(packet) })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "text", value: "malformed {" })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "json", value: { ...packet, status: "blocked" } })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "json", value: { ...packet, receipt: { status: "failed" } } })] },
+    { role: "tool", content: [result("sortie_v010_complete_mission", { type: "json", value: { ...packet, return_report: "non-card evidence" } })] },
+  ];
+  const original = structuredClone(messages);
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+  })).setup(fixture.context);
+  try {
+    for (const hook of ["context", "compaction"]) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+      await fixture.sessionHooks.get(hook)!(event);
+      assert.deepEqual(messages, original, "projection never changes saved messages or packet objects");
+      for (const index of [2, 3, 4]) {
+        const part = event.messages[index].content[0] as any;
+        const projected = part.result.type === "json" ? part.result.value
+          : JSON.parse(part.result.type === "text" ? part.result.value : part.result.value[0].text);
+        const { return_report: _card, ...preserved } = packet;
+        assert.deepEqual(projected, { ...preserved, return_report_retained: projected.return_report_retained });
+        assert.match(projected.return_report_retained, /saved in this tool result/);
+        assert.equal(projected.return_report, undefined);
+        assert.deepEqual(part.metadata, { keep: true });
+        assert.deepEqual(part.providerMetadata, { openai: { keep: true } });
+        assert.equal(Object.getPrototypeOf(event.messages[index]), Object.getPrototypeOf(messages[index]));
+      }
+      assert.equal((event.messages[4].content[0] as any).result.value[1], file);
+      for (const index of [0, 1, 5, 6, 7, 8, 9, 10]) assert.equal(event.messages[index], messages[index]);
+      const once = JSON.stringify(event.messages);
+      await fixture.sessionHooks.get(hook)!(event);
+      assert.equal(JSON.stringify(event.messages), once, "projection is idempotent");
+    }
+  } finally { cleanup?.(); }
+});
+
 test("V2 native shell results retain build→test exits and timestamps through the Review history adapter", async () => {
   const fixture = contextFixture();
   const tool = (id: string, command: string, ran: number, completed: number) => ({ type: "tool", id, name: "shell",
@@ -293,7 +345,7 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       assert.equal(resolve(directory, handoff), unit.handoffPath);
       assert.equal(JSON.parse(await readFile(resolve(directory, declaration), "utf8")).delivery_intent, "implementation");
       // V2 native read(path) reaches the shared engine as filePath without rewriting its target.
-      const read = await before(child, "read", { path: handoff });
+      const read = await before(child, "read", { path: handoff, limit: 2000 });
       assert.equal(read.input.path, handoff);
       const handoffSource = await readFile(resolve(directory, String(read.input.path)), "utf8");
       assert.equal(JSON.parse(handoffSource).task.objective, objective, "original objective and embedded example remain verbatim");
@@ -309,7 +361,7 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
           assert.equal(failed.result.content, "read failed");
           await retainedBinding();
         }
-        for (const args of [{ path: handoff, offset: 1, limit: 1 }, { path: "check.mjs" }]) {
+        for (const args of [{ path: handoff, offset: 2, limit: 1 }, { path: "check.mjs" }]) {
           const partial = await before(child, "read", args);
           const content = await after(partial, "partial / unrelated content");
           assert.doesNotMatch(content, /SORTIE_WORKER_ACTIVATION/);

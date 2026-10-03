@@ -53,9 +53,9 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     } } } as never);
     assert.match(hooks.tool!.sortie_v010_start_mission.description, /dispatch its Worker directly/u);
     for (const name of ['sortie_v010_start_mission', 'sortie_v010_plan_units']) {
-      assert.match(hooks.tool![name]!.description, /meaningful formal check known from user, project or task context/u);
+      assert.match(hooks.tool![name]!.description, /meaningful formal checks?/u);
       assert.match(hooks.tool![name]!.description, /do not require \.git\/\*\* scope/u);
-      assert.match(hooks.tool![name]!.description, /requested commit before independent Review/u);
+      assert.match(hooks.tool![name]!.description, /requested commit.*before independent Review/u);
     }
     const prohibitionDescription = (hooks.tool!.sortie_v010_start_mission.args.prohibited_write as { description: string }).description;
     assert.match(prohibitionDescription, /user or applicable instructions/u);
@@ -175,7 +175,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(status.units[0].status, "succeeded", JSON.stringify(status));
     assert.equal(status.task, undefined, "a successful Fast unit must not prompt a Coordinator dispatch");
     assert.equal(status.acceptance_summary.delivery.git_lifecycle, null, "absence of Git lifecycle is not forged delivery evidence");
-    assert.equal(status.acceptance_summary.delivery.clean, "not independently observed by this projection");
+    assert.equal(status.acceptance_summary.delivery.clean, verdict === "PASS");
+    assert.match(status.acceptance_summary.delivery.observation.source, /^host:git status/u);
+    if (verdict === "PASS") {
+      assert.equal(status.acceptance_summary.delivery.observation.head, (await exec("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim());
+      assert.equal(status.acceptance_summary.delivery.observation.branch, "same-worker-delivery");
+    }
     assert.match(status.next_action, /Fast-lane.*review_mission/);
     const historyReadsBeforeReview = workerHistoryReads;
     const storedEvidence = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units.map(unit => unit.evidence);
@@ -314,6 +319,10 @@ for (const length of [2000, 2001, 3000, 3001, 32768]) test(`known-check direct d
     const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
     assert.equal(MISSION_OBJECTIVE_LIMITS.target, 2000);
     assert.equal(MISSION_OBJECTIVE_LIMITS.maximum, 3000);
+    assert.match(hooks.tool!.sortie_v010_plan_units.description, /2000 characters/);
+    assert.doesNotMatch(hooks.tool!.sortie_v010_plan_units.description, /3000/,
+      "internal headroom must not become the model's authored target");
+    assert.doesNotMatch(started.next_action, /3000/);
     assert.ok(Array.from(handoff.task.objective).length <= 3000);
     if (length <= 3000) assert.equal(handoff.task.objective, objective, "2000 is guidance, not a refusal boundary");
     else assert.equal(handoff.ext["sortie-dogs/mission-context"].unit_instruction, objective, "overflow is retained verbatim, without repair/reapproval");

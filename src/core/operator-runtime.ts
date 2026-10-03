@@ -130,6 +130,13 @@ interface UnitState {
   reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string; promptID?: string;
     checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
   evidence: readonly GoalEvidence[];
+  /** Implementation in the existing controller session, without a native child Task. */
+  directExecution?: {
+    actor: string;
+    startedAt: string;
+    finishedAt?: string;
+    checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
+  };
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
   normalRemediationUsed?: boolean;
@@ -890,9 +897,10 @@ export class OperatorRuntime {
     return this.serial(root, async () => {
       const state = await this.required(root);
       const unit = state.units.find(item => /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-      if (!unit?.reviewerCorrection || unit.callID !== check.dispatchCallID || unit.childSessionID !== check.childSessionID ||
-          unit.reviewerCorrection.author !== check.childSessionID) throw new Error("mission-review-correction-check-owner-mismatch");
-      const checks = unit.reviewerCorrection.checks ??= [];
+      const execution = unit?.reviewerCorrection ?? unit?.directExecution;
+      if (!unit || !execution || unit.callID !== check.dispatchCallID || unit.childSessionID !== check.childSessionID ||
+          (unit.reviewerCorrection?.author ?? unit.directExecution?.actor) !== check.childSessionID) throw new Error("mission-review-correction-check-owner-mismatch");
+      const checks = execution.checks ??= [];
       if (checks.some(item => item.callID === check.callID)) return;
       checks.push(structuredClone(check));
       await this.save(state);
@@ -980,7 +988,7 @@ export class OperatorRuntime {
     if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
     const terminalChildren = mission?.terminalChildren ?? [];
     const retainAcceptance = previous !== undefined && cancelledMissionRetainsAcceptance(previous);
-    const predecessorChildren = previous?.units.flatMap(unit => unit.childSessionID !== null
+    const predecessorChildren = previous?.units.flatMap(unit => !unit.directExecution && unit.childSessionID !== null
       ? [unit.childSessionID] : []) ?? [];
     if (superseding && previous && (!replacingFailedAcceptance && !["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") || previous.gitLifecycle !== null ||
         previous.repairResidualPaths.length > 0 || previous.contractRepair !== null ||
@@ -1008,7 +1016,7 @@ export class OperatorRuntime {
     const parent = replanning ? { ...previous!, phase: "cancelled" as const, decision: "mission-replan" }
       : (!superseding || (retainAcceptance && !mission?.replaceRequirements)) && previous?.phase === "cancelled" ? previous : undefined;
     if (parent && ["explicit-cancellation", "agent-changed"].includes(parent.decision ?? "")) {
-      const cancelled = parent.units.flatMap(unit => (parent.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null
+      const cancelled = parent.units.flatMap(unit => !unit.directExecution && (parent.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null
         ? [unit.childSessionID] : []);
       if (cancelled.length > 0 && (new Set(terminalChildren).size !== terminalChildren.length ||
           cancelled.some(id => !terminalChildren.includes(id)))) {
@@ -1430,6 +1438,44 @@ export class OperatorRuntime {
   admitWorker(root: string, actor: string, callID: string, args: unknown): Promise<OperatorTask> {
     return this.serial(root, () => this.admitWorkerOnce(root, actor, callID, args));
   }
+  admitDirect(root: string, actor: string, callID: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      if (actor !== (state.operatorSessionID ?? root) || !["prepared", "running"].includes(state.phase)) {
+        throw new Error("operator-direct-owner-mismatch");
+      }
+      const unit = state.units.find(item => item.status !== "succeeded");
+      if (!unit || unit.status !== "pending" || unit.reviewerCorrection || unit.repairValidation || unit.terminalRescue) {
+        throw new Error("operator-direct-unit-unavailable");
+      }
+      await this.verifyControls(unit);
+      unit.directExecution = { actor, startedAt: new Date().toISOString(), checks: [] };
+      unit.childSessionID = actor; unit.callID = callID; unit.status = "running";
+      state.phase = "running";
+      await this.save(state);
+      return state;
+    });
+  }
+  /** Continue an admitted independent Review in-place; no second native Task or prompt. */
+  admitReviewerDirect(root: string, author: string, callID: string, promptID: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => item.status !== "succeeded");
+      if (state.phase !== "prepared" || !unit || unit.status !== "pending" ||
+          unit.reviewerCorrection?.author !== author || !promptID || unit.repairValidation || unit.terminalRescue) {
+        throw new Error("mission-review-direct-unit-unavailable");
+      }
+      await this.verifyControls(unit);
+      const startedAt = new Date().toISOString();
+      unit.directExecution = { actor: author, startedAt, checks: [] };
+      unit.reviewerCorrection.admittedAt = startedAt;
+      unit.reviewerCorrection.promptID = promptID;
+      unit.childSessionID = author; unit.callID = callID; unit.status = "running";
+      state.phase = "running";
+      await this.save(state);
+      return state;
+    });
+  }
   private async admitWorkerOnce(root: string, actor: string, callID: string, args: unknown): Promise<OperatorTask> {
     const state = await this.required(root);
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
@@ -1739,6 +1785,7 @@ export class OperatorRuntime {
     if (result.failure !== undefined) (unit as UnitState & { failure?: SerialDispatchSettlement["failure"] }).failure = result.failure;
     else delete unit.failure;
     unit.status = result.disposition;
+    if (unit.directExecution) unit.directExecution.finishedAt = new Date().toISOString();
     if (unit.terminalRescue) {
       unit.terminalRescue.status = "settled";
       unit.terminalRescue.disposition = result.disposition;
@@ -1902,9 +1949,13 @@ export class OperatorRuntime {
       state.decision = "operator-contract-repair-unavailable-after-cancel";
     } else if (reviewRemediation) state.decision = REVIEW_REMEDIATION_DECISION;
     else if (state.decision !== ACCEPTANCE_REMEDIATION_DECISION) state.decision = reason;
-    for (const unit of state.units) if (unit.status === "running") unit.status = "cancelled";
+    for (const unit of state.units) if (unit.status === "running") {
+      unit.status = "cancelled";
+      if (unit.directExecution) unit.directExecution.finishedAt = new Date().toISOString();
+    }
     await this.save(state);
-    return [state.operatorSessionID, ...state.units.map(unit => unit.childSessionID)].filter((id): id is string => id !== null);
+    return [state.operatorSessionID, ...state.units.filter(unit => !unit.directExecution).map(unit => unit.childSessionID)]
+      .filter((id): id is string => id !== null && id !== root);
   }
   terminal(root: string, receipt: GoalTerminalReceipt): Promise<void> {
     return this.serial(root, () => this.terminalOnce(root, receipt));

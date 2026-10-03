@@ -1831,15 +1831,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
-    if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) || parallelChildBindings.has(toolInput.sessionID)) return;
+    const direct = await input.runtimeBridge?.directMissionExecution?.(toolInput.sessionID);
+    if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) && !direct || parallelChildBindings.has(toolInput.sessionID)) return;
     const identity = await hostSessionIdentity(toolInput.sessionID);
-    if (identity?.parentID === undefined) return;
+    const owner = direct?.root ?? identity?.parentID;
+    if (owner === undefined) return;
     const authorization = sessionAuthorizations.get(toolInput.sessionID);
-    if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== identity.parentID) return;
+    if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== owner) return;
     const args = isRecord(output.args) ? output.args : undefined;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
-    const correcting = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
     // A same-text check in another cwd is a diagnostic of other inputs, not proof
     // of this correction's inherited Location-based recipe. Native execution stays allowed.
     if (correcting && typeof args?.workdir === "string" && resolve(input.directory, args.workdir) !== resolve(input.directory)) return;
@@ -1854,7 +1856,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
     const admittedSnapshot = await protectedSnapshot(authorization).catch(() => undefined);
     if (admittedSnapshot === undefined) return;
-    const root = goalRoot(identity.parentID);
+    const root = goalRoot(owner);
     const ledger = await goalLedger(root);
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
@@ -1870,7 +1872,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     };
     if (goal.goal_id !== null) {
       const unitBound = unitID !== undefined && (goal.outstanding_reservations.some((reservation) =>
-        reservation.unit_id === unitID && reservation.session_id === identity.parentID) ||
+        reservation.unit_id === unitID && reservation.session_id === owner) ||
         (repairResume?.unitID === unitID && repairResume.childSessionID === toolInput.sessionID && repairResume.callID !== null));
       if (!unitBound) throw denyValidation("requirement-unbound");
       // Exact generation and formatting checks may support acceptance without proving a criterion.
@@ -2776,7 +2778,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     goalReservations.set(callID, { root: goalRoot(sessionID), reservationID, unitID, started: Date.now() });
   }
 
-  async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput, nativeOutcome?: "completed" | "failed"): Promise<void> {
+  async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput, nativeOutcome?: "completed" | "failed",
+    directEvidence?: readonly GoalEvidence[]): Promise<void> {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
     const ledger = await goalLedger(reservation.root);
@@ -2816,7 +2819,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : execution.exitCode === undefined || execution.outcome === undefined ? [] : observedHostGoalEvidence({
           ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
           exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
-    const hostEvidence = [...new Map(observedEvidence.map(entry => [entry.evidence_id, entry])).values()];
+    const hostEvidence = [...new Map((directEvidence ?? observedEvidence).map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
     // adopt observations still bound to the current accepted source/candidate/criterion contract.
     const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
@@ -2859,7 +2862,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
-      evidence: settlementEvidence, resultClass, nativeOutcome: terminalFailed || interrupted ? "failed" : "completed",
+      evidence: settlementEvidence, resultClass,
+      ...(directEvidence ? {} : { nativeOutcome: terminalFailed || interrupted ? "failed" as const : "completed" as const }),
       ...(correctionChecks?.failure ? { failure: correctionChecks.failure } : resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
         exitCode: failedAcceptanceExecution.exitCode ?? null,
@@ -7307,7 +7311,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (canonical !== undefined) output.args.command = canonical;
       }
       await recordHostGoalStart(toolInput, output);
-      const coordinatorRoot = isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID);
+      const directExecution = await input.runtimeBridge?.directMissionExecution?.(toolInput.sessionID);
+      const coordinatorRoot = !directExecution && (isCoordinatorSession(toolInput.sessionID) || await recoverCoordinatorRoot(toolInput.sessionID));
       const readonlyDiagnosis = coordinatorRoot && toolInput.tool === "task" && isRecord(output.args)
         ? await claimDiagnosisTask(toolInput.sessionID, toolInput.callID, output.args) : false;
       touchCoordinatorTaskWatchdog(toolInput.sessionID);
@@ -8508,6 +8513,76 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionRoots.set(child, root);
       sessionTaskIDs.set(child, taskID);
       activateSession(child);
+    },
+    activateDirectUnit: (root, actor, prompt, handoffPath) => serializeChatTransition(actor, async () => {
+      const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
+      if (!direct || direct.root !== root) throw new Error("mission-direct-grant-stale");
+      if (!await recoverCoordinatorRoot(root)) throw new Error("mission-direct-root-unavailable");
+      const existing = sessionAuthorizations.get(actor);
+      if (existing?.taskID === direct.taskID && existing.dispatchCallID === direct.callID &&
+          !existing.suspended && activeSessionStatus(actor) === "active" && !activeSessions.get(actor)?.released) return;
+      const previous = sessionAuthorizations.get(actor);
+      if (previous && (previous.taskID !== direct.taskID || previous.dispatchCallID !== direct.callID)) {
+        await releaseWriteGate(actor);
+        releaseSessionEnforcement(actor);
+        activateSession(actor);
+      }
+      sessionRoots.set(actor, root);
+      sessionTaskIDs.set(actor, direct.taskID);
+      activateSession(actor);
+      if (!goalReservations.has(direct.callID)) {
+        const snapshot = await (await goalLedger(root)).readGoal();
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
+        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
+          goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
+        } else await reserveGoalDispatch(root, direct.callID, prompt);
+      }
+      const binding = await input.runtimeBridge?.missionReadBinding?.(root, actor, handoffPath);
+      if (!binding) throw new Error("mission-direct-grant-stale");
+      const result = await activateMissionBinding(actor, handoffPath, binding);
+      if (result.status !== "bound") throw new Error(`mission-direct-activation:${String(result.reason)}`);
+      bootstrapRequired = false;
+      bootstrapCompleted = true;
+    }),
+    finishDirectUnit: async (root, actor, checks) => {
+      const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
+      const authorization = sessionAuthorizations.get(actor);
+      if (!direct || direct.root !== root || !authorization || authorization.taskID !== direct.taskID) {
+        throw new Error("mission-direct-grant-stale");
+      }
+      if (activeSessions.get(actor)?.inFlightCalls.size) throw new Error("mission-direct-tools-running");
+      const snapshot = await (await goalLedger(root)).readGoal();
+      // These are the existing persisted native observations selected by the same
+      // ordered/freshness verifier as Reviewer corrections, not caller-authored proof.
+      const evidence = checks.flatMap(check => observedHostGoalEvidence({ ...check, owner: "coordinator",
+        outcome: check.exitCode === 0 ? "pass" : "fail", immutableRef: goalFingerprint({ direct_check: check }),
+        correction: { taskID: direct.taskID, dispatchCallID: direct.callID, commands: check.command } }, snapshot.state, direct.taskID));
+      await settleGoalDispatch(direct.callID, { output: "Host-observed direct unit finished; controller session remains active.",
+        metadata: { sessionId: actor } }, undefined, evidence);
+      await releaseWriteGate(actor);
+      releaseSessionEnforcement(actor);
+    },
+    releaseDirectUnit: async actor => {
+      await releaseWriteGate(actor);
+      releaseSessionEnforcement(actor);
+    },
+    failDirectUnit: async (root, actor) => {
+      const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
+      if (!direct || direct.root !== root) throw new Error("mission-direct-grant-stale");
+      // Cold terminal recovery can happen before the actor's next tool/context hook.
+      if (!goalReservations.has(direct.callID)) {
+        const snapshot = await (await goalLedger(root)).readGoal();
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
+        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
+            snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.reservation_id === reservationID)) {
+          goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
+        } else throw new Error("mission-direct-reservation-unavailable");
+      }
+      await settleGoalDispatch(direct.callID, { status: "error",
+        output: "Actual native Reviewer ended before its direct correction was validated.",
+        metadata: { sessionId: actor } }, undefined, []);
+      await releaseWriteGate(actor);
+      releaseSessionEnforcement(actor);
     },
     activateMissionWorker: (root, child, handoffPath, admission) => serializeChatTransition(child, async () => {
       // Resolve CURRENT durable pins inside the existing session lane. A retried prompt must

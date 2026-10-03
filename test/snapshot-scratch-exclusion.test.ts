@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import test from "node:test";
 import { snapshotScratchExclusion, snapshotScratchExcluded } from "../dist/plugin/protected-snapshot.js";
 import type { GoalEvidence } from "../dist/core/goal-bound.js";
+import { validationScratchPaths } from "../dist/plugin/validation-scratch.js";
 
 test("prepared scratch comparisons preserve the previous lexical protection rules", () => {
   const root = resolve("_testenv/scratch-containment");
@@ -40,4 +41,18 @@ test("prepared scratch comparisons preserve the previous lexical protection rule
       !literalBinding.freshness!.protected_paths.some(parent => !outside(parent, path) || !outside(path, parent));
     assert.equal(literalExclusion(path), old, path);
   }
+});
+
+test("configured inherited scratch is captured without guessing names, and command overrides win", () => {
+  const root = resolve("_testenv/inherited-scratch"), cache = resolve(root, "compiler-output");
+  const inherited = { GOCACHE: cache, TMPDIR: resolve(root, "temp-output"), GOPATH: resolve(root, "tool-path") };
+  assert.deepEqual(validationScratchPaths(root, ["go test ./..."], inherited),
+    [cache, resolve(root, "temp-output"), resolve(root, "tool-path/pkg/mod"), resolve(root, "tool-path/pkg/sumdb")].sort());
+  assert.deepEqual(validationScratchPaths(root, ["go test ./..."]), [], "no ambient process environment is implicitly read by the helper");
+  assert.deepEqual(validationScratchPaths(root, ['GOCACHE="new-cache" TMPDIR="" GOPATH="" go test ./...'], inherited),
+    [resolve(root, "new-cache")]);
+  assert.deepEqual(validationScratchPaths(root, ['GOCACHE="$UNRESOLVED" go test ./...'], { GOCACHE: cache }), []);
+  assert.deepEqual(validationScratchPaths(root, ["GOCACHE=off go test ./..."], { GOCACHE: cache }), []);
+  assert.deepEqual(validationScratchPaths(root, ["go test ./..."], { GOCACHE: resolve(root, "../external-cache"),
+    TMPDIR: root, GOMODCACHE: resolve(root, ".git/cache"), GOPATH: resolve(root, ".opencode/tools") }), []);
 });

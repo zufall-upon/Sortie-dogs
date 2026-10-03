@@ -279,8 +279,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     if (name === "dog-worker-v010") {
-      assert.match(asset, /Use public source\/tests: fix the cause; check meaningful changed branches, API errors and state after failure/u);
-      assert.match(asset, /Preserve reproduction entrypoint, input and layout/u);
+      assert.match(asset, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
+      assert.match(asset, /(?:Preserve reproduction entrypoint, input and layout|Keep reproduction entrypoint\/input\/layout)/u);
       assert.match(asset, /without a hypothetical exhaustive matrix/u);
       assert.match(asset, /unresolved\/untested behavior/u);
     } else {
@@ -306,7 +306,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.doesNotMatch(reviewer, /invoke no tools|reject a missing index|mapping count|supplied artifact.*only/u);
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
-  assert.match(reviewer, /During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /If no correction is required, return exactly PASS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /without another prompt, handoff read or Operator/u);
   assert.match(reviewer, /During an admitted\s+correction, finish after checks\/commit with SELF_RECHECKED/u);
   assert.match(reviewer, /self_recheck: \{"candidate":"current-validated"/u);
   assert.match(reviewer, /Legacy CORRECTION_READY-only uses a separate same-author\s+read-only fallback, not acceptance/u);
@@ -326,7 +327,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /call plan_units and dispatch its Worker immediately/u);
+  assert.match(primary, /include unit in start_mission to receive its Worker immediately in the same call/u);
   assert.match(primary, /inspect only missing source or evidence/u);
   assert.match(primary, /Batch focused reads where practical/u);
   assert.match(primary, /use \[\] only for genuinely low-risk work/u);
@@ -410,7 +411,11 @@ test("preview tools are denied globally and allowed only by profile agents", asy
   });
 
   const operations = previewAssets.find(asset => asset.name === "dogs-coordinator")!.content;
-  assert.match(operations, /^  edit: deny$/m);
+  assert.match(operations, /^  edit: allow$/m);
+  assert.match(operations, /^  write: allow$/m);
+  assert.match(operations, /^  patch: allow$/m);
+  assert.match(operations, /^  sortie_v010_start_direct_unit: true$/m);
+  assert.match(operations, /^  sortie_v010_finish_direct_unit: true$/m);
   assert.match(operations, /^  bash: allow$/m);
   assert.match(operations, /^  sortie_v010_operator_next: true$/m);
   assert.match(operations, /^  sortie_v010_plan_units: true$/m);
@@ -478,7 +483,8 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /Use estimated read\/write paths; native scope reconciliation and expand_unit cover actual outputs/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to continue the SAME native Reviewer\/context/u);
+  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to recover the SAME native Reviewer\/context only if it/u);
+  assert.match(primary, /do not request an interim findings return or dispatch a routine second correction Task/u);
   assert.match(primary, /Only concrete reachable Major risk remaining\s+after self-recheck requires a DIFFERENT Reviewer/u);
   assert.match(primary, /cumulative budget increase/);
   assert.match(primary, /Only its succeeded receipt authorizes DONE/);
@@ -2247,7 +2253,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
   assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
-  assert.match(complete.return_report_instruction, /verbatim exactly once/);
+  assert.match(complete.return_report_instruction, /do not transcribe this card/);
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 

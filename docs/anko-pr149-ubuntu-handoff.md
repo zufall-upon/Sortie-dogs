@@ -1,6 +1,37 @@
 # PR149 Ubuntu remediation and original Anko verification
 
-## Authority and current status
+## Follow-up results (2026-10-02)
+
+The original uncapped task subsequently completed in both comparison routes:
+single SOL 1372.413 s / $0.78903480 / official reward 1; Luna/SOL Sortie
+2194.002 s / $1.77609408 / reward 1. A later all-SOL Sortie execution completed
+its workflow in 2320.256 s / $2.43757400 but received reward 0 (F2P 7/9,
+P2P 94/94). Each used a fresh clone and private DB. Full results, concrete defect
+diagnosis, scoring identities and retained evidence are summarized in
+[the three-route investigation](anko-three-route-investigation-20261002.md).
+
+The follow-up [Coordinator restoration](coordinator-direct-improvements-20261002.md)
+completed a fresh mixed-model run in **1374.420 s / $1.14969540**, with native
+success and a genuine Mission receipt, but official local reward **0** (F2P 5/9,
+P2P 94/94). Its final Anko commit is `59fa8d902db71183de8241464ae6cf553464ba2e`.
+Observed time/cost fell 37.36%/35.27% versus prior mixed; quality did not pass.
+The report records the stale assignment-error return value, fixed candidate and
+archive. Direct controller execution was not used by that Anko route.
+
+The [continuous nightly loop](nightly-quality-loop-20261002.md) then completed
+direct-v2 Anko in 1881.045 s / $1.83757332, still reward 0 (F2P 5/9, P2P 94/94).
+New tests asserted the wrong return value; independent test-oracle selection is
+the next improvement. A separate native same-Coordinator two-unit direct probe
+passed in 278.110 s / $0.33391280, including real failed/passed checks, independent
+Review and genuine Mission completion.
+
+Direct-v3 then passed the original Anko task: official local reward 1, F2P 9/9,
+P2P 94/94; 2039.581 s, priced $1.80364484 plus one unknown-usage transport failure.
+Frozen Anko `c103668da55cb958a45c13236abd8adc0231082d`, product `8b536aa` and
+package hash are recorded in the continuous-loop record. Product PR #152 remains
+the working PR; release/main merge/global apply remain separate.
+
+## Historical authority and status through run7
 
 The user confirmed PR149 as the intended starting point (PR194 returned 404),
 requested the previously Advisor-refined improvements, actual original Anko

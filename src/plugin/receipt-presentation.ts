@@ -10,6 +10,48 @@ export function returnReportPanel(rendered: string): string | undefined {
   return start < 0 || end < 0 ? undefined : rendered.slice(start, end + "\n</details>".length).trim();
 }
 
+type ModelObject = Record<string, unknown>;
+const modelObject = (value: unknown): value is ModelObject => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Request-only projection: the full host card remains in persisted native tool history. */
+export function completionReportModelMessages(messages: readonly unknown[]): unknown[] {
+  const packet = (value: unknown): unknown => {
+    if (!modelObject(value) || value.status !== "succeeded" || !modelObject(value.receipt) ||
+        value.receipt.status !== "succeeded" || typeof value.return_report !== "string" ||
+        returnReportPanel(value.return_report) === undefined) return value;
+    const { return_report: _card, ...rest } = value;
+    return { ...rest, return_report_retained: "Full host card saved in this tool result; reply with concise outcome and key checks, without regenerating it." };
+  };
+  const text = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    try {
+      const original: unknown = JSON.parse(value), compact = packet(original);
+      return compact === original ? value : JSON.stringify(compact);
+    } catch { return value; }
+  };
+  return messages.map(message => {
+    if (!modelObject(message) || message.role !== "tool" || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map(part => {
+      if (!modelObject(part) || part.type !== "tool-result" || part.name !== "sortie_v010_complete_mission" ||
+          !modelObject(part.result)) return part;
+      const result = part.result;
+      const value = result.type === "json" ? packet(result.value) : result.type === "text" ? text(result.value)
+        : result.type === "content" && Array.isArray(result.value) ? result.value.map(item => {
+          if (!modelObject(item) || item.type !== "text") return item;
+          const compact = text(item.text);
+          return compact === item.text ? item : { ...item, text: compact };
+        }) : result.value;
+      if (value === result.value || (Array.isArray(value) && Array.isArray(result.value) &&
+          value.every((item, index) => item === (result.value as unknown[])[index]))) return part;
+      changed = true;
+      return { ...part, result: { ...result, value } };
+    });
+    // Preserve the host Message prototype, IDs, metadata and unrelated content without mutating history.
+    return changed ? Object.assign(Object.create(Object.getPrototypeOf(message)), message, { content }) : message;
+  });
+}
+
 /** Cosmetic headings only; no acceptance or execution state is inferred. */
 export function decoratePreviewHeadings(text: string): string {
   const icons: Record<string, string> = { "変更点": "🔧", "確認結果": "🔍", "次": "➡️", changes: "🔧", validation: "🔍", next: "➡️" };

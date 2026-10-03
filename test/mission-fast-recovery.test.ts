@@ -11,7 +11,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-test("Fast-lane failed validation permits root micro-fix then a second direct Worker and fresh Review", async () => {
+for (const self of [false, true]) test(`Fast-lane failed validation permits root correction then ${self ? "same-session formal checks" : "a second Worker"} and fresh Review`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-fast-recovery-"));
   try {
@@ -23,20 +23,24 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
       root: { agent: "dog-operator" }, first: { agent: "dog-worker-v010", parentID: "root" },
       second: { agent: "dog-worker-v010", parentID: "root" }, reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
     };
+    const rootHistory: Record<string, unknown>[] = [];
     const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-      messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root" ? rootHistory : [] }), abort: async () => ({ data: true }),
     } } } as never);
     await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: agents.root!.agent }, {
       message: { id: "request", agent: agents.root!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text: "Fix result.txt and verify check.mjs" }],
     });
-    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validated fixed result"] }, { sessionID: "root" }));
-    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Fix result",
+    const unit = { title: "Fix result",
       objective: "Create a result accepted by check.mjs", read: ["check.mjs"], write: ["result.txt"],
-      validation: ["node check.mjs"] }] }, { sessionID: "root" }));
+      validation: ["node check.mjs"] };
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validated fixed result"],
+      ...(self ? { unit } : {}) }, { sessionID: "root" }));
+    const planned = self ? started : JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [unit] }, { sessionID: "root" }));
+    if (self) assert.equal(planned.task.subagent_type, "dog-worker-v010", "single call returns the actual configured Worker");
     const dispatch = async (task: Record<string, unknown>, id: "first" | "second", callID: string, content: string) => {
       const output = { args: structuredClone(task) };
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID }, output);
@@ -62,6 +66,8 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: id, callID: `${callID}-check` },
         { output: exit ? "FAIL" : "PASS", metadata: { exit, status: exit ? "error" : "completed" } });
       if (id === "first") {
+        await assert.rejects(hooks.tool!.sortie_v010_start_direct_unit.execute({}, { sessionID: "root" }),
+          /operator-direct-unit-unavailable/u, "direct execution cannot take over a still-running Worker");
         await assert.rejects(hooks.tool!.sortie_v010_retry_mission_unit.execute({ unit_id: "unit-1" },
           { sessionID: "root" }), /operator-mission-normal-remediation-unavailable/u,
         "an in-flight Worker cannot be replaced even after its shell check returns");
@@ -92,13 +98,23 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
     await hooks["tool.execute.after"]!({ tool: "write", sessionID: "root", callID: "root-fix" }, { output: "fixed" });
     const retry = JSON.parse(await hooks.tool!.sortie_v010_retry_mission_unit.execute({ unit_id: "unit-1" }, { sessionID: "root" }));
     assert.equal(retry.status, "normal_remediation_prepared", JSON.stringify(retry));
-    assert.equal(await dispatch(retry.task, "second", "second-call", "fixed\n"), 0);
+    if (self) {
+      const direct = JSON.parse(await hooks.tool!.sortie_v010_start_direct_unit.execute({}, { sessionID: "root" }));
+      assert.equal(direct.status, "direct-unit-running");
+      const started = Date.now();
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID: "direct-check" }, { args: { command: "node check.mjs" } });
+      await exec(process.execPath, ["check.mjs"], { cwd: directory });
+      rootHistory.push({ info: { id: "root-validation", role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "bash", callID: "direct-check",
+        state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID: "direct-check" }, { output: "PASS", metadata: { exit: 0, status: "completed" } });
+      await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" });
+    } else assert.equal(await dispatch(retry.task, "second", "second-call", "fixed\n"), 0);
     const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(run.phase, "awaiting-acceptance");
     assert.equal(mission.id, started.mission_id);
     assert.equal(mission.coordinator, null);
-    assert.deepEqual(mission.attempts?.map(attempt => attempt.kind), ["implementation", "normal_remediation"]);
+    assert.deepEqual(mission.attempts?.map(attempt => attempt.kind), ["implementation", self ? "direct_execution" : "normal_remediation"]);
     await writeFile(join(directory, "result.txt"), "changed after validation\n");
     const stale = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(stale.completion.ready, false);
@@ -133,7 +149,7 @@ test("Fast-lane failed validation permits root micro-fix then a second direct Wo
     const final = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(final.review.verdict, "PASS");
     assert.equal(final.execution_summary.historical_failed_attempts, 1);
-    assert.equal(final.budget.consumed_units, 2, "both Worker calls count against the same cumulative budget");
+    assert.equal(final.budget.consumed_units, 2, "both execution units count against the same cumulative budget");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

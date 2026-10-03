@@ -45,7 +45,7 @@ export interface MissionAttempt {
   predecessorAttemptID?: string | null;
   /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
   candidateID?: string;
-  kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction";
+  kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction" | "direct_execution";
   status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
   callID?: string;
   childSessionID?: string;
@@ -129,6 +129,10 @@ export interface OperatorMission {
   runID: string | null;
   /** Git HEAD before this mission's first implementation unit, retained across replans and commits. */
   reviewBaseline?: string;
+  /** A dated host Git observation, never an inference from a Worker report or lifecycle plan. */
+  deliveryObservation?: {
+    run_id: string; observed_at: string; head: string | null; branch: string | null; clean: boolean; source: string;
+  };
   /** Cumulative declared review inputs/outputs, including units that failed after writing source. */
   reviewScope?: MissionReviewScope;
   /** Optional Advisor/Scout decisions and native consultation outcomes; never an admission gate. */
@@ -158,6 +162,8 @@ export interface OperatorMission {
   /** Retained independently of later review generations; authors never become independent reviewers. */
   corrections?: { author: string; reviewIdentity: string; priorRunID: string; runID: string;
     priorSource: string; findings: string; initialPrompt: string; baseline?: string;
+    /** Actual still-running initial Review; direct correction is not another child terminal. */
+    inlineReview?: { callID: string; promptID: string; admittedAt: number; reviewIdentity: string };
     status: "prepared" | "running" | "ready" | "failed" | "cancelled";
     selfRecheck?: MissionSelfRecheck }[];
 }
@@ -498,8 +504,8 @@ export class OperatorMissionRuntime {
   }
   brief(state: OperatorMission): string {
     return [`mission_id: ${state.id}`, `project_root: ${this.projectRoot}`, "Use the user's language below for all replies and Task titles.",
-      "Own investigation, unit declarations, Worker/Scout/Advisor/independent Reviewer dispatch, scope extensions and corrections.",
-      "Start the first useful Worker promptly. No proposal/approval phase. Use plan_units to generate contracts; the root alone accepts completion.",
+      "Own investigation, implementation, formal validation, corrections and Worker/Scout/Advisor/independent Reviewer dispatch.",
+      "Use plan_units with executor=self for direct work in this session, or delegate promptly when useful. finish_direct_unit records native checks without a Worker handoff. No proposal/approval phase; root alone accepts completion.",
       "Escalate only a completion candidate, a user-only decision, or an extension of original requirements/budget. Unit progress is published without stopping you.",
       "Requirements:", ...state.requirements.map(item => `${item.id}: ${item.text}`),
       `Confirmed launch conditions (fixed limits, not consumption or remaining budget): ${JSON.stringify(state.launchConditions ?? [])}`,
@@ -588,7 +594,9 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
     if (historical && (!anchor || unit.status !== "succeeded")) return [];
     return (unit.evidence ?? []).map(proof => ({ run_id: state.runID, unit_id: unit.unit.id,
       task_id: unit.task.prompt.match(/^task_id: (.+)$/mu)?.[1] ?? null,
-      worker_session_id: unit.childSessionID, state_archive_path: path, handoff_path: unit.handoffPath,
+      worker_session_id: unit.directExecution ? null : unit.childSessionID,
+      ...(unit.directExecution ? { execution_mode: "direct", executor_session_id: unit.directExecution.actor } : {}),
+      state_archive_path: path, handoff_path: unit.handoffPath,
       ...(anchor ? { accepted_anchor: anchor } : {}), evidence_id: proof.evidence_id,
       command: proof.execution.command, exit: proof.execution.exit_code, outcome: proof.execution.outcome,
       started_at: proof.execution.started_at, ended_at: proof.execution.ended_at,
@@ -614,7 +622,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       try {
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
         return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID,
-          unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
+          unit.directExecution ? Date.parse(unit.directExecution.startedAt) :
+            unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
       } catch (error) {
         return { ...provenance, status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
       }
@@ -633,8 +642,9 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       verdict: mission.review.verdict, result: mission.review.result ?? null, self_recheck: mission.review.selfRecheck ?? null,
       freshness: "not established by run ID; existing source comparison remains required" } : null,
     delivery: { submission: mission.submission, git_lifecycle: current?.gitLifecycle ?? null,
+      observation: mission.deliveryObservation && mission.deliveryObservation.run_id === current?.runID ? mission.deliveryObservation : null,
       observation_source: "persisted operator Git lifecycle and formal validation records; no new Git inspection",
-      clean: "not independently observed by this projection" },
+      clean: mission.deliveryObservation && mission.deliveryObservation.run_id === current?.runID ? mission.deliveryObservation.clean : "not independently observed by this projection" },
     interpretation: "Compare original requests with the submitted candidate and actual evidence. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
 }
 
@@ -655,7 +665,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
      requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
     launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
-     accounting_scope: "Implementation units (Worker or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing Worker-unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
+     accounting_scope: "Implementation units (Worker, direct controller execution or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
+     delivery_observation: mission.deliveryObservation?.run_id === (run?.runID ?? mission.runID) ? mission.deliveryObservation : null,
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
     attempts: mission.attempts ?? [], corrections: (mission.corrections ?? []).map(({ findings: _findings, initialPrompt: _prompt, ...item }) => item), ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),

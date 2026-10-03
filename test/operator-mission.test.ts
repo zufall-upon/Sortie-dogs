@@ -29,8 +29,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /do not copy them into objective/u);
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
-  assert.match(worker, /entrypoint, input and layout; rerun or\s+report why unverified/u);
-  assert.match(worker, /meaningful changed branches, API errors and state after failure/u);
+  assert.match(worker, /entrypoint(?:, input and layout|\/input\/layout); rerun or\s+report why unverified/u);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
   assert.match(worker, /without a hypothetical exhaustive matrix/u);
   assert.match(worker, /no extra tee, redirect or wrapper/u);
   assert.match(coordinator, /a preview is not the live run/u);
@@ -179,7 +179,7 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   await assert.rejects(operators.claimAdmittedWorkerPrompt("root", "root", "worker", next.task.prompt), /parent-mismatch/);
   const admitted = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", next.task.prompt);
   assert.match(admitted.prompt, /^contract_reference: handoff$/m);
-  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Read\/search use existing permissions/);
+  assert.match(missionWorkerContent(V010_RUNTIME_PROFILE), /Read\/search(?: use|:) existing permissions/);
   assert.equal((await operators.required("root")).runID, state.runID);
   await assert.rejects(operators.replanMission("root", state.runID, missionPlan(mission, [{ ...unit, write: ["src", "test"] }])), /still-active/);
 }));
@@ -213,7 +213,7 @@ test("mission Worker separates prior decisions from post-validation independent 
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", workerTask.prompt);
   assert.match(expanded.prompt, /^contract_reference: handoff$/m);
   const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
-  assert.match(instructions, /Parent handles independent Review after return, not before execution/u);
+  assert.match(instructions, /Parent(?: handles|:) independent Review after return, not before execution/u);
   assert.match(instructions, /Do not spawn nested subagents/u);
   assert.doesNotMatch(expanded.prompt, /Required consultations belong to the root before dispatch/u);
   assert.doesNotMatch(expanded.prompt, /If required consultation results or user decisions are missing/u);
@@ -251,7 +251,7 @@ test("multi-unit mission retains review sequence in each referenced handoff and 
     assert.match(prompt, /^contract_reference: handoff$/m);
     assert.match(prompt, /^acceptance: handoff\.ext\["sortie-dogs\/acceptance-continuity"\]\.criteria$/m);
     const instructions = missionWorkerContent(V010_RUNTIME_PROFILE);
-    assert.match(instructions, /Parent handles independent Review after return, not before execution/u);
+    assert.match(instructions, /Parent(?: handles|:) independent Review after return, not before execution/u);
     assert.match(instructions, /Do not spawn nested subagents/u);
     assert.doesNotMatch(prompt, /Required consultations belong to the root before dispatch/u);
     assert.doesNotMatch(prompt, /If required consultation results or user decisions are missing/u);

@@ -9,6 +9,7 @@ import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { NativeBackgroundLifecycle } from "./native-background.js";
 import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
+import { completionReportModelMessages } from "./receipt-presentation.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -401,6 +402,8 @@ function nativeRuleMatch(input: string, pattern: string): boolean {
 // Exact shipped role block after ConfigAgentV1.normalize + ConfigMigrateV1.migrateAgent in
 // OpenCode v2.0.18 (cd9a14a6), not all matching denies. Everything outside this block is retained.
 export const nativeReviewerRoleRules: readonly NativePermissionRule[] = [
+  { action: "sortie_*", resource: "*", effect: "deny" },
+  ...["sortie_v010_repair_review", "sortie_v010_finish_direct_unit"].map(action => ({ action, resource: "*", effect: "allow" as const })),
   ...["read", "glob", "grep", "list"].map(action => ({ action, resource: "*", effect: "allow" as const })),
   ...["shell", "webfetch", "subagent", "question", "edit", "edit", "edit"].map(action => ({ action, resource: "*", effect: "deny" as const })),
 ];
@@ -495,12 +498,14 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
       }
       if (start < 0) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
       const inherited = [...rules.slice(0, start), ...nativeReviewerRoleRules.filter(rule => !["edit", "shell"].includes(rule.action)),
+        ...["bind_write_gate", "release_write_gate", "operator_status"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
         ...rules.slice(start + nativeReviewerRoleRules.length)];
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
         // Remove ONLY the shipped read-only edit/shell role entries. Native implementation
         // defaults and every real configured rule keep their original order/effective meaning.
-        // No grants, copied historical denies, command scanner or session-rule replacement.
+        // No edit/shell grants, copied historical denies, command scanner or session-rule replacement.
+        // The existing correction-control tools stay exposed beneath the shipped sortie_* deny.
         // Common implementation gates own known output scope; the ordinary Reviewer is untouched.
         permissions: inherited }));
     });
@@ -724,6 +729,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
+    if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     await background.resume(String(event.sessionID ?? ""));
     await background.reconcile(String(event.sessionID ?? ""));
     const output = { system: [] as string[] };
@@ -732,14 +738,14 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (Array.isArray(event.system)) event.system.push(...output.system.map(text => ({ type: "text", text })));
     if (record(event.tools)) {
       const visible: Record<string, string[]> = {
-        "dog-operator": ["start_mission", "plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
-        "dogs-coordinator": ["plan_units", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
+        "dog-operator": ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
+        "dogs-coordinator": ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
         "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
-        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status"] : [], "dog-scout-v010": [], "dog-advisor-v010": [],
+        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status", "repair_review", "finish_direct_unit"] : ["repair_review"], "dog-scout-v010": [], "dog-advisor-v010": [],
       };
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
-      const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status"] : []) : visible[String(event.agent)];
+      const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status", "repair_review", "finish_direct_unit"] : []) : visible[String(event.agent)];
       for (const key of Object.keys(event.tools)) {
         if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && !correcting &&
             ["edit", "write", "patch", "shell"].includes(key)) { delete event.tools[key]; continue; }
@@ -752,6 +758,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
+    if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     // V2 compaction builds its own tool snapshot and does not run the normal
     // context hook's agent-specific Sortie filter. Summary calls cannot run
     // local tools, so do not expose Sortie schemas to the compaction provider.
