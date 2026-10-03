@@ -848,3 +848,41 @@ before source/package freeze and original-task resubmission.
 `origin/main` was re-fetched before this cycle and remains
 `b9b1246fd04eb4c18142ac8861e94a809394280d`; no main integration/release/global
 apply performed here.
+
+### Final v7 integrated verification, fixed package and original-task launch
+
+`night-v7-integrated-full` / `npm run test:full`: **1,619/1,619 PASS**, all
+**101** files, exit **0**, **203.145 s**. Full source SHA-256:
+`1db4631fb3a72b37039014e54dd8a5be8c82c5252d43d35c717c1c19a61ee4b6`.
+All source-file hashes matched at pack time before any later docs-only edit.
+
+- Product **`16bc9b18da989126dbf977dad61c07aafafae421`**, pushed on the existing
+  PR branch; marker **`0.13.3-reviewer-continuous-v7`**.
+- Fixed package SHA-256
+  **`244846386c9eff58e01fc130165b509fc35a518e3bb419343aa09e9ddba39327`**.
+  All **204** installed files and **eight** runtime assets match this package.
+- New isolated original Anko clone/private DB; exact 1,825-byte original request
+  and base `3f269a72ff69398b1250c584171f32d12c0d8085` unchanged. Private DB
+  initially **0** sessions, shared DB/service untouched. Preflight/base formal
+  `go test ./...` exit **0**, no inference during preparation.
+
+Original-task launch command, without `tee`/redirection or new cutoff:
+
+```sh
+node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-continuous-v7-package-20261003 anko-nightly-continuous-v7-scoring-20261003
+```
+
+Started **2026-10-03T02:27:57.414Z**. Read-only actual startup proof at
+**02:29:21.094Z** records root `ses_f00691126ffekgdGuIye6sp6Ma` using
+**`openai/gpt-6.1-sol#xhigh`** and real native Worker
+`ses_f0068ad1fffeG69CC4jvsSHN0c` using **`openai/gpt-6-luna-fast#max`**.
+Worker starts **25.299 s** after the measured launch; no model mismatch.
+This is startup proof only: no completion, score, public-quality or new saving
+claim. Snapshot pricing/unknown counts are provisional while requests run.
+Owned driver continues through native terminal/source freeze, then unchanged
+official local scoring and the separate read-only public probes. Active package,
+prompt, source conditions and effort stay fixed; 25 minutes remains observation
+only. Evidence under `anko-nightly-continuous-v7-package-20261003/` includes
+`candidate.json`, preparation/build-match/private-DB proofs and
+`actual-native-start.json`. Release/global apply/main merge/Anko publication
+remain outside this session.
