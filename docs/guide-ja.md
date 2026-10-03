@@ -15,10 +15,10 @@ model routingが必要なtaskだけSortieを起動する。
 [English README](../README.md) · [简体中文](guide-zh-CN.md) ·
 [テスト](testing.md) · [CLI testing](cli-testing.md)
 
-**現行release: [v0.13.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.3)**
-（[release notes](release-v0.13.3.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.4)**
+（[release notes](release-v0.13.4.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.3-coordinator-direct-v5`。
+現行asset markerは`0.13.4-reviewer-continuous-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -61,28 +61,28 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.3の更新
+## v0.13.4の更新
 
-PR #148・#149とUbuntuでの後続修正を統合。native background Mission、簡潔で原要求を保持する
-Worker handoff、同じReviewer contextでの修正を導入した。
+PR #152を統合。`plan_units(executor="self")`、`start_direct_unit`、`finish_direct_unit`で
+Coordinator/Operatorが同session内の実装・正式検証を担当できる。既知の単一unitはMission開始と
+計画をまとめられる。既定WorkerはLuna Fast/maxを維持。明示Read行範囲が生成contract全体を
+覆う場合は全文を保持する。background起動通知やroot idleをMission完了と取り違えない。
 
-- OperatorはCoordinator、直接Worker、Reviewerをnative background jobとして起動し、短い応答後も
-  利用者との会話に対応する。native完了通知が同じOperatorを再開する。起動通知やroot idleはMission完了ではない。
-  Coordinator内部の委譲はforegroundのまま。無関係な会話で進行中Missionを取消・置換しない。
-- 指摘したReviewer自身が、同じnative session・model・contextで修正、継承した正式検証、要求された
-  Git delivery、明示self-recheckまで担当する。hostは修正中だけscope付きprofileを有効化し、終了後は
-  read-only Reviewerへ戻す。元要求、現在sourceの証跡、累積budgetを保持する。
-- 作者の再確認は`self-rechecked`、`independent=false`として記録し、独立Reviewの`PASS`とはしない。
-  別Reviewerは、再確認後に具体的な到達可能経路を持つ残存Major riskがある場合だけ必要。
-  未解決Major・Mediumは受理不可。最終比較と成功receiptはOperatorが担当する。
+最初の独立Reviewerは、元のnative Taskを終了・再委譲せず、調査→修正→継承check→Git delivery→
+明示self-recheckまで継続できる。途中で発見したMajor/Mediumも同じ修正contextへ累積保存する。
+作者再確認は`self-rechecked`、`independent=false`であり独立`PASS`ではない。別Reviewerは具体的な
+残存Major risk時だけ必要。未解決Major/Mediumは受理不可、最終receiptはOperatorが担当する。
 
-固定releaseはcandidate preflight、Linux全体 **1,589/1,589**、Windows **12/12** を通過。
-native CLI probeでは実WorkerのLuna Fast/max、OperatorのSol 6.1/xhighを観測した。
-これは起動と実modelの確認であり、task完遂の証明ではない。
+継承compiler scratchによる正式証跡の誤失効を修正。Git delivery観測、呼出時設定の審査、既存testとの
+合成guidanceを改善。host完了cardは保存履歴/UIに残し、V2のmodel/compaction contextから表示本文だけを
+省く。receipt・hash・元要求・証跡は保持する。
 
-導入済みnative修正fixtureは成功したが、元Anko taskの観測は最新25分runを含め未受理。
-一般的な高速化、元task完遂、新SWE-bench scoreは主張しない。
-[実装と測定の記録](anko-pr149-ubuntu-handoff.md)と[Reviewer修正仕様](reviewer-context-repair.md)を参照。
+固定pre-release v8 packageの元Anko taskを2回検証し、両方が公式local score 1（F2P 9/9、P2P 94/94）、
+選定public probe 9/9。26分49秒/$1.47908048、25分55秒/$1.54610816で、記録済みv5から各7分以上短縮。
+同taskの限定観測であり、一般高速化や新SWE-bench scoreではない。releaseのpreflight・全体test・
+固定commitのWindows CI・実Worker起動証跡は`_testenv/releases/0.13.4/`に保存する。
+起動/model確認はtask完遂ではない。[release notes](release-v0.13.4.md)と
+[品質改善記録](nightly-quality-loop-20261002.md)を参照。
 
 ## Mission workflow
 
@@ -91,8 +91,7 @@ native CLI probeでは実WorkerのLuna Fast/max、OperatorのSol 6.1/xhighを観
 
 - `dog-operator`: 簡潔な要件・禁止事項、利用者判断、最終acceptanceを担当。hostが元発言を原文保存する。
 - hidden `dogs-coordinator`: 調査、unit宣言、Worker/Scout/Advisor/Reviewer委譲、元要求内の
-  write scope調整、修正進行を担当。read/searchと確認shellを使える。source実装はWorkerまたは
-  同contextで修正を許可されたReviewerが担当する。
+  write scope調整、修正進行を担当。同sessionで直接実装・正式検証でき、Workerへの委譲も選べる。
 - `dog-worker-v010`: host生成unitをfile/directory write scope内で実装。調査commandの事前登録は不要。
   正式checkはhostが実結果を記録する。
 - 高risk変更は最初の独立Reviewerがread/searchで審査。低risk skipは明示記録する。
@@ -119,7 +118,7 @@ agent数ではなく、品質を維持しながら不要な高cost作業を減�
   既知推論費用 **$17.73**、不明usage hold **$1.98** は別管理。推論約81分、公式採点7.2分。
   [固定条件・中断runの扱い・詳細](../README.md#v0131-dev23-2026-09-30)。
 
-どちらも過去の固定candidateの結果で、v0.13.3のscoreではない。version、予算、条件が異なるため
+どちらも過去の固定candidateの結果で、v0.13.4のscoreではない。version、予算、条件が異なるため
 統制比較や一般成功率へ拡張しない。inference完了、Sortieの`DONE`、Review `PASS`、公式解決を区別する。
 公式local評価とleaderboard登録・承認も別扱い。SWE-benchは必要時の別計測で、release必須gateではない。
 [測定契約](benchmark-completion-contract.md)、[結果履歴](../README.md#swe-bench-evaluation)、
@@ -127,14 +126,17 @@ agent数ではなく、品質を維持しながら不要な高cost作業を減�
 
 ## Mission tools
 
-1. `start_mission`: Operatorが簡潔な要件を渡し、hostが元発言を保存してCoordinator Taskを返す。
+1. `start_mission`: Operatorが簡潔な要件を渡し、hostが元発言を保存。既知の単一unitは`unit`を含めて
+   開始/計画をまとめ、設定済みWorker Taskを返せる。
 2. `plan_units`: title、objective、file/directory scope、正式checkを指定。hostがID、handoff、manifest、
-   proof対応、実行可能なWorker Taskを生成する。proposal承認の往復は不要。
+   proof対応、実行可能なWorker Taskを生成する。`executor="self"`は同controller内で直接実行。
+   `start_direct_unit` / `finish_direct_unit`が実際の正式checkと現在sourceの鮮度を維持する。
 3. `operator_next`: serial unitを進める。`expand_unit`は同じTaskを維持して元要求内の必要outputを調整。
    通常unitの回復は理由付き`plan_units`修正または`retry_mission_unit`で行い、累積budgetを維持する。
 4. `review_mission`: source、原要求、実checkから独立Review packetを生成。高riskではReviewer Taskを委譲し、
    低riskでは明示skipを記録する。
-5. `repair_review`: 指摘した元Reviewerのnative sessionを再開。修正、継承check、要求されたGit delivery、
+5. `repair_review`: 指摘を保存し、実行中の元Reviewer Taskで修正を継続、または同native sessionを再開。
+   後続の指摘も累積保存。修正、継承check、要求されたGit delivery、
    `SELF_RECHECKED`を同じTaskで実施する。旧`CORRECTION_READY`だけの場合は、`review_mission`から
    同じ作者のread-only再確認へ進む。
 6. `submit_mission`: Coordinatorが完了candidate、利用者のみ判断可能な事項、証明済み外部/scope/budget blockerを返す。
@@ -286,7 +288,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.3
+npm install --global sortie-dogs@0.13.4
 sortie-dogs init --global --profile v010
 ```
 
@@ -298,7 +300,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.3
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.4
 sortie-dogs init --global --profile v010
 ```
 
@@ -319,7 +321,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.3-coordinator-direct-v5`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.4-reviewer-continuous-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、

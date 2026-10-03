@@ -13,9 +13,9 @@
 [English README](../README.md) · [日本語](guide-ja.md) ·
 [测试](testing.md) · [CLI testing](cli-testing.md)
 
-**当前release：[v0.13.3](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.3)**
-（[发布说明](release-v0.13.3.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.3-coordinator-direct-v5`。
+**当前release：[v0.13.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.4)**
+（[发布说明](release-v0.13.4.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.4-reviewer-continuous-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -56,28 +56,26 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.3更新
+## v0.13.4更新
 
-本版整合PR #148、#149及Ubuntu后续修复：native background Mission、简洁且保留原始请求的
-Worker handoff，以及在同一Reviewer context内完成修复。
+整合PR #152。通过`plan_units(executor="self")`、`start_direct_unit`和`finish_direct_unit`，
+Coordinator/Operator可在同session直接实现和正式验证。已知单一unit可合并Mission启动与规划，
+默认Worker仍为Luna Fast/max。明确Read行范围覆盖整个生成contract时保留全文。
+background启动确认或root idle仍不代表Mission完成。
 
-- Operator以native background job启动Coordinator、直接Worker和Reviewer，简短确认后仍可响应用户聊天。
-  native完成通知会唤醒同一个Operator；启动确认或root idle不代表Mission完成。
-  Coordinator内部委派仍为foreground；无关聊天不会取消或替换进行中的Mission。
-- 发现问题的Reviewer在同一个native session、model和context中修复，执行继承的正式检查、要求的
-  Git delivery并明确self-recheck。host仅在修复期间启用限定scope的执行profile，结束后恢复read-only
-  Reviewer。原始要求、当前source证据和累计budget保持不变。
-- 作者自查如实记录为`self-rechecked`、`independent=false`，不是独立Review的`PASS`。
-  只有自查后仍存在具体可达路径上的残余Major risk，才需要另一名Reviewer。
-  未解决的Major或Medium问题不能被接受；最终比较和成功receipt仍由Operator负责。
+最初独立Reviewer可在原native Task中连续调查、修复、执行继承check、Git delivery及明确self-recheck，
+无需先结束Task或重新委派。后续发现的Major/Medium累积保存在同一修复context中。
+作者自查是`self-rechecked`、`independent=false`，不是独立`PASS`；仅具体残余Major risk需要另一Reviewer。
+未解决Major/Medium不能接受，最终receipt由Operator负责。
 
-固定release通过candidate preflight、Linux完整测试 **1,589/1,589** 和Windows测试 **12/12**。
-native CLI probe观测到真实的Luna Fast/max Worker与Sol 6.1/xhigh Operator。
-该probe仅证明启动和实际model身份，不证明任务完成。
+修复继承compiler scratch造成的正式证据误失效；改善Git delivery观测、调用时设置审查及test合成指导。
+host完成card保留在历史/UI中，V2的model/compaction context仅省略显示正文，保留receipt、hash、原要求和证据。
 
-已安装的native修复fixture成功，但原始Anko任务的观测仍未通过验收，包括最新的25分钟run。
-本版不宣称一般性提速、原任务完成或新的SWE-bench分数。
-参见[实现与测量记录](anko-pr149-ubuntu-handoff.md)和[Reviewer修复规格](reviewer-context-repair.md)。
+相同固定pre-release v8 package两次完成原Anko任务，均为官方local score 1（F2P 9/9、P2P 94/94），
+选定public probe 9/9。耗时26分49秒/$1.47908048和25分55秒/$1.54610816，各比记录中的v5节省七分以上。
+这是同任务的有限观测，不是一般性提速或新SWE-bench分数。release的preflight、完整test、固定commit
+Windows CI及真实Worker启动证据保存在`_testenv/releases/0.13.4/`；启动/model身份不证明任务完成。
+参见[发布说明](release-v0.13.4.md)和[质量改进记录](nightly-quality-loop-20261002.md)。
 
 ## Mission workflow
 
@@ -86,8 +84,7 @@ native CLI probe观测到真实的Luna Fast/max Worker与Sol 6.1/xhigh Operator�
 
 - `dog-operator`：负责简洁要求、禁止事项、用户决定和最终acceptance；host逐字保存原始消息。
 - hidden `dogs-coordinator`：负责调研、unit声明、Worker/Scout/Advisor/Reviewer委派、原要求内的
-  write scope调整和修复推进。可使用read/search和确认用shell；source实现由Worker或获准在
-  同context修复的Reviewer承担。
+  write scope调整和修复推进。可在同session直接实现及正式验证，也可委派Worker。
 - `dog-worker-v010`：在file/directory write scope内实现host生成的unit。调研command无需预先注册；
   正式check保留host记录的真实结果。
 - 高风险修改需要初始独立Reviewer，可自行read/search；低风险skip必须明确记录。
@@ -114,21 +111,24 @@ stable profile中的Luna fabric和parallel integration不在本profile开放。
   已知推理费用 **$17.73**，未知usage hold **$1.98** 单独记录；推理约81分钟、官方评分7.2分钟。
   [固定条件、中断run处理与详情](../README.md#v0131-dev23-2026-09-30)。
 
-这些是历史固定candidate的结果，不是v0.13.3分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
+这些是历史固定candidate的结果，不是v0.13.4分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
 推理完成、Sortie的`DONE`、Review `PASS`和官方解决结果分别记录；官方本地评测也不等于leaderboard注册或接受。
 SWE-bench按需单独执行，不是release必需gate。条件和限制保留在[测量契约](benchmark-completion-contract.md)、
 [结果历史](../README.md#swe-bench-evaluation)及[历史local case study](benchmark-reference.md)中。
 
 ## Mission tools
 
-1. `start_mission`：Operator提交简洁要求；host保存原始消息并返回Coordinator Task。
+1. `start_mission`：Operator提交简洁要求；host保存原始消息。已知单一unit可附`unit`合并启动/规划，
+   返回已配置的Worker Task。
 2. `plan_units`：提供title、objective、file/directory scope和正式check；host生成ID、handoff、manifest、
-   proof映射及可执行的Worker Task，无需proposal批准往返。
+   proof映射及可执行的Worker Task。`executor="self"`保留同controller直接执行；
+   `start_direct_unit` / `finish_direct_unit`维持真实正式check与当前source的新鲜度。
 3. `operator_next`：推进serial unit。`expand_unit`在保留同一Task的情况下补齐原要求内的必要output。
    普通unit通过附理由的`plan_units`修正或`retry_mission_unit`恢复，保留原始要求和累计budget。
 4. `review_mission`：根据source、原始要求和真实check生成独立Review packet；高风险派发Reviewer Task，
    低风险明确记录skip。
-5. `repair_review`：恢复发现问题的原Reviewer native session，在同一Task中修复、执行继承check和要求的
+5. `repair_review`：保存发现，在运行中的原Reviewer Task连续修复，或恢复同native session。
+   后续发现累积保存；在同一Task中修复、执行继承check和要求的
    Git delivery，并明确返回`SELF_RECHECKED`。旧版仅返回`CORRECTION_READY`时，需通过`review_mission`
    进入同一作者的read-only复查。
 6. `submit_mission`：Coordinator返回完成candidate、仅用户能作出的决定，或已证明的外部/scope/budget blocker。
@@ -274,7 +274,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.3
+npm install --global sortie-dogs@0.13.4
 sortie-dogs init --global --profile v010
 ```
 
@@ -286,7 +286,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.3
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.4
 sortie-dogs init --global --profile v010
 ```
 
@@ -307,7 +307,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.3-coordinator-direct-v5`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.4-reviewer-continuous-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，

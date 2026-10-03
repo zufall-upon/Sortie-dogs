@@ -32,7 +32,7 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.equal(fastFirst.runtimeProfile, "v010", "the v0.13 release retains the actual Mission runtime");
   assert.equal(fastFirst.markerFile, V010_RUNTIME_PROFILE.markerFile);
   assert.equal(fastFirst.markerExport, "V010_RUNTIME_ASSET_VERSION");
-  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.13.3-reviewer-continuous-v8");
+  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.13.4-reviewer-continuous-v1");
   assert.deepEqual(githubReleaseFlags(fastFirst), ["--target", "main"]);
   assert.equal(missionReleaseSmokeMode(fastFirst.id), "start", "candidate smoke observes Worker/model, not a claimed solution");
   assert.equal(missionReleaseSmokeMode(restored.id), "complete", "historical v012 contract remains intact");
