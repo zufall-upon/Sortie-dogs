@@ -1097,3 +1097,31 @@ not final settled usage or a completed-attempt subtotal. Evidence:
 `anko-nightly-continuous-v8-package-20261003/actual-native-start.json`, fixed
 `candidate.json`, file/asset installation and private DB/preflight proofs.
 Final outcomes will be measured only at actual native terminal/source freeze.
+
+### Read-only findings accounting during the fixed v8 run
+
+The active v8 package, source, request, driver and acceptance conditions remain
+unchanged. Post-run analysis previously treated every later nonempty
+`repair_review(findings)` call as new native accumulation, including a duplicate
+or failed call. The analysis-only helper now classifies actual same-author,
+successful `correction-running` / `same-native-task` return packets: initial,
+distinct new findings, repeated body, header-only, or rejected/unproven. It then
+checks distinct successful findings against final durable correction text.
+Duplicates, empty bodies and failed/malformed returns do not prove accumulation.
+This changes reporting only, not runtime acceptance or a verification gate.
+
+`night-v8-readonly-findings-audit`: **4/4 PASS**, exit **0**, **0.063 s**; synthetic
+success/missing retention/duplicate/header-only/foreign-author/error/malformed
+receipt cases. A separate read-only check against frozen v7 raw history confirms
+one successful initial retained report and **no native additional-finding
+exercise**, consistent with the published v7 result. Existing raw evidence and
+prior analysis not overwritten; new model requests/candidate edits/official
+verifier runs **0**. Evidence: ignored helper `findings-audit.mjs`, its test,
+command record and `nightly-20261002/v7-readonly-findings-audit.json`.
+
+Last one-shot v8 status observed **2026-10-03T03:34:08.571Z**: implementation
+running at **263.157 s**, actual Luna-fast/max Worker/SOL-xhigh Operator, no
+receipt/review yet. Provisional priced **$0.12774320**, one active unpriced
+request; neither final failure nor final cost is inferred from it. Owned driver
+continues without repeat launch or candidate mutation; completion notification,
+not repeated polling, advances scoring/probes and result analysis.
