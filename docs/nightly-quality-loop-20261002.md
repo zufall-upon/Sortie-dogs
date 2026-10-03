@@ -21,9 +21,12 @@ Completed themes: public failure-result coverage, fresh original Anko evaluation
 real-V2 direct controller/multiple-unit execution, retained host-card projection,
 inherited compiler-cache freshness, and continuous Reviewer correction. The fixed
 v6 original-task sample below observes a 644.715-second saving with official score 1,
-but later unchanged public probes pass only **5/9** (v5 **9/9**). The time saving
-is real on that sample; preserving known public quality remains **unmet**. This
-is a single-sample result, not established merely by product unit checks.
+but later unchanged public probes pass only **5/9** (v5 **9/9**). That sample does
+not preserve known public quality. The two identical-package v8 runs recorded
+at the end both preserve official score **1** / selected public **9/9** and save
+over five minutes versus v5; v8 is now recommended to the separate release lane.
+These observations are not established merely by product unit checks or proof
+of general reliability/causal speedup.
 Diagnose concrete failures rather than repeat unchanged failed runs or weaken
 acceptance.
 
@@ -1287,3 +1290,103 @@ cutoff introduced. Two repetitions can corroborate the observed result but do
 not establish general reliability or causal latency attribution. Final release
 recommendation is **pending this replication**, not authorization to publish;
 the separate release lane still owns main integration and release gates.
+
+### Identical v8 replication result and release recommendation
+
+**Recommendation: advance v8 to the separate release lane.** Both fresh runs of
+the same fixed product **`0bf74557b35366af7f3a7f7ee5580a7cf5b858ad`** / package
+SHA-256 **`a72234f0b3f3252c575eefda01b52baa4f10bf11904c036b368c60083cb25c44`**
+meet the observed quality/completion and whole-task five-minute objectives.
+This is a release-candidate recommendation, **not publication or a claim that
+the eventual integrated/versioned release artifact has passed its release gate**.
+No product, prompt, driver, acceptance or effort changes between repetitions;
+no third attempt, post-score editing/re-inference or official regrade.
+
+- First v8: **1609.436 s (26 min 49.436 s)** / **$1.47908048**, **89** requests,
+  unknown **0**. Versus v5 **426.924 s faster** / **15.91%** lower priced cost.
+- Replication: **1555.198 s (25 min 55.198 s)** / **$1.54610816**, **73** requests,
+  unknown **0**. Versus v5 **481.162 s (8 min 1.162 s, 23.63%) faster** /
+  **$0.21273112 (12.09%)** lower. Versus first v8 **54.238 s faster**, but
+  **$0.06702768 (4.53%) more**. Cost did not decrease between repetitions.
+- Both official local **score 1, F2P 9/9, P2P 94/94**, selected unchanged public
+  **9/9**, actual native Worker Luna-fast/max and Operator/Reviewer SOL/xhigh,
+  three native successes, genuine Mission succeeded receipt, new branch/commit
+  and clean source. Replication verifier exit **0**, **16.153 s**, no timeout;
+  process exit, score, public observations and native completion are separate.
+- Replication final Anko **`4a3ffe65615fdaf52945b6fc7e5e795b4d503876`**, branch
+  **`typed-variable-bindings`**. Final source/clean/commit remain unchanged after
+  scoring/probes/read-only assessment. 25-minute checkpoint continued normally,
+  no cutoff/intervention. Completed-attempt priced subtotal **$14.49377552 plus
+  one historical unknown-usage request**; both v8 runs unknown **0**.
+- Two-run mean **1582.317 s (26 min 22.317 s)** / **$1.51259432**; mean saving
+  versus v5 **454.043 s (7 min 34.043 s)**. Both runs beat the existing
+  **1736.360 s** five-minute target. Same-task two-run corroboration is not broad
+  reliability, exhaustive public-API correctness or causal latency attribution.
+
+Replication Reviewer `ses_effb37e38ffeFFI2yJfmmbP731` has **one** native user
+prompt. Original Task call `call_LlmxJrMk0glwWAMSsZ9NXY8f` / prompt
+`msg_1004c81ce002EfpnB3pfSbJG9N` binds actual successful terminal self-recheck
+`msg_10058ffe1001Y2xst5QarQ3ph8`. Its independent pre-edit investigation finds
+**five Mediums**: caller-mode propagation, module-member assignments, pointer
+writeback, channel receive status and unknown qualified types. During correction,
+successful distinct `repair_review` call `call_GujVPvllwyAaOraKYl329PO7` records
+an **M1 refinement** for a Go callback that returns another callback. Both exact
+reports remain in the final durable correction; two successful reports are not
+miscounted as six unrelated initial defects. Same original Task performs all
+repairs, formal testing/commit and explicit `SELF_RECHECKED` with unresolved
+findings **[]**, residual Major **null**, **independent=false**. No different
+Reviewer, correction redispatch, Mission/handoff reread or validation-only Worker.
+The additional-findings retention path is exercised natively in **both v8 runs**.
+
+Replication Worker window **637.505 s**, **33** requests; complete Reviewer
+window **844.157 s**, **30** requests (initial **156.318 s**, correction
+**687.675 s**). Compared with first v8, Worker **127.526 s shorter** but Reviewer
+**95.766 s longer**; windows are non-additive and not causal attribution.
+Correction has six test-containing commands, actual execution **5.478 s**;
+all tool execution union **5.977 s**, final self-recheck response **25.635 s**.
+Two regressions fail before their repairs and pass afterward. Extra model/context
+work remains even though both whole-task measurements meet the target.
+
+Known nonblocking observations are retained rather than hidden by recommendation:
+
+- First v8's in-scope scratch-variable shell path denial remains an unresolved
+  diagnostic/classification detour, recovered with a literal in-scope path.
+- Replication runs a combined `gofmt ... && go test ./...` then a standalone
+  formal `go test ./...` after commit, with no intervening source edit. The extra
+  actual execution is **0.372 s**; this trace does not establish its precise
+  necessity or a host rejection of the combined check.
+- After successful `finish_direct_unit`, a read-only compound Git observation
+  is rejected as `mission-reviewer-readonly`. The preceding successful commit
+  command already observed clean delivery, and the host checks clean/head before
+  accepting. Same Task then genuinely ends `SELF_RECHECKED`; no missing required
+  check, approval request, redispatch or false independent PASS. Classify this
+  separately from unresolved Anko Major/Medium findings; policy is not changed
+  during assessment.
+- Saved completion card/receipt remains intact, no assistant transcription;
+  desktop/terminal visual display is still unconfirmed.
+
+Prior candidate product full evidence **1620/1620 PASS**, 101 files, exit **0**,
+**203.192 s**, remains tied to the exact same package; unnecessary product full
+rerun not added here. PR #152 observed **OPEN / MERGEABLE** at docs commit
+`354d945`, Linux `npm test` and Windows `npm run test:windows` checks successful.
+Later docs commits do not inherit that CI-head observation. Release lane must
+still fix the final integrated/versioned target commit and package hash, run the
+existing candidate preflight/full gates and own global/runtime/publication
+operations. Anko/SWE-Bench is not added as a mandatory release gate. No main
+merge, global apply, tag, GitHub Release, npm publish or Anko publication here.
+
+Evidence in the repeat arm: `release-assessment.json`,
+`continuous-review-analysis.json`, `correction-timing-summary.json`,
+`finish-analysis.json`, `repeat-detour-analysis.json`, raw native history/private
+DB and cleanup proof. Separate scoring `result.json` and unchanged probe hash
+`b45d25b39fb462688334fa174b2008743dba57405c9993fa53fed73ba0935e53` retained.
+
+Replication archive completed **2026-10-03T06:06:18.516Z** after owned-server,
+Docker and project-process inactivity checks. Removed only generated `.opencode/`
+and cache; source/Git, private native DB, fixed package and history retained.
+Archive parent is unchanged from the first v8 and previous arms:
+
+- `anko-nightly-continuous-v8-repeat-package-20261003/attempt-evidence.tar`
+  SHA-256: `a8f35679e09d0f8b648142c55a42f74cb800d7449fdc3c156c34e6df7c40b84f`.
+- `product-checks-and-analysis.tar` SHA-256:
+  `669cfcc0c4dc1c970ccc71f9c163ac1a6ced1256abb02cab400b08e94bbac25d`.
