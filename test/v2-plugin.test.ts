@@ -136,6 +136,48 @@ test("V2 optional condition objects admit omission without manufacturing provena
   } finally { cleanup?.(); }
 });
 
+test("V2 volatile host state is a current system update after history, not a changing absolute prefix", async () => {
+  const fixture = contextFixture();
+  let phase = 0;
+  const live = () => [
+    `SORTIE_GOAL_BOUND_STATE\n${JSON.stringify({ revision: phase, consumed_units: phase, receipt: phase === 2 ? { status: "succeeded" } : null })}`,
+    `SORTIE_ACCEPTANCE_CONTINUITY_STATE\n${JSON.stringify({ latest_accepted_task_id: `task-${phase}` })}`,
+    `SORTIE_PARALLEL_DISPATCH_STATE\n${JSON.stringify({ sequence: phase })}`,
+    ...(phase === 0 ? [] : [`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify({ findings: phase === 1 ? "Medium one" : "Medium one\nAdditional Medium two", validation: ["go test ./..."], write: ["vm/**"] })}`]),
+  ];
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "Original requirements unchanged" }] },
+    { role: "assistant", content: [{ type: "tool-call", id: "check", name: "shell", input: { command: "go test ./..." } }] },
+    { role: "tool", content: [{ type: "tool-result", id: "check", name: "shell", result: { type: "json", value: { exit: 0, evidence: "sha256:check" } } }] },
+    { role: "assistant", content: [{ type: "compaction", provider: "openai", encrypted: "native-checkpoint" }] },
+    // A foreign system message with similar metadata must not be removed or mistaken for our projection.
+    { role: "system", metadata: { "sortie-dogs/live-state": "request-only" }, content: [{ type: "text", text: "Another plugin's instruction" }] },
+  ];
+  const original = structuredClone(messages);
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_POLICY", ...live(), "OTHER_STATIC_POLICY"]; },
+  })).setup(fixture.context);
+  try {
+    for (phase = 0; phase < 3; phase++) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [{ type: "text", text: "NATIVE_PREFIX" }], messages, tools: {} };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(event.system, ["NATIVE_PREFIX", "STATIC_POLICY", "OTHER_STATIC_POLICY"].map(text => ({ type: "text", text })), "state addition/change does not rewrite the prefix");
+      assert.deepEqual(event.messages.slice(0, messages.length), messages, "history and native call/result pairs are intact");
+      for (let i = 0; i < messages.length; i++) assert.equal(event.messages[i], messages[i]);
+      const update = event.messages.at(-1)!;
+      assert.equal(update.role, "system", "state does not become user input or a fabricated tool result");
+      assert.deepEqual(update.content, live().map(text => ({ type: "text", text })), "every current field and retained finding is supplied verbatim");
+      assert.deepEqual(messages, original, "request projection never mutates saved history");
+      const once = structuredClone(event.messages);
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(event.messages, once, "reentrant projection replaces only its own update rather than accumulating it");
+    }
+    const legacy = { sessionID: "root", system: [] };
+    await fixture.sessionHooks.get("context")!(legacy);
+    assert(JSON.stringify(legacy.system).includes("SORTIE_GOAL_BOUND_STATE"), "a host without message projection retains state in system rather than losing it");
+  } finally { cleanup?.(); }
+});
+
 test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
   const fixture = contextFixture();
   const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";

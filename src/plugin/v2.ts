@@ -10,6 +10,7 @@ import { NativeBackgroundLifecycle } from "./native-background.js";
 import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
 import { completionReportModelMessages } from "./receipt-presentation.js";
+import { modelLiveState } from "./model-live-state.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -735,7 +736,6 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     await reconcileCorrectionPermissions(String(event.sessionID));
-    if (Array.isArray(event.system)) event.system.push(...output.system.map(text => ({ type: "text", text })));
     if (record(event.tools)) {
       const visible: Record<string, string[]> = {
         "dog-operator": ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
@@ -752,10 +752,13 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         if (!key.startsWith("sortie_")) continue;
         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
       }
-      if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && Array.isArray(event.system)) {
-        event.system.push({ type: "text", text: `Native tools actually available in this request: ${Object.keys(event.tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.` });
+      if (event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) {
+        output.system.push(`Native tools actually available in this request: ${Object.keys(event.tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.`);
       }
     }
+    const projection = modelLiveState(output.system, Array.isArray(event.messages) ? event.messages : undefined);
+    if (Array.isArray(event.system)) event.system.push(...projection.system.map(text => ({ type: "text", text })));
+    if (projection.messages) event.messages = projection.messages;
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
     if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);

@@ -212,6 +212,8 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
   try {
     const started = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
     const promptID = started.mission.review!.promptID;
+    const investigatedSystem = { sessionID: "author", agent: f.agents.author!.agent, tools: { read: {}, grep: {}, sortie_v010_repair_review: {} }, system: [], messages: [] };
+    await f.context(investigatedSystem);
     const findings = "FINDINGS\nMedium: result.txt is wrong rather than ready; preserve result, checks and clean delivery.";
     const begun = await f.tool("author", "repair_review", { findings });
     assert.equal(begun.execution, "same-native-task");
@@ -227,10 +229,12 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
     assert.equal((await f.missions.required("root")).corrections!.length, 1);
     const available = ["read", "shell", "patch", "sortie_v010_repair_review", "sortie_v010_finish_direct_unit", "sortie_v010_bind_write_gate"];
     assert(available.every(name => !whollyDisabled(name === "patch" ? "edit" : name, f.registry()[f.agents.author!.agent]!.permissions)), "controls survive the real native snapshot");
-    const system = { sessionID: "author", agent: f.agents.author!.agent, tools: Object.fromEntries(available.map(name => [name, {}])), system: [] };
+    const system = { sessionID: "author", agent: f.agents.author!.agent, tools: Object.fromEntries(available.map(name => [name, {}])), system: [], messages: [] };
     await f.context(system);
-    assert.match(JSON.stringify(system.system), /SORTIE_REVIEWER_CONTINUOUS_CONTEXT/);
-    assert.doesNotMatch(JSON.stringify(system.system), /SORTIE_WORKER_CONTEXT|Read the retained handoff/);
+    assert.deepEqual(system.system, investigatedSystem.system, "repair admission does not replace the absolute instruction prefix; tool permissions still change normally");
+    assert.doesNotMatch(JSON.stringify(system.system), /SORTIE_REVIEWER_CONTINUOUS_CONTEXT/);
+    assert.match(JSON.stringify(system.messages), /SORTIE_REVIEWER_CONTINUOUS_CONTEXT/);
+    assert.doesNotMatch(JSON.stringify(system), /SORTIE_WORKER_CONTEXT|Read the retained handoff/);
     assert.deepEqual(Object.keys(system.tools).sort(), available.sort());
     assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation");
     await f.edit("author", "ready corrected");
@@ -241,8 +245,8 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
     assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
     const validatedSystem = { ...system, system: [] };
     await f.context(validatedSystem);
-    const fixedContext = (event: ObjectValue) => event.system.find((part: ObjectValue) => String(part.text).startsWith("SORTIE_REVIEWER_CONTINUOUS_CONTEXT"));
-    assert.deepEqual(fixedContext(validatedSystem), fixedContext(system), "fixed prefix remains through final self-recheck, without changing counters or phase");
+    assert.deepEqual(validatedSystem.system, system.system, "stable prefix remains through final self-recheck, without changing counters or phase");
+    assert.deepEqual(validatedSystem.messages, system.messages, "current assignment/findings remain through final self-recheck");
     await assert.rejects(f.edit("author", "not allowed after settlement"), /mission-reviewer-readonly/);
     assert.equal((await f.missions.required("root")).review!.verdict, "findings", "finish tool is not a native terminal or approval");
     await assert.rejects(f.tool("root", "complete_mission"), /mission-review-required-or-stale/);
@@ -277,6 +281,8 @@ for (const mode of ["live", "cold-reload", "failed-native-recovery"] as const) t
     const first = "FINDINGS\nMedium: result must be ready; preserve the initial investigation.";
     const extra = "FINDINGS\nAdditional Medium: ready output loses callback errors; preserve the independently reproduced behavior.";
     await f.tool("author", "repair_review", { findings: first });
+    const originalContext = { sessionID: "author", agent: f.agents.author!.agent, tools: {}, system: [], messages: [] };
+    await f.context(originalContext);
     await f.edit("author", "ready initial correction");
     await f.shell("author", "node required-test.mjs");
     const before = await f.run(), budget = (await f.ledger()).state;
@@ -300,9 +306,11 @@ for (const mode of ["live", "cold-reload", "failed-native-recovery"] as const) t
     assert.equal(await readFile(after.units[0]!.handoffPath, "utf8"), handoff, "immutable original handoff/check contract");
     assert.equal((await f.ledger()).state.consumed_units, budget.consumed_units);
     assert.equal((await f.ledger()).state.outstanding_reservations.length, budget.outstanding_reservations.length);
-    const context = { sessionID: "author", agent: f.agents.author!.agent, tools: {}, system: [] };
+    const context = { sessionID: "author", agent: f.agents.author!.agent, tools: {}, system: [], messages: [] };
     await f.context(context);
-    assert(JSON.stringify(context.system).includes("Additional Medium"), "outgoing context reconstructs all known findings from durable state");
+    assert.deepEqual(context.system, originalContext.system, "additional findings and cold reconstruction preserve the original correction prefix");
+    assert(JSON.stringify(context.messages).includes("Additional Medium"), "outgoing chronological system update reconstructs all known findings from durable state");
+    assert(!JSON.stringify(context.system).includes("Additional Medium"), "new findings never rewrite the absolute system prefix");
     if (mode === "failed-native-recovery") {
       f.terminal("author", "Native correction failed before remaining formal checks", true);
       await f.after(started.dispatch, "Native correction failed", { sessionID: "author", status: "failed" }, "error");
