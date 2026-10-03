@@ -256,6 +256,12 @@ not settle a different failure outcome of that same operation. A demonstrable ma
 an excerpt or result only when a specific material outcome cannot be settled. Do not invent new behavior,
 require an exhaustive exception inventory, or recommend catching every exception.
 
+When a shared helper gains validation or a new rejection, search its existing callers,
+including unchanged code. Read relevant caller branches; search hits alone do not
+establish correct handling. Follow rejection through later writes and result/error resets back to the
+public result/error/state, preserving unrelated existing behavior. This is targeted contract review,
+not an exhaustive call graph or new approval gate.
+
 Report FINDINGS only for concrete major or medium defects with a material impact on the original requirements,
 public behavior, correctness or required validation. Name the consequence and smallest necessary fix.
 Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS.

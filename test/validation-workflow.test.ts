@@ -117,3 +117,16 @@ test('regressions compose by general naming and requirements are reconciled befo
   assert.match(reviewer, /accumulates known findings without another Task, scope or check contract/);
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW + worker, /TestTypedBindingsDeclarations|typed_bindings|hidden grader|rename.*official/);
 });
+
+test('shared helper rejection review follows existing unchanged callers without a new gate or task-specific oracle', () => {
+  const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
+  assert.equal(reviewer.split(MISSION_BEHAVIOR_REVIEW).length, 2, 'one stable shared policy in the installed Reviewer');
+  assert.match(MISSION_BEHAVIOR_REVIEW, /shared helper gains validation or a new rejection/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /search its existing callers,\s+including unchanged code/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /Read relevant caller branches; search hits alone do not\s+establish correct handling/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /later writes and result\/error resets back to the\s+public result\/error\/state/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /preserving unrelated existing behavior/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /not an exhaustive call graph or new approval gate/);
+  assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /Anko|TypedBindings|ChanStmt|invokeLetExpr|channel-status|vmStmt\.go|bool.{0,10}int64/);
+  assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /must enumerate every caller|separate Reviewer|mandatory coverage inventory/);
+});
