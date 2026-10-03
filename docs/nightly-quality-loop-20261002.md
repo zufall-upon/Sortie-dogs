@@ -629,8 +629,25 @@ Verification records are under `_testenv/coordinator-direct/`:
   compatibility-assertion updates; includes controller direct-work/generation
   and existing Reviewer/runtime routes.
 - `night-v6-inline-focused-7`: **151/151 PASS**, final-native-only recovery.
-  Integrated full verification and fixed-package original-task execution follow; this section
-  does not claim that unit fixtures complete Anko or demonstrate a time saving.
+- `night-v6-inline-full-2`: **1,614/1,614 PASS**, all **101** files, exit **0**,
+  **202.163 s** including build; test phase 195.239 s. Source SHA-256
+  `b0ca1054af727b13ab45ecdfe48f577b79695562d629fd00717de2ee85e0c4a7`
+  matched before packaging. These unit fixtures do not complete Anko or establish
+  a time saving.
+
+Fixed product **`7f94d24eb3b7a919ef04f674c694236d48b2e34f`**, pushed to PR #152.
+Fixed `.tgz` SHA-256:
+`91a2837ad17c9da0dc02093561ddfd6ef41f034ece128cbc7fec40d52444ee0a`.
+Installed **204** package files and **8** generated assets match; preflight and
+unchanged-base `go test ./...` PASS. Fresh private DB has **0** initial sessions.
+Arm `_testenv/anko-nightly-continuous-v6-package-20261003/` launched the original
+1,825-byte request from the same pinned Anko base. At
+`2026-10-03T01:33:52.038Z`, native Worker
+`ses_f009aa1c7ffeoY8BjTVjEH47u5` actually started as
+`openai/gpt-6-luna-fast#max`, with root Operator
+`ses_f009b1d2affetCsDqT33QUc3PU` actually using `openai/gpt-6.1-sol#xhigh`.
+This is start/model proof only; no completion, official score or saving claimed
+yet. The owned driver queues post-completion scoring after native/source freeze.
 
 The read-only observer supports actual continuous Review/direct-unit lineage.
 Six observer-parser checks replay real v5 history and synthetic continuous-shape
