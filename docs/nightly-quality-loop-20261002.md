@@ -1125,3 +1125,102 @@ receipt/review yet. Provisional priced **$0.12774320**, one active unpriced
 request; neither final failure nor final cost is inferred from it. Owned driver
 continues without repeat launch or candidate mutation; completion notification,
 not repeated polling, advances scoring/probes and result analysis.
+
+### v8 result: selected quality preserved and whole-task five-minute target exceeded
+
+All results below belong only to product
+**`0bf74557b35366af7f3a7f7ee5580a7cf5b858ad`** / package SHA-256
+**`a72234f0b3f3252c575eefda01b52baa4f10bf11904c036b368c60083cb25c44`**.
+Later docs/helper edits do not change that product candidate.
+
+- Original-task native completion **1,609.436 s (26 min 49.436 s)** /
+  **$1.47908048**, **89** requests, unknown **0**. Actual Worker Luna-fast/max
+  and Operator/Reviewer SOL/xhigh unchanged, all three native sessions succeeded,
+  genuine Mission succeeded receipt. 25-minute checkpoint continued normally,
+  no cutoff or intervention.
+- Final Anko **`8a66a6bebf5c1ef621a0b5d66348847a62452ef7`**, branch
+  **`typed-variable-bindings`**, clean. Exact original request/base/common prompt
+  and fixed pricing matched. Source/commit/clean unchanged after scoring/probes.
+- Official local **score 1, F2P 9/9, P2P 94/94**, verifier exit **0**,
+  **15.589 s**, no timeout. No scorer patch/regrade or post-score candidate edit/
+  model request. Formal workflow completion is still a separate observation.
+- Same unchanged selected public probe **9/9**, SHA-256
+  `b45d25b39fb462688334fa174b2008743dba57405c9993fa53fed73ba0935e53`.
+  All four direct/callback caller-option cases pass. v6 was 5/9; v5 9/9;
+  Bare 7/9. This preserves the **known selected public quality**, not exhaustive
+  correctness or an independent quality sample.
+- Versus quality-passing v5: **426.924 s (7 min 6.924 s, 20.97%) faster**,
+  **$0.27975880 (15.91%) lower**. The requested at-least-five-minute reduction
+  with official score 1 and selected public quality is **observed in this sample**.
+  Versus v7 **416.544 s faster**, $0.23506480 lower. Versus Bare **237.023 s
+  slower**, $0.69004568 more (87.45%); versus v6 **217.791 s slower**, but v6
+  did not preserve the known selected public quality.
+
+Actual initial Reviewer `ses_f0023e853ffePv6uKab1zHi8yM` uses **one** native user
+prompt; original call `call_ItKFnavXSpkzIENqJQ84l5NA` / prompt
+`msg_0ffdc17b4002L1B5bSvi6zlTs7` also binds terminal self-recheck
+`msg_0ffe68f920011gvSgBSFm6uXSB`. Independent pre-edit investigation reports
+**four Mediums**: retained caller-mode propagation, channel receive status error
+propagation, Go pointer writeback errors and qualified unknown-type diagnostics.
+During correction, **one additional Medium** reproduces caller-mode loss in Go
+callback conversion. Actual second `repair_review` call
+`call_wBFMCAO4uoQf0X17DDXGh5TP` successfully returns in the **same native Task**
+and its distinct finding remains in final durable correction text. v7 accumulation
+code and v8 retention cue are now exercised **natively**, not only by fixtures.
+No rejected/duplicate/header-only findings call is counted as this evidence.
+
+The same Reviewer corrects/rechecks all five findings, runs formal
+`go test ./...` once and returns actual `SELF_RECHECKED`, unresolved findings
+empty, residual Major null, **independent=false**. No correction redispatch,
+Mission/handoff reread, different Reviewer or validation-only Worker. Actual
+direct-unit settlement does not masquerade as a second native Task terminal or
+an independent PASS; Operator final acceptance/receipt follows.
+
+Activity windows are not additive or causal timing attribution:
+
+- Worker **765.031 s**, v5 **711.912 s**: **53.119 s longer**, 55 requests /
+  $0.15632408. Still two formal runs: actual source edits after the first test
+  repair disabled module assignments and binding metadata/locking; the second
+  is fresh required evidence, not an unchanged gratuitous rerun.
+- Complete Reviewer **748.391 s**, v5 **1,221.142 s**: **472.751 s shorter**,
+  24 requests / $1.01196800. Initial investigation **190.584 s**;
+  correction/self-recheck **557.639 s**, 15 requests, 8,873 reasoning and
+  5,912 output tokens. Three test-containing commands execute in **2.471 s**,
+  all actual tool execution union **3.094 s**. Final self-recheck response
+  **62.517 s**. Time outside tools includes model/provider/host, not proven
+  pure reasoning. Initial added regressions fail before the repair, pass after.
+- Final assistant **413** characters; saved host card **1,225**, not transcribed.
+  Final response **14.730 s / $0.06370000**, not a card-only cost measurement.
+
+Remaining observed detours are retained, not hidden by the successful result:
+five guessed missing-file reads; one shell scratch-variable scope denial; and a
+subsequent diagnostic script exits 127 before a shell-only parser-generation
+comparison succeeds. The rejected command creates its scratch directory with
+`mktemp -d parser/.review-grammar-XXXXXX` inside existing `parser/**` write scope,
+but the diagnostic names literal `$scratch/baseline.y` and suggests scope
+expansion. Reviewer instead uses literal in-scope scratch paths, without new
+grant/Task, then completes. Investigate this host path-resolution/repair-message
+detour separately before changing policy; no measured five-minute saving is
+attributed to it. The reproducible next priorities are initial implementation
+completeness and actual rework/model-response/context costs, not adding review
+gates or weakening effort.
+
+Evidence: `continuous-review-analysis.json` with native findings audit,
+`correction-timing-summary.json`, `finish-analysis.json`,
+`comparison-summary-v8.json`, `remaining-detour-analysis.json`, raw history/DB,
+unchanged public probe record and fixed official `result.json`. Completed-attempt
+priced subtotal **$12.94766736 plus one historical unknown-usage request**;
+v8 unknown **0**. One sample per changed candidate, source/findings/provider
+timing differ: this is an observed joint quality/time result, **not causal
+proof or demonstrated repeatability**. No release/global apply/main merge or
+Anko publication performed.
+
+v8 archive completed **2026-10-03T04:00:03.296Z**, owned server stopped and
+Docker/project-process inactivity checked. Removed only generated arm
+`.opencode/` and cache; source/Git, private DB, fixed package and native history
+remain. Same retained archive parent as earlier arms:
+
+- `anko-nightly-continuous-v8-package-20261003/attempt-evidence.tar` SHA-256:
+  `6f6955029a59f8e96ed4acbee014ca65461b64d5c310bada02e142fe318b2e82`.
+- `product-checks-and-analysis.tar` SHA-256:
+  `a825b5c196d750921a15fa5822fde3dfbb91721b1887e0879a895a8639c06b4b`.
