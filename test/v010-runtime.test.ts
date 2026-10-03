@@ -430,8 +430,8 @@ test("preview tools are denied globally and allowed only by profile agents", asy
 test("every preview role preserves user language and protocol keys without duplicated Worker boilerplate", () => {
   for (const asset of previewAssets) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Use the user's latest instruction language \(previous if unclear\)/u);
-      assert.match(asset.content, /keep protocol\/code\/quotes verbatim/u);
+      assert.match(asset.content, /Prose: user's latest instruction language \(previous if unclear\)/u);
+      assert.match(asset.content, /protocol\/code\/quotes verbatim/u);
       assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 1, asset.name);
     } else assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 2, asset.name);
   }

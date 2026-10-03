@@ -130,3 +130,13 @@ test('shared helper rejection review follows existing unchanged callers without 
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /Anko|TypedBindings|ChanStmt|invokeLetExpr|channel-status|vmStmt\.go|bool.{0,10}int64/);
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /must enumerate every caller|separate Reviewer|mandatory coverage inventory/);
 });
+
+test('Worker instruction discovery reuses supplied instructions and prefers exact relevant paths', () => {
+  const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
+  assert.match(worker, /Reuse supplied AGENTS\.md/);
+  assert.match(worker, /for gaps prefer exact ancestor files\/affected subtrees over parent globs/);
+  assert.match(worker, /Read\/search: existing permissions/);
+  assert.match(worker, /Keep prohibitions, host Git lifecycle[\s\S]+cumulative budget/);
+  assert.match(worker, /every registered formal check exactly in order/);
+  assert.doesNotMatch(worker, /allow all external|external_directory: allow|skip missing instructions|Anko|TypedBindings/);
+});
