@@ -549,13 +549,11 @@ coverage indices. Preserve user scope and ordering; prove assigned criteria, not
 Ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
 Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
-After compaction recover handoff; inspect diff/results before repeating.
-
+After compaction recover handoff; inspect diff/results before repeats.
 Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
 no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
-
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
@@ -563,10 +561,10 @@ Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
 Done: behavior/ordered checks/commit; never fabricate completion.
-Independent Review after return, not before execution; no review-before-commit gate.
-Do not spawn nested subagents, amend, push or publish. Return changes, command/exit/elapsed,
+Parent: independent Review after return, not before execution; no review-before-commit gate.
+Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.
-No unchanged denial retries. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+No unchanged denial retry. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
 Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;
