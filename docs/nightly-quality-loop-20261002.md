@@ -886,3 +886,94 @@ only. Evidence under `anko-nightly-continuous-v7-package-20261003/` includes
 `candidate.json`, preparation/build-match/private-DB proofs and
 `actual-native-start.json`. Release/global apply/main merge/Anko publication
 remain outside this session.
+
+### v7 result: public probes recovered, official VM tests did not build
+
+Immutable product `16bc9b1`, package
+`244846386c9eff58e01fc130165b509fc35a518e3bb419343aa09e9ddba39327`:
+
+- Native workflow **2,025.980 s / $1.71414528**, **117** requests, unknown **0**.
+  Actual Worker Luna-fast/max, Operator/Reviewer SOL/xhigh; all three actual
+  native sessions succeeded, genuine Mission succeeded receipt.
+- Final Anko **`8fc43546802cbdf12dc8226b2488169c17d08808`** on
+  **`feature/typed-bindings`**, clean. Source/request/base/pricing conditions
+  matched; scored source remains fixed and unchanged after public probes.
+- Official local **score 0, F2P 1/9, P2P 94/94**, verifier exit **0**,
+  **14.413 s**, no timeout. Eight VM F2P entries are **missing/unexecuted**,
+  not eight observed behavioral assertion failures: VM package build failed.
+  Exit 0 means scoring completed, not benchmark success.
+- Same unchanged selected public probe **9/9** (v6 **5/9**, v5 **9/9**, Bare
+  **7/9**). All four caller-mode cases now pass. No model requests, official
+  verifier reruns or candidate edits from these probes; this is not an exhaustive
+  public quality claim and does not replace the failed official result.
+- v5 whole-run difference **10.380 s (0.51%) faster**, **$0.04469400 (2.54%)
+  lower**. Versus v6 **634.335 s slower**, **$0.45141080 more**. Quality-preserved
+  five-minute objective remains **unmet**, not rescued by public probes or receipt.
+
+Original Reviewer `ses_f00596717ffePd4YJ6WFXaFHLn` has **one** native user prompt;
+initial call `call_4urOaEuPAxm2jduBArVcb8xW` / prompt
+`msg_0ffa698f0001KdzB6NT6GfbgyC` also owns final self-recheck
+`msg_0ffb4419700191DjgZYYxQnRak`. Actual continuous correction/direct settlement,
+no correction redispatch/Mission or handoff reread/different Reviewer/validation
+Worker. Initial three Medium findings: caller-mode propagation, channel receive
+error propagation and Go pointer writeback errors. Reviewer corrected/rechecked
+those and investigated callback/generated-assignment failure paths during repair.
+No unresolved finding was reported at terminal; later build-composition failure
+is nevertheless real. This remains author self-recheck, not independent PASS.
+Only **one** `repair_review(findings)` call occurred: v7's additional-findings
+accumulation fix is verified by fixtures but **not exercised natively here**.
+
+Activity windows, not additive/causal timing components:
+
+- Worker **978.494 s**, v5 **711.912 s**: **266.582 s slower**.
+- Complete Reviewer **960.297 s**, v5 **1,221.142 s**: **260.845 s shorter**.
+  Correction **784.462 s**, 26 responses / 9,482 reasoning / 9,976 output
+  tokens; nine test-containing commands execute in **8.509 s**, all tool
+  execution union **9.036 s**. Final author self-recheck response **65.326 s**.
+- Worker formal `go test ./...` **twice**: a concrete original-requirement
+  unknown-type diagnostic omission was found/edited after the first successful
+  formal run. Second run was required fresh evidence, not an unchanged gratuitous
+  rerun. Reviewer formal test once. Move requirement reconciliation before final
+  formal checks; do not waive necessary fresh checks after later edits.
+- Final assistant **461** characters, saved card **1,228**, no card transcription;
+  final request **13.912 s / $0.073376**, not a card-only cost measurement.
+
+Build-composition diagnosis uses a **declaration-name intersection only**, not
+private test bodies or expected values. The candidate itself declares generic
+package-level `TestTypedBindingsDeclarations`; a same-package evaluation entry
+collides. The original scorer filters Go `build-*` JSON events, so its retained
+log shows build failure but not the compiler explanation. Public-only reproduction
+in a separate archived-source fixture proves the package mechanism:
+
+- Candidate public tests alone, `go test ./vm -run '^$'`: exit **0**.
+- Add an empty public test with that existing candidate entry name: exit **1**,
+  actual compiler **redeclared** diagnostic.
+- Give only that empty fixture entry a distinctive name: exit **0**.
+
+No repaired official result is inferred and the original grader is not rerun.
+Native candidate source/Git/clean hashes unchanged. The reproduction helper first
+failed on its default `git archive` buffer and an incorrectly equal project/TMPDIR
+root; corrected only its fixture setup before the passing collision reproduction.
+Private bodies/expected values, exact evaluator test entry names and Anko-specific
+oracles are not supplied to future inference. Next product guidance favors existing
+suites/subtests or distinctive new entry names for same-package composition,
+without new gates, test matrices or validation Workers. A new concrete defect
+found while correcting should be retained via the existing same-Task route,
+not silently left only in the conversational trace.
+
+Evidence: `continuous-review-analysis.json`, `correction-timing-summary.json`,
+`worker-efficiency-diagnosis.json`, `finish-analysis.json`,
+`build-collision-diagnosis.json`, `public-test-collision-reproduction.json`,
+`anko-nightly-continuous-v7-package-20261003-public-probes.json`, fixed official
+`result.json` and raw native history/private DB. Completed-attempt priced subtotal
+**$11.46858688 plus one historical unknown-usage request**; v7 unknown 0.
+
+v7 archive completed **2026-10-03T03:09:16.166Z** after inactive owned server,
+Docker and project-process checks. Removed only generated arm `.opencode/` and
+cache; fixed package, scored source/Git, private DB and native evidence remain.
+Same retained archive parent as v6:
+
+- `anko-nightly-continuous-v7-package-20261003/attempt-evidence.tar`:
+  `39059f54d2cfa02e9296c78f16db7ec707dbf2a29ee6efc7528548dae6d95215`.
+- `product-checks-and-analysis.tar`:
+  `a89fef1e7ac6fc2cdef35aacdbe4d417d7cca3b3ae469593f230055bde0ba60a`.
