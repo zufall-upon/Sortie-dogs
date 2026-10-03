@@ -217,6 +217,8 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
     const findings = "FINDINGS\nMedium: result.txt is wrong rather than ready; preserve result, checks and clean delivery.";
     const begun = await f.tool("author", "repair_review", { findings });
     assert.equal(begun.execution, "same-native-task");
+    assert.match(begun.next_action, /Run inherited formal commands in order as exact separate foreground native shell calls/);
+    assert.match(begun.next_action, /Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper/);
     assert.equal(begun.findings, findings);
     assert.equal(begun.task, undefined);
     const active = await f.run();

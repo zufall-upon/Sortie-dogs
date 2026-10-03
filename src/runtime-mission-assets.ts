@@ -39,6 +39,10 @@ separate foreground native shell calls, no extra tee, redirect or wrapper. Diagn
 Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
 `;
 
+/** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
+export const REVIEWER_VALIDATION_WORKFLOW = `Run inherited formal commands in order as exact separate foreground native shell calls.
+Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.`;
+
 const OPERATION_GUIDE = `## Practical operation guide
 
 Use file paths for exact outputs and dir/** for a directory tree, including a directory that does not
@@ -325,7 +329,8 @@ binds the existing scope/checks and lets you correct HERE, without another promp
 round trip. Reuse the known project test harness and the reasoning/source already in this conversation.
 If correction exposes another concrete Major/Medium defect, retain it through ${profile.toolPrefix}repair_review
 here before fixing it; the host accumulates known findings without another Task, scope or check contract.
-Run inherited formal commands in order, retain the requested commit/clean boundary, then
+${REVIEWER_VALIDATION_WORKFLOW}
+After current formal checks, retain the requested commit/clean boundary, then
 ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this same native Task with
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
 self-recheck, never independent approval of your own edits. No unresolved Medium may pass.

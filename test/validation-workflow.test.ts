@@ -89,6 +89,10 @@ test('native CLI init installs the validation workflow in each active mission ro
         t.diagnostic(JSON.stringify({ installed_worker_asset_chars: installed.length }));
       }
     }
+    const reviewer = await readFile(join(root, '.opencode', 'agent', 'dog-reviewer-v010.md'), 'utf8');
+    assert.equal(reviewer, runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content);
+    assert.match(reviewer, /Run inherited formal commands in order as exact separate foreground native shell calls/);
+    assert.match(reviewer, /Run formatting and diagnostics separately; do not append undeclared shell commands/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -139,4 +143,15 @@ test('Worker instruction discovery reuses supplied instructions and prefers exac
   assert.match(worker, /Keep prohibitions, host Git lifecycle[\s\S]+cumulative budget/);
   assert.match(worker, /every registered formal check exactly in order/);
   assert.doesNotMatch(worker, /allow all external|external_directory: allow|skip missing instructions|Anko|TypedBindings/);
+});
+
+test('Reviewer correction distinguishes exact formal shell calls from formatting and diagnostics', () => {
+  const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
+  assert.match(reviewer, /Run inherited formal commands in order as exact separate foreground native shell calls/);
+  assert.match(reviewer, /Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper/);
+  assert.match(reviewer, /retain the requested commit\/clean boundary/);
+  assert.match(reviewer, /actual successful terminal binds the current validated source/);
+  assert.match(reviewer, /No unresolved Medium may pass/);
+  assert.match(reviewer, /Review starts read-only/);
+  assert.doesNotMatch(reviewer, /accept mixed diagnostic chains|infer successful shell members|Anko|TypedBindings/);
 });
