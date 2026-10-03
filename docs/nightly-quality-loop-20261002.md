@@ -977,3 +977,78 @@ Same retained archive parent as v6:
   `39059f54d2cfa02e9296c78f16db7ec707dbf2a29ee6efc7528548dae6d95215`.
 - `product-checks-and-analysis.tar`:
   `a89fef1e7ac6fc2cdef35aacdbe4d417d7cca3b3ae469593f230055bde0ba60a`.
+
+## v8: general regression composition and final-check preparation
+
+The next product candidate retains all v7 runtime behavior, caller-mode review
+guidance and model effort. Marker `0.13.3-reviewer-continuous-v8` changes guidance
+only around the actual v7 defects/detours:
+
+- Prefer existing suites/subtests, or distinctive regression test entry/helper
+  names that compose with other same-package files. No evaluator identifiers,
+  private bodies, expected values, build tags or test deletion/renaming recipe
+  are inserted into assets, Mission prompt or original task.
+- Reconcile the original requirements and diff before focused/final formal
+  checks. This addresses the actual late Worker unknown-type fix; fresh affected
+  and required broad checks after later edits remain mandatory when the contract
+  or host freshness requires. No old evidence is accepted after new source.
+- If the same continuous Reviewer discovers another concrete Major/Medium while
+  correcting, retain it via existing `repair_review` before fixing it, in that
+  same native Task. No new handoff, scope, contract, independent Reviewer or test
+  Worker; no extra call when no new concrete finding exists.
+
+Equivalent Worker wording is compacted without changing the original prose
+bounds or removing the original-request/scope/opaque-path/reproduction/Git/
+cumulative-budget boundaries. Source-level common body **2,462**, prose **2,398**;
+installed-asset checks follow. This is general process guidance, not proof that
+another original-task sample will pass or be five minutes faster.
+
+Main re-fetched before this cycle, still `b9b1246`; scored v7 source/package
+remain frozen. Related targeted checks, one final integrated full verification,
+then a new fixed-package fresh-clone/private-DB original-task resubmission follow.
+Official result and unchanged selected public probes remain separate, post-freeze
+only; no grader modifications or scored-candidate re-inference.
+
+`night-v8-guidance-focused`: **125/126 PASS**, exit 1. The unchanged reproduction
+boundary was compacted to `Keep reproduction entrypoint/input/layout`; one older
+asset assertion accepted only its verbose wording. Keep the product guidance
+unchanged and accept either exact equivalent preservation form in that assertion.
+New naming/requirements/additional-findings tests passed; installed Worker
+**2,884** characters, common body **2,462**, prose **2,398**, original bounds
+unchanged. Recheck the affected assertion/guidance before final integrated full.
+`night-v8-guidance-focused-2`: **4/5 PASS**, exit 1, **0.274 s** recorded:
+the same installed-asset case also requires the original `Missing tooling` phrase.
+Restore that phrase in the product (common prose remains **2,400**, not a raised
+limit), then verify the complete related file set before the single final full.
+`night-v8-guidance-focused-3`: **126/126 PASS**, exit 0. Installed Worker
+**2,886**, common body **2,464**, prose **2,400**; original limits pass.
+No product code/check/scope/model-effort change beyond the recorded guidance.
+Final integrated full verification follows before candidate/package freeze.
+
+`night-v8-guidance-full`: exit **1**, **199.317 s**, snapshot SHA-256
+`aa810e99bc2c1db387fc86ae408c5d4cdc9f8e5ec6a8d012473be33472b3ee7d`.
+The fail-fast run reports **1,231/1,235** partial passing tests with **four**
+failures in `operator-mission.test.ts`; only 50/101 files started, so this is not
+complete-suite evidence. Three failures match verbose `Parent handles` or
+`Read/search use` wording rather than the equivalent compact forms. Update those
+assertions to accept either exact preserved semantic form. The reproduction
+assertion also caught omission of explicit **why** when reporting an unverified
+case: restore `report why unverified` and assert it in the guidance test. Compact
+`in this Task via` to `here via` in the already same-Task scope section to retain
+the original prose bound; no check/effort/scope/permission change. Verify all
+four related test files before the corrected final full.
+
+`night-v8-guidance-focused-4`: **154/155 PASS**, exit 1. All four previously
+failed Mission tests now pass; the new `here via` compact form hits one more
+old literal assertion. Assert the same Task explicitly and accept either
+`in this Task via` or `here via` **with the exact existing expand_unit tool**;
+do not change product text or bounds again. Current installed asset **2,882**,
+common body **2,460**, prose **2,396**. Reuse the just-built current production
+for complete affected-file testing, then full rebuild/integration verification.
+
+`night-v8-guidance-focused-5`: **155/155 PASS**, exit **0**, **10.815 s**;
+all four affected files, installed Worker **2,882**, common prose **2,396**.
+Source/runtime matches the preceding build; only the boundary assertion changed.
+`night-v8-guidance-full-2` now verifies the corrected integrated candidate before
+any package freeze or fresh original-task inference. Failed/partial full evidence
+does not authorize package preparation.

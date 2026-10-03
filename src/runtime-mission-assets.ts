@@ -34,7 +34,7 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 `;
 
 /** Worker-only projection; planning/review authorities retain the complete shared workflow. */
-export const WORKER_VALIDATION_WORKFLOW = `Batch edits, inspect the diff, run focused tests, then every registered formal check exactly in order:
+export const WORKER_VALIDATION_WORKFLOW = `Batch edits, reconcile requirements/diff, run focused tests, then every registered formal check exactly in order:
 separate foreground native shell calls, no extra tee, redirect or wrapper. Diagnostics are not formal evidence.
 Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
 `;
@@ -240,6 +240,8 @@ alone are not defects; a concrete contradiction with the established contract is
 During correction, reuse the established public test harness where applicable and exercise the smallest
 regression exposing the defect before the fix and passing afterward. Do not change expected values or
 helper defaults merely to agree with the implementation; derive them from the original contract.
+Prefer existing suites/subtests for regressions. New test entry/helper names should be distinctive
+and compose with other same-package test files, not create generic package-level collisions.
 
 For a requested per-call mode/option, trace where the setting is chosen and where changed code uses
 retained objects or closures. Distinguish the current caller's setting from a captured creation-time
@@ -315,6 +317,8 @@ When concrete findings require authorized source correction, call ${profile.tool
 their actual findings text instead of ending this Task. The host records that independent investigation,
 binds the existing scope/checks and lets you correct HERE, without another prompt, handoff read or Operator
 round trip. Reuse the known project test harness and the reasoning/source already in this conversation.
+If correction exposes another concrete Major/Medium defect, retain it through ${profile.toolPrefix}repair_review
+here before fixing it; the host accumulates known findings without another Task, scope or check contract.
 Run inherited formal commands in order, retain the requested commit/clean boundary, then
 ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this same native Task with
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
@@ -532,28 +536,29 @@ mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
-Investigate, edit, test and requested commit in this Task. Follow AGENTS.md.
-Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction in mission-context, global constraints
-and unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Implement, test and requested commit in this Task. Follow AGENTS.md.
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, mission-context constraints,
+unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
 Host ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
 Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
 After compaction recover handoff; inspect diff/results before repeating work.
 
-Read/search use existing permissions. Repair estimated unit.write scope/outputs/checks
-in this Task via ${profile.toolPrefix}expand_unit/existing contract updates and host repair diagnostics;
+Read/search: existing permissions. Fix unit.write estimates/outputs/checks
+here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
 no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle and cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
 
 Use pre-change test helpers as oracles, not new implementation/tests. Check
-result/error/state together, without a hypothetical exhaustive matrix. Preserve reproduction entrypoint, input and layout; rerun or
-report why unverified. Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
-Per-call modes: check retained creation/use code for captured vs current settings.
+result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
+Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
+Per-call modes: check retained creation/use for captured vs current settings.
+Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
 Done: behavior, ordered checks/commit; never fabricate completion.
-Parent handles independent Review after return, not before execution; no review-before-commit gate.
-Do not spawn nested subagents, amend, push or publish. Return changes, actual command/exit/elapsed,
-rerun reasons and unresolved/untested behavior; no proof document.
+Parent: independent Review after return, not before execution; no review-before-commit gate.
+Do not spawn nested subagents, amend, push or publish. Return changes, command/exit/elapsed,
+rerun reasons, unresolved/untested behavior; no proof document.
 No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
 Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.
