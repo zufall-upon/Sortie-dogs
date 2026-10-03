@@ -19,9 +19,10 @@ separate release session.
 The durable work queue and commands live under `_testenv/nightly-20261002/`.
 Completed themes: public failure-result coverage, fresh original Anko evaluations,
 real-V2 direct controller/multiple-unit execution, retained host-card projection,
-and inherited compiler-cache freshness. The current efficiency investigation is
-first-draft omissions and expensive correction/test generation, not test execution
-time. Diagnose concrete failures rather than repeat unchanged failed runs or weaken
+inherited compiler-cache freshness, and continuous Reviewer correction. The fixed
+v6 original-task sample below observes a 644.715-second saving with official score 1;
+this is a single-sample result, not established merely by product unit checks.
+Diagnose concrete failures rather than repeat unchanged failed runs or weaken
 acceptance.
 
 ## Cycle 1: public failure-result coverage
@@ -646,16 +647,101 @@ Arm `_testenv/anko-nightly-continuous-v6-package-20261003/` launched the origina
 `ses_f009aa1c7ffeoY8BjTVjEH47u5` actually started as
 `openai/gpt-6-luna-fast#max`, with root Operator
 `ses_f009b1d2affetCsDqT33QUc3PU` actually using `openai/gpt-6.1-sol#xhigh`.
-This is start/model proof only; no completion, official score or saving claimed
-yet. The owned driver queues post-completion scoring after native/source freeze.
+This observation is start/model proof only. Completion and post-freeze official
+scoring from the owned driver are recorded below.
 
 The read-only observer supports actual continuous Review/direct-unit lineage.
 Six observer-parser checks replay real v5 history and synthetic continuous-shape
 fixtures; they use zero model requests and leave prior scored source unchanged.
 Those fixtures are **not** native continuous-execution evidence. Fresh v6 private
-DB/source/package will supply that evidence. Official hidden grading remains
+DB/source/package supplied that evidence below. Official hidden grading remains
 post-completion only, after source is fixed, with no subsequent source edits or
 re-inference. Whole-task target remains at most **1,736.360 s** against v5's
 **2,036.360 s**, with score 1 and genuine receipt. No reviewer-only/overlapping
 windows or time transferred to Worker count as whole-task saving. Release/global
 apply/main merge and Anko upstream publication remain outside this session.
+
+### v6 original-task result: 644.715-second whole-task saving observed
+
+Fixed product `7f94d24`, package SHA-256
+`91a2837ad17c9da0dc02093561ddfd6ef41f034ece128cbc7fec40d52444ee0a`:
+
+- Whole native workflow **1,391.645 s** / **$1.26273448**, **82** requests,
+  usage unknown **0**. Original request/common prompt/pricing matched v5.
+- Versus fixed v5: **644.715 s (31.66%) faster**, **$0.49610480 (28.21%) lower**.
+  The 300-second goal is observed on this original-task sample with preserved
+  official quality, not by adding overlapping actor windows or shifting work.
+- Final Anko **`1abf91ab1dee0ba124fbf4334f2f42ddc4f53e07`**, new branch
+  **`feature/typed-bindings`**, clean. Worker/Reviewer/root each have their actual
+  native `succeeded` terminal, with a genuine Mission succeeded receipt.
+- **Official local score 1, F2P 9/9, P2P 94/94**. Fixed verifier exit **0**,
+  **15.589 s**, post-completion only. Source/commit/clean remained unchanged;
+  no post-score candidate edits or model requests. Score belongs to this fixed
+  v6 package, not the subsequent docs commit or any v7 follow-up.
+
+Actual continuous Reviewer `ses_f0090094effeYWZhEQdqpC0dPZ` had **one** native
+user prompt. Its initial Task call `call_A7j5JIuD7GQ4qyCNDY6XW1m0` and prompt
+`msg_0ff6ff6b8002zlaxq5e0raxNM4` also own the real final `SELF_RECHECKED` message
+`msg_0ff78f83c001pBd8UL7Gyjt2U3`. Direct correction has a distinct direct-unit
+settlement, not an invented native child terminal. No correction re-dispatch,
+handoff/Mission reread, second Reviewer, extra Coordinator or validation Worker.
+No product-tool refusal in the Reviewer. Worker and Reviewer each ran formal
+`go test ./...` once. Expected focused regression failures preceded actual fixes.
+
+Independent Reviewer retained four concrete Medium findings: reflected interface
+initializers, channel receive-ok assignment error suppression, Go pointer writeback
+error suppression, and qualified unknown-type diagnostics. During correction it
+also independently reproduced named-vs-unnamed reflected type acceptance, fixed
+it, and explicitly self-rechecked all five. No unresolved Major/Medium or concrete
+residual Major. This is author self-recheck, **not independent final PASS**.
+
+Measured activity windows, **not additive/causal components**:
+
+- Whole Reviewer investigation/correction: v5 **1,221.142 s** → v6 **619.164 s**,
+  difference **601.978 s**.
+- Correction activity: v5 **937.896 s** → v6 **448.592 s**. v6 has 18 responses,
+  6,381 reasoning / 5,289 output tokens; five test-containing commands execute
+  in 4.687 s total, all actual tools union 5.023 s. Final author response 29.137 s.
+- Worker: v5 **711.912 s** → v6 **668.036 s**, difference **43.876 s**.
+  The whole-run saving therefore is not explained by a faster Worker alone;
+  actor windows still include model/provider/host gaps and can overlap.
+
+Different first drafts, finding sets and provider timing remain confounders. One
+sample per candidate does not establish a reproducible or isolated causal effect.
+Compared with Bare's fixed official-score-1 sample, v6 is still **19.232 s
+(1.40%) slower** and **$0.47369968 (60.04%) more expensive**. Native continuous
+execution and lack of handoff rereads are directly observed mechanisms, not a
+claim that all elapsed-time difference came from those mechanisms.
+
+Completion projection also exercised: full 1,226-character card retained in
+native tool history; actual outgoing result 1,350 characters without card body,
+with identical receipt identity. Final assistant 453 characters, no card
+transcription. Final request 11.880 s / $0.087674, not a card-only cost measure.
+Desktop/terminal card appearance remains uninspected.
+
+Evidence: `continuous-review-analysis.json`, `correction-timing-summary.json`,
+`comparison-summary.json`, `completion-projection-summary.json`, raw native
+history/private DB and scoring `result.json`. `finish-analysis-audited.json`
+corrects an old analyzer's unconditional unpriced-request caveat: v6 has **0**
+unknown requests; fixed-table usage estimate is not a billing invoice. Raw
+native/grade evidence remains untouched.
+
+The same native trace exposed the next narrow product defect: a second
+`repair_review(findings)` call during running correction returns the original
+findings and does not append the newly submitted Medium finding to the retained
+correction list. Its full text is still in the native tool input and its fix is
+in the scored Anko source, so v6 completion/score remain genuine; nevertheless
+continuity/compaction should retain the full known finding set. Fix only product
+finding accumulation in the next candidate, preserving this scored source,
+single Task, existing scope/checks/budget and terminal acceptance semantics.
+
+Completed v6 archived at `2026-10-03T02:07:12.912Z` under the same retained
+`nightly-quality-20261002/` archive parent. Actual owned server/container/project
+processes inactive, package/result identities checked before removing generated
+`.opencode/` and arm cache only. Source/Git/private DB/fixed package remain local;
+source/Git/native history and scoring/check/analysis artifacts also archived.
+
+- `anko-nightly-continuous-v6-package-20261003/attempt-evidence.tar`:
+  `0cb2b8971a35ac2fffb8f7e1dafea83c6840bdc3fdf35387066105304d972313`.
+- Its `product-checks-and-analysis.tar`:
+  `e94ee87c58fb33d006c68afc4cccefdf1d1e4691fe07b43fdaf021c37595e268`.
