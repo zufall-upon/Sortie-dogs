@@ -136,6 +136,160 @@ test("V2 optional condition objects admit omission without manufacturing provena
   } finally { cleanup?.(); }
 });
 
+test("V2 volatile host state is a current system update after history, not a changing absolute prefix", async () => {
+  const fixture = contextFixture();
+  let phase = 0;
+  const live = () => [
+    `SORTIE_GOAL_BOUND_STATE\n${JSON.stringify({ revision: phase, consumed_units: phase, receipt: phase === 2 ? { status: "succeeded" } : null })}`,
+    `SORTIE_ACCEPTANCE_CONTINUITY_STATE\n${JSON.stringify({ latest_accepted_task_id: `task-${phase}` })}`,
+    `SORTIE_PARALLEL_DISPATCH_STATE\n${JSON.stringify({ sequence: phase })}`,
+    ...(phase === 0 ? [] : [`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify({ findings: phase === 1 ? "Medium one" : "Medium one\nAdditional Medium two", validation: ["go test ./..."], write: ["vm/**"] })}`]),
+  ];
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "Original requirements unchanged" }] },
+    { role: "assistant", content: [{ type: "tool-call", id: "check", name: "shell", input: { command: "go test ./..." } }] },
+    { role: "tool", content: [{ type: "tool-result", id: "check", name: "shell", result: { type: "json", value: { exit: 0, evidence: "sha256:check" } } }] },
+    { role: "assistant", content: [{ type: "compaction", provider: "openai", encrypted: "native-checkpoint" }] },
+    // A foreign system message with similar metadata must not be removed or mistaken for our projection.
+    { role: "system", metadata: { "sortie-dogs/live-state": "request-only" }, content: [{ type: "text", text: "Another plugin's instruction" }] },
+  ];
+  const original = structuredClone(messages);
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_POLICY", ...live(), "OTHER_STATIC_POLICY"]; },
+  })).setup(fixture.context);
+  try {
+    for (phase = 0; phase < 3; phase++) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [{ type: "text", text: "NATIVE_PREFIX" }], messages, tools: {} };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(event.system, ["NATIVE_PREFIX", "STATIC_POLICY", "OTHER_STATIC_POLICY"].map(text => ({ type: "text", text })), "state addition/change does not rewrite the prefix");
+      assert.deepEqual(event.messages.slice(0, messages.length), messages, "history and native call/result pairs are intact");
+      for (let i = 0; i < messages.length; i++) assert.equal(event.messages[i], messages[i]);
+      const update = event.messages.at(-1)!;
+      assert.equal(update.role, "system", "state does not become user input or a fabricated tool result");
+      assert.deepEqual(update.content, live().map(text => ({ type: "text", text })), "every current field and retained finding is supplied verbatim");
+      assert.deepEqual(messages, original, "request projection never mutates saved history");
+      const once = structuredClone(event.messages);
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(event.messages, once, "reentrant projection does not accumulate unchanged state updates");
+    }
+    const legacy = { sessionID: "root", system: [] };
+    await fixture.sessionHooks.get("context")!(legacy);
+    assert(JSON.stringify(legacy.system).includes("SORTIE_GOAL_BOUND_STATE"), "a host without message projection retains state in system rather than losing it");
+  } finally { cleanup?.(); }
+});
+
+test("V2 live-state boundaries persist across native turns and cold reload without cross-session state or evidence writes", async () => {
+  const fixture = contextFixture();
+  const systems = new Map([
+    ["root", ["STATIC_ROLE", "SORTIE_WORKER_CONTEXT\noriginal assignment"]],
+    ["other", ["STATIC_ROLE", "SORTIE_WORKER_CONTEXT\nother assignment"]],
+  ]);
+  const factory: OpenCodePlugin = async () => ({
+    "experimental.chat.system.transform": async (input, output) => { output.system = systems.get(input.sessionID)!; },
+  });
+  let cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  const user = { role: "user", content: [{ type: "text", text: "Original task" }] };
+  const native = [user, { role: "assistant", content: [{ type: "text", text: "Native investigation" }] }];
+  const event = (id: string, messages: unknown[]) => ({ sessionID: id, agent: "dog-worker-v010", system: [], messages, tools: {} });
+  try {
+    const first = event("root", [user]);
+    await fixture.sessionHooks.get("context")!(first);
+    const next = event("root", native);
+    await fixture.sessionHooks.get("context")!(next);
+    assert.deepEqual(next.messages.slice(0, first.messages.length), first.messages);
+    assert.equal(next.messages.at(-1), native.at(-1), "unchanged state does not move behind new native history");
+    cleanup?.();
+    const coldFixture = contextFixture();
+    const coldContext = { ...coldFixture.context, storage: fixture.context.storage };
+    cleanup = await createSortieDogsV2Plugin(factory).setup(coldContext);
+    const cold = event("root", [...native, { role: "tool", content: [{ type: "text", text: "actual outcome" }] }]);
+    await coldFixture.sessionHooks.get("context")!(cold);
+    assert.deepEqual(cold.messages.slice(0, next.messages.length), next.messages, "cold restore uses durable projection boundaries");
+    const other = event("other", [user]);
+    await coldFixture.sessionHooks.get("context")!(other);
+    assert(!JSON.stringify(other.messages).includes("original assignment"));
+    await coldFixture.emit({ type: "session.deleted", data: { sessionID: "root" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(await fixture.context.storage!.get("v2-model-live-state:root"), undefined);
+    assert.equal(fixture.synthetic.length, 0, "request projection never persists a synthetic outcome or new prompt");
+    assert.equal(coldFixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
+test("V2 cache-ledger storage failure preserves current state and in-process append continuity instead of blocking work", async () => {
+  const fixture = contextFixture();
+  const storage = fixture.context.storage!, get = storage.get, set = storage.set;
+  storage.get = async key => { if (key.startsWith("v2-model-live-state:")) throw new Error("cache ledger unavailable"); return get(key); };
+  storage.set = async (key, value) => { if (key.startsWith("v2-model-live-state:")) throw new Error("cache ledger unavailable"); return set(key, value); };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_ROLE", "SORTIE_WORKER_CONTEXT\noriginal assignment"]; },
+  })).setup(fixture.context);
+  try {
+    const user = { role: "user", content: [{ type: "text", text: "Original task" }] };
+    const first = { sessionID: "root", system: [], messages: [user], tools: {} };
+    await fixture.sessionHooks.get("context")!(first);
+    const second = { sessionID: "root", system: [], messages: [user, { role: "assistant", content: [{ type: "text", text: "Native progress" }] }], tools: {} };
+    await fixture.sessionHooks.get("context")!(second);
+    assert.deepEqual(second.messages.slice(0, first.messages.length), first.messages);
+    assert(JSON.stringify(second.messages).includes("original assignment"));
+  } finally { cleanup?.(); }
+});
+
+test("Reviewer model tool order keeps genuine read-only definitions as a deterministic prefix across correction admission", async () => {
+  const fixture = contextFixture();
+  let correcting = false;
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-reviewer-v010",
+    model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } });
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_REVIEWER_ROLE"]; },
+    reviewerCorrectionScope: async () => correcting ? { write: ["vm/**"], validation: ["go test ./..."], generation: 1 } : undefined,
+  })).setup(fixture.context);
+  const names = ["glob", "grep", "patch", "read", "shell", "skill", "sortie_v010_bind_write_gate",
+    "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate",
+    "sortie_v010_repair_review", "websearch", "execute"];
+  const definitions = Object.fromEntries(names.map(name => [name, { description: name, input: { type: "object", properties: {} } }]));
+  const event = (agent: string, order = names) => ({ sessionID: "review-author", agent, system: [], messages: [],
+    tools: Object.fromEntries(order.map(name => [name, definitions[name]])) });
+  try {
+    const initial = event("dog-reviewer-v010");
+    await fixture.sessionHooks.get("context")!(initial);
+    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
+      assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
+    }
+    correcting = true;
+    const corrected = event("dog-reviewer-correction-v010-0123456789abcdef");
+    await fixture.sessionHooks.get("context")!(corrected);
+    assert.deepEqual(Object.keys(corrected.tools).slice(0, Object.keys(initial.tools).length), Object.keys(initial.tools),
+      "newly authorized tools append after every initial Reviewer definition rather than interleaving");
+    assert.deepEqual(Object.keys(corrected.tools).toSorted(), names.toSorted(), "same genuine tool set, no invented hidden executor");
+    for (const name of names) assert.equal(corrected.tools[name], definitions[name], "native definition/executor binding identity preserved");
+    const shuffled = event("dog-reviewer-correction-v010-0123456789abcdef", [...names].reverse());
+    await fixture.sessionHooks.get("context")!(shuffled);
+    assert.deepEqual(Object.keys(shuffled.tools), Object.keys(corrected.tools), "same role/tool set has deterministic order independent of registry insertion");
+    correcting = false;
+    const restored = event("dog-reviewer-v010", [...names].reverse());
+    await fixture.sessionHooks.get("context")!(restored);
+    assert.deepEqual(Object.keys(restored.tools), Object.keys(initial.tools), "restored read-only role never keeps correction tools for cache");
+    assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
+test("Reviewer model tool order never changes other agents' native tool set or insertion order", async () => {
+  const fixture = contextFixture();
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_ROLE"]; },
+  })).setup(fixture.context);
+  try {
+    for (const agent of ["build", "dog-worker-v010", "dog-operator"]) {
+      const definitions = { shell: { description: "shell" }, read: { description: "read" }, patch: { description: "patch" }, execute: { description: "execute" } };
+      const event = { sessionID: agent, agent, system: [], messages: [], tools: { ...definitions } };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(Object.keys(event.tools), Object.keys(definitions));
+      for (const name of Object.keys(definitions)) assert.equal(event.tools[name as keyof typeof definitions], definitions[name as keyof typeof definitions]);
+    }
+  } finally { cleanup?.(); }
+});
+
 test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
   const fixture = contextFixture();
   const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";

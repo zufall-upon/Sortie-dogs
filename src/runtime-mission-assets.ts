@@ -256,6 +256,12 @@ not settle a different failure outcome of that same operation. A demonstrable ma
 an excerpt or result only when a specific material outcome cannot be settled. Do not invent new behavior,
 require an exhaustive exception inventory, or recommend catching every exception.
 
+When a shared helper gains validation or a new rejection, search its existing callers,
+including unchanged code. Read relevant caller branches; search hits alone do not
+establish correct handling. Follow rejection through later writes and result/error resets back to the
+public result/error/state, preserving unrelated existing behavior. This is targeted contract review,
+not an exhaustive call graph or new approval gate.
+
 Report FINDINGS only for concrete major or medium defects with a material impact on the original requirements,
 public behavior, correctness or required validation. Name the consequence and smallest necessary fix.
 Do not turn minor style, wording, optional improvements or speculative edge cases into FINDINGS or EVIDENCE_GAPS.
@@ -536,31 +542,30 @@ mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
-Implement, test and requested commit in this Task. Follow AGENTS.md.
-Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, mission-context constraints,
-unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Host ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
-Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+Implement, test and requested commit in this Task.
+Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
+coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
-After compaction recover handoff; inspect diff/results before repeating work.
-
-Read/search: existing permissions. Fix unit.write estimates/outputs/checks
+After compaction recover handoff; inspect diff/results before repeats.
+Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
-no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle and cumulative budget.
+no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
-
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: behavior, ordered checks/commit; never fabricate completion.
+Done: behavior/ordered checks/commit; never fabricate completion.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
-Do not spawn nested subagents, amend, push or publish. Return changes, command/exit/elapsed,
-rerun reasons, unresolved/untested behavior; no proof document.
-No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
-TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
-Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.
+Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
+rerun reasons, unresolved/untested behavior; no proof doc.
+No unchanged denial retry. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
+Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;
 }
