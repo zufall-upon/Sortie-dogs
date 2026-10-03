@@ -572,3 +572,73 @@ archive includes official scoring, public Bare comparison and correction timing.
   `1a88d9515bd182944d0a82a62ff61d9d2616c96336284c19d9184189865c05df`.
 - Its `product-checks-and-analysis.tar`:
   `0b7fd675ea652a73bff131928b76d331bdf49fecab81944ca2f57a0c8e45fa4e`.
+
+## Continuous Reviewer candidate v6: remove routine termination/re-dispatch
+
+The user requested all known process defects be repaired and resubmitted continuously.
+The v5 trace established a structural detour: initial Review ended with findings,
+Operator issued a correction Task, and the same author reloaded a large Mission
+projection even though its original reasoning and findings were already available.
+The v5 timing analysis above does not establish a five-minute saving by itself.
+
+Candidate marker `0.13.3-reviewer-continuous-v6` changes the first independent
+source Review into one continuous native Task:
+
+- Independently investigate Major **and** Medium material defects while read-only.
+- Call `repair_review(findings)` to retain the actual pre-edit findings. The host
+  binds the inherited scope, original requirements, ordered formal checks and
+  requested Git delivery to a direct unit in this same native session. No new
+  user prompt, Worker, interim findings terminal or Operator dispatch is needed.
+- Correct, reproduce and validate there. `finish_direct_unit` proves only the
+  current formal validation/delivery boundary, not Review or Mission acceptance.
+- Explicitly compare the original contract, all findings and relevant impact,
+  then return `SELF_RECHECKED` in the original native Task. Only that actual
+  successful terminal and exact call/prompt/source/check identities record author
+  self-recheck. It is never independent final PASS; unresolved Medium cannot pass.
+- Retain Operator final comparison/acceptance and the residual-concrete-Major-only
+  different-Reviewer route. Operations/read-only/second Review remain unchanged.
+
+The correction handoff now includes `correction_context.findings` directly.
+`retained_findings_ref` remains lineage only, not an instruction to print the
+whole Mission, `corrections[]` or old prompt. During continuous correction a
+stable context prefix retains the assignment through actual terminal, without
+changing phase/counters or requiring another handoff read. Native SOL/xhigh and
+Luna-fast/max selections and review effort are unchanged.
+
+Lifecycle regressions cover no extra user prompt, automatic binding, actual
+initial native call/prompt ownership, cold native Job reload before/after direct
+validation, source freshness, failed checks, unresolved findings, read-only final
+comparison, original-author continuation after incomplete correction and single
+unit settlement. The new incomplete-terminal tests exposed incorrect direct
+reservation release; settlement now records the actual author/cost rather than
+pretending the direct call was a rejected child Task. Cancellation reproduction
+also showed the still-running initial native Review was not stopped; both active
+correction and cold post-validation self-recheck now stop the actual native child.
+Current successful formal evidence is reused if only the final native self-recheck
+is missing/failed; the fallback resumes the same author read-only, not a second
+Reviewer or a validation-only unit.
+
+Verification records are under `_testenv/coordinator-direct/`:
+
+- `night-v6-inline-focused-5`: **155/155 PASS**; direct-settlement/recovery fix.
+- First `night-v6-inline-full`: exit **1** after two outdated asset-text assertions;
+  fail-fast run did not execute all 101 files and is not full-suite proof.
+- `night-v6-inline-cancel-repro`: exit **1**, both actual native cancellation
+  cases reproduced before correction.
+- `night-v6-inline-focused-6`: **277/277 PASS** after native cancellation fix and
+  compatibility-assertion updates; includes controller direct-work/generation
+  and existing Reviewer/runtime routes.
+- `night-v6-inline-focused-7`: **151/151 PASS**, final-native-only recovery.
+  Integrated full verification and fixed-package original-task execution follow; this section
+  does not claim that unit fixtures complete Anko or demonstrate a time saving.
+
+The read-only observer supports actual continuous Review/direct-unit lineage.
+Six observer-parser checks replay real v5 history and synthetic continuous-shape
+fixtures; they use zero model requests and leave prior scored source unchanged.
+Those fixtures are **not** native continuous-execution evidence. Fresh v6 private
+DB/source/package will supply that evidence. Official hidden grading remains
+post-completion only, after source is fixed, with no subsequent source edits or
+re-inference. Whole-task target remains at most **1,736.360 s** against v5's
+**2,036.360 s**, with score 1 and genuine receipt. No reviewer-only/overlapping
+windows or time transferred to Worker count as whole-task saving. Release/global
+apply/main merge and Anko upstream publication remain outside this session.

@@ -326,8 +326,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!root) return undefined;
       const mission = await missions.read(root), run = await operators.read(root);
       if (!mission || !run || mission.runID !== run.runID || run.phase !== "running" ||
-          ["completed", "cancelled"].includes(mission.phase) || id !== (mission.coordinator ?? root)) return undefined;
+          ["completed", "cancelled"].includes(mission.phase)) return undefined;
       const unit = run.units.find(item => item.status === "running" && item.directExecution?.actor === id && !item.directExecution.finishedAt);
+      if (id !== (mission.coordinator ?? root) && !(unit?.reviewerCorrection?.author === id &&
+          mission.corrections?.some(item => item.runID === run.runID && item.author === id && item.inlineReview))) return undefined;
       return unit ? { root, mission, run, unit } : undefined;
     }
     /**
@@ -1124,7 +1126,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const reviseApprovedIntent = profileTool(profile, "sortie_revise_approved_operator_intent");
     async function stopCancelledChildren(root: string, run: OperatorState): Promise<void> {
       if (run.phase !== "cancelled") return;
-      const children = new Set(run.units.flatMap(unit => !unit.directExecution && unit.childSessionID ? [unit.childSessionID] : []));
+      const children = new Set(run.units.flatMap(unit => (!unit.directExecution || unit.reviewerCorrection) && unit.childSessionID ? [unit.childSessionID] : []));
       if (run.operatorSessionID) {
         // Older V2 private servers expose get/interrupt but no session.list. The durable
         // dispatch IDs suffice to cancel our work; a missing listing must not veto that operation.
@@ -1165,9 +1167,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const mission = await missions.read(root);
       if (mission && mission.phase !== "completed") await missions.update(root, state => {
         state.phase = "cancelled"; state.dispatchOpen = false;
-        for (const correction of state.corrections ?? []) if (["prepared", "running"].includes(correction.status)) correction.status = "cancelled";
+        for (const correction of state.corrections ?? []) if (["prepared", "running"].includes(correction.status) ||
+          correction.inlineReview && correction.status === "ready" && !correction.selfRecheck) correction.status = "cancelled";
       });
-      const children = [...new Set([...(await operators.interrupted(root, reason)), ...(mission?.coordinator ? [mission.coordinator] : [])])];
+      const inlineChildren = mission?.corrections?.flatMap(item => item.runID === mission.runID && item.inlineReview &&
+        item.inlineReview.callID === mission.review?.callID && !item.selfRecheck && ["prepared", "running", "ready"].includes(item.status)
+        ? [item.author] : []) ?? [];
+      const children = [...new Set([...(await operators.interrupted(root, reason)), ...inlineChildren, ...(mission?.coordinator ? [mission.coordinator] : [])])];
       for (const child of children) {
         retired.add(child);
         const result = await session("abort", { path: { id: child }, query: { directory: input.directory } });
@@ -1786,9 +1792,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const { root } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, () => startDirect(root, context.sessionID));
       } };
-    tools[finishDirectUnit] = { description: "Finish this controller's direct unit using actual ordered native checks bound to current source. Retains the controller session for review/coordination; this is not a native Task terminal, independent Review or Mission acceptance. Missing/failed/stale checks continue here without a Worker.",
+    tools[finishDirectUnit] = { description: "Finish this controller's or admitted Reviewer's direct unit using actual ordered native checks bound to current source. Retains this session for review/coordination or explicit author self-recheck; this is not a native Task terminal, independent Review or Mission acceptance. Missing/failed/stale checks continue here without a Worker.",
       args: {}, execute: async (_args, context) => {
-        const { root } = await missionAuthority(context.sessionID);
+        const inline = await directExecution(context.sessionID);
+        const root = inline?.unit.reviewerCorrection
+          ? inline.root : (await missionAuthority(context.sessionID)).root;
         return serializeDispatchTransition(root, async () => {
           const direct = await activateDirect(context.sessionID);
           if (!direct) throw new Error("mission-direct-unit-not-running");
@@ -1796,8 +1804,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             Date.parse(direct.unit.directExecution!.startedAt));
           if (!checks?.ready) return JSON.stringify({ status: "direct-unit-awaits-validation", ...checks,
             next_action: "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
-          await control!.finishDirectUnit(root, context.sessionID, direct.unit.directExecution!.checks.filter(check =>
+          await control!.finishDirectUnit(root, context.sessionID, (direct.unit.reviewerCorrection?.checks ?? direct.unit.directExecution!.checks).filter(check =>
             checks.matched?.some(item => item.callID === check.callID)));
+          if (direct.unit.reviewerCorrection) return JSON.stringify({ status: "correction-validated",
+            execution: "same-native-task", validation: direct.unit.unit.validation,
+            next_action: 'Compare the original requirements, retained findings and affected public behavior in this same context, then finish THIS native Task with SELF_RECHECKED and self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. No handoff reread, second Task or Operator round trip. This is author self-recheck; only the actual successful native terminal can bind it, never this tool result.' });
           return JSON.stringify({ ...missionPacket(await missions.required(root), await operators.required(root)),
             next_action: `Continue remaining units, or call ${reviewMission} with actual risk tags. Independent Review and Operator final acceptance remain required.` });
         });
@@ -2192,14 +2203,60 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             budget: await control!.currentBudget(root), next_action: "Host repaired the ended Task's contract without reviving it or consuming a unit. Continue Review/acceptance if evidence remains current; plan a continuation only for actual remaining implementation or required validation." });
         });
       } };
-    tools[repairReview] = { description: "Continue the ORIGINAL correction owner in the SAME native session, including newer second-review findings. Generates a scoped correction Task from retained findings, authorized write union and required checks; no findings transcription, Worker rediscovery or new approval. After correction, explicit native self-recheck precedes root acceptance; it is not independent PASS. Operation and read-only reviews do not use this route.",
-      args: {}, execute: async (_args, context) => {
+    async function startInlineReviewerCorrection(root: string, author: string) {
+      const mission = await missions.required(root);
+      const correction = mission.corrections?.find(item => item.runID === mission.runID && item.author === author && item.inlineReview &&
+        item.inlineReview.callID === mission.review?.callID && item.inlineReview.promptID === mission.review?.promptID &&
+        ["prepared", "running"].includes(item.status));
+      if (!correction) throw new Error("mission-review-correction-generation-stale");
+      let run = await operators.required(root);
+      if (run.phase === "prepared") run = await operators.admitReviewerDirect(root, author, `direct-review-${randomUUID()}`, correction.inlineReview!.promptID);
+      const unit = run.units.find(item => item.status === "running" && item.directExecution?.actor === author);
+      if (!unit) throw new Error("mission-direct-unit-not-running");
+      const taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)![1]!;
+      await missions.update(root, item => {
+        item.corrections!.find(item => item.runID === run.runID)!.status = "running";
+        if (!item.attempts?.some(item => item.callID === unit.callID)) (item.attempts ??= []).push({ attemptID: randomUUID(), runID: run.runID,
+          unitID: unit.unit.id, taskID, kind: "direct_execution", status: "dispatched", callID: unit.callID!, childSessionID: author });
+      });
+      await activateDirect(author);
+      return JSON.stringify({ status: "correction-running", execution: "same-native-task",
+        findings: correction.findings, validation: unit.unit.validation, write: unit.unit.write,
+        next_action: `Correct all retained defects here using your existing context and public test harness; no handoff read or new Task. Run inherited formal commands in order, retain requested commit/clean delivery, then ${finishDirectUnit} and your explicit SELF_RECHECKED native terminal. Additional investigation may widen when useful; no reduced effort or acceptance of unresolved Medium.` });
+    }
+    tools[repairReview] = { description: "Reviewer: record your concrete Major/Medium findings and continue correction, inherited formal checks, commit and self-recheck HERE without ending this native Task. Controller: recover the ORIGINAL correction owner after a terminated review/correction. Host prepares/binds the existing authorized write scope and validation; no findings transcription, new approval or Worker rediscovery. Author self-recheck is not independent PASS. Operation and read-only reviews do not use this route.",
+      args: { findings: optionalStringSchema as never }, execute: async (args, context) => {
         if (!input.reviewerCorrectionPermissions) throw new Error("native-reviewer-correction-permissions-unavailable");
-        const { root } = await missionAuthority(context.sessionID);
+        const reviewer = (await identity(context.sessionID)).role === "dog-reviewer";
+        const root = reviewer ? await rootFor(context.sessionID) : (await missionAuthority(context.sessionID)).root;
+        if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
         return serializeDispatchTransition(root, async () => {
-          const mission = await missions.required(root), run = await operators.required(root);
+          let mission = await missions.required(root);
+          const run = await operators.required(root);
           const existing = mission.corrections?.find(item => item.runID === run.runID);
-          const review = mission.review;
+          let review = mission.review;
+          if (reviewer && existing?.inlineReview && existing.author === context.sessionID &&
+              ["prepared", "running"].includes(existing.status)) return startInlineReviewerCorrection(root, context.sessionID);
+          if (reviewer) {
+            if (!review || review.verdict !== "pending" || review.mode === "self-recheck" || mission.corrections?.length || review.child !== context.sessionID ||
+                !review.callID || !review.promptID || !review.task || !missionReviewIndependent(mission, context.sessionID) ||
+                typeof args.findings !== "string" || !args.findings.trim()) throw new Error("mission-review-correction-reviewer-not-current");
+            if (mission.kind === "operation" || !run.units.some(unit => unit.unit.write.length)) throw new Error("mission-review-correction-unavailable");
+            const readiness = await control!.completionReadiness(root);
+            if (run.phase !== "awaiting-acceptance" || mission.runID !== run.runID || readiness.blockers.length ||
+                review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) {
+              throw new Error("mission-review-correction-source-stale");
+            }
+            const findings = /^\s*FINDINGS(?:\s|$)/u.test(args.findings) ? args.findings : `FINDINGS\n${args.findings}`;
+            mission = await missions.update(root, item => {
+              const current = item.review;
+              if (!current || current.callID !== review!.callID || current.promptID !== review!.promptID) throw new Error("mission-review-correction-generation-stale");
+              current.verdict = "findings"; current.result = findings;
+              // The independent investigation is recorded by this real tool call, not a fictitious terminal.
+              current.initialPrompt = current.task!.prompt;
+            });
+            review = mission.review;
+          }
           const newFindings = review?.runID === run.runID && review.verdict === "findings" &&
             existing?.reviewIdentity !== missionReviewIdentity(mission);
           const recovery = existing?.status === "failed" && run.phase === "awaiting-decision";
@@ -2213,9 +2270,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const authorID = original?.author ?? review.child;
           const author = await identity(authorID), native = payload(await session("get", { path: { id: authorID } }));
           if (author.role !== "dog-reviewer" || author.parent !== (mission.coordinator ?? root) ||
-              !record(native) || !(recovery ? ["succeeded", "completed", "failed"] : ["succeeded", "completed"]).includes(String(native.outcome))) throw new Error("mission-review-correction-reviewer-not-terminal");
+              !record(native) || (!reviewer && !(recovery ? ["succeeded", "completed", "failed"] : ["succeeded", "completed"]).includes(String(native.outcome)))) throw new Error("mission-review-correction-reviewer-not-terminal");
           if (recovery) {
-            const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.kind === "reviewer_correction");
+            const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID &&
+              (item.kind === "reviewer_correction" || existing.inlineReview && item.kind === "direct_execution"));
             const terminal = attempt ? await missionWorkerTerminalProof(root, mission, run, attempt, true) : undefined;
             if (terminal?.status !== "ready" || terminal.child !== authorID) throw new Error(`mission-review-correction-terminal-unreconciled:${terminal && "reason" in terminal ? terminal.reason : "terminal_record_missing"}`);
           } else {
@@ -2227,7 +2285,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (!budget || budget.reserved_units || budget.remaining_units < 1) throw new Error("mission-review-correction-budget-unavailable");
           const reviewIdentity = missionReviewIdentity(mission);
           const plan = missionPlan(mission, [{ title: `Correct ${run.units[0]!.unit.title}`,
-            objective: 'Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Findings/prior review are at correction_context in the handoff. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. Run all unchanged declared formal validation in order and retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.',
+            objective: 'Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. Run all unchanged declared formal validation in order and retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.',
             read: [...new Set([...(mission.reviewScope?.read ?? []), ...run.units.flatMap(unit => unit.unit.read)])],
             write: [...new Set([...(mission.reviewScope?.write ?? []), ...run.units.flatMap(unit => unit.unit.write)])],
             validation: run.units.flatMap(unit => unit.unit.validation) }], input.directory);
@@ -2246,9 +2304,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const dispatcher = mission.coordinator ? { sessionID: mission.coordinator, callID: mission.callID! } : undefined;
           const prepared = await operators.prepareReviewerCorrection(root, run.runID, correctedPlan, authorID, reviewIdentity, retainedPlan.units[0]!.write, dispatcher, {
             original_requests: mission.requests, requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [],
-            correction_context: { retained_findings_ref: JSON.parse(missions.correctionReference(root, reviewIdentity)),
+            correction_context: { findings: recovery ? existing.findings : review.result!,
+              retained_findings_ref: JSON.parse(missions.correctionReference(root, reviewIdentity)),
               mission_id: mission.id, prior_run_id: run.runID, review_identity: reviewIdentity,
-              note: "Retained prior Reviewer findings in this native conversation; mission corrections[] stores the exact lineage." },
+              note: "Exact findings supplied here; the reference retains lineage only. Do not reread/print the whole Mission or prior review prompt to retrieve them." },
           });
           await control!.registerGoalDeclaration(root, prepared.units[0]!.task.prompt, true);
           control!.enableUnits(root, 1);
@@ -2256,10 +2315,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (["cancelled", "completed"].includes(item.phase) || missionReviewIdentity(item) !== reviewIdentity) throw new Error("mission-review-correction-generation-stale");
             (item.corrections ??= []).push({ author: authorID, reviewIdentity, priorRunID: run.runID, runID: prepared.runID,
               priorSource: review.source, findings: recovery ? existing.findings : review.result!,
-              initialPrompt: recovery ? existing.initialPrompt : review.initialPrompt!, ...(baseline ? { baseline } : {}), status: "prepared" });
+              initialPrompt: recovery ? existing.initialPrompt : review.initialPrompt!, ...(baseline ? { baseline } : {}), status: "prepared",
+              ...(reviewer ? { inlineReview: { callID: review.callID!, promptID: review.promptID!, admittedAt: Date.now(), reviewIdentity } } : {}) });
             item.reviewScope = missionReviewScope(item.reviewScope, run, prepared);
             item.runID = prepared.runID; item.phase = "running"; item.submission = null; item.plans++;
           });
+          if (reviewer) return startInlineReviewerCorrection(root, authorID);
           return JSON.stringify({ status: "correction-required", task: operators.nextWorkerTask(prepared),
             next_action: "Dispatch this exact Task with its task_id: the SAME original Reviewer corrects, formally validates/commits and explicitly self-rechecks in ONE Task, returning SELF_RECHECKED with candidate=current-validated. No fresh Worker or mandatory second author Task. CORRECTION_READY-only uses the legacy same-author read-only fallback. Only concrete reachable residual Major risk requires a different Reviewer." });
         });
@@ -2358,7 +2419,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
               `review_mode: ${selfRecheck ? "self-recheck" : "independent"}`,
               selfRecheck ? `Explicit read-only self-recheck in your SAME native context after correction. Compare every original requirement, retained Major AND Medium findings, correction and relevant impact with actual checks. Correct known defects before acceptance. This is NOT independent approval. First line: SELF_RECHECKED. Next line: self_recheck: ${JSON.stringify({ candidate: source.fingerprint, unresolved_findings: [], residual_major: null })}. Put known unresolved Major/Medium defects in unresolved_findings. Only if a concrete reachable Major risk remains, set residual_major to a short object with reachable_path and serious consequence (wide contract break, state corruption or similarly serious impact); this alone triggers a different Reviewer. Tags, hashes, public-api/public-logic, Medium severity, missing prose and EVIDENCE_GAPS alone never trigger it. Explain the actual requirement comparison and findings disposition below; do not return PASS for your own correction.`
-                : "Review this candidate independently for Major AND Medium defects. Use the language of the requirements. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS.",
+                : input.reviewerCorrectionPermissions && mission.kind !== "operation" && !mission.corrections?.length && run.units.some(unit => unit.unit.write.length)
+                  ? `Review this candidate independently for Major AND Medium defects. Investigate the material issues first. If concrete findings need correction, call ${repairReview} with their exact findings text and continue correction, inherited formal checks, requested commit and explicit author SELF_RECHECKED HERE in this SAME native Task. Do not end with interim FINDINGS or ask the Operator to re-dispatch you. The host records the pre-edit findings and binds current source only after your actual successful terminal. No independent approval of your own edits. With no correction needed, first line PASS or EVIDENCE_GAPS. Use the language of the requirements.`
+                  : "Review this candidate independently for Major AND Medium defects. Use the language of the requirements. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS. Inline correction is unavailable for this operation/read-only/second-review route; return concrete findings without editing.",
               "Read/search relevant source and existing results directly when useful, widening relevant search as needed; do not ask another agent to transcribe diff or long traces. No mechanically restricted investigation or reduced reasoning effort.",
               "EVIDENCE_GAPS is advisory and does not require a second review or Worker. Missing prose, mappings or excerpt lines alone are not defects. Report FINDINGS for a concrete material defect or an actually missing required check, naming the affected behavior and consequence.",
               "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Assess all available source, validation and historical evidence honestly; author self-recheck is not independent approval.",
@@ -2537,7 +2600,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
       reviewerCorrectionScope: async id => {
         const correction = await reviewerCorrection(id);
-        return correction ? { write: correction.unit.unit.write, validation: correction.unit.unit.validation, generation: correction.run.generation } : undefined;
+        if (correction) return { write: correction.unit.unit.write, validation: correction.unit.unit.validation, generation: correction.run.generation };
+        // Keep the active native profile stable through the final self-recheck response.
+        // The ordinary writer guard still denies edits after direct settlement.
+        const root = await rootFor(id), mission = root ? await missions.read(root) : undefined;
+        const run = root ? await operators.read(root) : undefined;
+        const inline = mission?.corrections?.find(item => item.author === id && item.runID === run?.runID &&
+          item.status === "ready" && item.inlineReview?.callID === mission.review?.callID && !item.selfRecheck);
+        return inline && run && !["completed", "cancelled"].includes(mission!.phase)
+          ? { write: [], validation: run.units[0]!.unit.validation, generation: run.generation } : undefined;
       },
       reviewerCorrectionSessions: async id => {
         // Cleanup follows native lineage rather than active role authority: stop/agent change
@@ -3090,6 +3161,47 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           await core["tool.execute.after"]?.({ ...request, sessionID: ownership.root }, output);
           if (ownership.consultation === "dog-reviewer") {
             const current = await missions.required(ownership.root);
+            const inline = current.corrections?.find(item => item.inlineReview && item.inlineReview.callID === request.callID &&
+              item.inlineReview.reviewIdentity === ownership.reviewIdentity && item.runID === current.runID);
+            if (inline) {
+              const child = taskChildSessionID(output), run = await operators.required(ownership.root);
+              const successful = output.status !== "error" && output.status !== "cancelled" &&
+                !["failed", "interrupted", "cancelled", "error"].includes(String(record(output.metadata) ? output.metadata.status : ""));
+              const unit = run.units.find(item => item.reviewerCorrection?.author === inline.author && item.directExecution);
+              if (unit?.status === "running" && unit.callID) {
+                // A real native failure/unfinished correction releases its direct reservation;
+                // it never acquires success from an older Reviewer terminal.
+                await control!.failDirectUnit(ownership.root, inline.author);
+              }
+              const settled = await operators.required(ownership.root);
+              const report = successful && child === inline.author && inline.status === "ready" &&
+                current.review?.callID === request.callID && !["completed", "cancelled"].includes(current.phase)
+                ? await observeNativeSelfRecheck(ownership.root, current, settled, inline.author,
+                  request.callID!, inline.inlineReview!.promptID, inline.inlineReview!.admittedAt) : undefined;
+              if (report) await missions.update(ownership.root, mission => {
+                const correction = mission.corrections?.find(item => item.runID === report.runID && item.author === report.author &&
+                  item.inlineReview?.callID === request.callID && item.status === "ready");
+                if (!correction || mission.runID !== report.runID || ["completed", "cancelled"].includes(mission.phase)) return;
+                correction.selfRecheck = report;
+                mission.review = { runID: report.runID, risk: current.review?.risk ?? [], source: report.source,
+                  candidateSource: report.candidateSource, evidence: current.review?.evidence, task: null,
+                  initialPrompt: correction.initialPrompt, mode: "self-recheck",
+                  verdict: report.unresolvedFindings.length || report.residualMajor ? "findings" : "self-rechecked",
+                  child: report.author, callID: report.callID, promptID: report.promptID,
+                  admittedAt: inline.inlineReview!.admittedAt, result: report.result, selfRecheck: report };
+              });
+              const latest = await missions.required(ownership.root);
+              output.output = JSON.stringify({ status: report ? "review-correction-recorded" : "review-correction-incomplete",
+                reviewer_report: raw, independent: false,
+                acceptance_summary: await missionAcceptanceSummary(latest, settled, operators, acceptanceValidationObservation),
+                next_action: report && !report.unresolvedFindings.length && !report.residualMajor
+                  ? `Host already recorded source, formal checks, delivery and actual native author self-recheck. Compare the original request with this candidate, then ${current.coordinator ? submitMission : completeMission}; no routine operator_status, new review or validation Worker.`
+                  : !report && inline.status === "ready" && settled.phase === "awaiting-acceptance"
+                    ? `Formal correction validation remains current, but the actual native author self-recheck is missing/failed. No acceptance. Call ${reviewMission} only for the missing read-only self-recheck in the SAME author/context, without rerunning successful checks or requesting another Reviewer.`
+                  : `No acceptance. Continue the SAME author through ${repairReview} for actual defects; only a concrete residual Major risk after self-recheck calls for a different Reviewer.` });
+              taskOwners.delete(request.callID!);
+              return;
+            }
             const reviewIdentity = ownership.reviewIdentity ?? missionReviewIdentity(current);
             if (current.review?.callID !== request.callID || missionReviewIdentity(current) !== reviewIdentity) { taskOwners.delete(request.callID!); return; }
             const child = taskChildSessionID(output);
@@ -3293,10 +3405,26 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         (output.system ??= []).push(`SORTIE_RUNTIME_PROFILE ${profile.id}; marker ${assetVersion}. ` +
           `Shared MkII protocol role names are logical: ${protocolMap}. Use only ${profile.toolPrefix} tools for this profile. ` +
           "Never rewrite user acceptance or evidence to rename protocol roles. Final acceptance belongs only to the root coordinator.");
-        if ((await identity(request.sessionID)).role === "dog-worker" || await reviewerCorrection(request.sessionID)) {
+        const mission = await missions.read(root), run = await operators.read(root);
+        const inline = mission?.corrections?.find(item => item.runID === run?.runID && item.author === request.sessionID &&
+          item.inlineReview && ["running", "ready"].includes(item.status) && !item.selfRecheck);
+        if (inline && run) {
+          // Fixed assignment only. Keep this prefix through the actual native self-recheck
+          // terminal, without changing phase/counters or reintroducing a handoff-read ritual.
+          (output.system ??= []).push(`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify({
+            root_session_id: root, run_id: run.runID, original_requests: mission!.requests,
+            findings: inline.findings, write: run.units[0]!.unit.write,
+            validation: run.units[0]!.unit.validation, acceptance: run.acceptance,
+          })}\nContinue the original independent investigation's correction in THIS native Task. ` +
+            `The host already bound the authorized controls; no handoff or full Mission read is needed. ` +
+            `Retain requested Git delivery. Correct all Major/Medium defects, run inherited checks in order, ${finishDirectUnit}, ` +
+            'then explicitly compare requirements/findings/impact and finish SELF_RECHECKED with self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. ' +
+            "Follow the latest tool result after direct validation; it does not itself prove a successful native terminal or independent approval.");
+        } else if ((await identity(request.sessionID)).role === "dog-worker" || await reviewerCorrection(request.sessionID)) {
           const context = await operators.workerContext(root, request.sessionID);
           if (context) (output.system ??= []).push(context);
-          const mission = await missions.read(root);
+        }
+        if (inline || (await identity(request.sessionID)).role === "dog-worker" || await reviewerCorrection(request.sessionID)) {
           if (mission?.launchConditions?.length) (output.system ??= []).push(`Confirmed launch conditions (fixed caps, not remaining Worker/campaign budget): ${JSON.stringify(mission.launchConditions)}`);
         }
         const proposal = await proposals.read(root);

@@ -162,6 +162,8 @@ export interface OperatorMission {
   /** Retained independently of later review generations; authors never become independent reviewers. */
   corrections?: { author: string; reviewIdentity: string; priorRunID: string; runID: string;
     priorSource: string; findings: string; initialPrompt: string; baseline?: string;
+    /** Actual still-running initial Review; direct correction is not another child terminal. */
+    inlineReview?: { callID: string; promptID: string; admittedAt: number; reviewIdentity: string };
     status: "prepared" | "running" | "ready" | "failed" | "cancelled";
     selfRecheck?: MissionSelfRecheck }[];
 }

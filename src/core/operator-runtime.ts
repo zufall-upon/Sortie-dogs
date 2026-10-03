@@ -1456,6 +1456,26 @@ export class OperatorRuntime {
       return state;
     });
   }
+  /** Continue an admitted independent Review in-place; no second native Task or prompt. */
+  admitReviewerDirect(root: string, author: string, callID: string, promptID: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => item.status !== "succeeded");
+      if (state.phase !== "prepared" || !unit || unit.status !== "pending" ||
+          unit.reviewerCorrection?.author !== author || !promptID || unit.repairValidation || unit.terminalRescue) {
+        throw new Error("mission-review-direct-unit-unavailable");
+      }
+      await this.verifyControls(unit);
+      const startedAt = new Date().toISOString();
+      unit.directExecution = { actor: author, startedAt, checks: [] };
+      unit.reviewerCorrection.admittedAt = startedAt;
+      unit.reviewerCorrection.promptID = promptID;
+      unit.childSessionID = author; unit.callID = callID; unit.status = "running";
+      state.phase = "running";
+      await this.save(state);
+      return state;
+    });
+  }
   private async admitWorkerOnce(root: string, actor: string, callID: string, args: unknown): Promise<OperatorTask> {
     const state = await this.required(root);
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");

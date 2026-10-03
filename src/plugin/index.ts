@@ -8566,6 +8566,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await releaseWriteGate(actor);
       releaseSessionEnforcement(actor);
     },
+    failDirectUnit: async (root, actor) => {
+      const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
+      if (!direct || direct.root !== root) throw new Error("mission-direct-grant-stale");
+      // Cold terminal recovery can happen before the actor's next tool/context hook.
+      if (!goalReservations.has(direct.callID)) {
+        const snapshot = await (await goalLedger(root)).readGoal();
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
+        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
+            snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.reservation_id === reservationID)) {
+          goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
+        } else throw new Error("mission-direct-reservation-unavailable");
+      }
+      await settleGoalDispatch(direct.callID, { status: "error",
+        output: "Actual native Reviewer ended before its direct correction was validated.",
+        metadata: { sessionId: actor } }, undefined, []);
+      await releaseWriteGate(actor);
+      releaseSessionEnforcement(actor);
+    },
     activateMissionWorker: (root, child, handoffPath, admission) => serializeChatTransition(child, async () => {
       // Resolve CURRENT durable pins inside the existing session lane. A retried prompt must
       // retain legitimate scope growth, not replay the original manifest hash from dispatch.

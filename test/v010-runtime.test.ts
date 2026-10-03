@@ -306,7 +306,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.doesNotMatch(reviewer, /invoke no tools|reject a missing index|mapping count|supplied artifact.*only/u);
   assert.match(reviewer, /If a missing check genuinely\naffects correctness or a requested deliverable/u);
   assert.doesNotMatch(reviewer, /Require the enumeration to name the target artifact/u);
-  assert.match(reviewer, /During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /If no correction is required, return exactly PASS or EVIDENCE_GAPS/u);
+  assert.match(reviewer, /without another prompt, handoff read or Operator/u);
   assert.match(reviewer, /During an admitted\s+correction, finish after checks\/commit with SELF_RECHECKED/u);
   assert.match(reviewer, /self_recheck: \{"candidate":"current-validated"/u);
   assert.match(reviewer, /Legacy CORRECTION_READY-only uses a separate same-author\s+read-only fallback, not acceptance/u);
@@ -482,7 +483,8 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /Use estimated read\/write paths; native scope reconciliation and expand_unit cover actual outputs/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to continue the SAME native Reviewer\/context/u);
+  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to recover the SAME native Reviewer\/context only if it/u);
+  assert.match(primary, /do not request an interim findings return or dispatch a routine second correction Task/u);
   assert.match(primary, /Only concrete reachable Major risk remaining\s+after self-recheck requires a DIFFERENT Reviewer/u);
   assert.match(primary, /cumulative budget increase/);
   assert.match(primary, /Only its succeeded receipt authorizes DONE/);

@@ -137,7 +137,9 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    check. The host supplies source/diff and actual check observations; routine root diff rereads or long
    trace transcription are optional, not prerequisites. Call ${profile.toolPrefix}review_mission promptly
    with real risk_tags; concise traces are optional.
-   Dispatch its exact independent Reviewer Task when required;
+    Dispatch its exact independent Reviewer Task when required. That Reviewer records concrete findings
+    through ${profile.toolPrefix}repair_review and corrects/tests/self-rechecks within that SAME native Task;
+    do not request an interim findings return or dispatch a routine second correction Task.
    use [] only for genuinely low-risk work. A review skip is not implied by Fast-lane. If source/evidence
    is unchanged, do not repeat validation or an identical review. EVIDENCE_GAPS is advisory: retain the
    limitation and compare the actual result with the original request. Do not dispatch another Reviewer or
@@ -149,7 +151,8 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
    ${profile.toolPrefix}plan_units with executor: "self", a concrete reason and one corrective unit.
    Finish direct work with ${profile.toolPrefix}finish_direct_unit; its actual native checks are formal
    evidence, with the same source freshness and Review requirements. Reviewer FINDINGS
-   instead use ${profile.toolPrefix}repair_review to continue the SAME native Reviewer/context, correct
+    instead use ${profile.toolPrefix}repair_review to recover the SAME native Reviewer/context only if it
+    actually returned before correction or was interrupted, correct
    all known Major/Medium defects and pass formal validation/requested commit, then call review_mission
    only for legacy CORRECTION_READY-only fallback; normally that SAME author explicitly self-rechecks
    after formal checks/commit within its correction Task, using candidate=current-validated for host binding.
@@ -280,6 +283,8 @@ permission:
   write: deny
   patch: deny
 tools:
+  "sortie_*": false
+${controls(profile, ["repair_review", "finish_direct_unit"])}
   read: true
   glob: true
   grep: true
@@ -299,7 +304,16 @@ the original requirements, diff and observed checks. Implementation notes are op
 format, count or requirement labels. Read/search the necessary project source, tests and existing results
 yourself when context is missing or clipped. Use the normal host permissions; no new manifest or approval
 is needed for review reads. Prefer the supplied results over rerunning checks or asking for transcription.
-Review is read-only by default. Do not edit or delegate during review. If the host resumes this SAME
+Review starts read-only. Investigate all material Major AND Medium issues independently first.
+When concrete findings require authorized source correction, call ${profile.toolPrefix}repair_review with
+their actual findings text instead of ending this Task. The host records that independent investigation,
+binds the existing scope/checks and lets you correct HERE, without another prompt, handoff read or Operator
+round trip. Reuse the known project test harness and the reasoning/source already in this conversation.
+Run inherited formal commands in order, retain the requested commit/clean boundary, then
+${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this same native Task with
+SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
+self-recheck, never independent approval of your own edits. No unresolved Medium may pass.
+Do not edit before that host transition or delegate. If the host resumes this SAME
 session with an admitted correction unit, read its exact handoff and use only its existing scoped write
 gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
 work. Use normal implementation execution permissions for focused diagnostics/formatting/generation;
@@ -316,7 +330,9 @@ Otherwise return to the caller in the user's language.
 Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;
 do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
 
-During review, start with exactly one of PASS, FINDINGS or EVIDENCE_GAPS. During an admitted
+If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
+only when correction cannot continue here (for example an operation/read-only task or actual blocker).
+During an admitted
 correction, finish after checks/commit with SELF_RECHECKED, then
 self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}
 and the actual requirement/findings/impact comparison. During a legacy read-only fallback, use SELF_RECHECKED

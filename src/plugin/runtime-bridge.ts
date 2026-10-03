@@ -170,6 +170,8 @@ export interface RuntimeBridge {
       admission: MissionImplementationAdmission): Promise<void>;
     activateDirectUnit(rootSessionID: string, actorSessionID: string, prompt: string, handoffPath: string): Promise<void>;
     finishDirectUnit(rootSessionID: string, actorSessionID: string, checks: readonly ReviewerCorrectionCheck[]): Promise<void>;
+    /** Settle an unfinished direct unit against its actual actor, never a fabricated child Task. */
+    failDirectUnit(rootSessionID: string, actorSessionID: string): Promise<void>;
     releaseDirectUnit(actorSessionID: string): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
