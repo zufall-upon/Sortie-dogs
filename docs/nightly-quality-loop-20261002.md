@@ -1052,3 +1052,48 @@ Source/runtime matches the preceding build; only the boundary assertion changed.
 `night-v8-guidance-full-2` now verifies the corrected integrated candidate before
 any package freeze or fresh original-task inference. Failed/partial full evidence
 does not authorize package preparation.
+
+### Corrected v8 full verification and immutable original-task resubmission
+
+`night-v8-guidance-full-2` / `npm run test:full`: **1,620/1,620 PASS**, all
+**101** files completed, scheduler valid, exit **0**, **203.192 s**. Fixed
+verification source SHA-256:
+`265135dc83ddedf2c495bee707981d98af322f8e5045d8700ea964ac46df7320`.
+Every verified file hash matched before packing; this supersedes the failed,
+partial first v8 full run, not its history.
+
+- Product **`0bf74557b35366af7f3a7f7ee5580a7cf5b858ad`**, pushed on the existing
+  PR branch. Marker **`0.13.3-reviewer-continuous-v8`**.
+- Immutable package SHA-256
+  **`a72234f0b3f3252c575eefda01b52baa4f10bf11904c036b368c60083cb25c44`**;
+  all **204** installed files / **eight** runtime assets match.
+- New original-task clone, same 1,825-byte Anko request and base
+  `3f269a72ff69398b1250c584171f32d12c0d8085`; fresh private DB initially **0**
+  sessions, host DB/shared service untouched. Preflight and base
+  `go test ./...` exit **0**, preparation has no inference. Model/effort and
+  original continuous review/self-recheck/receipt/Git acceptance conditions
+  unchanged; no time/cost cutoff, 25 minutes observation only.
+
+Launched unchanged owned driver command, without `tee`/redirection:
+
+```sh
+node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-continuous-v8-package-20261003 anko-nightly-continuous-v8-scoring-20261003
+```
+
+Driver freezes completed source before unchanged official local scoring, then
+the separate read-only public 9-case probes. No native completion/official score/
+public quality/new savings claim at launch. Actual native model startup is
+observed separately; configured routing alone is not startup evidence. No
+release/global apply/main merge or Anko push/PR/publication here. v7 scored
+source/package/history stay frozen; no official regrade or repaired score claim.
+
+Actual v8 launch **2026-10-03T03:29:45.414Z**. One read-only startup snapshot at
+**03:30:29.356Z** confirms root `ses_f00307cc4ffe3ibOKjD6UzTiK2` on
+**`openai/gpt-6.1-sol#xhigh`** and real Worker
+`ses_f00300b74ffeTtVdCNq5N0XQrS` on **`openai/gpt-6-luna-fast#max`**,
+starting **28.710 s** after measured launch; no model mismatch. Startup-only
+pricing **$0.08750872**, unknown **1** while a request is active: provisional,
+not final settled usage or a completed-attempt subtotal. Evidence:
+`anko-nightly-continuous-v8-package-20261003/actual-native-start.json`, fixed
+`candidate.json`, file/asset installation and private DB/preflight proofs.
+Final outcomes will be measured only at actual native terminal/source freeze.
