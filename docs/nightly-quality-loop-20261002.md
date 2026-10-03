@@ -1224,3 +1224,17 @@ remain. Same retained archive parent as earlier arms:
   `6f6955029a59f8e96ed4acbee014ca65461b64d5c310bada02e142fe318b2e82`.
 - `product-checks-and-analysis.tar` SHA-256:
   `a825b5c196d750921a15fa5822fde3dfbb91721b1887e0879a895a8639c06b4b`.
+
+Read-only post-archive public reproduction isolates the scratch detour in a new
+synthetic project with existing `parser/**` write authority. The variable command
+is rejected as `manifest-scope` for literal `$scratch/baseline.y`, although its
+extraction already records `active-expansion` with a literal-command remedy.
+Actual Bash execution writes only beneath the authorized parser directory and
+exits **0**. Its literal-path equivalent passes the existing gate and also exits
+**0**, without widening scope. Thus the first necessary improvement is accurate
+unresolved-shell-path diagnostics, **not a new grant** or indiscriminate variable
+permission. No shell parser/permission/runtime policy changed in this diagnosis,
+no model request or official regrade. Synthetic fixture/source and proof retained
+in `nightly-20261002/v8-shell-scratch-detour-reproduction.json`; scored v8 source
+and previously hashed archives remain unchanged. The addendum is separate from
+the already fixed archive, not claimed to be inside its original hash.
