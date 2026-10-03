@@ -393,6 +393,15 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 }
 
 const correctionAgent = (agent: unknown): boolean => typeof agent === "string" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent);
+const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "shell", "sortie_v010_bind_write_gate",
+  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_finish_direct_unit"]);
+
+// Order only the genuine, already-filtered native definitions. Initial read-only
+// tools remain a deterministic prefix when correction admits additional tools;
+// object identities, schemas, executors and native authority are unchanged.
+const reviewerModelToolOrder = (tools: JsonObject): JsonObject => Object.fromEntries(Object.entries(tools).sort(([left], [right]) =>
+  Number(reviewerCorrectionOnlyTools.has(left)) - Number(reviewerCorrectionOnlyTools.has(right)) ||
+  (left < right ? -1 : left > right ? 1 : 0)));
 const correctionAgentID = (sessionID: string) => `dog-reviewer-correction-v010-${createHash("sha256").update(sessionID).digest("hex").slice(0, 16)}`;
 const correctionStoragePrefix = "v2-reviewer-correction-permissions:";
 // OpenCode 2.0.18 util/wildcard.ts + permission.evaluate ordering.
@@ -755,7 +764,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
       }
       if (event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) {
-        output.system.push(`Native tools actually available in this request: ${Object.keys(event.tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.`);
+        const tools = reviewerModelToolOrder(event.tools);
+        event.tools = tools;
+        output.system.push(`Native tools actually available in this request: ${Object.keys(tools).sort().join(", ")}. Use these tools directly; do not infer missing tools or ask the root to transcribe source.`);
       }
     }
     const id = String(event.sessionID ?? "");

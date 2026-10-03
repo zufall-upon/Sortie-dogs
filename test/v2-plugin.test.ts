@@ -235,6 +235,61 @@ test("V2 cache-ledger storage failure preserves current state and in-process app
   } finally { cleanup?.(); }
 });
 
+test("Reviewer model tool order keeps genuine read-only definitions as a deterministic prefix across correction admission", async () => {
+  const fixture = contextFixture();
+  let correcting = false;
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-reviewer-v010",
+    model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } });
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_REVIEWER_ROLE"]; },
+    reviewerCorrectionScope: async () => correcting ? { write: ["vm/**"], validation: ["go test ./..."], generation: 1 } : undefined,
+  })).setup(fixture.context);
+  const names = ["glob", "grep", "patch", "read", "shell", "skill", "sortie_v010_bind_write_gate",
+    "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate",
+    "sortie_v010_repair_review", "websearch", "execute"];
+  const definitions = Object.fromEntries(names.map(name => [name, { description: name, input: { type: "object", properties: {} } }]));
+  const event = (agent: string, order = names) => ({ sessionID: "review-author", agent, system: [], messages: [],
+    tools: Object.fromEntries(order.map(name => [name, definitions[name]])) });
+  try {
+    const initial = event("dog-reviewer-v010");
+    await fixture.sessionHooks.get("context")!(initial);
+    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
+      assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
+    }
+    correcting = true;
+    const corrected = event("dog-reviewer-correction-v010-0123456789abcdef");
+    await fixture.sessionHooks.get("context")!(corrected);
+    assert.deepEqual(Object.keys(corrected.tools).slice(0, Object.keys(initial.tools).length), Object.keys(initial.tools),
+      "newly authorized tools append after every initial Reviewer definition rather than interleaving");
+    assert.deepEqual(Object.keys(corrected.tools).toSorted(), names.toSorted(), "same genuine tool set, no invented hidden executor");
+    for (const name of names) assert.equal(corrected.tools[name], definitions[name], "native definition/executor binding identity preserved");
+    const shuffled = event("dog-reviewer-correction-v010-0123456789abcdef", [...names].reverse());
+    await fixture.sessionHooks.get("context")!(shuffled);
+    assert.deepEqual(Object.keys(shuffled.tools), Object.keys(corrected.tools), "same role/tool set has deterministic order independent of registry insertion");
+    correcting = false;
+    const restored = event("dog-reviewer-v010", [...names].reverse());
+    await fixture.sessionHooks.get("context")!(restored);
+    assert.deepEqual(Object.keys(restored.tools), Object.keys(initial.tools), "restored read-only role never keeps correction tools for cache");
+    assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
+test("Reviewer model tool order never changes other agents' native tool set or insertion order", async () => {
+  const fixture = contextFixture();
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["STATIC_ROLE"]; },
+  })).setup(fixture.context);
+  try {
+    for (const agent of ["build", "dog-worker-v010", "dog-operator"]) {
+      const definitions = { shell: { description: "shell" }, read: { description: "read" }, patch: { description: "patch" }, execute: { description: "execute" } };
+      const event = { sessionID: agent, agent, system: [], messages: [], tools: { ...definitions } };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.deepEqual(Object.keys(event.tools), Object.keys(definitions));
+      for (const name of Object.keys(definitions)) assert.equal(event.tools[name as keyof typeof definitions], definitions[name as keyof typeof definitions]);
+    }
+  } finally { cleanup?.(); }
+});
+
 test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
   const fixture = contextFixture();
   const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";
