@@ -1238,3 +1238,52 @@ no model request or official regrade. Synthetic fixture/source and proof retaine
 in `nightly-20261002/v8-shell-scratch-detour-reproduction.json`; scored v8 source
 and previously hashed archives remain unchanged. The addendum is separate from
 the already fixed archive, not claimed to be inside its original hash.
+
+### Identical v8 replication for release assessment: launched, outcome pending
+
+The user requested **one more run of the same candidate, then a release
+judgment**. This run does not include a product repair, third automatic attempt,
+release/global apply/main merge or Anko publication. Shell-diagnostic changes
+are deferred; the successful first v8 source and archives remain frozen.
+
+- Same product **`0bf74557b35366af7f3a7f7ee5580a7cf5b858ad`** and exact copied
+  `.tgz`, SHA-256
+  **`a72234f0b3f3252c575eefda01b52baa4f10bf11904c036b368c60083cb25c44`**.
+  No repack/build or new product full test: the fixed package's **1620/1620**
+  PASS evidence is retained. All **204** installed files / **8** assets match.
+- New arm **`anko-nightly-continuous-v8-repeat-package-20261003`**, base-only
+  clone, original 1,825-byte request, new private native DB initially **0**
+  sessions. Prior Anko solution/history not copied or mounted; host DB/shared
+  service unchanged. Container preflight exit **0**, **5.704 s**; fresh base
+  `go test ./...` exit **0**, **5.632 s**. Preparation made no model requests.
+- Runner, acceptance, history observer and pricing helper copied byte-for-byte
+  from the first v8; wrapper changes only the owned container name. Same pinned
+  Node/OpenCode/Go/container, model/effort, review and completion conditions;
+  normalized common-task prompt and driver SHA-256 match the first v8.
+  No inference time/cost cutoff; 25 minutes remains an observation checkpoint.
+
+Launched **2026-10-03T05:34:49.900Z**, unchanged command form without
+`tee`/redirection:
+
+```sh
+node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-continuous-v8-repeat-package-20261003 anko-nightly-continuous-v8-repeat-scoring-20261003
+```
+
+One read-only startup observation at **05:35:19.460Z** confirms actual Operator
+`ses_effbdfa66ffe0EENGvFIxmpB2U` on **`openai/gpt-6.1-sol#xhigh`**, real Worker
+`ses_effbd8fccffem05AQsxPWqpnTZ` on **`openai/gpt-6-luna-fast#max`** starting
+**26.977 s** after launch. Startup-only priced **$0.06177400**, unknown **1**
+while a request is active, not final usage or an attempt failure. Evidence:
+`replication-provenance.json`, DB/file/asset/preflight proof and
+`actual-native-start.json` in the new arm. No completion/score/quality claim yet.
+
+After genuine native terminal and source freeze, the driver performs the same
+fixed official local verifier and unchanged read-only public nine cases once.
+Assess native receipt/Git/formal checks, all Major/Medium resolution and honest
+same-author self-recheck separately from score **1** and public **9/9**; compare
+whole-task time/cost to the first v8 and v5. Existing five-minute observation
+target is **1736.360 s** (v5 **2036.360 s**); no new runtime check/gate or cost
+cutoff introduced. Two repetitions can corroborate the observed result but do
+not establish general reliability or causal latency attribution. Final release
+recommendation is **pending this replication**, not authorization to publish;
+the separate release lane still owns main integration and release gates.
