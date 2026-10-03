@@ -17,10 +17,12 @@ runs use new candidates. Release/main merge/global installation belong to the
 separate release session.
 
 The durable work queue and commands live under `_testenv/nightly-20261002/`.
-Completed themes: public failure-result coverage, a fresh original Anko evaluation,
-and real-V2 direct controller/multiple-unit execution. The next observed inefficiency
-is model re-generation of the retained host completion card. Diagnose concrete
-failures rather than repeat unchanged failed runs or weaken acceptance.
+Completed themes: public failure-result coverage, fresh original Anko evaluations,
+real-V2 direct controller/multiple-unit execution, retained host-card projection,
+and inherited compiler-cache freshness. The current efficiency investigation is
+first-draft omissions and expensive correction/test generation, not test execution
+time. Diagnose concrete failures rather than repeat unchanged failed runs or weaken
+acceptance.
 
 ## Cycle 1: public failure-result coverage
 
@@ -377,8 +379,8 @@ unchanged evidence after cache cleanup, stale real-source rejection and v5 asset
 coverage. `npm run test:full`: **1603/1603 PASS**, 101 files, exit 0,
 **199.284 seconds**, no skipped/missing/duplicate files. Full source snapshot:
 `ce1094145de7af3e373171395a6885fd7508bb0ea70bc50d730a78004dd860b2`;
-subsequent updates are documentation only. A new fixed native candidate is being
-prepared; its original Anko result and semantic score are not established.
+subsequent updates are documentation only. The fixed native candidate was prepared
+next; its original Anko result and semantic score are recorded below.
 Tests and the separate Go replay
 ran on the same host during v4 inference, a further limitation on timing comparisons;
 the active arm's installed package is unchanged. The v5 change is not part of v4's
@@ -409,8 +411,109 @@ as superseded evidence, not substituted for the real assertion run.
   `2026-10-02T23:47:11.233Z`, private DB initially zero sessions. Root
   `ses_f00fcb9eeffeCfEnmhT29cpWVm`; Worker startup 29.120 seconds.
   Command: `node _testenv/nightly-20261002/run-cycle.mjs anko-nightly-cache-v5-package-20261003 anko-nightly-cache-v5-scoring-20261003`.
-  It never repairs or rescores the frozen failed v4 source. Native completion, same-Reviewer behavior, original
-  semantic quality and any reduction in handoffs remain unproven for v5.
+   It never repairs or rescores the frozen failed v4 source. At launch, native
+   completion, same-Reviewer behavior, original semantic quality and any reduction
+   in handoffs remained unproven for v5.
+
+### Cycle 4 v5 result: completed original task and official score 1
+
+The fixed `9dd5311` product/package above completed in **2036.360 s / $1.75883928**,
+86 requests, unknown usage 0. Actual Luna-fast/max Worker and SOL/xhigh
+Operator/Reviewer; all three native sessions succeeded. A genuine Mission succeeded
+receipt was retained. Anko is clean at
+`fcdb51d25763ea389061722d63b4902b85b7c32a`, branch `feature/typed-variable-bindings`.
+These results belong to the fixed package, not a subsequent documentation-only head.
+
+Pinned official local verifier: exit 0, **15.850 s**, **binary score 1, F2P 9/9,
+P2P 94/94**. Source/commit remained clean and unchanged after scoring; no post-score
+candidate edit, model request or verifier rerun. The failed v4 remains unscored.
+
+Initial independent Reviewer found five Medium defects in Worker draft `8624a39`:
+module-member assignment bypass, channel-status error suppression, Go pointer
+writeback error suppression, declaration-time function option capture, and qualified
+unknown-type diagnostics. The same native Reviewer reproduced all five with public
+regressions, corrected them (including converted Go callbacks), ran formal
+`go test ./...`, committed and returned `SELF_RECHECKED`. No second Reviewer and no
+unresolved Medium. This is author self-recheck, not independent final approval.
+
+Worker and correction Reviewer each ran the full formal command once. No replacement
+Worker, extra Coordinator or product-tool rejection. The native read inputs were
+narrow, so this run does **not** by itself establish the inherited broad-input cache
+fix; the real-Go reproduction and regression above establish that mechanism.
+
+Native completion history keeps the full **1222-character** host card in its
+2421-character packet. Actual outgoing V2 context contains the 1350-character
+projection without the card body; receipt hash and run/acceptance identities are
+retained. Final assistant: 453 characters, no card transcription; final request
+19.789 s / $0.074644. Rendered desktop/terminal card appearance was not inspected.
+
+Compared with old mixed: -157.642 s (-7.19%), -$0.01725480 (-0.97%), both score 1.
+Compared with Bare SOL: **+663.947 s (+48.38%), +$0.96980448, cost 2.2291x**, both
+score 1. One sample per route, different implementations and findings; no causal
+efficiency estimate. Completed-attempt priced subtotal **$8.49170712 plus one prior
+unknown-usage request**. No active inference remains.
+
+Evidence: the v5 arm's `comparison-summary.json`, `review-trace.md`,
+`completion-projection-summary.json` and the scoring arm's `result.json`.
+
+### Why the correction/self-recheck activity lasted 15 minutes
+
+Calling the whole **937.896 s (15m 37.896s)** activity window "self-recheck" is
+inaccurate. It includes fixing five defects, writing a new 229-line regression file,
+extending boundary coverage, preserving public error compatibility and delivery.
+The native correction made 19 SOL/xhigh requests, 14976 reasoning tokens and 9664
+output tokens, cost $0.843328. Sequential observed phases:
+
+- Contract rereads, design and initial regression generation: **405.957 s**.
+- Initial red check, production correction and first green check: **132.225 s**.
+- Expanded boundary regressions and public Error compatibility: **211.461 s**.
+- Final focused/formal checks, interpretation and commit: **104.613 s**.
+- Last author `SELF_RECHECKED` response: **83.640 s**.
+
+Four test-bearing shell commands: one intentional red reproduction, two focused
+green runs around source/test changes, and one full formal check. Native actual
+execution intervals total **3.507 s**, including formatting/Git where composed.
+Standalone final `go test ./...`: **0.593 s**. All tools' actual execution union:
+3.974 s. Reducing test execution cannot recover minutes from this sample.
+
+The remaining time includes model reasoning/argument output, provider latency and
+host orchestration, not pure inference alone. In particular, tool `created`→`ran`
+includes streamed patch argument generation and is not evidence of a host queue or
+permission wait. Earlier self-review is embedded in correction; the last response's
+83.640 s is not an exhaustive measurement of all self-review.
+
+Avoid lowering effort or accepting unresolved Mediums. Next useful targets are
+preventing first-draft omissions and eliminating redundant rereads/fragmented
+correction work, with small distinguishing public regressions before the final full
+check. Additional boundary coverage has a generation cost; its marginal value is
+not established just because all tests pass. Timing evidence and command timestamps:
+v5 `correction-timing-summary.json`, generated by
+`node _testenv/nightly-20261002/analyze-correction-timing.mjs` (exit 0, no new models).
+
+### Bare versus reviewed v5: concrete additional review value
+
+`node _testenv/nightly-20261002/compare-bare-review-value.mjs`: exit 0. Same public-API
+probe and Go toolchain on frozen Bare `8834b2c` and reviewed v5 `fcdb51d`; execution
+2.279 s and 0.386 s respectively. These timings describe the diagnostic only, not
+model performance. Both commits, clean status and tracked-byte SHA-256 remained
+identical before/after. Model requests 0, official verifier reruns 0.
+
+- Bare passes **7/9** selected cases; reviewed v5 passes **9/9**.
+- Bare already handles four finding families: module assignment, channel-status
+  failure, Go writeback failure and qualified unknown-type diagnostics.
+- Bare fails two cases in the remaining family: define a function while enforcement
+  is disabled, then invoke it with enforcement enabled, directly or through a Go
+  callback. Both incorrectly accept the string and replace the declared integer.
+  Reviewed v5 returns a positioned type error, nil result and unchanged binding.
+- Bare passes the opposite enabled→disabled direction for both call paths.
+
+Thus Review repaired five omissions in the mixed draft, but only one defect family
+is an observed quality advantage over this Bare sample. The official score does not
+cover every public behavior. These selected cases came from v5 findings, not an
+independent exhaustive quality sample; they neither prove broader superiority nor
+justify the observed +11m 3.947s / 2.2291x price by themselves. No scored candidate
+was altered or re-inferred. Full observations and limits:
+`_testenv/nightly-20261002/bare-review-value-comparison.json`.
 
 ## Retained archives
 
@@ -458,3 +561,14 @@ only after owned-server/container/process inactivity checks.
   `9387f5168a629992068814205dca41309805a662588e7f601814f687f97bfd68`.
 - Its `product-checks-and-analysis.tar`:
   `398fc3e7e8ac4be2e82aa0d982a7c4e3421424e74c0c1e1a137ad72fa23a863b`.
+
+Completed original-task v5 archived at `2026-10-03T00:35:37.352Z` under the same
+parent. Retained result/root/package identities checked; owned server, containers
+and project processes inactive before removing only generated `.opencode/` and
+the arm cache. Source/Git/private DB/fixed package remain locally. The analysis
+archive includes official scoring, public Bare comparison and correction timing.
+
+- `anko-nightly-cache-v5-package-20261003/attempt-evidence.tar`:
+  `1a88d9515bd182944d0a82a62ff61d9d2616c96336284c19d9184189865c05df`.
+- Its `product-checks-and-analysis.tar`:
+  `0b7fd675ea652a73bff131928b76d331bdf49fecab81944ca2f57a0c8e45fa4e`.
