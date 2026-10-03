@@ -8,7 +8,7 @@ const object = (value: unknown): value is ModelObject => value !== null && typeo
 // counters, findings and lifecycle changes should not invalidate all prior reads.
 const headings = new Set([
   "SORTIE_GOAL_BOUND_STATE", "SORTIE_ACCEPTANCE_CONTINUITY_STATE", "SORTIE_PARALLEL_DISPATCH_STATE",
-  "SORTIE_REVIEWER_CONTINUOUS_CONTEXT", "SORTIE_WORKER_CONTEXT", "SORTIE_FAST_LANE_TERMINAL",
+  "SORTIE_REVIEWER_CONTINUOUS_CONTEXT", "SORTIE_REVIEWER_RETAINED_FINDINGS", "SORTIE_WORKER_CONTEXT", "SORTIE_FAST_LANE_TERMINAL",
 ]);
 const prefixes = ["Native tools actually available in this request: ",
   "Confirmed launch conditions (fixed caps, not remaining Worker/campaign budget): "];
@@ -17,6 +17,13 @@ const blockName = (text: string): string | undefined => {
   return headings.has(heading) ? heading : prefixes.find(prefix => text.startsWith(prefix));
 };
 const projected = new WeakSet<object>();
+
+/** Separate changing findings from unchanged assignment; both come from current durable state. */
+export function reviewerContinuousState(context: ModelObject & { root_session_id: string; run_id: string; findings: string }, instruction: string): string[] {
+  const { findings, ...assignment } = context;
+  return [`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify(assignment)}\n${instruction}`,
+    `SORTIE_REVIEWER_RETAINED_FINDINGS\n${JSON.stringify({ root_session_id: context.root_session_id, run_id: context.run_id, findings })}`];
+}
 
 export interface ModelLiveStateHistory {
   version: 1;

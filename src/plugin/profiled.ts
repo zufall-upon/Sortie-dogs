@@ -1,5 +1,6 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { MISSION_BEHAVIOR_REVIEW, MISSION_GIT_SCOPE } from "../runtime-mission-assets.js";
+import { reviewerContinuousState } from "./model-live-state.js";
 import { cancelledMissionRetainsAcceptance, operatorGitPathAuthorized, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
@@ -3427,15 +3428,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (inline && run) {
           // Assignment/known defects only. New actual findings may update this context;
           // routine phase/counters never do, nor require another handoff-read ritual.
-          (output.system ??= []).push(`SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n${JSON.stringify({
+          (output.system ??= []).push(...reviewerContinuousState({
             root_session_id: root, run_id: run.runID, original_requests: mission!.requests,
             findings: inline.findings, write: run.units[0]!.unit.write,
             validation: run.units[0]!.unit.validation, acceptance: run.acceptance,
-          })}\nContinue the original independent investigation's correction in THIS native Task. ` +
+          }, "Exact current findings are in SORTIE_REVIEWER_RETAINED_FINDINGS. " +
+            "Continue the original independent investigation's correction in THIS native Task. " +
             `The host already bound the authorized controls; no handoff or full Mission read is needed. ` +
             `Retain requested Git delivery. Correct all Major/Medium defects, run inherited checks in order, ${finishDirectUnit}, ` +
             'then explicitly compare requirements/findings/impact and finish SELF_RECHECKED with self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. ' +
-            "Follow the latest tool result after direct validation; it does not itself prove a successful native terminal or independent approval.");
+            "Follow the latest tool result after direct validation; it does not itself prove a successful native terminal or independent approval."));
         } else if ((await identity(request.sessionID)).role === "dog-worker" || await reviewerCorrection(request.sessionID)) {
           const context = await operators.workerContext(root, request.sessionID);
           if (context) (output.system ??= []).push(context);

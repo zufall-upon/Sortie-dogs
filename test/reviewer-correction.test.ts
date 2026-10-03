@@ -272,6 +272,43 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
   } finally { await f.dispose(); }
 });
 
+for (const mode of ["live", "cold-reload"] as const) test(`continuous findings update does not repeat unchanged correction assignment: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const original = "Original unchanged contract sentinel: preserve requested delivery and public behavior.";
+    await initial(f, { keepReviewOpen: true, original, validation: ["node required-test.mjs", "node check.mjs"] });
+    const first = "FINDINGS\nMedium: first exact retained defect.";
+    await f.tool("author", "repair_review", { findings: first });
+    const native: ObjectValue[] = [{ role: "user", content: [{ type: "text", text: "Independent initial Task" }] }];
+    const context = () => ({ sessionID: "author", agent: f.agents.author!.agent, tools: {}, system: [], messages: [...native] });
+    const before = context();
+    await f.context(before);
+    assert(JSON.stringify(before.messages).includes(original));
+    const prior = structuredClone(before.messages);
+    native.push({ role: "assistant", content: [{ type: "text", text: "New independent correction-impact observation" }] });
+    if (mode === "cold-reload") await f.start();
+    const extra = "FINDINGS\nMedium: second exact retained defect with newline\nand quoted \"detail\".";
+    await f.tool("author", "repair_review", { findings: extra });
+    const after = context();
+    await f.context(after);
+    assert.deepEqual(after.system, before.system, "stable role policy unaffected by new findings");
+    assert.deepEqual(after.messages.slice(0, prior.length), prior, "previously sent state remains at its native boundary");
+    assert.equal(after.messages[prior.length], native[1], "native message identity and ordering preserved");
+    const latest = after.messages.at(-1) as ObjectValue;
+    assert.equal(latest.role, "system");
+    assert(!JSON.stringify(latest).includes(original), "new findings must not copy unchanged original requirements");
+    const text = latest.content.find((part: ObjectValue) => part.text.startsWith("SORTIE_REVIEWER_RETAINED_FINDINGS\n"))?.text;
+    assert(text, "current exact cumulative findings have their own named host-state block");
+    assert(!text.includes('"validation"'), "inherited checks remain in their original assignment block");
+    assert.equal(JSON.parse(text.split("\n")[1]).findings, `${first}\n\n${extra}`);
+    const ledger = f.storage.get("v2-model-live-state:author") as ObjectValue;
+    assert.equal(ledger.updates.flatMap((update: ObjectValue) => update.text).filter((text: string) => text.includes(original)).length, 1);
+    const correction = (await f.missions.required("root")).corrections![0]!;
+    assert.equal(correction.findings, `${first}\n\n${extra}`, "authoritative Mission findings not summarized or replaced");
+    assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
+  } finally { await f.dispose(); }
+});
+
 for (const mode of ["live", "cold-reload", "failed-native-recovery"] as const) test(`running continuous correction retains additional findings without redispatch: ${mode}`, async () => {
   const f = await fixture();
   try {
