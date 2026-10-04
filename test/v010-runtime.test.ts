@@ -267,7 +267,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Keep cwd\/project_root\/paths opaque/u);
+      assert.match(asset.content, /Treat cwd\/project_root and paths as opaque/u);
       assert.match(asset.content, /never shorten or normalize (?:generated )?segments/u);
     } else {
       assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
@@ -280,9 +280,9 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     if (name === "dog-worker-v010") {
       assert.match(asset, /pre-change test helpers as oracles, not new implementation\/tests/u);
-      assert.match(asset, /trace writes\/resets to public result\/error\/state/u);
+      assert.match(asset, /Check\s+result\/error\/state together/u);
       assert.match(asset, /(?:Preserve reproduction entrypoint, input and layout|Keep reproduction entrypoint\/input\/layout)/u);
-      assert.match(asset, /No exhaustive matrix/u);
+      assert.match(asset, /without a hypothetical exhaustive matrix/u);
       assert.match(asset, /unresolved\/untested behavior/u);
     } else {
       assert.match(asset, /inspect the affected source branches and the public\nentry path in the request/u);

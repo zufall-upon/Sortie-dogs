@@ -31,8 +31,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint(?:, input and layout|\/input\/layout); rerun or\s+report why unverified/u);
   assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests/u);
-  assert.match(worker, /trace writes\/resets to public result\/error\/state/u);
-  assert.match(worker, /No exhaustive matrix/u);
+  assert.match(worker, /Check\s+result\/error\/state together/u);
+  assert.match(worker, /without a hypothetical exhaustive matrix/u);
   assert.match(worker, /no extra tee, redirect or wrapper/u);
   assert.match(coordinator, /a preview is not the live run/u);
   assert.match(operator, /Do not turn a chosen preflight step into a user requirement/u);

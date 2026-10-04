@@ -274,7 +274,7 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
   } finally { await f.dispose(); }
 });
 
-for (const mode of ["live", "cold-reload"] as const) test(`continuous findings update does not repeat unchanged correction assignment: ${mode}`, async () => {
+for (const mode of ["live", "cold-reload"] as const) test(`continuous findings update retains complete correction assignment: ${mode}`, async () => {
   const f = await fixture();
   try {
     const original = "Original unchanged contract sentinel: preserve requested delivery and public behavior.";
@@ -298,13 +298,13 @@ for (const mode of ["live", "cold-reload"] as const) test(`continuous findings u
     assert.equal(after.messages[prior.length], native[1], "native message identity and ordering preserved");
     const latest = after.messages.at(-1) as ObjectValue;
     assert.equal(latest.role, "system");
-    assert(!JSON.stringify(latest).includes(original), "new findings must not copy unchanged original requirements");
-    const text = latest.content.find((part: ObjectValue) => part.text.startsWith("SORTIE_REVIEWER_RETAINED_FINDINGS\n"))?.text;
-    assert(text, "current exact cumulative findings have their own named host-state block");
-    assert(!text.includes('"validation"'), "inherited checks remain in their original assignment block");
+    assert(JSON.stringify(latest).includes(original), "current state includes the complete original requirements");
+    const text = latest.content.find((part: ObjectValue) => part.text.startsWith("SORTIE_REVIEWER_CONTINUOUS_CONTEXT\n"))?.text;
+    assert(text, "assignment and exact cumulative findings share one current host-state block");
+    assert.deepEqual(JSON.parse(text.split("\n")[1]).validation, ["node required-test.mjs", "node check.mjs"]);
     assert.equal(JSON.parse(text.split("\n")[1]).findings, `${first}\n\n${extra}`);
     const ledger = f.storage.get("v2-model-live-state:author") as ObjectValue;
-    assert.equal(ledger.updates.flatMap((update: ObjectValue) => update.text).filter((text: string) => text.includes(original)).length, 1);
+    assert.equal(ledger.updates.flatMap((update: ObjectValue) => update.text).filter((text: string) => text.includes(original)).length, 2);
     const correction = (await f.missions.required("root")).corrections![0]!;
     assert.equal(correction.findings, `${first}\n\n${extra}`, "authoritative Mission findings not summarized or replaced");
     assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
