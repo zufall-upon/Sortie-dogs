@@ -620,6 +620,16 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       const provenance = { run_id: item.state.runID, unit_id: unit.unit.id, worker_session_id: unit.childSessionID,
         state_archive_path: item.path, handoff_path: unit.handoffPath, historical: item.historical,
         authority: "native declared-command observations; not additional formal evidence or current freshness" };
+      // Settled proof already records these commands. Do not fetch the same native
+      // history again merely to render acceptance; freshness is checked separately.
+      const proofs = unit.evidence ?? [];
+      if (unit.status === "succeeded" && unit.unit.validation.every(command => proofs.some(proof =>
+        proof.execution.exit_code === 0 && proof.execution.outcome === "pass" &&
+        proof.execution.command.includes(command)))) {
+        return { ...provenance, status: "recorded-formal-evidence",
+          evidence_ids: proofs.map(proof => proof.evidence_id),
+          details_ref: { field: "formal_validation", run_id: item.state.runID, unit_id: unit.unit.id } };
+      }
       try {
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
         return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID,

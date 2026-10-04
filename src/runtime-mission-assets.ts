@@ -170,8 +170,8 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     For a Coordinator ready candidate, use operator_status's acceptance_summary: verbatim original
     requests, anchored cumulative formal validation, current review disposition (author self-recheck
     is not independent approval) and recorded delivery state.
-    Historical results are references, not current freshness PASS. Inspect source or evidence only for
-    concrete unresolved gaps; do not routinely search run archives or reread every source/test file.
+     If current evidence covers the request and no concrete gap remains, proceed to acceptance.
+     Historical results are not current freshness PASS; read source or artifacts only to resolve a gap.
      Existing validation freshness and Review guards still apply; this summary does not accept the mission.
      One compact status check can lead directly to review_mission and its returned Reviewer Task; original
      requests, diff and checks are supplied automatically. Add traces only for concrete extra information.

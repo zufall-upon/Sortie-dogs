@@ -376,9 +376,12 @@ test("default and progress status retain measured checks/terminal and observed G
   assert.ok(JSON.stringify(full).length - JSON.stringify(compact).length > 10000, "real tracked protected source arrays are no longer duplicated in default status");
   assert.deepEqual(progress.observations.formal_validation, compact.acceptance_summary.formal_validation);
   assert.deepEqual(progress.observations.native_declared_validation, compact.acceptance_summary.native_declared_validation);
-  assert.deepEqual(progress.observations.native_declared_validation[0].observations.commands[0], {
-    command: "node check.mjs", exit_code: 0, observed_attempts: 1, latest_started_ms: started, latest_completed_ms: completed,
-  }, "actual command/exit/timestamps survive the compact projection");
+  assert.equal(progress.observations.native_declared_validation[0].status, "recorded-formal-evidence");
+  const proof = progress.observations.formal_validation[0];
+  assert.deepEqual(proof.command, ["node check.mjs"]);
+  assert.equal(proof.exit, 0);
+  assert.ok(proof.started_at && proof.ended_at, "actual timing remains in formal evidence without duplicate history");
+  assert.ok(progress.observations.native_declared_validation[0].evidence_ids.includes(proof.evidence_id));
   assert.deepEqual(progress.observations.worker_terminals[0].terminal, (await f.missions.required("root")).attempts[0].terminal);
   assert.equal(progress.observations.delivery.git_lifecycle, null);
   assert.equal(progress.observations.delivery.clean, (await exec("git", ["status", "--porcelain"], { cwd: f.directory })).stdout === "");

@@ -31,6 +31,21 @@ async function validationPin(root: string, read: string[], write: string[], vali
   return pinned;
 }
 
+test("external source/candidate inventory reuse never survives a refresh", async () => fixture(async root => fixture(async external => {
+  const file = join(external, "installed.js");
+  await writeFile(file, "before");
+  const pinned = await pin(root, [external], [external]);
+  const before = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.deepEqual(before, { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(file, "after");
+  const after = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.ok(after);
+  assert.notEqual(after.source, before!.source);
+  assert.notEqual(after.candidate, before!.candidate);
+  await rm(file);
+  assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), after);
+})));
+
 test("new whole-project candidate proof ignores host bookkeeping but pins real and explicitly declared outputs", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await mkdir(join(root, ".sortie-dogs-v010/operators"), { recursive: true });

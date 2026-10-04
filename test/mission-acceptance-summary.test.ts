@@ -45,7 +45,11 @@ test("ready summary retains exact requests and anchored same-mission formal PASS
   mission.attempts = [{ runID: previous.runID } as never, { runID: current.runID } as never];
   mission.submission = { status: "ready", summary: "Fixed and committed" };
   mission.review = { runID: current.runID, source: "reviewed-source", verdict: "PASS", child: "reviewer", task: null, risk: ["public-logic"] };
-  const observe = async (commands: readonly string[], child: string | null) => ({ attempts: [{ command: commands[0], exit_code: 0 }], child });
+  const observed: (string | null)[] = [];
+  const observe = async (commands: readonly string[], child: string | null) => {
+    observed.push(child);
+    return { attempts: [{ command: commands[0], exit_code: 0 }], child };
+  };
   const summary = await missionAcceptanceSummary(mission, current, operators, observe);
   assert.deepEqual(summary.original_requests, [{ id: "user-request", text }]);
   const proofs = summary.formal_validation as Record<string, unknown>[];
@@ -64,6 +68,9 @@ test("ready summary retains exact requests and anchored same-mission formal PASS
   const native = summary.native_declared_validation as Record<string, unknown>[];
   assert.equal(native.length, 2);
   assert.equal(native[1]!.worker_session_id, "old-worker");
+  assert.equal(native[1]!.status, "recorded-formal-evidence");
+  assert.deepEqual(native[1]!.evidence_ids, ["formal-old"]);
+  assert.deepEqual(observed, ["commit-worker"], "settled formal proof avoids a duplicate history fetch");
   assert.equal((summary.independent_review as Record<string, unknown>).reviewer_session_id, "reviewer");
   assert.match(String((summary.delivery as Record<string, unknown>).clean), /not independently observed/);
   await mkdir(join(directory, "src"), { recursive: true });
