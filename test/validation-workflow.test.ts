@@ -44,7 +44,7 @@ test('planning and implementation share a staged validation workflow without new
       assert.match(content, /Requested add\/commit needs source paths, not \.git\/\*\* scope/);
       assert.match(content, /requested commit in this Task/);
       assert.match(content, /no review-before-commit gate/);
-      assert.match(content, /Preserve user scope and ordering/);
+      assert.match(content, /Preserve user scope\/ordering/);
     }
   }
   const operator = runtimeAssets.find(item => item.name === 'dog-operator')!.content;
@@ -53,11 +53,12 @@ test('planning and implementation share a staged validation workflow without new
   assert.match(operator, /preserving the authorized clone and exact prohibited paths/);
   assert.doesNotMatch(operator, /If the original request supplies a meaningful formal validation command/);
   assert.match(worker, /Read handoff_path in full first:/);
-  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests/);
+  assert.match(worker, /trace writes\/resets to public result\/error\/state/);
   assert.doesNotMatch(worker, /Assert public return value|Check a\s+materially different failure input|uncaught failures/);
   assert.match(worker, /Implement, test and requested commit in this Task/);
   for (const boundary of [/(?:in this Task|here) via sortie_v010_expand_unit/, /\.git\/\*\* scope/, /formal evidence/,
-    /without a hypothetical exhaustive matrix/, /\.sortie-env\//, /Do not spawn nested subagents/,
+    /No exhaustive matrix/, /\.sortie-env\//, /Do not spawn nested subagents/,
     /PROCESS_DEFECT: local:/, /TRUE_BLOCKER: external:/, /host repair diagnostics/,
     /not before execution/, /foreground native shell calls/]) assert.match(worker, boundary);
   assert.ok(worker.length <= 3000, `complete generated Worker asset: ${worker.length}`);
@@ -85,6 +86,8 @@ test('native CLI init installs the validation workflow in each active mission ro
       assert.equal(installed.split(policy).length, 2, role);
       if (role === 'dog-worker-v010') {
         assert.equal(installed, runtimeAssets.find(item => item.name === role)!.content);
+        assert.match(installed, /New helper rejection: read unchanged callers; trace writes\/resets to public result\/error\/state/);
+        assert.match(installed, /independent Review after return/);
         assert.ok(installed.length <= 3000, `complete installed Worker asset: ${installed.length}`);
         t.diagnostic(JSON.stringify({ installed_worker_asset_chars: installed.length }));
       }
@@ -105,7 +108,7 @@ test('per-call feature review distinguishes current use from retained creation s
   assert.match(MISSION_BEHAVIOR_REVIEW, /actual source crosses that boundary\s+and existing tests do not cover it/);
   assert.match(MISSION_BEHAVIOR_REVIEW, /smallest public case, including the disabled behavior/);
   assert.match(MISSION_BEHAVIOR_REVIEW, /Do not invent a lifecycle matrix/);
-  assert.match(worker, /Per-call modes: check retained creation\/use for captured vs current settings/);
+  assert.match(worker, /Per-call modes: check retained creation\/use: captured vs current settings/);
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /TypedBindings|Anko|namedSlice|must run a new|second Reviewer/);
 });
 
@@ -133,6 +136,20 @@ test('shared helper rejection review follows existing unchanged callers without 
   assert.match(MISSION_BEHAVIOR_REVIEW, /not an exhaustive call graph or new approval gate/);
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /Anko|TypedBindings|ChanStmt|invokeLetExpr|channel-status|vmStmt\.go|bool.{0,10}int64/);
   assert.doesNotMatch(MISSION_BEHAVIOR_REVIEW, /must enumerate every caller|separate Reviewer|mandatory coverage inventory/);
+});
+
+test('Worker traces new helper rejection through unchanged callers before independent review', () => {
+  const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
+  assert.match(worker, /New helper rejection: read unchanged callers/);
+  assert.match(worker, /trace writes\/resets to public result\/error\/state/);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests/);
+  assert.match(worker, /No exhaustive matrix/);
+  assert.match(worker, /independent Review after return/);
+  assert.match(worker, /every registered formal check exactly in order/);
+  assert.ok(worker.length <= 3000, `complete generated Worker asset: ${worker.length}`);
+  const body = missionWorkerContent(V010_RUNTIME_PROFILE);
+  assert.ok(body.slice(body.indexOf('---', 3) + 3).length <= 2400);
+  assert.doesNotMatch(worker, /Anko|TypedBindings|vmExprFunction|channel-status|must enumerate every caller|coverage inventory|second Reviewer/);
 });
 
 test('Worker instruction discovery reuses supplied instructions and prefers exact relevant paths', () => {
