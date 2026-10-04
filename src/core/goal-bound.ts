@@ -42,6 +42,9 @@ export interface GoalEvidence {
     readonly candidate_paths: readonly string[];
     /** Missing on legacy evidence: retain its original all-paths snapshot recipe. */
     readonly source_policy?: "project-files-v1" | "declared-paths-v1";
+    /** New captures distinguish a whole-project output grant from explicitly named control-like artifacts.
+     * Missing on old evidence: keep its original candidate recipe, including bookkeeping bytes. */
+    readonly candidate_policy?: "project-root-artifacts-v1";
     /** Fixed when validation starts. Full manifest_hash still identifies the historical execution contract. */
     readonly freshness?: {
       readonly contract_hash: string;
@@ -271,6 +274,7 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
     protectedBinding.candidate_paths.every(text) &&
     (protectedBinding.source_policy === undefined || protectedBinding.source_policy === "project-files-v1" ||
       protectedBinding.source_policy === "declared-paths-v1") &&
+    (protectedBinding.candidate_policy === undefined || protectedBinding.candidate_policy === "project-root-artifacts-v1") &&
     (protectedBinding.freshness === undefined || (protectedBinding.freshness !== null && typeof protectedBinding.freshness === "object" &&
       HASH.test(protectedBinding.freshness.contract_hash) &&
       Array.isArray(protectedBinding.freshness.scratch_paths) && protectedBinding.freshness.scratch_paths.every(text) &&

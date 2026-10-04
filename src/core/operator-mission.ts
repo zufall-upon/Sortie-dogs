@@ -531,10 +531,11 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
       const entries = value[field] ?? [];
       if (!Array.isArray(entries) || !entries.every(item => typeof item === "string")) throw new Error(`mission-unit-${index + 1}: ${field} must be paths`);
       return [...new Set(entries.map(item => {
-        // A model's repository-root read means the current project, not an invalid empty path.
-        // Resolve only this read shorthand at the host boundary; saved plans and write scopes stay exact.
-        const rootRead = field === "read" && [".", "./", ".\\", "./**", ".\\**"].includes(item);
-        return normalizeExecutionScope(rootRead && projectRoot ? `${resolve(projectRoot).replaceAll("\\", "/")}/**` : item);
+        // An explicit repository-root scope means this project for both reads and writes.
+        // Resolve this shorthand only at the host boundary; saved plans, prohibitions and
+        // native permissions still use the exact directory scope, never an inferred grant.
+        const rootScope = [".", "./", ".\\", "./**", ".\\**"].includes(item);
+        return normalizeExecutionScope(rootScope && projectRoot ? `${resolve(projectRoot).replaceAll("\\", "/")}/**` : item);
       }))];
     };
     // A sole unit owns the whole request. This schedules work; it does not prove acceptance.

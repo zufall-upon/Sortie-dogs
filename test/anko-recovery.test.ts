@@ -71,6 +71,45 @@ async function fixture(run: (f: any) => Promise<void>) {
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+test("explicit project-root Mission scope starts one native Worker without a path-repair round trip", async () => fixture(async f => {
+  const planned = await f.tool("start_mission", { requirements: ["Implement result and preserve checks"],
+    unit: { title: "Implement result", objective: "Implement and verify the original request",
+      read: ["."], write: ["."], validation: ["node check.mjs"] } });
+  assert.ok(planned.task);
+  const task = { args: structuredClone(planned.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
+  await f.chat("worker", String(task.args.prompt));
+  const unit = (await f.runtime.required("root")).units[0];
+  const scope = f.directory.replaceAll("\\", "/") + "/**";
+  assert.deepEqual(unit.unit.read, [scope]); assert.deepEqual(unit.unit.write, [scope]);
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: unit.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(unit.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const budget = (await f.tool("operator_status")).budget;
+  for (const path of [".git/**", ".sortie-dogs-v010/contracts/**"])
+    await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: [path], reason: "Not a valid scope correction" }, "worker"),
+      /operator-control-write-forbidden/u);
+  await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "source-write" },
+    { args: { filePath: "result.txt", content: "fixed" } });
+  await writeFile(join(f.directory, "result.txt"), "fixed");
+  await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "source-write" }, { output: "written" });
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  assert.equal((await f.runtime.required("root")).dispatched, 1);
+  await f.validate(); await f.finish();
+  const completed = await f.tool("operator_status");
+  assert.equal(completed.completion.ready, true, JSON.stringify(completed));
+  await writeFile(join(f.directory, "result.txt"), "changed after formal");
+  assert.equal((await f.tool("operator_status")).completion.ready, false, "root shorthand never exempts source freshness");
+}));
+
+test("explicit project-root scope retains an intersecting user prohibition rather than creating a write grant", async () => fixture(async f => {
+  await assert.rejects(f.tool("start_mission", { requirements: ["Implement result and preserve checks", "Do not write forbidden.txt"],
+    prohibited_write: ["forbidden.txt"], unit: { title: "Implement result", objective: "Implement and verify the original request",
+      read: ["."], write: ["."], validation: ["node check.mjs"] } }), /mission-explicit-write-prohibition/u);
+  assert.deepEqual((await f.missions.required("root")).prohibitedWrite, ["forbidden.txt"]);
+  await assert.rejects(f.runtime.required("root"), /operator-run-missing/u);
+}));
+
 test("Mission Task references its existing required handoff without repeating objective, acceptance or checks", async () => fixture(async f => {
   await f.start({ entrypoint: "scripts/anko/run-once.mjs", inputs: ["public/input.json"], timeout_seconds: 3600,
     cost_limit_usd: 5, benchmark_attempts: 1, grading: "none", source: "user:request", applies_to: "benchmark attempt" });

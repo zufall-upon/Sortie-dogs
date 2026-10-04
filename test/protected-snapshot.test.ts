@@ -31,6 +31,46 @@ async function validationPin(root: string, read: string[], write: string[], vali
   return pinned;
 }
 
+test("new whole-project candidate proof ignores host bookkeeping but pins real and explicitly declared outputs", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, ".sortie-dogs-v010/operators"), { recursive: true });
+  await writeFile(join(root, "result.txt"), "verified source");
+  await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "before");
+  const pinned = await validationPin(root, [root + "/**"], [root + "/**"], ["node check.mjs"]);
+  const saved = JSON.stringify(pinned.binding), unchanged = { source: pinned.source, candidate: pinned.candidate };
+  await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "host settled validation and Worker");
+  await writeFile(join(root, ".git/host-observation"), "bookkeeping");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged,
+    "the host's post-formal state transition is not a code edit");
+  for (const path of ["result.txt", ".sortie-dogs-v010-neighbor/source.txt", "nested/.git/fixture.txt"]) {
+    await mkdir(join(root, path, ".."), { recursive: true });
+    await writeFile(join(root, path), "unverified output");
+    assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged, path);
+    if (path === "result.txt") await writeFile(join(root, path), "verified source");
+    else await rm(join(root, path.split("/")[0]!), { recursive: true });
+  }
+  assert.equal(JSON.stringify(pinned.binding), saved, "never recapture or rewrite saved proof");
+  const explicit = await validationPin(root, [root + "/**"], [root + "/**", ".sortie-dogs-v010/operators/root.json"], ["node check.mjs"]);
+  await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "changed explicit output");
+  assert.notEqual((await refreshProtectedSnapshot(root, explicit.binding))?.candidate, explicit.candidate,
+    "explicit control-like outputs remain bound even alongside broad project scope");
+}));
+
+test("old whole-project candidate recipes never gain bookkeeping exclusions retroactively", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, ".sortie-dogs-v010/operators"), { recursive: true });
+  await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "before");
+  const pinned = await validationPin(root, [root + "/**"], [root + "/**"], ["node check.mjs"]);
+  const older = structuredClone(pinned.binding);
+  delete older.candidate_policy;
+  const oldSnapshot = await refreshProtectedSnapshot(root, older), oldRecipe = JSON.stringify(older);
+  assert.ok(oldSnapshot);
+  await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "after");
+  assert.notEqual((await refreshProtectedSnapshot(root, older))?.candidate, oldSnapshot.candidate);
+  assert.equal(JSON.stringify(older), oldRecipe);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+}));
+
 test("fixed validation scratch ignores generation/cleanup but protects read, tracked and exact deliverables", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await mkdir(join(root, ".tmp"));
