@@ -15,10 +15,10 @@ model routingが必要なtaskだけSortieを起動する。
 [English README](../README.md) · [简体中文](guide-zh-CN.md) ·
 [テスト](testing.md) · [CLI testing](cli-testing.md)
 
-**現行release: [v0.13.4](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.4)**
-（[release notes](release-v0.13.4.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.5](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.5)**
+（[release notes](release-v0.13.5.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.4-reviewer-continuous-v1`。
+現行asset markerは`0.13.5-live-state-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -61,7 +61,21 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.4の更新
+## v0.13.5の更新
+
+PR #154を統合。固定model指示を維持し、変化したhost stateだけをnative履歴の境界へ追加する。
+compaction後は現行stateを完全復元。Reviewerの実toolはread-only優先の決定的順序とし、
+実際の修正権限移行は維持する。最終版はv3のbehavioral reviewと一体型assignment/findingsへ戻し、
+正確なAGENTS.md探索、継承formal commandの個別実行、literal local shell-fileのscope整合、
+明示project-root read/write表記を保持。新規whole-project証跡はhost bookkeepingだけの変更で
+失効しない。旧証跡recipeと実source/artifactのfreshnessは変更しない。
+
+固定pre-release cycle 11のAnko観測は公式local score 1、選定public 9/9、26分1.866秒、推定$1.41968316。
+旧v3より短時間だが費用15.762%増。速度・費用の同時改善や一般品質保証とは扱わない。
+release証跡は`_testenv/releases/0.13.5/`。起動確認はtask完遂ではない。
+[release notes](release-v0.13.5.md)と[比較・失敗記録](cache-prefix-loop-20261003.md)を参照。
+
+## v0.13.4の更新（継承）
 
 PR #152を統合。`plan_units(executor="self")`、`start_direct_unit`、`finish_direct_unit`で
 Coordinator/Operatorが同session内の実装・正式検証を担当できる。既知の単一unitはMission開始と
@@ -118,7 +132,7 @@ agent数ではなく、品質を維持しながら不要な高cost作業を減�
   既知推論費用 **$17.73**、不明usage hold **$1.98** は別管理。推論約81分、公式採点7.2分。
   [固定条件・中断runの扱い・詳細](../README.md#v0131-dev23-2026-09-30)。
 
-どちらも過去の固定candidateの結果で、v0.13.4のscoreではない。version、予算、条件が異なるため
+どちらも過去の固定candidateの結果で、v0.13.5のscoreではない。version、予算、条件が異なるため
 統制比較や一般成功率へ拡張しない。inference完了、Sortieの`DONE`、Review `PASS`、公式解決を区別する。
 公式local評価とleaderboard登録・承認も別扱い。SWE-benchは必要時の別計測で、release必須gateではない。
 [測定契約](benchmark-completion-contract.md)、[結果履歴](../README.md#swe-bench-evaluation)、
@@ -288,7 +302,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.4
+npm install --global sortie-dogs@0.13.5
 sortie-dogs init --global --profile v010
 ```
 
@@ -300,7 +314,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.4
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.5
 sortie-dogs init --global --profile v010
 ```
 
@@ -321,7 +335,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.4-reviewer-continuous-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.5-live-state-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
