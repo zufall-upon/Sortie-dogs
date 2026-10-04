@@ -149,11 +149,9 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
     assert.equal(Object.keys(await status())[0], "acceptance_summary");
     if (mode === "implementation") {
       const emptyNative = (await status()).acceptance_summary.native_declared_validation[0];
-      assert.equal(emptyNative.status, "available");
-      assert.deepEqual(emptyNative.observations.commands, []);
-      assert.deepEqual(emptyNative.observations.not_observed, ["node check.mjs"]);
-      for (const [historyMode, reason] of [["missing", "native-worker-history-api-unavailable"],
-        ["error", "native-worker-history-api-error"], ["invalid", "native-worker-history-response-not-array"]] as const) {
+      assert.equal(emptyNative.status, "recorded-formal-evidence");
+      assert.ok(emptyNative.evidence_ids.length);
+      for (const historyMode of ["missing", "error", "invalid"] as const) {
         // Root role is already observed in this live instance. Change only the summary reader's API
         // availability; a cold root with no recovery API is a different existing host contract.
         const normalMessages = latestSession!.messages;
@@ -163,8 +161,8 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
         const observed = await status();
         latestSession!.messages = normalMessages;
         assert.equal(observed.completion.ready, true, "history display failure adds no acceptance gate");
-        assert.equal(observed.acceptance_summary.native_declared_validation[0].status, "unavailable");
-        assert.equal(observed.acceptance_summary.native_declared_validation[0].reason, reason);
+        assert.deepEqual(observed.acceptance_summary.native_declared_validation[0], emptyNative,
+          "settled proof does not depend on refetching native history for display");
       }
     }
     // The oracle is read-only and therefore outside the review diff. Completion must still name it.

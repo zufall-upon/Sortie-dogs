@@ -157,12 +157,19 @@ function outside(projectRoot: string, path: string): boolean {
 
 async function declaredScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
   source: boolean, excluded: readonly string[] = [], binding?: Binding,
-  candidatePolicy?: Binding["candidate_policy"]): Promise<string | undefined> {
+  candidatePolicy?: Binding["candidate_policy"],
+  artifactsMemo?: Map<string, ReturnType<typeof declaredArtifacts>>): Promise<string | undefined> {
   const local = paths.filter(path => !outside(projectRoot, path));
   const external = paths.filter(path => outside(projectRoot, path));
   const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded, binding, candidatePolicy);
   if (project === undefined) return undefined;
-  const artifacts = await declaredArtifacts(external).catch(() => undefined);
+  const key = JSON.stringify(external);
+  let pending = artifactsMemo?.get(key);
+  if (!pending) {
+    pending = declaredArtifacts(external);
+    artifactsMemo?.set(key, pending);
+  }
+  const artifacts = await pending.catch(() => undefined);
   return artifacts && goalFingerprint({ project, external: artifacts.entries.filter(([path]) => !excluded.some(root => !outside(root, path))) });
 }
 
@@ -266,8 +273,11 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
     }
   }
   if (binding.source_policy === "declared-paths-v1") {
-    const source = await declaredScopeDigest(projectRoot, sourcePaths, manifestHash, true, [], binding);
-    const candidate = await declaredScopeDigest(projectRoot, candidatePaths, manifestHash, false, [], binding, binding.candidate_policy);
+    // Reuse identical external inventories only inside this read-only refresh.
+    // A later status/completion call always observes filesystem changes anew.
+    const artifactsMemo = new Map<string, ReturnType<typeof declaredArtifacts>>();
+    const source = await declaredScopeDigest(projectRoot, sourcePaths, manifestHash, true, [], binding, undefined, artifactsMemo);
+    const candidate = await declaredScopeDigest(projectRoot, candidatePaths, manifestHash, false, [], binding, binding.candidate_policy, artifactsMemo);
     return source === undefined || candidate === undefined ? undefined : { source, candidate };
   }
   // Legacy evidence retains its original recipe; a new policy cannot relabel stale proof as fresh.
