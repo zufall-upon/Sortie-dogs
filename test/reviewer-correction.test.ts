@@ -760,17 +760,20 @@ test("staged native correction repairs source/test scope in the SAME admitted Re
   } finally { await f.dispose(); }
 });
 
-test("staged correction shell scope repair retries the original command without a new admission", async () => {
+test("staged correction literal shell scope reconciles the original command without a new admission", async () => {
   const f = await fixture();
   try {
     await stagedInitial(f);
     const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
     await f.prompt("author", dispatch.input.prompt); await f.bind("author");
     const command = "printf 'regression diagnostic' > correction.txt";
-    await assert.rejects(f.before("author", "shell", { command }), /manifest write scope/);
     const run = await f.run(), budget = await f.ledger();
-    const expanded = await f.tool("root", "expand_unit", { unit_id: "unit-1", paths: ["correction.txt"], reason: "Original request correction diagnostic output" });
-    assert.equal(expanded.status, "scope-updated"); await f.shell("author", command);
+    await f.shell("author", command);
+    const unit = (await f.run()).units[0]!;
+    assert.ok(unit.unit.write.includes("correction.txt"));
+    assert.deepEqual(unit.reviewerCorrection!.writeUnion, unit.unit.write);
+    assert.equal(unit.reviewerCorrection!.promptID, run.units[0]!.reviewerCorrection!.promptID);
+    assert.equal(unit.reviewerCorrection!.checks, undefined, "diagnostics are not formal proof");
     assert.equal(await readFile(join(f.directory, "correction.txt"), "utf8"), "regression diagnostic");
     assert.equal((await f.run()).units[0]!.callID, dispatch.id); assert.equal((await f.run()).generation, run.generation);
     assert.deepEqual((await f.ledger()).state.outstanding_reservations, budget.state.outstanding_reservations);
@@ -1383,7 +1386,10 @@ test("correction execution permits focused tests/formatter/generator; formal pro
     await f.shell("author", "node generate.mjs"); await f.shell("author", "node format.mjs");
     await f.shell("author", "printf 'ready\\n' > result.txt");
     await assert.rejects(f.before("author", "shell", { command: "printf x > check.mjs" }), /mission-explicit-write-prohibition/);
-    await assert.rejects(f.before("author", "shell", { command: "printf x > outside.txt" }), /manifest write scope|write-union|write-denied/);
+    const output = await f.before("author", "shell", { command: "printf x > outside.txt" });
+    assert.ok((await f.run()).units[0]!.reviewerCorrection!.writeUnion.includes("outside.txt"));
+    await f.after(output, "Literal output reconciled without executing or creating formal evidence", { exit: 0 });
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined);
     await assert.rejects(f.before("author", "shell", { command: "printf x > ../outside.txt" }), /repository-relative path without traversal/);
     await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m diagnostics-then-formal");
     await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
@@ -1426,8 +1432,12 @@ for (const absolute of [false, true]) for (const declared of [false, true]) test
     const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
     await f.prompt("author", dispatch.input.prompt); await f.bind("author");
     const input = { command, workdir: absolute ? join(f.directory, "nested") : "nested" };
-    await assert.rejects(f.before("author", "shell", input), /manifest write scope|write-union|write-denied/,
-      "native nested/result.txt is outside the result.txt correction write union");
+    const reconciled = await f.before("author", "shell", input);
+    assert.ok((await f.run()).units[0]!.reviewerCorrection!.writeUnion.includes("nested/result.txt"),
+      "reconcile the actual native nested destination, not the same-named root file");
+    await f.after(reconciled, "Correct directory observed; output not actually executed", { exit: 0 });
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined,
+      "matching command text in a different cwd is still not inherited formal proof");
     await f.missions.update("root", state => { state.prohibitedWrite = ["nested/result.txt"]; });
     await assert.rejects(f.before("author", "shell", input), /mission-explicit-write-prohibition/,
       "prohibition checks inspect the same destination native shell would write");
@@ -1949,7 +1959,16 @@ for (const place of ["global", "project", "session", "global-all"] as const) tes
     await f.prompt("author", correction.input.prompt); await f.bind("author");
     await assert.rejects(f.before("author", "shell", { command: "node check.mjs" }), /native permission denied shell/);
     assert.equal(f.registry()[f.agents.author!.agent]!.permissions.some((rule: Rule) => rule.action === "shell" && rule.resource === "*" && rule.effect === "allow"), false);
-    await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /manifest write scope|write-union|write-denied/);
+    const command = "printf x > undeclared.txt";
+    if (place === "global-all") await assert.rejects(f.before("author", "shell", { command }), /native permission denied shell/);
+    else {
+      const output = await f.before("author", "shell", { command });
+      assert.ok((await f.run()).units[0]!.reviewerCorrection!.writeUnion.includes("undeclared.txt"));
+      await f.after(output, "Known path reconciled, no formal check", { exit: 0 });
+      await assert.rejects(f.before("author", "shell", { command: "node check.mjs" }), /native permission denied shell/,
+        "scope reconciliation cannot alter the inherited native deny");
+    }
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined);
     await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
     assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
     assert.deepEqual(f.agents.author!.permissions, place === "session" ? [deny] : undefined);

@@ -7834,7 +7834,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const extracted = extractWritePaths(toolInput.tool, output.args, input.directory);
           if (extracted.paths.length) await input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, extracted.paths);
           const nativeFile = /^(?:write|edit)(?:$|[_-])/iu.test(toolInput.tool) || /patch/iu.test(toolInput.tool);
-          if (nativeFile && !extracted.ambiguous && extracted.paths.length) {
+          const nativeShell = ["bash", "shell"].includes(toolInput.tool) && authorization!.writeScopes.length > 0;
+          if ((nativeFile && !extracted.ambiguous || nativeShell && !extracted.gitAmbiguous) && extracted.paths.length) {
             const missing: string[] = [];
             for (const path of extracted.paths) {
               const actual = nativeFile ? resolve(input.directory, path) : path;
@@ -7842,6 +7843,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               catch (error) {
                 if (!(error instanceof WriteDeniedError) || !["manifest-scope", "project-boundary"].includes(error.reason)) throw error;
                 const local = relative(authorization!.projectRoot, resolve(input.directory, actual)).replaceAll("\\", "/");
+                if (nativeShell) {
+                  // Reconcile known local file destinations, not expansions, directory trees or
+                  // opaque program internals. Unknown executables may accompany a literal rm/redirect.
+                  if (/[$*?\[\]{}()~`]/u.test(path) || local === ".." || local.startsWith("../") || isAbsolute(local)) continue;
+                  if (extracted.createdDirectories?.length || extracted.requiredDirectories?.some(directory =>
+                    resolve(input.directory, isRecord(output.args) && typeof output.args.workdir === "string" ? output.args.workdir : ".", directory) ===
+                    resolve(input.directory, actual))) continue;
+                  if (await stat(resolve(input.directory, actual)).then(value => value.isDirectory()).catch(() => false)) continue;
+                }
                 missing.push(local === ".." || local.startsWith("../") || isAbsolute(local) ? resolve(input.directory, actual) : local);
               }
             }
