@@ -267,7 +267,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Treat cwd\/project_root and (?:supplied )?paths as opaque/u);
+      assert.match(asset.content, /Treat cwd\/project_root and paths as opaque/u);
       assert.match(asset.content, /never shorten or normalize (?:generated )?segments/u);
     } else {
       assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
@@ -279,7 +279,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     if (name === "dog-worker-v010") {
-      assert.match(asset, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
+      assert.match(asset, /pre-change test helpers as oracles, not new implementation\/tests/u);
+      assert.match(asset, /Check\s+result\/error\/state together/u);
       assert.match(asset, /(?:Preserve reproduction entrypoint, input and layout|Keep reproduction entrypoint\/input\/layout)/u);
       assert.match(asset, /without a hypothetical exhaustive matrix/u);
       assert.match(asset, /unresolved\/untested behavior/u);
@@ -430,8 +431,8 @@ test("preview tools are denied globally and allowed only by profile agents", asy
 test("every preview role preserves user language and protocol keys without duplicated Worker boilerplate", () => {
   for (const asset of previewAssets) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Use the user's latest instruction language \(previous if unclear\)/u);
-      assert.match(asset.content, /keep protocol\/code\/quotes verbatim/u);
+      assert.match(asset.content, /Prose: user's latest instruction language \(previous if unclear\)/u);
+      assert.match(asset.content, /protocol\/code\/quotes verbatim/u);
       assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 1, asset.name);
     } else assert.equal(asset.content.split(COMMUNICATION_LANGUAGE_POLICY).length, 2, asset.name);
   }

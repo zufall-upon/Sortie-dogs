@@ -94,16 +94,17 @@ export function isRuntimeControlPath(path: string): boolean {
 }
 
 async function protectedScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
+  sourcePolicy?: Binding["source_policy"], excluded: readonly string[] = [], binding?: Binding,
+  candidatePolicy?: Binding["candidate_policy"]): Promise<string | undefined> {
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
   const scratchExcluded = binding ? snapshotScratchExclusion(binding) : () => false;
-  const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set()): Promise<boolean> => {
+  const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set(), projectArtifacts = false): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
     if (scratchExcluded(absolute)) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
-    if (sourcePolicy === "project-files-v1" && isRuntimeControlPath(scoped)) return true;
+    if ((sourcePolicy === "project-files-v1" || projectArtifacts) && isRuntimeControlPath(scoped)) return true;
     const metadata = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -121,7 +122,7 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
         // Keep the logical scope path and link target in the digest; do not follow external links or cycles.
         entries.push([scoped, `symlink:${link}`]);
         const next = new Set([...ancestors, target]);
-        for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next)) return false;
+        for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts)) return false;
         return true;
       }
       if (!targetMetadata.isFile()) return false;
@@ -133,14 +134,19 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
       if (ancestors.has(real)) return false;
       entries.push([scoped, "directory"]);
       const next = new Set([...ancestors, real]);
-      for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next)) return false;
+      for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts)) return false;
       return true;
     }
     if (!metadata.isFile()) return false;
     entries.push([scoped, "file", createHash("sha256").update(await readFile(absolute)).digest("hex")]);
     return true;
   };
-  for (const path of [...new Set(paths)].sort()) if (!await visit(path)) return undefined;
+  for (const path of [...new Set(paths)].sort()) {
+    // Only a whole-project grant excludes incidental host bookkeeping. A separately
+    // declared control-like output still traverses and pins its exact bytes.
+    const projectArtifacts = candidatePolicy === "project-root-artifacts-v1" && resolve(path) === resolve(projectRoot);
+    if (!await visit(path, new Set(), projectArtifacts)) return undefined;
+  }
   return goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries });
 }
 
@@ -150,10 +156,11 @@ function outside(projectRoot: string, path: string): boolean {
 }
 
 async function declaredScopeDigest(projectRoot: string, paths: readonly string[], manifestHash: string,
-  source: boolean, excluded: readonly string[] = [], binding?: Binding): Promise<string | undefined> {
+  source: boolean, excluded: readonly string[] = [], binding?: Binding,
+  candidatePolicy?: Binding["candidate_policy"]): Promise<string | undefined> {
   const local = paths.filter(path => !outside(projectRoot, path));
   const external = paths.filter(path => outside(projectRoot, path));
-  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded, binding);
+  const project = await protectedScopeDigest(projectRoot, local, manifestHash, source ? "project-files-v1" : undefined, excluded, binding, candidatePolicy);
   if (project === undefined) return undefined;
   const artifacts = await declaredArtifacts(external).catch(() => undefined);
   return artifacts && goalFingerprint({ project, external: artifacts.entries.filter(([path]) => !excluded.some(root => !outside(root, path))) });
@@ -216,6 +223,7 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
     const tracked = await exec("git", ["ls-files", "-z"], { cwd: authorization.projectRoot, maxBuffer: 16 * 1024 * 1024 }).then(value => value.stdout.split("\0").filter(Boolean)).catch(() => []);
     const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
+      candidate_policy: "project-root-artifacts-v1",
       source_paths: sourcePaths.map(evidencePath),
       candidate_paths: candidatePaths.map(evidencePath),
       freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation, process.env),
@@ -259,12 +267,12 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
   }
   if (binding.source_policy === "declared-paths-v1") {
     const source = await declaredScopeDigest(projectRoot, sourcePaths, manifestHash, true, [], binding);
-    const candidate = await declaredScopeDigest(projectRoot, candidatePaths, manifestHash, false, [], binding);
+    const candidate = await declaredScopeDigest(projectRoot, candidatePaths, manifestHash, false, [], binding, binding.candidate_policy);
     return source === undefined || candidate === undefined ? undefined : { source, candidate };
   }
   // Legacy evidence retains its original recipe; a new policy cannot relabel stale proof as fresh.
   if (binding.source_policy !== undefined && binding.source_policy !== "project-files-v1") return undefined;
   const source = await protectedScopeDigest(projectRoot, sourcePaths, manifestHash, binding.source_policy, [], binding);
-  const candidate = await protectedScopeDigest(projectRoot, candidatePaths, manifestHash, undefined, [], binding);
+  const candidate = await protectedScopeDigest(projectRoot, candidatePaths, manifestHash, undefined, [], binding, binding.candidate_policy);
   return source === undefined || candidate === undefined ? undefined : { source, candidate };
 }

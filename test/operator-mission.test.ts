@@ -30,7 +30,8 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.match(coordinator, /working directory or package layout/u);
   assert.match(coordinator, /not an adjacent check unless it runs\s+the changed branch/u);
   assert.match(worker, /entrypoint(?:, input and layout|\/input\/layout); rerun or\s+report why unverified/u);
-  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/u);
+  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests/u);
+  assert.match(worker, /Check\s+result\/error\/state together/u);
   assert.match(worker, /without a hypothetical exhaustive matrix/u);
   assert.match(worker, /no extra tee, redirect or wrapper/u);
   assert.match(coordinator, /a preview is not the live run/u);
@@ -72,6 +73,25 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   assert.deepEqual(handoff.verification.map((item: { check: string }) => item.check), ["python -m pytest tests/test_format.py"]);
   assert.deepEqual(run.acceptance, ["Fix the public format failure", "Preserve working formatting"]);
   assert.equal(run.units.length, 1, "no separate setup or review Worker is required");
+}));
+
+test("Mission root scope shorthand equals the explicit project directory for reads and writes only at the host boundary", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Implement the requested result in this repository" });
+  const mission = await missions.start("root", ["Implement result and validate"]);
+  const expected = directory.replaceAll("\\", "/") + "/**";
+  for (const path of [".", "./", ".\\", "./**", ".\\**"]) {
+    const plan = missionPlan(mission, [{ ...unit, read: [path], write: [path] }], directory);
+    assert.deepEqual(plan.units[0]!.read, [expected]); assert.deepEqual(plan.units[0]!.write, [expected]);
+  }
+  const readOnly = missionPlan(mission, [{ ...unit, read: ["."], write: [] }], directory);
+  assert.deepEqual(readOnly.units[0]!.write, [], "read shorthand never infers write permission");
+  for (const path of ["", "../", "../**", "./../outside", "./../outside/**"])
+    assert.throws(() => missionPlan(mission, [{ ...unit, write: [path] }], directory), /Path must/u);
+  assert.throws(() => missionPlan(mission, [{ ...unit, write: ["."] }]), /Path must/u,
+    "no ambient cwd guess when no actual project root is supplied");
+  const exact = missionPlan(mission, [{ ...unit, write: ["src/**"] }], directory);
+  assert.deepEqual(exact.units[0]!.write, ["src/**"], "ordinary scope is not broadened");
 }));
 
 test("mission review notes are optional and cannot turn prose formatting into a coverage gate", async () => fixture(async directory => {

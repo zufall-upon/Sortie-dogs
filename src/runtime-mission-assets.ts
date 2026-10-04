@@ -39,6 +39,10 @@ separate foreground native shell calls, no extra tee, redirect or wrapper. Diagn
 Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
 `;
 
+/** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
+export const REVIEWER_VALIDATION_WORKFLOW = `Run inherited formal commands in order as exact separate foreground native shell calls.
+Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.`;
+
 const OPERATION_GUIDE = `## Practical operation guide
 
 Use file paths for exact outputs and dir/** for a directory tree, including a directory that does not
@@ -319,7 +323,8 @@ binds the existing scope/checks and lets you correct HERE, without another promp
 round trip. Reuse the known project test harness and the reasoning/source already in this conversation.
 If correction exposes another concrete Major/Medium defect, retain it through ${profile.toolPrefix}repair_review
 here before fixing it; the host accumulates known findings without another Task, scope or check contract.
-Run inherited formal commands in order, retain the requested commit/clean boundary, then
+${REVIEWER_VALIDATION_WORKFLOW}
+After current formal checks, retain the requested commit/clean boundary, then
 ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this same native Task with
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
 self-recheck, never independent approval of your own edits. No unresolved Medium may pass.
@@ -536,31 +541,30 @@ mode: subagent
 ---
 # ${profileAgent(profile, "dog-worker")}
 
-Implement, test and requested commit in this Task. Follow AGENTS.md.
-Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, mission-context constraints,
-unit-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Host ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
-Legacy/recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+Implement, test and requested commit in this Task.
+Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
+coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
-After compaction recover handoff; inspect diff/results before repeating work.
-
-Read/search: existing permissions. Fix unit.write estimates/outputs/checks
+After compaction recover handoff; inspect diff/results before repeats.
+Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
-no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle and cumulative budget.
+no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
-
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: behavior, ordered checks/commit; never fabricate completion.
+Done: behavior/ordered checks/commit; never fabricate completion.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
-Do not spawn nested subagents, amend, push or publish. Return changes, command/exit/elapsed,
-rerun reasons, unresolved/untested behavior; no proof document.
-No unchanged denial retries. Only unrecoverable PROCESS_DEFECT: local: plus diagnostic or proven
-TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision: returns early.
-Use the user's latest instruction language (previous if unclear); keep protocol/code/quotes verbatim.
+Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
+rerun reasons, unresolved/untested behavior; no proof doc.
+No unchanged denial retry. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
+Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;
 }

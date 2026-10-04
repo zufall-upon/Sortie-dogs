@@ -71,6 +71,45 @@ async function fixture(run: (f: any) => Promise<void>) {
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+test("explicit project-root Mission scope starts one native Worker without a path-repair round trip", async () => fixture(async f => {
+  const planned = await f.tool("start_mission", { requirements: ["Implement result and preserve checks"],
+    unit: { title: "Implement result", objective: "Implement and verify the original request",
+      read: ["."], write: ["."], validation: ["node check.mjs"] } });
+  assert.ok(planned.task);
+  const task = { args: structuredClone(planned.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
+  await f.chat("worker", String(task.args.prompt));
+  const unit = (await f.runtime.required("root")).units[0];
+  const scope = f.directory.replaceAll("\\", "/") + "/**";
+  assert.deepEqual(unit.unit.read, [scope]); assert.deepEqual(unit.unit.write, [scope]);
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: unit.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(unit.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const budget = (await f.tool("operator_status")).budget;
+  for (const path of [".git/**", ".sortie-dogs-v010/contracts/**"])
+    await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: [path], reason: "Not a valid scope correction" }, "worker"),
+      /operator-control-write-forbidden/u);
+  await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "source-write" },
+    { args: { filePath: "result.txt", content: "fixed" } });
+  await writeFile(join(f.directory, "result.txt"), "fixed");
+  await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "source-write" }, { output: "written" });
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  assert.equal((await f.runtime.required("root")).dispatched, 1);
+  await f.validate(); await f.finish();
+  const completed = await f.tool("operator_status");
+  assert.equal(completed.completion.ready, true, JSON.stringify(completed));
+  await writeFile(join(f.directory, "result.txt"), "changed after formal");
+  assert.equal((await f.tool("operator_status")).completion.ready, false, "root shorthand never exempts source freshness");
+}));
+
+test("explicit project-root scope retains an intersecting user prohibition rather than creating a write grant", async () => fixture(async f => {
+  await assert.rejects(f.tool("start_mission", { requirements: ["Implement result and preserve checks", "Do not write forbidden.txt"],
+    prohibited_write: ["forbidden.txt"], unit: { title: "Implement result", objective: "Implement and verify the original request",
+      read: ["."], write: ["."], validation: ["node check.mjs"] } }), /mission-explicit-write-prohibition/u);
+  assert.deepEqual((await f.missions.required("root")).prohibitedWrite, ["forbidden.txt"]);
+  await assert.rejects(f.runtime.required("root"), /operator-run-missing/u);
+}));
+
 test("Mission Task references its existing required handoff without repeating objective, acceptance or checks", async () => fixture(async f => {
   await f.start({ entrypoint: "scripts/anko/run-once.mjs", inputs: ["public/input.json"], timeout_seconds: 3600,
     cost_limit_usd: 5, benchmark_attempts: 1, grading: "none", source: "user:request", applies_to: "benchmark attempt" });
@@ -232,7 +271,62 @@ test("native write and shell scope correction keep the same Task, call, unit and
   assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
 }));
 
-test("covered write scope expansion is a no-op for controls, evidence, freshness and spend; real repair retries the SAME command", async () => fixture(async f => {
+test("native literal shell files reconcile before execution in the same Task without an expansion round trip", async () => fixture(async f => {
+  await f.start();
+  const { unit } = await f.dispatch();
+  await writeFile(join(f.directory, "scratch.output"), "generated diagnostic");
+  await mkdir(join(f.directory, "nested"));
+  const before = await f.runtime.required("root"), budget = (await f.tool("operator_status")).budget;
+  for (const [callID, command, workdir] of [
+    ["cleanup", "node -e '' ; rm scratch.output", f.directory],
+    ["output", "printf diagnostic > output.txt", join(f.directory, "nested")],
+  ]) {
+    const output = { args: { command, workdir } };
+    await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, output);
+    assert.equal(output.args.command, command, "scope reconciliation must not rewrite native execution");
+    const result = await exec("bash", ["-c", command], { cwd: workdir });
+    await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+  }
+  const after = await f.runtime.required("root");
+  assert.deepEqual(after.units[0].unit.write, ["result.txt", "scratch.output", "nested/output.txt"]);
+  assert.equal(after.runID, before.runID); assert.equal(after.generation, before.generation);
+  assert.equal(after.units[0].callID, unit.callID); assert.equal(after.units[0].childSessionID, "worker");
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  assert.equal(await readFile(join(f.directory, "nested/output.txt"), "utf8"), "diagnostic");
+  await assert.rejects(readFile(join(f.directory, "scratch.output")), { code: "ENOENT" });
+  assert.deepEqual(after.units[0].evidence, [], "native cleanup/output is not formal evidence");
+  await f.validate(); await f.finish();
+  assert.equal((await f.tool("operator_status")).completion.ready, true);
+}));
+
+test("literal shell reconciliation preserves prohibitions, Git ambiguity and uninferred path boundaries", async () => fixture(async f => {
+  await f.start(); const { unit } = await f.dispatch();
+  await mkdir(join(f.directory, "unscoped-directory"));
+  const before = await f.runtime.required("root"), manifest = await readFile(unit.manifestPath, "utf8");
+  for (const [command, error] of [
+    ["rm forbidden.txt", /mission-explicit-write-prohibition/],
+    ["printf x > .git/config", /operator-control-write-forbidden/],
+    ["printf x > extra.txt; git add .", /write denied/iu],
+    ['printf x > "$OUTPUT"', /manifest write scope/],
+    ["rm -rf unscoped-directory", /manifest write scope/],
+    [`printf x > ${join(f.directory, "../outside.txt")}`, /write denied/iu],
+  ] as const) {
+    await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: command }, { args: { command } }), error);
+    assert.equal(await readFile(unit.manifestPath, "utf8"), manifest, command);
+    assert.deepEqual((await f.runtime.required("root")).units[0].unit.write, before.units[0].unit.write);
+  }
+}));
+
+test("literal shell reconciliation does not turn a read-only unit into a writer", async () => fixture(async f => {
+  await f.start(); const { unit } = await f.dispatch("Read and verify only", "node check.mjs", []);
+  const manifest = await readFile(unit.manifestPath, "utf8");
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "readonly-output" },
+    { args: { command: "printf x > undeclared.txt" } }), /manifest write scope/);
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+  assert.deepEqual((await f.runtime.required("root")).units[0].unit.write, []);
+}));
+
+test("covered write scope expansion is a no-op for controls, evidence, freshness and spend; concrete shell repair uses the SAME command", async () => fixture(async f => {
   await f.start();
   const { unit } = await f.dispatch("Implement and verify", "node check.mjs", ["result.txt", "src/**"]);
   await mkdir(join(f.directory, "src")); await writeFile(join(f.directory, "src/a.ts"), "source");
@@ -247,8 +341,11 @@ test("covered write scope expansion is a no-op for controls, evidence, freshness
   await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["forbidden.txt"], reason: "Denied" }, "worker"), /mission-explicit-write-prohibition/);
   const command = "printf generated > generated.txt";
   const invoke = () => f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "same-shell" }, { args: { command } });
-  await assert.rejects(invoke(), /manifest write scope/);
+  await invoke();
+  assert.ok((await f.runtime.required("root")).units[0].unit.write.includes("generated.txt"));
+  const repairedManifest = await readFile(unit.manifestPath, "utf8");
   await f.tool("expand_unit", { unit_id: "unit-1", paths: ["generated.txt"], reason: "Requested shell output" }, "worker");
+  assert.equal(await readFile(unit.manifestPath, "utf8"), repairedManifest, "an explicit already-reconciled expansion remains a no-op");
   await invoke();
   assert.deepEqual((await f.tool("operator_status")).budget, budget);
   await f.finish();
@@ -328,6 +425,17 @@ test("scope update persistence failure rolls back manifest, handoff and binding 
   assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
   assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
   assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
+  prototype.save = async function(state: any) {
+    if (state.units[0].unit.write.includes("extra.txt")) throw Error("injected-shell-scope-state-save-failure");
+    return save.call(this, state);
+  };
+  try { await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "rollback-shell" },
+    { args: { command: "printf x > extra.txt" } }), /injected-shell-scope/); }
+  finally { prototype.save = save; }
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+  assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
+  assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
+  assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
   await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { args: { filePath: "result.txt", content: "fixed" } });
   await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { output: "written" });
   assert.equal((await f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra.txt"], reason: "Storage restored" }, "worker")).status, "scope-updated");
@@ -353,6 +461,8 @@ test("another writer blocks only the overlapping scope update and retains both o
   assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: other.manifestPath }, "worker2")).status, "bound");
   const original = await readFile(unit.manifestPath, "utf8"), budget = (await f.tool("operator_status")).budget;
   await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["held.txt"], reason: "Overlapping requested output" }, "worker"), /writer-conflict/);
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "conflicting-shell" },
+    { args: { command: "printf x > held.txt" } }), /writer-conflict/);
   assert.equal(await readFile(unit.manifestPath, "utf8"), original);
   assert.deepEqual((await f.tool("operator_status")).budget, budget);
   for (const [sessionID, filePath] of [["worker", "result.txt"], ["worker2", "held.txt"]]) {
