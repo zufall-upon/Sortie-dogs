@@ -138,7 +138,7 @@ import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js
 import type { RuntimeBridge } from "./runtime-bridge.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
@@ -489,6 +489,7 @@ interface HostGoalExecution {
   readonly candidate: string;
   readonly operationInputs?: string;
   readonly validationInputs?: string;
+  readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[] };
@@ -1962,12 +1963,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     const validationInputs = (validation !== undefined || correction !== undefined) && operationInputs === undefined
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
+    const validationSource = correction && validationInputs !== undefined
+      ? await validatedSourceSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
+      ...(validationSource === undefined ? {} : { validationSource }),
       owner: validation?.request.owner ?? "worker", validation,
       ...(correction ? { correction } : {}),
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
@@ -2009,19 +2013,28 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
       source: execution.source, candidate: execution.candidate });
+    const generated = execution.validationInputs !== undefined && refreshed &&
+      (refreshed.source !== execution.source || refreshed.candidate !== execution.candidate);
+    // Capture this narrower recipe only from an actual non-generating native check.
+    // Legacy records never gain new exclusions when refreshed or recovered later.
+    const validationBinding = execution.correction && fresh && !generated && execution.validationSource !== undefined
+      ? { ...execution.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const } : undefined;
+    const validatedSource = validationBinding && await validatedSourceSnapshot(execution.projectRoot, validationBinding).catch(() => undefined);
+    const proofFresh = fresh && (!validationBinding || validatedSource === execution.validationSource);
+    const observed = proofFresh && validatedSource && validationBinding
+      ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
     hostGoalExecutions.set(execution.callID, { ...execution,
-      ...(refreshed === undefined ? {} : { source: refreshed.source, candidate: refreshed.candidate }),
+      ...observed,
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
-      ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh });
+      ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh: proofFresh });
     if (execution.correction) {
       await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
         dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
         command: execution.correction.commands, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
-        binding: execution.binding, source: refreshed?.source ?? execution.source, candidate: refreshed?.candidate ?? execution.candidate,
-        fresh: fresh && outcome === "pass",
-        ...(execution.validationInputs !== undefined && refreshed &&
-          (refreshed.source !== execution.source || refreshed.candidate !== execution.candidate)
-          ? { generatedInputs: execution.validationInputs } : {}),
+        binding: proofFresh && validationBinding && validatedSource ? validationBinding : execution.binding,
+        source: observed?.source ?? execution.source, candidate: observed?.candidate ?? execution.candidate,
+        fresh: proofFresh && outcome === "pass",
+        ...(generated ? { generatedInputs: execution.validationInputs } : {}),
       });
     }
   }

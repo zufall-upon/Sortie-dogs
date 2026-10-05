@@ -128,7 +128,9 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   let complete: typeof matched | undefined;
   let previousEnd = notBefore, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
   for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
-    if (attempt.started < editedAt) continue;
+    // Bound native checks are compared with their actual input bytes below. A later
+    // report/cache write is not itself a source change. Unbound history stays conservative.
+    if (!checks && attempt.started < editedAt) continue;
     const commands = canonicalDeclaredValidationMembers(attempt.command, declared, matched.length % declared.length);
     if (!commands) continue; // Focused diagnostics are not formal proof.
     if (attempt.started < previousEnd) return { ready: false, reason: "mission-review-correction-validation-order:overlap" };

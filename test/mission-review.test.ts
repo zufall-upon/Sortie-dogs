@@ -47,6 +47,23 @@ test("required validation matches ordered native occurrences, not a latest-per-c
     parts: [part(`${quoted} && ${B}`, 0)] }], 100).ready, true, "quoted && stays inside its exact command");
 });
 
+test("later edits do not erase bound native outcomes; missing and failed bindings still refuse", () => {
+  const command = "node check.mjs", child = "author";
+  const history = [{ info: { role: "assistant", sessionID: child }, parts: [
+    { type: "tool", tool: "shell", callID: "check", state: { status: "completed", input: { command },
+      metadata: { exit: 0 }, time: { start: 110, end: 120 } } },
+    { type: "tool", tool: "patch", callID: "report", state: { status: "completed", time: { end: 130 } } },
+  ] }];
+  const check = { childSessionID: child, callID: "check", command: [command], fresh: true, exitCode: 0,
+    startedAt: new Date(110).toISOString(), endedAt: new Date(120).toISOString() } as any;
+  assert.equal(reviewerCorrectionValidation([command], child, history, 100).ready, false, "unbound legacy history stays conservative");
+  assert.equal(reviewerCorrectionValidation([command], child, history, 100, [check]).ready, true,
+    "persisted binding reaches the byte-freshness verifier instead of a blanket edit-time veto");
+  for (const checks of [[], [{ ...check, fresh: false }], [{ ...check, exitCode: 1 }], [{ ...check, childSessionID: "other" }]]) {
+    assert.match(reviewerCorrectionValidation([command], child, history, 100, checks).reason!, /binding-unavailable/);
+  }
+});
+
 test("native validation history reports only the current Worker's exact commands and real exits", () => {
   const part = (command: string, exit?: number, started = 100) => ({ type: "tool", tool: "shell", state: {
     status: "completed", input: { command }, metadata: exit === undefined ? {} : { exit } },
