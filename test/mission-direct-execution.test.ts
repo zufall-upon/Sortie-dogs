@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
@@ -12,7 +14,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root"] as const) test(`${actor} direct execution: ${mode}`, async () => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction"] as const) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
@@ -21,6 +23,18 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
   try {
     await mkdir(product, { recursive: true });
     await exec("git", ["init", "--quiet"], { cwd: product });
+    if (mode === "junction") {
+      const target = join(directory, "profile", "IE"), alias = join(directory, "profile", "Content.IE5");
+      await mkdir(target, { recursive: true });
+      await writeFile(join(target, "cached.txt"), "old profile data");
+      await fs.symlink(target, alias, process.platform === "win32" ? "junction" : "dir");
+      const original = fs.readdir;
+      t.mock.method(fs, "readdir", async (...args: Parameters<typeof fs.readdir>) => {
+        if (resolve(String(args[0])) === alias) throw Object.assign(new Error("alias enumeration denied"), { code: "EPERM" });
+        return Reflect.apply(original, fs, args);
+      });
+      syncBuiltinESMExports();
+    }
     await writeFile(join(directory, "check.mjs"), `import {readFileSync} from "node:fs";\nif (readFileSync(${JSON.stringify(resultPath)},"utf8") !== "fixed\\n") process.exit(1);\n`);
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator", outcome: "running" },
@@ -51,8 +65,8 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       await prompt(actor, task.args.prompt);
     }
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{ title: "Fix result",
-      objective: "Create result.txt accepted by check.mjs", read: ["check.mjs"],
-      write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**"], validation: ["node check.mjs"] }] }, { sessionID: actor }));
+      objective: "Create result.txt accepted by check.mjs", read: ["check.mjs", ...(mode === "junction" ? ["profile/**"] : [])],
+       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])], validation: ["node check.mjs"] }] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -139,5 +153,5 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(await readFile(join(directory, resultPath), "utf8"), "fixed\n");
     assert.equal((await readRun()).units[0]!.directExecution?.actor, actor, "recovery and acceptance retain the same author without a user turn");
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(directory, { recursive: true, force: true }); }
 });
