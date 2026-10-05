@@ -99,30 +99,34 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
   const entries: Array<readonly [string, string, string?]> = [];
   const canonicalRoot = await realpath(projectRoot);
   const scratchExcluded = binding ? snapshotScratchExclusion(binding) : () => false;
-  const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set(), projectArtifacts = false): Promise<boolean> => {
+  const visit = async (absolute: string, ancestors: ReadonlySet<string> = new Set(), projectArtifacts = false,
+    physical = absolute): Promise<boolean> => {
     if (excluded.some(root => !outside(root, absolute))) return true;
     if (scratchExcluded(absolute)) return true;
     const scoped = relative(projectRoot, absolute).replaceAll("\\", "/");
     if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return false;
     if ((sourcePolicy === "project-files-v1" || projectArtifacts) && isRuntimeControlPath(scoped)) return true;
-    const metadata = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
+    const metadata = await lstat(physical).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
     });
     if (metadata === undefined) { entries.push([scoped, "missing"]); return true; }
     if (metadata.isSymbolicLink()) {
-      const target = await realpath(absolute).catch(() => undefined);
+      const target = await realpath(physical).catch(() => undefined);
       if (target === undefined) return false;
       const relativeTarget = relative(canonicalRoot, target);
       if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget) ||
         ancestors.has(target)) return false;
       const targetMetadata = await stat(target);
-      const link = await readlink(absolute);
+      const link = await readlink(physical);
       if (targetMetadata.isDirectory()) {
         // Keep the logical scope path and link target in the digest; do not follow external links or cycles.
         entries.push([scoped, `symlink:${link}`]);
         const next = new Set([...ancestors, target]);
-        for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts)) return false;
+        // Windows compatibility junctions can deny enumeration through the alias while
+        // their resolved directory remains readable. Traverse the already resolved target.
+        // Retain logical entry labels so unchanged existing evidence keeps its identity.
+        for (const child of (await readdir(target)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts, join(target, child))) return false;
         return true;
       }
       if (!targetMetadata.isFile()) return false;
@@ -130,15 +134,15 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
       return true;
     }
     if (metadata.isDirectory()) {
-      const real = await realpath(absolute);
+      const real = await realpath(physical);
       if (ancestors.has(real)) return false;
       entries.push([scoped, "directory"]);
       const next = new Set([...ancestors, real]);
-      for (const child of (await readdir(absolute)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts)) return false;
+      for (const child of (await readdir(physical)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts, join(physical, child))) return false;
       return true;
     }
     if (!metadata.isFile()) return false;
-    entries.push([scoped, "file", createHash("sha256").update(await readFile(absolute)).digest("hex")]);
+    entries.push([scoped, "file", createHash("sha256").update(await readFile(physical)).digest("hex")]);
     return true;
   };
   for (const path of [...new Set(paths)].sort()) {
