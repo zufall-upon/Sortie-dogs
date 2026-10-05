@@ -145,7 +145,8 @@ export type GoalFlightEvent =
         readonly native_session_id?: string; readonly native_started_at?: string;
         /** Host-native validation identity retained in this same goal ledger; never model-authored evidence. */
         readonly native_validation_observations?: readonly { readonly thread_id: string; readonly turn_id: string;
-          readonly item_id?: string; readonly raw_command: string; readonly canonical_commands: readonly string[] }[] })
+          readonly item_id?: string; readonly raw_command: string; readonly canonical_commands: readonly string[];
+          readonly status: string; readonly exit_code: number | null }[] })
   | (GoalEventBase & { readonly kind: "unit.usage-reconciled"; readonly goal_id: string;
         readonly reservation_id: string; readonly native_session_id: string; readonly cost_usd: number;
         readonly source: "native-usage-price-table" })
@@ -435,7 +436,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       requireState(event.native_validation_observations === undefined || event.native_validation_observations.length > 0 &&
         event.native_validation_observations.every(item => text(item.thread_id) && text(item.turn_id) &&
           (item.item_id === undefined || text(item.item_id)) && commandText(item.raw_command) &&
-          item.canonical_commands.length > 0 && item.canonical_commands.every(commandText)),
+          item.canonical_commands.length > 0 && item.canonical_commands.every(commandText) && text(item.status) &&
+          (item.exit_code === null || Number.isSafeInteger(item.exit_code))),
       "invalid", "Native validation observations are malformed.");
       requireState(event.evidence.every((entry) => validGoalEvidence(entry, state)), "evidence", "Unit evidence is not bound to the current goal revision.");
       requireState(event.evidence.every((entry) => entry.execution.units.includes(event.unit_id)), "evidence", "Unit evidence does not identify its reserved unit.");

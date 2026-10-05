@@ -64,6 +64,30 @@ test("Codex settlement preserves an observed validation failure", async () => {
   ] }), async () => [evidence]));
   assert.equal(result.disposition, "failed");
   assert.deepEqual(result.failure, { command: [command], outcome: "fail", exitCode: 2 });
+  assert.equal(state.observations.length, 1);
+  assert.equal(state.observations[0]![0]!.rawCommand, command);
+  assert.equal(state.observations[0]![0]!.status, "failed");
+  assert.equal(state.observations[0]![0]!.exitCode, 2);
+});
+
+test("Codex settlement retains ordered successful prefix before a later validation failure", async () => {
+  const second = "node verify-second.js";
+  const state = target();
+  const multiGoal = { ...goalState, acceptance_contract: { criteria: [
+    ...goalState.acceptance_contract!.criteria,
+    { ...goalState.acceptance_contract!.criteria[0]!, criterion_id: "criterion-2", validation_command: second },
+  ] } };
+  const result = await new CodexMissionSettlementBridge(state.target).settle({
+    rootSessionID: "root-1", callID: "call-1", unitID: "unit-1",
+    turn: turn({ items: [
+      { id: "cmd-1", type: "commandExecution", command, status: "completed", exitCode: 0 },
+      { id: "cmd-2", type: "commandExecution", command: second, status: "failed", exitCode: 7 },
+    ] }), declaredValidation: [command, second], goalState: multiGoal, captureEvidence: async () => [],
+  });
+  assert.equal(result.disposition, "failed");
+  assert.equal(state.observations.length, 1);
+  assert.deepEqual(state.observations[0]!.map(item => item.rawCommand), [command, second]);
+  assert.deepEqual(state.observations[0]!.map(item => item.exitCode), [0, 7]);
 });
 
 test("Codex settlement rejects model text and invalid evidence as proof", async () => {
@@ -83,6 +107,9 @@ test("Codex settlement maps interrupted turns without attempting evidence captur
   assert.equal(result.disposition, "cancelled");
   assert.equal(result.resultClass, "interrupted");
   assert.equal(captured, false);
+  assert.equal(state.observations.length, 1);
+  assert.equal(state.observations[0]![0]!.rawCommand, command);
+  assert.equal(state.observations[0]![0]!.status, "completed");
 });
 
 test("Codex settlement requires evidence coverage for every positive criterion", async () => {

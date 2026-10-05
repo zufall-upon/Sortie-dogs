@@ -150,7 +150,8 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
     const implementation = await host.runTurn(threadID,
       `${options.prompt}\n\nWork only within the operation manifest scope. Do not run validation commands yet.`,
       { cwd: projectRoot, approvalPolicy: "never", sandboxPolicy, model: options.model, effort: options.effort });
-    if (implementation.status !== "completed") throw new Error("codex-mission-implementation-failed");
+    if (implementation.status !== "completed") throw new Error(implementation.status === "interrupted"
+      ? "codex-mission-implementation-interrupted" : "codex-mission-implementation-failed");
     await lease.assertHeld();
     const after = await projectSnapshot(projectRoot, profile);
     const outOfScope = changedPaths(before, after).filter(path => !allowedWrite(path, writeScope));
@@ -177,7 +178,7 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
           native_started_at: validationStartedAt,
           ...(observations.length ? { native_validation_observations: observations.map(item => ({ thread_id: item.threadID,
             turn_id: item.turnID, ...(item.itemID ? { item_id: item.itemID } : {}), raw_command: item.rawCommand,
-            canonical_commands: item.canonicalCommands })) } : {}) });
+            canonical_commands: item.canonicalCommands, status: item.status, exit_code: item.exitCode })) } : {}) });
       },
     });
     const settlement = await bridge.settle({ rootSessionID, callID: validation.turnID, unitID, turn: validation,
@@ -199,8 +200,10 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
       if (ledger && goalID && reservationID && unitID && startedAt) {
         let state = (await ledger.readGoal()).state;
         if (state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
+          const interrupted = error instanceof Error && error.message === "codex-mission-implementation-interrupted";
           await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(), reservation_id: reservationID,
-            receipt_id: randomUUID(), goal_id: goalID, unit_id: unitID, disposition: "failed", result_class: "process-defect",
+            receipt_id: randomUUID(), goal_id: goalID, unit_id: unitID, disposition: interrupted ? "cancelled" : "failed",
+            result_class: interrupted ? "interrupted" : "process-defect",
             progress_fingerprint: null, evidence: [], elapsed_ms: null, cost_usd: null });
           state = (await ledger.readGoal()).state;
         }

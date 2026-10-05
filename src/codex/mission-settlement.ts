@@ -21,6 +21,8 @@ export interface CodexValidationObservation {
   readonly itemID?: string;
   readonly rawCommand: string;
   readonly canonicalCommands: readonly string[];
+  readonly status: string;
+  readonly exitCode: number | null;
 }
 
 export interface CodexMissionSettlementRequest {
@@ -84,8 +86,30 @@ export class CodexMissionSettlementBridge {
   async settle(request: CodexMissionSettlementRequest): Promise<SerialDispatchSettlement> {
     const base = { rootSessionID: request.rootSessionID, callID: request.callID, unitID: request.unitID,
       childSessionID: request.turn.threadID } as const;
-    if (request.turn.status === "interrupted") return this.commit({ ...base, disposition: "cancelled",
-      evidence: [], resultClass: "interrupted", nativeOutcome: "failed" });
+    if (request.turn.status === "interrupted") {
+      const expected = request.declaredValidation.map(normalizeCommand);
+      const observations: CodexValidationObservation[] = [];
+      let cursor = 0;
+      for (const item of request.turn.items) {
+        if (!object(item) || item.type !== "commandExecution") continue;
+        const members = declaredMembers(item, expected.slice(cursor), request.trustedPowerShellExecutable);
+        if (!members || members.length === 0) continue;
+        const normalized = members.map(normalizeCommand);
+        if (normalized.some((member, index) => member !== expected[cursor + index])) continue;
+        observations.push({ threadID: request.turn.threadID, turnID: request.turn.turnID,
+          ...(typeof item.id === "string" ? { itemID: item.id } : {}), rawCommand: item.command as string,
+          canonicalCommands: normalized, status: typeof item.status === "string" ? item.status : "unknown",
+          exitCode: typeof item.exitCode === "number" ? item.exitCode : null });
+        cursor += normalized.length;
+        if (cursor === expected.length || item.status !== "completed" || item.exitCode !== 0) break;
+      }
+      if (observations.length > 0) {
+        try { await this.target.observedValidation(observations); }
+        catch { return this.commit({ ...base, disposition: "failed", evidence: [], resultClass: "process-defect", nativeOutcome: "failed" }); }
+      }
+      return this.commit({ ...base, disposition: "cancelled",
+        evidence: [], resultClass: "interrupted", nativeOutcome: "failed" });
+    }
     if (request.turn.status !== "completed") return this.commit({ ...base, disposition: "failed",
       evidence: [], resultClass: "process-defect", nativeOutcome: "failed" });
     if (request.declaredValidation.length === 0) return this.commit({ ...base, disposition: "failed",
@@ -105,8 +129,18 @@ export class CodexMissionSettlementBridge {
       if (normalized.some((member, index) => member !== expected[cursor + index])) continue;
       validationExecutions.push({ item, commands: normalized });
       const exitCode = typeof item.exitCode === "number" ? item.exitCode : null;
-      if (item.status !== "completed" || exitCode !== 0) return this.commit({ ...base, disposition: "failed", evidence: [],
-        resultClass: "acceptance", nativeOutcome: "completed", failure: { command: normalized, outcome: "fail", exitCode } });
+      if (item.status !== "completed" || exitCode !== 0) {
+        const observations = validationExecutions.map(({ item: observed, commands }) => ({
+          threadID: request.turn.threadID, turnID: request.turn.turnID,
+          ...(typeof observed.id === "string" ? { itemID: observed.id } : {}), rawCommand: observed.command as string,
+          canonicalCommands: commands, status: typeof observed.status === "string" ? observed.status : "unknown",
+          exitCode: typeof observed.exitCode === "number" ? observed.exitCode : null,
+        }));
+        try { await this.target.observedValidation(observations); }
+        catch { return this.commit({ ...base, disposition: "failed", evidence: [], resultClass: "process-defect", nativeOutcome: "completed" }); }
+        return this.commit({ ...base, disposition: "failed", evidence: [],
+          resultClass: "acceptance", nativeOutcome: "completed", failure: { command: normalized, outcome: "fail", exitCode } });
+      }
       cursor += normalized.length;
       if (cursor === expected.length) break;
     }
@@ -116,7 +150,9 @@ export class CodexMissionSettlementBridge {
 
     const observations = validationExecutions.map(({ item, commands }) => ({ threadID: request.turn.threadID,
       turnID: request.turn.turnID, ...(typeof item.id === "string" ? { itemID: item.id } : {}),
-      rawCommand: item.command as string, canonicalCommands: commands }));
+      rawCommand: item.command as string, canonicalCommands: commands,
+      status: typeof item.status === "string" ? item.status : "unknown",
+      exitCode: typeof item.exitCode === "number" ? item.exitCode : null }));
     try { await this.target.observedValidation(observations); }
     catch { return this.commit({ ...base, disposition: "failed", evidence: [], resultClass: "process-defect", nativeOutcome: "completed" }); }
     let evidence: readonly GoalEvidence[];
