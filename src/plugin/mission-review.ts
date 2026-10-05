@@ -126,12 +126,18 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
   let complete: typeof matched | undefined;
-  let previousEnd = notBefore, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
+  let previousEnd = notBefore, overlap = false, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
   for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
-    if (attempt.started < editedAt) continue;
+    // Bound native checks are compared with their actual input bytes below. A later
+    // report/cache write is not itself a source change. Unbound history stays conservative.
+    if (!checks && attempt.started < editedAt) continue;
     const commands = canonicalDeclaredValidationMembers(attempt.command, declared, matched.length % declared.length);
     if (!commands) continue; // Focused diagnostics are not formal proof.
-    if (attempt.started < previousEnd) return { ready: false, reason: "mission-review-correction-validation-order:overlap" };
+    if (attempt.started < previousEnd) {
+      complete = undefined; matched.length = 0; failed = undefined; overlap = true;
+      previousEnd = Math.max(previousEnd, attempt.completed);
+      continue; // A later complete ordered retry can recover in this same admission.
+    }
     previousEnd = attempt.completed;
     if (commands[0] !== declared[matched.length] || matched.length === declared.length) matched.length = 0;
     failed = undefined;
@@ -148,10 +154,11 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         if (command !== declared[0]) continue;
       }
       matched.push({ callID: attempt.callID, member, occurrence: matched.length });
-      if (matched.length === declared.length) complete = [...matched];
+      if (matched.length === declared.length) { complete = [...matched]; overlap = false; }
     }
   }
   if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed, nextOccurrence: 0 };
+  if (overlap && !matched.length) return { ready: false, reason: "mission-review-correction-validation-order:overlap", nextOccurrence: 0 };
   if (!complete) return { ready: false, reason: `mission-review-correction-validation-missing:${declared[matched.length]}`, nextOccurrence: matched.length };
   for (const item of complete) {
     const command = declared[item.occurrence]!;

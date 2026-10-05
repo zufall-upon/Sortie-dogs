@@ -1831,14 +1831,14 @@ for (const mode of ["four", "two", "early-fail", "late-fail", "chain", "failed-c
   });
 }
 
-for (const mode of ["hook-edit", "hook-edit-rerun", "scratch-cold", "missing-binding", "generators"] as const) {
+for (const mode of ["hook-edit", "hook-edit-rerun", "scratch-cold", "missing-binding", "generators", "report-edit"] as const) {
   test(`required correction checks retain actual candidate bindings: ${mode}`, async () => {
     const f = await fixture();
     try {
       const validation = mode === "generators" ? ["node generate.mjs", "node format.mjs", "node required-test.mjs", "node check.mjs"]
         : mode === "scratch-cold" ? ["TMPDIR=.cache node required-test.mjs", "TMPDIR=.cache node check.mjs"]
         : ["node required-test.mjs", "node check.mjs"];
-      await initial(f, { validation });
+      await initial(f, { validation, ...(mode === "report-edit" ? { write: ["result.txt", "reports/**"] } : {}) });
       const prepared = await f.tool("root", "repair_review");
       const correction = await f.before("root", "subagent", f.task(prepared.task));
       await f.prompt("author", correction.input.prompt); await f.bind("author"); await f.edit("author", "ready");
@@ -1850,6 +1850,12 @@ for (const mode of ["hook-edit", "hook-edit-rerun", "scratch-cold", "missing-bin
       await f.shell("author", "git add -- result.txt && git commit -m correction");
       if (mode === "hook-edit-rerun") await f.shell("author", "node required-test.mjs");
       await f.shell("author", validation.at(-1)!);
+      if (mode === "report-edit") {
+        const report = await f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: reports/result.md\n+Native checks passed.\n*** End Patch" });
+        await mkdir(join(f.directory, "reports"));
+        await writeFile(join(f.directory, "reports/result.md"), "Native checks passed.\n");
+        await f.after(report, "Added report");
+      }
       await f.finish(correction, "author", "CORRECTION_READY");
       if (mode === "missing-binding") {
         const runtime = new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE);

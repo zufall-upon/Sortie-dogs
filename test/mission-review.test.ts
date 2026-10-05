@@ -47,6 +47,41 @@ test("required validation matches ordered native occurrences, not a latest-per-c
     parts: [part(`${quoted} && ${B}`, 0)] }], 100).ready, true, "quoted && stays inside its exact command");
 });
 
+test("later edits do not erase bound native outcomes; missing and failed bindings still refuse", () => {
+  const command = "node check.mjs", child = "author";
+  const history = [{ info: { role: "assistant", sessionID: child }, parts: [
+    { type: "tool", tool: "shell", callID: "check", state: { status: "completed", input: { command },
+      metadata: { exit: 0 }, time: { start: 110, end: 120 } } },
+    { type: "tool", tool: "patch", callID: "report", state: { status: "completed", time: { end: 130 } } },
+  ] }];
+  const check = { childSessionID: child, callID: "check", command: [command], fresh: true, exitCode: 0,
+    startedAt: new Date(110).toISOString(), endedAt: new Date(120).toISOString() } as any;
+  assert.equal(reviewerCorrectionValidation([command], child, history, 100).ready, false, "unbound legacy history stays conservative");
+  assert.equal(reviewerCorrectionValidation([command], child, history, 100, [check]).ready, true,
+    "persisted binding reaches the byte-freshness verifier instead of a blanket edit-time veto");
+  for (const checks of [[], [{ ...check, fresh: false }], [{ ...check, exitCode: 1 }], [{ ...check, childSessionID: "other" }]]) {
+    assert.match(reviewerCorrectionValidation([command], child, history, 100, checks).reason!, /binding-unavailable/);
+  }
+});
+
+test("a bound ordered retry recovers after an earlier overlap without a new admission", () => {
+  const A = "node a.mjs", B = "node b.mjs", child = "author";
+  const part = (command: string, callID: string, start: number, end: number) => ({ type: "tool", tool: "shell", callID,
+    state: { status: "completed", input: { command }, metadata: { exit: 0 }, time: { start, end } } });
+  const overlapping = [part(A, "old-a", 110, 150), part(B, "old-b", 120, 160)];
+  const ordered = [part(A, "new-a", 200, 210), part(B, "new-b", 220, 230)];
+  const checks = [...overlapping, ...ordered].map(item => ({ childSessionID: child, callID: item.callID,
+    command: [item.state.input.command], fresh: item.callID.startsWith("new-"), exitCode: 0,
+    startedAt: new Date(item.state.time.start).toISOString(), endedAt: new Date(item.state.time.end).toISOString() })) as any;
+  const compare = (parts: unknown[]) => reviewerCorrectionValidation([A, B], child,
+    [{ info: { role: "assistant", sessionID: child }, parts }], 100, checks);
+  assert.equal(compare(overlapping).ready, false, "overlapped execution never proves ordered validation");
+  assert.equal(compare([...overlapping, ordered[0]]).ready, false, "a partial retry is not a complete sequence");
+  const result = compare([...overlapping, { type: "tool", tool: "patch", state: { status: "completed", time: { end: 180 } } }, ...ordered]);
+  assert.equal(result.ready, true, JSON.stringify(result));
+  assert.deepEqual(result.matched?.map(item => item.callID), ["new-a", "new-b"]);
+});
+
 test("native validation history reports only the current Worker's exact commands and real exits", () => {
   const part = (command: string, exit?: number, started = 100) => ({ type: "tool", tool: "shell", state: {
     status: "completed", input: { command }, metadata: exit === undefined ? {} : { exit } },
