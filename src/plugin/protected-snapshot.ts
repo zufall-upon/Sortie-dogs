@@ -203,6 +203,37 @@ export async function validationInputSnapshot(projectRoot: string, binding: Bind
     : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, [], binding);
 }
 
+/** Pin a non-generating check's inputs and concrete source outputs, not incidental
+ * files created later under a directory execution grant (for example result reports).
+ * Exact outputs and tracked source remain protected even when omitted from read. */
+export async function validatedSourceSnapshot(projectRoot: string, binding: Binding): Promise<string | undefined> {
+  const current = await snapshotManifest(projectRoot, binding);
+  if (!current?.manifest.read.length) return undefined; // An absent input set retains the full-source recipe.
+  const scopes = [...binding.source_paths.map(path => resolve(projectRoot, path)),
+    ...current.manifest.write.map(path => resolve(projectRoot, normalizeManifestScope(path).path))];
+  const protection = [...new Set([...(binding.freshness?.protected_paths ?? []),
+    ...await currentSnapshotProtection(projectRoot, current.manifest)])];
+  const reads = current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path));
+  const currentBinding = binding.freshness ? { ...binding, freshness: { ...binding.freshness, protected_paths: protection } } : binding;
+  // A populated directory grant without a concrete output/input inventory cannot safely
+  // acquire the report-only recipe. Keep the original full-candidate freshness instead.
+  for (const entry of binding.validation_policy === undefined ? current.manifest.write : []) {
+    const output = resolve(projectRoot, normalizeManifestScope(entry).path);
+    if (reads.some(input => !outside(input, output)) || snapshotScratchExcluded(currentBinding, output) ||
+        protection.some(path => path !== output && !outside(output, path) && !reads.includes(path))) continue;
+    const stat = await lstat(output).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (stat?.isDirectory() && (await readdir(output)).length) return undefined;
+  }
+  const paths = [...new Set([...reads,
+    ...protection.filter(path => scopes.some(scope => !outside(scope, path)))])];
+  return binding.source_policy === "declared-paths-v1"
+    ? declaredScopeDigest(projectRoot, paths, current.hash, true, [], currentBinding)
+    : protectedScopeDigest(projectRoot, paths, current.hash, binding.source_policy, [], currentBinding);
+}
+
 export async function protectedSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string },
   options: { captureFreshness?: boolean } = {}): Promise<{
   readonly binding: Binding; readonly source: string; readonly candidate: string;
@@ -257,6 +288,10 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
 } | undefined> {
   const current = await snapshotManifest(projectRoot, binding);
   if (!current) return undefined;
+  if (binding.validation_policy === "inputs-and-concrete-outputs-v1") {
+    const source = await validatedSourceSnapshot(projectRoot, binding);
+    return source === undefined ? undefined : { source, candidate: source };
+  }
   const manifestHash = current.hash;
   const sourcePaths = binding.source_paths.map(path => resolve(projectRoot, path));
   const candidatePaths = binding.candidate_paths.map(path => resolve(projectRoot, path));
