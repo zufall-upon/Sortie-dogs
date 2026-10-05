@@ -35,10 +35,10 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-**Current release: [v0.13.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.6)**
-([release notes](docs/release-v0.13.6.md)). The default Mission runtime retains the `v010`
+**Current release: [v0.13.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.7)**
+([release notes](docs/release-v0.13.7.md)). The default Mission runtime retains the `v010`
 profile, command and configuration names for compatibility; these names do not mean v0.10 is installed.
-The current asset marker is `0.13.6-acceptance-reuse-v1`.
+The current asset marker is `0.13.7-review-recovery-v1`.
 
 ## SWE-bench Lite: 170/300 (56.67%)
 
@@ -48,7 +48,7 @@ The fixed **Sortie-dogs v0.12.24** harness resolved **170 of 300 SWE-bench Lite 
 
 The single official 300-instance report and frozen predictions are hash-bound in the report. Confirmed inference expense was **$162.99**; a separate **$34.60** of usage has unknown pricing and is held against the campaign cap, **not** counted as known expense. Leaderboard registration and maintainer acceptance are separate from this official local evaluation.
 
-Historical scores below belong to their fixed candidates, not v0.13.6. SWE-bench is a separate,
+Historical scores below belong to their fixed candidates, not v0.13.7. SWE-bench is a separate,
 optional measurement rather than a mandatory release gate.
 
 > **Beta:** v0.13.x is still stabilizing. Runtime behavior,
@@ -93,7 +93,19 @@ existing local bridge loads enforcement and model routing. OpenCode can reload w
 but replacing an installed dependency may require a full restart. A new chat session alone does not
 prove the newly installed plugin is loaded.
 
-## v0.13.6 runtime updates
+## v0.13.7 runtime updates
+
+PRs #158/#159 prevent late write-only reports from falsely invalidating bound non-generating
+native checks, while preserving actual source/output freshness, failed checks and legacy recipes.
+Whole-root grants without a concrete inventory keep full-candidate freshness. Non-Git Mission roots
+can prepare independent Review from declared nested repositories/worktrees/plain outputs, including
+committed content; corrupt Git/HEAD errors remain visible. Operator performs authorized local recovery
+in the same turn without another approval, changed requirements or reset spending. Ubuntu's Git
+filesystem-boundary diagnostic is recognized alongside the standard non-repository error.
+The PR native observation reached Reviewer startup, not final acceptance. Release receipts:
+`_testenv/releases/0.13.7/`; see [release notes](docs/release-v0.13.7.md).
+
+## v0.13.6 runtime updates (retained)
 
 PR #156 references recorded formal PASS evidence in acceptance summaries instead of fetching
 the same successful unit's native history again for display. Missing/failed proof retains history
@@ -424,7 +436,7 @@ register stable and `v010` from the same package installation path in one host.
 Project-local installation is recommended. To expose the current Mission assets globally:
 
 ```sh
-npm install --global sortie-dogs@0.13.6
+npm install --global sortie-dogs@0.13.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -436,7 +448,7 @@ can resolve a **separate dependency** under that config root. Updating npm-globa
 it. For that layout, also install the same release at the actual config root, then rerun global init:
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.6
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -459,7 +471,7 @@ version, preserves user configuration, and stops safely on unknown ownership or
 conflicting files.
 
 Align any exact version pin or separate bridge dependency with the intended release too. An installed
-marker of `0.13.6-acceptance-reuse-v1` identifies the assets; it does not prove an already-running
+marker of `0.13.7-review-recovery-v1` identifies the assets; it does not prove an already-running
 OpenCode process has reloaded the plugin.
 
 There is no supported uninstall command. Remove the npm dependency separately,

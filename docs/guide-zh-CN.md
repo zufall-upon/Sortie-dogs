@@ -13,9 +13,9 @@
 [English README](../README.md) · [日本語](guide-ja.md) ·
 [测试](testing.md) · [CLI testing](cli-testing.md)
 
-**当前release：[v0.13.6](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.6)**
-（[发布说明](release-v0.13.6.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.6-acceptance-reuse-v1`。
+**当前release：[v0.13.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.7)**
+（[发布说明](release-v0.13.7.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.7-review-recovery-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -56,7 +56,17 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.6更新
+## v0.13.7更新
+
+整合PR #158/#159：后续write-only报告的时间戳不会单独使已绑定的非生成native check失效。
+真实source/具体成果freshness、失败和旧证据recipe保持不变；无具体inventory的whole-root grant
+仍使用full-candidate freshness。非Git Mission root也可从声明的nested repo/worktree/plain output
+准备独立Review，包含已commit内容；真实Git/HEAD损坏仍明确报错。Operator在原权限内同turn修复
+通常故障，不增加审批、改变要求或reset费用。识别Ubuntu mount边界的非Git诊断。
+PR真实观测仅达到Reviewer启动，未证明最终受理。release证据：`_testenv/releases/0.13.7/`，
+参见[发布说明](release-v0.13.7.md)。
+
+## v0.13.6更新（保留）
 
 整合PR #156：成功unit的正式PASS证据覆盖全部声明command时，acceptance summary引用已有formal
 evidence，不为显示再次获取native历史。证据缺失/失败仍保留历史诊断；历史证据不是当前freshness或受理。
@@ -133,7 +143,7 @@ stable profile中的Luna fabric和parallel integration不在本profile开放。
   已知推理费用 **$17.73**，未知usage hold **$1.98** 单独记录；推理约81分钟、官方评分7.2分钟。
   [固定条件、中断run处理与详情](../README.md#v0131-dev23-2026-09-30)。
 
-这些是历史固定candidate的结果，不是v0.13.6分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
+这些是历史固定candidate的结果，不是v0.13.7分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
 推理完成、Sortie的`DONE`、Review `PASS`和官方解决结果分别记录；官方本地评测也不等于leaderboard注册或接受。
 SWE-bench按需单独执行，不是release必需gate。条件和限制保留在[测量契约](benchmark-completion-contract.md)、
 [结果历史](../README.md#swe-bench-evaluation)及[历史local case study](benchmark-reference.md)中。
@@ -296,7 +306,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.6
+npm install --global sortie-dogs@0.13.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -308,7 +318,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.6
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -329,7 +339,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.6-acceptance-reuse-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.7-review-recovery-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，
