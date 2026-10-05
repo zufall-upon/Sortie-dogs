@@ -213,9 +213,22 @@ export async function validatedSourceSnapshot(projectRoot: string, binding: Bind
     ...current.manifest.write.map(path => resolve(projectRoot, normalizeManifestScope(path).path))];
   const protection = [...new Set([...(binding.freshness?.protected_paths ?? []),
     ...await currentSnapshotProtection(projectRoot, current.manifest)])];
-  const paths = [...new Set([...current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path)),
-    ...protection.filter(path => scopes.some(scope => !outside(scope, path)))])];
+  const reads = current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path));
   const currentBinding = binding.freshness ? { ...binding, freshness: { ...binding.freshness, protected_paths: protection } } : binding;
+  // A populated directory grant without a concrete output/input inventory cannot safely
+  // acquire the report-only recipe. Keep the original full-candidate freshness instead.
+  for (const entry of binding.validation_policy === undefined ? current.manifest.write : []) {
+    const output = resolve(projectRoot, normalizeManifestScope(entry).path);
+    if (reads.some(input => !outside(input, output)) || snapshotScratchExcluded(currentBinding, output) ||
+        protection.some(path => path !== output && !outside(output, path) && !reads.includes(path))) continue;
+    const stat = await lstat(output).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (stat?.isDirectory() && (await readdir(output)).length) return undefined;
+  }
+  const paths = [...new Set([...reads,
+    ...protection.filter(path => scopes.some(scope => !outside(scope, path)))])];
   return binding.source_policy === "declared-paths-v1"
     ? declaredScopeDigest(projectRoot, paths, current.hash, true, [], currentBinding)
     : protectedScopeDigest(projectRoot, paths, current.hash, binding.source_policy, [], currentBinding);

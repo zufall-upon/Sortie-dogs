@@ -48,6 +48,16 @@ test("concrete validation protects newly tracked source inside old scratch witho
   assert.equal(JSON.stringify(binding), saved, "current protections tighten the comparison, never mutate historical evidence");
 }));
 
+test("a populated directory without concrete source outputs keeps full-candidate validation freshness", async () => fixture(async root => {
+  await writeFile(join(root, "check.mjs"), "check input");
+  await mkdir(join(root, "product"));
+  await writeFile(join(root, "product", "result.txt"), "checked product");
+  const pinned = await validationPin(root, ["check.mjs"], [root + "/**"], ["node check.mjs"]);
+  assert.equal(await validatedSourceSnapshot(root, pinned.binding), undefined);
+  await writeFile(join(root, "product", "result.txt"), "unvalidated product");
+  assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+}));
+
 test("concrete validation sees materialized exact outputs after an authorized scope addition", async () => fixture(async root => {
   await writeFile(join(root, "input.txt"), "checked input");
   const pinned = await validationPin(root, ["input.txt"], ["outputs/**"], ["node check.mjs"]);
