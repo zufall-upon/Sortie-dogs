@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -30,6 +30,37 @@ async function validationPin(root: string, read: string[], write: string[], vali
   assert.ok(pinned?.binding.freshness);
   return pinned;
 }
+
+test("concrete validation protects newly tracked source inside old scratch without rewriting its recipe", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, ".tmp"));
+  await writeFile(join(root, "input.txt"), "checked input");
+  const pinned = await validationPin(root, ["input.txt"], [".tmp/**"], ["TMPDIR=.tmp node check.mjs"]);
+  const binding = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const saved = JSON.stringify(binding), before = await validatedSourceSnapshot(root, binding);
+  assert.ok(before);
+  await writeFile(join(root, ".tmp", "report.md"), "incidental report");
+  assert.deepEqual(await refreshProtectedSnapshot(root, binding), { source: before, candidate: before });
+  await writeFile(join(root, ".tmp", "source.js"), "new real source");
+  await exec("git", ["add", "--", ".tmp/source.js"], { cwd: root });
+  const after = await refreshProtectedSnapshot(root, binding);
+  assert.notEqual(after?.source, before);
+  assert.equal(JSON.stringify(binding), saved, "current protections tighten the comparison, never mutate historical evidence");
+}));
+
+test("concrete validation sees materialized exact outputs after an authorized scope addition", async () => fixture(async root => {
+  await writeFile(join(root, "input.txt"), "checked input");
+  const pinned = await validationPin(root, ["input.txt"], ["outputs/**"], ["node check.mjs"]);
+  const binding = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const before = await validatedSourceSnapshot(root, binding);
+  assert.ok(before);
+  const manifestPath = join(root, "manifest.json"), manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.write.push("extra-source.js");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  assert.deepEqual(await refreshProtectedSnapshot(root, binding), { source: before, candidate: before }, "an absent grant is not new source");
+  await writeFile(join(root, "extra-source.js"), "new delivered source");
+  assert.notEqual((await refreshProtectedSnapshot(root, binding))?.source, before);
+}));
 
 test("external source/candidate inventory reuse never survives a refresh", async () => fixture(async root => fixture(async external => {
   const file = join(external, "installed.js");

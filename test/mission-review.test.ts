@@ -64,6 +64,24 @@ test("later edits do not erase bound native outcomes; missing and failed binding
   }
 });
 
+test("a bound ordered retry recovers after an earlier overlap without a new admission", () => {
+  const A = "node a.mjs", B = "node b.mjs", child = "author";
+  const part = (command: string, callID: string, start: number, end: number) => ({ type: "tool", tool: "shell", callID,
+    state: { status: "completed", input: { command }, metadata: { exit: 0 }, time: { start, end } } });
+  const overlapping = [part(A, "old-a", 110, 150), part(B, "old-b", 120, 160)];
+  const ordered = [part(A, "new-a", 200, 210), part(B, "new-b", 220, 230)];
+  const checks = [...overlapping, ...ordered].map(item => ({ childSessionID: child, callID: item.callID,
+    command: [item.state.input.command], fresh: item.callID.startsWith("new-"), exitCode: 0,
+    startedAt: new Date(item.state.time.start).toISOString(), endedAt: new Date(item.state.time.end).toISOString() })) as any;
+  const compare = (parts: unknown[]) => reviewerCorrectionValidation([A, B], child,
+    [{ info: { role: "assistant", sessionID: child }, parts }], 100, checks);
+  assert.equal(compare(overlapping).ready, false, "overlapped execution never proves ordered validation");
+  assert.equal(compare([...overlapping, ordered[0]]).ready, false, "a partial retry is not a complete sequence");
+  const result = compare([...overlapping, { type: "tool", tool: "patch", state: { status: "completed", time: { end: 180 } } }, ...ordered]);
+  assert.equal(result.ready, true, JSON.stringify(result));
+  assert.deepEqual(result.matched?.map(item => item.callID), ["new-a", "new-b"]);
+});
+
 test("native validation history reports only the current Worker's exact commands and real exits", () => {
   const part = (command: string, exit?: number, started = 100) => ({ type: "tool", tool: "shell", state: {
     status: "completed", input: { command }, metadata: exit === undefined ? {} : { exit } },
