@@ -66,6 +66,12 @@ async function offload(mode, args) {
   writeFileSync(resolve(logs, 'source.json'), JSON.stringify({ sha256: source.sha256, head: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), paths: source.files.map(f => f.path), mode, args }));
   console.log(`SORTIE_WSL_SOURCE ${JSON.stringify({ id, sha256: source.sha256, logs })}`);
   const helper = snapshotHelper(source);
+  const liveTestEnvironment = Object.fromEntries([
+    'SORTIE_CODEX_LIVE',
+    'SORTIE_CODEX_LIVE_EXECUTABLE',
+    'SORTIE_CODEX_LIVE_WINDOWS_TEMP',
+    'SORTIE_CODEX_LIVE_LINUX_TEMP',
+  ].flatMap(name => process.env[name] === undefined ? [] : [[name, process.env[name]]]));
   const command = `p=$(mktemp /tmp/sortie-test-XXXXXX.mjs); printf %s ${helper} | base64 -d > $p; node $p; rc=$?; rm -f $p; exit $rc`;
   const child = spawn('wsl.exe', ['--distribution', process.env.SORTIE_WSL_DISTRO || 'Ubuntu', '--exec', 'bash', '-lc', command], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const out = createWriteStream(resolve(logs, 'stdout.log'));
@@ -73,7 +79,7 @@ async function offload(mode, args) {
   child.stdout.pipe(out); child.stderr.pipe(err);
   child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
   child.stdin.on('error', () => {});
-  child.stdin.write(JSON.stringify({ ...source, mode, args, id }) + '\n');
+  child.stdin.write(JSON.stringify({ ...source, mode, args, id, liveTestEnvironment }) + '\n');
   const heartbeat = setInterval(() => {
     if (process.env.SORTIE_TEST_CANCEL_FILE && existsSync(process.env.SORTIE_TEST_CANCEL_FILE)) child.stdin.end();
     else if (!child.stdin.writableEnded) child.stdin.write('heartbeat\n');

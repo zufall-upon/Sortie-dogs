@@ -14,6 +14,7 @@ import {
   type AcceptanceContinuityLedger,
 } from "../core/acceptance-continuity.js";
 import { resolveGlobalConfigRoot } from "../core/initialize.js";
+import { durableScopeRoot } from "../core/durable-scope-root.js";
 import { OperatorMissionRuntime } from "../core/operator-mission.js";
 import { admitLunaFabric } from "../core/luna-fabric-contract.js";
 import { summarizeExperienceEvidence } from "../core/experience-evidence-summary.js";
@@ -156,7 +157,6 @@ const CONSULTATION_AGENTS = new Set([REVIEWER_AGENT, ADVISOR_AGENT]);
 type ConsultationAgent = typeof REVIEWER_AGENT | typeof ADVISOR_AGENT;
 const SORTIE_TRIGGER = /^\/sortie(?:\s|$)/;
 const TASK_ROLES = new Set(["implementation", "remediation", "blocker-resolution"]);
-const GIT_POINTER_LIMIT = 4096;
 const PARALLEL_OUTCOME_MARKER = "SORTIE_PARALLEL_OUTCOME";
 const LUNA_FABRIC_ADMISSION_CAPABILITY = "sortie_admit_luna_fabric";
 const EXPERIENCE_ROUTE_PROPOSAL_CAPABILITY = "sortie_propose_experience_route";
@@ -541,41 +541,6 @@ interface SessionAuthorization {
   dispatchCallID?: string;
   validationCommands: ReadonlySet<string>;
   writeScopes: readonly string[];
-}
-
-async function readGitMetadata(path: string): Promise<string | undefined> {
-  const metadata = await stat(path).catch(() => undefined);
-  if (metadata === undefined) return undefined;
-  if (!metadata.isFile() || metadata.size < 1 || metadata.size > GIT_POINTER_LIMIT) throw new Error("invalid-git-metadata");
-  const value = (await readFile(path, "utf8")).trim();
-  if (value.length === 0 || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error("invalid-git-metadata");
-  return value;
-}
-
-/** Resolve one repository-wide lease location without invoking Git or trusting process-local state. */
-async function durableScopeRoot(projectRoot: string): Promise<string | undefined> {
-  try {
-    const dotGit = join(projectRoot, ".git");
-    const dotGitStat = await stat(dotGit);
-    let gitDirectory: string;
-    if (dotGitStat.isDirectory()) {
-      gitDirectory = dotGit;
-    } else if (dotGitStat.isFile()) {
-      const pointer = await readGitMetadata(dotGit);
-      const match = pointer === undefined ? undefined : /^gitdir:\s*(.+)$/u.exec(pointer);
-      if (match === undefined || match === null) return undefined;
-      gitDirectory = resolve(dirname(dotGit), match[1]!);
-      if (!(await stat(gitDirectory)).isDirectory()) return undefined;
-    } else {
-      return undefined;
-    }
-    const commonPointer = await readGitMetadata(join(gitDirectory, "commondir"));
-    const commonDirectory = commonPointer === undefined ? gitDirectory : resolve(gitDirectory, commonPointer);
-    if (!(await stat(commonDirectory)).isDirectory()) return undefined;
-    return join(commonDirectory, "sortie-dogs", "scope-leases");
-  } catch {
-    return undefined;
-  }
 }
 
 interface BindingPin {

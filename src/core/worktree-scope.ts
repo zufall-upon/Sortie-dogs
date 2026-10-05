@@ -19,7 +19,7 @@ export function normalizeWorktreeScope(scope: WorktreeScope): WorktreeScope {
 }
 
 export function worktreeScopesOverlap(left: string, right: string): boolean {
-  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+  return left === "**" || right === "**" || left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
 export function worktreeScopesConflict(left: WorktreeScope, right: WorktreeScope): boolean {

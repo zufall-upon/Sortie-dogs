@@ -142,7 +142,10 @@ export type GoalFlightEvent =
       readonly result_class?: "acceptance" | "process-defect" | "interrupted";
       readonly progress_fingerprint: string | null; readonly evidence: readonly GoalEvidence[];
         readonly elapsed_ms: number | null; readonly cost_usd: number | null;
-        readonly native_session_id?: string; readonly native_started_at?: string })
+        readonly native_session_id?: string; readonly native_started_at?: string;
+        /** Host-native validation identity retained in this same goal ledger; never model-authored evidence. */
+        readonly native_validation_observations?: readonly { readonly thread_id: string; readonly turn_id: string;
+          readonly item_id?: string; readonly raw_command: string; readonly canonical_commands: readonly string[] }[] })
   | (GoalEventBase & { readonly kind: "unit.usage-reconciled"; readonly goal_id: string;
         readonly reservation_id: string; readonly native_session_id: string; readonly cost_usd: number;
         readonly source: "native-usage-price-table" })
@@ -429,6 +432,11 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     } else if (event.kind === "unit.settled") {
       const reservation = state.outstanding_reservations.find((entry) => entry.reservation_id === event.reservation_id);
       requireState(reservation?.unit_id === event.unit_id, "transition", "Unit settlement is unknown or duplicate.");
+      requireState(event.native_validation_observations === undefined || event.native_validation_observations.length > 0 &&
+        event.native_validation_observations.every(item => text(item.thread_id) && text(item.turn_id) &&
+          (item.item_id === undefined || text(item.item_id)) && commandText(item.raw_command) &&
+          item.canonical_commands.length > 0 && item.canonical_commands.every(commandText)),
+      "invalid", "Native validation observations are malformed.");
       requireState(event.evidence.every((entry) => validGoalEvidence(entry, state)), "evidence", "Unit evidence is not bound to the current goal revision.");
       requireState(event.evidence.every((entry) => entry.execution.units.includes(event.unit_id)), "evidence", "Unit evidence does not identify its reserved unit.");
       const newCriteria = event.evidence.flatMap((entry) => entry.measurement.criterion_ids)

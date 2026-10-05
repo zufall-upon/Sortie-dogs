@@ -44,6 +44,12 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
 const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
        sortie-dogs init --global [--profile stable|v010]
 This beta package defaults to the v010 profile.`;
+const CODEX_USAGE = `Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
+  [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>]
+  [--trusted-pwsh <absolute-pwsh.exe>] [--profile stable|v010]
+
+The operation manifest is required. This command reuses Sortie's goal ledger and
+scope leases; it does not import or modify OpenCode settings or sessions.`;
 
 type OutputFormat = "text" | "json";
 
@@ -252,6 +258,41 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 }
 
 export async function run(argv: readonly string[]): Promise<number> {
+  if (argv[0] === "codex") {
+    if (argv[1] === "--help" && argv.length === 2) { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
+    if (argv[1] !== "run") { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
+    const values = new Map<string, string>();
+    const allowed = new Set(["--manifest", "--prompt", "--project-root", "--executable", "--model", "--effort", "--trusted-pwsh", "--profile"]);
+    for (let index = 2; index < argv.length; index += 2) {
+      const key = argv[index], value = argv[index + 1];
+      if (!key || !allowed.has(key) || value === undefined || value.startsWith("--") || values.has(key)) {
+        process.stderr.write(`${CODEX_USAGE}\n`); return 2;
+      }
+      values.set(key, value);
+    }
+    const manifest = values.get("--manifest"), prompt = values.get("--prompt"), profile = values.get("--profile") ?? "stable";
+    if (!manifest || !prompt || !["stable", "v010"].includes(profile)) { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
+    try {
+      const runner: typeof import("../codex/run-mission.js") = await import("../codex/run-mission.js");
+      const profiles: typeof import("../core/runtime-profile.js") = await import("../core/runtime-profile.js");
+      const result = await runner.runCodexMission({ projectRoot: values.get("--project-root") ?? process.cwd(), manifestPath: manifest,
+        prompt, ...(values.get("--executable") ? { executable: values.get("--executable") } : {}),
+        ...(values.get("--model") ? { model: values.get("--model") } : {}),
+        ...(values.get("--effort") ? { effort: values.get("--effort") } : {}),
+        ...(values.get("--trusted-pwsh") ? { trustedPowerShellExecutable: values.get("--trusted-pwsh") } : {}),
+        profile: profile === "stable" ? profiles.STABLE_RUNTIME_PROFILE : profiles.V010_RUNTIME_PROFILE });
+      process.stdout.write(`${JSON.stringify({ status: result.settlement.disposition, root_session_id: result.rootSessionID,
+        thread_id: result.validation.threadID, turn_id: result.validation.turnID, ledger_path: result.ledgerPath,
+        evidence: result.settlement.evidence.length,
+        validation_commands: result.validation.items.filter(item => item.type === "commandExecution").map(item => ({
+          command: item.command, status: item.status, exit_code: item.exitCode,
+        })) })}\n`);
+      return result.settlement.disposition === "succeeded" ? 0 : 1;
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : "codex-mission-failed"}\n`);
+      return 1;
+    }
+  }
   if (argv[0] === "init") {
     if (argv[1] === "--help" && argv.length === 2) {
       process.stdout.write(`${INIT_USAGE}\n`);

@@ -6,9 +6,15 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ScopeLeaseError, ScopeLeaseRegistry } from "../dist/core/scope-lease-registry.js";
+import { worktreeScopesConflict } from "../dist/core/worktree-scope.js";
 
 const scope = (read: string[] = [], write: string[] = []) => ({ read, write });
 const childFixture = fileURLToPath(new URL("./fixtures/scope-lease-child.mjs", import.meta.url));
+
+test("repository-wide scope conflicts with every nested OpenCode scope", () => {
+  assert.equal(worktreeScopesConflict(scope([], ["**"]), scope(["src/a.ts"], [])), true);
+  assert.equal(worktreeScopesConflict(scope([], ["src/a.ts"]), scope([], ["**"])), true);
+});
 
 test("scope replacement is atomic, identity-bound and retains the original lease on conflict", async () => {
   const root = await mkdtemp(join(tmpdir(), "sortie-lease-replace-"));

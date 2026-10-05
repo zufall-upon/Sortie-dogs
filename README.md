@@ -56,6 +56,49 @@ optional measurement rather than a mandatory release gate.
 
 ## Quick start
 
+### Codex host adapter (experimental)
+
+Sortie-dogs also exports a host adapter for the official Codex app-server stdio protocol. This is
+separate from selecting an OpenAI model through OpenCode: OpenCode model routing still uses the
+OpenCode host, while `CodexAppServerHost` starts and observes native Codex threads and turns.
+
+```ts
+import { CodexAppServerHost, createCodexAppServerTransport } from "sortie-dogs";
+
+const transport = createCodexAppServerTransport({ executable: "codex" });
+const host = new CodexAppServerHost(transport);
+const threadID = await host.startThread({ cwd: process.cwd(), ephemeral: true });
+const result = await host.runTurn(threadID, "Implement the admitted unit.", {
+  cwd: process.cwd(),
+  approvalPolicy: "unlessTrusted",
+  sandboxPolicy: {
+    type: "workspaceWrite",
+    writableRoots: [process.cwd()],
+    networkAccess: false,
+  },
+});
+await host.close();
+```
+
+The adapter reuses Sortie's host-neutral core instead of copying its goal, acceptance, evidence, or
+ledger implementation. It exposes completed Codex items as authoritative observations, supports
+exact thread resume and turn interruption, and declines command/file approvals unless the caller
+provides an approval handler. Permission escalation requests receive an empty grant. Unsupported
+server-initiated requests fail closed.
+
+For a manifest-bound mission, use the SDK `runCodexMission(...)` or the CLI:
+
+```sh
+sortie-dogs codex run --manifest operation-manifest.json --prompt "Implement the requested change"
+```
+
+The operation manifest remains required. The mission runner reuses Sortie's existing goal ledger,
+protected evidence capture, settlement, and repository-wide scope leases. It does not emulate
+OpenCode plugin hooks, install Codex assets, switch models implicitly, or copy/import/modify OpenCode
+settings and sessions. Codex command and file events are post-execution observations, not a claimed
+pre-execution write guard. The stdio transport is the supported initial integration; experimental
+WebSocket transport is intentionally out of scope.
+
 Requirements: Node.js 22.6 or newer, npm, and OpenCode V2.
 
 Run these commands in the target project:

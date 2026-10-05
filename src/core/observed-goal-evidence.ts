@@ -17,7 +17,9 @@ export interface ObservedGoalExecution {
 
 /** One host execution can exercise several independently declared criteria.
  * Preserve each measurement identity instead of dropping all heterogeneous ones. */
-export function evidenceFromObservedExecution(execution: ObservedGoalExecution, state: GoalFlightState, unitID: string): GoalEvidence[] {
+export function evidenceFromObservedExecution(execution: ObservedGoalExecution,
+  state: Pick<GoalFlightState, "goal_id" | "revision" | "scope_epoch" | "acceptance_fingerprint" | "acceptance_contract">,
+  unitID: string): GoalEvidence[] {
   if (!execution.fresh || execution.exitCode !== 0 || execution.outcome !== "pass" || !state.goal_id || !state.acceptance_fingerprint) return [];
   // Canonical requested-full proof is coordinator-owned and must never be manufactured from a
   // child shell result. The caller derives owner from the observed host session lineage.

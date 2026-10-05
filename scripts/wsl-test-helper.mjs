@@ -35,10 +35,10 @@ process.on('SIGTERM', stop); process.on('SIGINT', stop);
 const packet = await new Promise(resolvePacket => input.once('line', line => resolvePacket(JSON.parse(line))));
 input.on('line', () => { lastHeartbeat = Date.now(); });
 const watchdog = setInterval(() => { if (Date.now() - lastHeartbeat > 10000) void stop(); }, 1000);
-function run(command, args, cwd) {
+function run(command, args, cwd, env) {
   if (cancelled) throw new Error('Windows test owner disconnected');
   return new Promise((done, reject) => {
-    child = spawn(command, args, { cwd, stdio: ['ignore', 'inherit', 'inherit'] });
+    child = spawn(command, args, { cwd, env, stdio: ['ignore', 'inherit', 'inherit'] });
     child.once('error', reject);
     child.once('close', code => { child = undefined; done(code ?? 1); });
   });
@@ -83,7 +83,7 @@ try {
   }
   console.log(`SORTIE_WSL_RUN ${JSON.stringify({ root, sha256: packet.sha256, node: process.version, npm: npmVersion, dependency_key: key })}`);
   process.exitCode = await run('npm', packet.mode === 'targeted' ? ['run', 'test:targeted', '--', ...packet.args]
-    : packet.mode === 'full' ? ['run', 'test:full'] : ['test'], root);
+    : packet.mode === 'full' ? ['run', 'test:full'] : ['test'], root, { ...process.env, ...packet.liveTestEnvironment });
   if (cancelled) process.exitCode = 130;
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {

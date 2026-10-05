@@ -85,6 +85,32 @@ export type {
   ProjectInitializationErrorCode,
 } from "./core/initialize.js";
 export { SortieDogsPlugin } from "./plugin/index.js";
+export {
+  CodexAppServerHost,
+  CodexHostError,
+  createCodexAppServerTransport,
+} from "./codex/app-server.js";
+export { CodexMissionSettlementBridge } from "./codex/mission-settlement.js";
+export { CodexProtectedEvidenceCapture } from "./codex/protected-evidence.js";
+export type {
+  CodexAppServerHostOptions,
+  CodexAppServerProcessOptions,
+  CodexAppServerTransport,
+  CodexApprovalDecision,
+  CodexApprovalHandler,
+  CodexApprovalRequest,
+  CodexAuthenticationState,
+  CodexTurnEvent,
+  CodexTurnOptions,
+  CodexTurnResult,
+} from "./codex/app-server.js";
+export type {
+  CodexEvidenceCaptureRequest,
+  CodexMissionSettlementRequest,
+  CodexMissionSettlementTarget,
+  CodexValidationObservation,
+} from "./codex/mission-settlement.js";
+export type { CodexProtectedEvidenceAuthorization } from "./codex/protected-evidence.js";
 export { SortieDogsV010Plugin, createProfiledPlugin } from "./plugin/profiled.js";
 export * from "./core/runtime-profile.js";
 export { OperatorRuntime, parseOperatorPlan, OPERATOR_LIMITS } from "./core/operator-runtime.js";
@@ -221,6 +247,8 @@ export {
   RunFlightLedger,
   RunFlightLedgerError,
 } from "./core/run-flight-ledger.js";
+export { runCodexMission } from "./codex/run-mission.js";
+export type { RunCodexMissionOptions, RunCodexMissionResult } from "./codex/run-mission.js";
 export {
   GOAL_BOUND_METADATA_KEY,
   GOAL_BOUND_SCHEMA_VERSION,
