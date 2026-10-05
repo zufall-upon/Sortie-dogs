@@ -14,3 +14,4 @@ temp/
 /.sortie-dogs/
 /.sortie-dogs-v010/
 logs/
+.sortie-env/
