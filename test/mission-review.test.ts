@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
@@ -264,6 +265,140 @@ test("mission review source ignores the shared tool environment", async () => {
     assert.equal(after.fingerprint, before.fingerprint);
     assert.match(after.excerpt, /new file: added_test\.py/u);
     assert.doesNotMatch(after.excerpt, /\.sortie-env/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a non-Git mission reviews scoped nested repositories without a new root or grant", async () => {
+  const area = await mkdtemp(join(tmpdir(), "mission-review-non-git-"));
+  const directory = join(area, "mission"), repository = join(directory, "candidate");
+  try {
+    await mkdir(repository, { recursive: true });
+    await git("git", ["init", "--quiet"], { cwd: repository });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: repository });
+    await git("git", ["config", "user.name", "test"], { cwd: repository });
+    await writeFile(join(repository, "source.js"), "export const answer = 0;\n");
+    await writeFile(join(repository, "deleted.js"), "old source\n");
+    await git("git", ["add", "."], { cwd: repository });
+    await git("git", ["commit", "--quiet", "-m", "base"], { cwd: repository });
+    await writeFile(join(repository, "source.js"), "export const answer = 42;\n");
+    await rm(join(repository, "deleted.js"));
+    await writeFile(join(repository, "new-test.js"), "assert.equal(answer, 42);\n");
+    await writeFile(join(directory, "outside.txt"), "not part of this candidate\n");
+    const run = { units: [{ unit: { write: ["candidate/**"] }, hashes: [] }] } as never;
+    assert.equal(await missionReviewBaseline(directory), undefined);
+    const source = await missionReviewSource(directory, run);
+    assert.match(source.excerpt, /repository output: candidate/);
+    assert.match(source.excerpt, /source\.js/);
+    assert.match(source.excerpt, /answer = 42/);
+    assert.match(source.excerpt, /deleted\.js/);
+    assert.match(source.excerpt, /assert\.equal\(answer, 42\)/);
+    assert.doesNotMatch(source.excerpt, /not part of this candidate|refs\/heads|logs\/HEAD/);
+    await writeFile(join(directory, "outside.txt"), "unrelated activity\n");
+    assert.equal((await missionReviewSource(directory, run)).fingerprint, source.fingerprint);
+    await writeFile(join(repository, "source.js"), "export const answer = 43;\n");
+    const changed = await missionReviewSource(directory, run);
+    assert.notEqual(changed.fingerprint, source.fingerprint);
+    await rm(join(repository, "new-test.js"));
+    assert.notEqual((await missionReviewSource(directory, run)).fingerprint, changed.fingerprint);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("non-Git outputs and worktrees remain reviewable with scoped byte freshness", async () => {
+  const area = await mkdtemp(join(tmpdir(), "mission-review-worktree-"));
+  const directory = join(area, "mission"), repository = join(area, "repository"), worktree = join(directory, "worktree");
+  try {
+    await mkdir(repository, { recursive: true });
+    await mkdir(directory);
+    await git("git", ["init", "--quiet"], { cwd: repository });
+    await git("git", ["config", "user.email", "test@example.invalid"], { cwd: repository });
+    await git("git", ["config", "user.name", "test"], { cwd: repository });
+    await writeFile(join(repository, "source.js"), "committed candidate\n");
+    await git("git", ["add", "."], { cwd: repository });
+    await git("git", ["commit", "--quiet", "-m", "candidate"], { cwd: repository });
+    await git("git", ["worktree", "add", "--detach", worktree], { cwd: repository });
+    await mkdir(join(directory, "outputs"));
+    await writeFile(join(directory, "outputs", "result.txt"), "observed result\n");
+    await writeFile(join(directory, "summary.md"), "summary\n");
+    const run = { units: [{ unit: { write: ["worktree/**", "outputs/**", "summary.md", "missing.txt"] }, hashes: [] }] } as never;
+    const source = await missionReviewSource(directory, run);
+    assert.match(source.excerpt, /committed candidate/);
+    assert.match(source.excerpt, /observed result/);
+    assert.match(source.excerpt, /summary/);
+    assert.doesNotMatch(source.excerpt, /gitdir:/);
+    await writeFile(join(directory, "outputs", "result.txt"), "changed result\n");
+    const changed = await missionReviewSource(directory, run);
+    assert.notEqual(changed.fingerprint, source.fingerprint);
+    await writeFile(join(directory, "missing.txt"), "new output\n");
+    assert.notEqual((await missionReviewSource(directory, run)).fingerprint, changed.fingerprint);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("whole non-Git output ignores host bookkeeping but pins explicitly declared control-like files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-control-"));
+  try {
+    await mkdir(join(root, ".sortie-dogs-v010", "missions"), { recursive: true });
+    const state = join(root, ".sortie-dogs-v010", "missions", "root.json");
+    await writeFile(state, "host review pending\n");
+    await writeFile(join(root, "result.txt"), "actual product result\n");
+    const run = { units: [{ unit: { write: ["."] }, hashes: [] }] } as never;
+    const before = await missionReviewSource(root, run);
+    assert.match(before.excerpt, /actual product result/);
+    assert.doesNotMatch(before.excerpt, /host review pending/);
+    await writeFile(state, "host review saved\n");
+    assert.equal((await missionReviewSource(root, run)).fingerprint, before.fingerprint);
+    const explicit = { units: [{ unit: { write: [".", ".sortie-dogs-v010/missions/root.json"] }, hashes: [] }] } as never;
+    const pinned = await missionReviewSource(root, explicit);
+    assert.match(pinned.excerpt, /host review saved/);
+    await writeFile(state, "explicit output changed\n");
+    assert.notEqual((await missionReviewSource(root, explicit)).fingerprint, pinned.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a changed output repo cannot hide another repo or exclude its same-named tool input", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-repos-"));
+  try {
+    for (const name of ["a", "b"]) {
+      const repo = join(root, name);
+      await mkdir(repo);
+      await git("git", ["init", "--quiet"], { cwd: repo });
+      await git("git", ["config", "user.email", "test@example.invalid"], { cwd: repo });
+      await git("git", ["config", "user.name", "test"], { cwd: repo });
+      await writeFile(join(repo, "source.txt"), `${name} committed product\n`);
+      await writeFile(join(repo, ".gitignore"), ".sortie-env/\n");
+      await git("git", ["add", "."], { cwd: repo });
+      await git("git", ["commit", "--quiet", "-m", "base"], { cwd: repo });
+    }
+    await writeFile(join(root, "a", "source.txt"), "a changed product\n");
+    await mkdir(join(root, "b", ".sortie-env"));
+    await writeFile(join(root, "b", ".sortie-env", "fixture.json"), "declared fixture input\n");
+    const run = { units: [{ unit: { read: ["b/.sortie-env/fixture.json"], write: ["a/**", "b/**"] }, hashes: [] }] } as never;
+    const before = await missionReviewSource(root, run);
+    assert.match(before.excerpt, /b committed product/);
+    assert.match(before.excerpt, /declared fixture input/);
+    await writeFile(join(root, "b", ".sortie-env", "fixture.json"), "changed fixture input\n");
+    assert.notEqual((await missionReviewSource(root, run)).candidateFingerprint, before.candidateFingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("broken repositories remain visible failures rather than non-Git or unborn fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-broken-"));
+  try {
+    const worktree = join(root, "broken");
+    await mkdir(worktree);
+    await writeFile(join(worktree, ".git"), `gitdir: ${join(root, "missing-gitdir")}\n`);
+    await writeFile(join(worktree, "result.txt"), "not proof of repository health\n");
+    await assert.rejects(missionReviewSource(root, { units: [{ unit: { write: ["broken/**"] }, hashes: [] }] } as never), /not a git repository/u);
+    const repo = join(root, "repo");
+    await mkdir(repo);
+    await git("git", ["init", "--quiet"], { cwd: repo });
+    await writeFile(join(repo, "source.txt"), "product\n");
+    await git("git", ["add", "."], { cwd: repo });
+    await git("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repo });
+    const head = (await git("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await rm(join(repo, ".git", "objects", head.slice(0, 2), head.slice(2)));
+    const run = { units: [{ unit: { write: ["repo/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run), /bad object HEAD/u);
+    await assert.rejects(missionReviewSource(repo, { units: [{ unit: { write: ["."] }, hashes: [] }] } as never), /bad object HEAD/u);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

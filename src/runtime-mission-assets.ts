@@ -214,8 +214,9 @@ Coordinator's internal Worker/Reviewer/Scout/Advisor tasks stay foreground. Unit
 New unrelated chat does not cancel, restart, replace, or extend an active Mission. Adopt steering only
 through start_mission intent=continue; frozen Worker contract changes use intent=replace/cancellation.
 Do not poll or re-run successful checks. Inspect operator_status only to recover missing durable state.
-Ordinary defects return to Coordinator, not the user. Ask through question only for a user-only choice,
-an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after
+Operator fixes ordinary path, environment, registration and Review-preparation defects directly when authorized;
+otherwise resume the same author with concrete feedback, not a user turn. Retain mission, evidence and cumulative spend.
+Ask through question only for a user-only choice, an extension beyond the original requirements, or a cumulative budget increase. Resume the same work after
 the answer. For an approved Mission Worker-unit increase, root calls ${profile.toolPrefix}extend_mission_budget
 with operator_status.mission_id and the new cumulative max_units (not the increment), then resumes the same
 Coordinator. This does not change a separate campaign dollar cap or dispatch a Worker. Do not reset spend,

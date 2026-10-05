@@ -473,6 +473,11 @@ test("preview primary requires machine checkpoints at actual terminal boundaries
   assert.match(primary, /an active contract returns sortie_v010_operator_status and the existing next Task/);
   assert.match(primary, /unavailable contract-repair validation resume returns the preserved run state/);
   assert.match(primary, /stop retrying and return one INTERRUPTED checkpoint naming that refusal/);
+  assert.match(primary, /continue authorized recovery/);
+  assert.match(primary, /Stop repeating an\nunchanged refused request, not the work/);
+  assert.match(primary, /Operator can Fix within existing permissions, requirements and budget/);
+  assert.match(primary, /Only when no authorized recovery remains/);
+  assert.doesNotMatch(primary, /refused\ncontract operation, or an unreachable acceptance is an INTERRUPTED/);
   for (const icon of ["✅", "⚠️", "⛔", "❓"]) assert.ok(primary.includes(icon), icon);
 });
 
@@ -483,6 +488,8 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /Coordinator Task only for real coordination/u);
   assert.match(primary, /Use estimated read\/write paths; native scope reconciliation and expand_unit cover actual outputs/u);
   assert.match(primary, /Ask through question only for a user-only choice/);
+  assert.match(primary, /Operator fixes ordinary path, environment, registration and Review-preparation defects directly when authorized/);
+  assert.match(primary, /otherwise resume the same author with concrete feedback, not a user turn/);
   assert.match(primary, /Resume the same work after\nthe answer/);
   assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to recover the SAME native Reviewer\/context only if it/u);
   assert.match(primary, /do not request an interim findings return or dispatch a routine second correction Task/u);

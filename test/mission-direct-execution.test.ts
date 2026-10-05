@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
@@ -11,12 +12,16 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const cancel of [false, true]) test(`${actor} direct execution: ${cancel ? "cold cancellation and replacement" : "correction, fresh checks and independent Review"}`, async () => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root"] as const) test(`${actor} direct execution: ${mode}`, async () => {
+  const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   await mkdir(resolve("_testenv"), { recursive: true });
-  const directory = await mkdtemp(resolve("_testenv/mission-direct-"));
+  const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
+  const product = nonGit ? join(directory, "product") : directory;
+  const resultPath = nonGit ? "product/result.txt" : "result.txt";
   try {
-    await exec("git", ["init", "--quiet"], { cwd: directory });
-    await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs";\nif (readFileSync("result.txt","utf8") !== "fixed\\n") process.exit(1);\n');
+    await mkdir(product, { recursive: true });
+    await exec("git", ["init", "--quiet"], { cwd: product });
+    await writeFile(join(directory, "check.mjs"), `import {readFileSync} from "node:fs";\nif (readFileSync(${JSON.stringify(resultPath)},"utf8") !== "fixed\\n") process.exit(1);\n`);
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator", outcome: "running" },
       coordinator: { agent: "dogs-coordinator", parentID: "root", outcome: "running" },
@@ -46,7 +51,8 @@ for (const actor of ["root", "coordinator"]) for (const cancel of [false, true])
       await prompt(actor, task.args.prompt);
     }
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{ title: "Fix result",
-      objective: "Create result.txt accepted by check.mjs", read: ["check.mjs"], write: ["result.txt", "reports/**"], validation: ["node check.mjs"] }] }, { sessionID: actor }));
+      objective: "Create result.txt accepted by check.mjs", read: ["check.mjs"],
+      write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**"], validation: ["node check.mjs"] }] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -69,7 +75,7 @@ for (const actor of ["root", "coordinator"]) for (const cancel of [false, true])
       return;
     }
     let counter = 0;
-    const write = async (content: string, path = "result.txt") => {
+    const write = async (content: string, path = resultPath) => {
       const callID = `write-${++counter}`, args = { filePath: join(directory, path), content };
       await hooks["tool.execute.before"]!({ tool: "write", sessionID: actor, callID }, { args });
       await writeFile(args.filePath, content);
@@ -101,17 +107,22 @@ for (const actor of ["root", "coordinator"]) for (const cancel of [false, true])
     await write("fixed\n");
     assert.equal(await check(), 0); // Real native write history requires a check after this edit.
     const checked = (await readRun()).units[0]!.directExecution!.checks;
-    assert.equal(checked.at(-1)!.binding.validation_policy, "inputs-and-concrete-outputs-v1",
-      "non-generating native checks retain input/source bindings through final acceptance");
-    await mkdir(join(directory, "reports"));
-    await write("Actual native check passed.\n", "reports/result.md");
+    if (mode === "non-git-root") {
+      assert.equal(checked.at(-1)!.binding.validation_policy, undefined,
+        "a whole-root grant without a concrete output inventory retains full-candidate freshness");
+    } else {
+      assert.equal(checked.at(-1)!.binding.validation_policy, "inputs-and-concrete-outputs-v1",
+        "non-generating native checks retain input/source bindings through final acceptance");
+      await mkdir(join(directory, "reports"));
+      await write("Actual native check passed.\n", "reports/result.md");
+    }
     hooks = await create(); // The saved native checks, not live hook memory, authorize finish.
     const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
     assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
     const done = await readRun();
     assert.equal(done.phase, "awaiting-acceptance", JSON.stringify(done));
     assert.ok(done.units[0]!.evidence.length);
-    assert.equal(done.units[0]!.directExecution!.checks.length, checked.length, "report creation does not rerun validation");
+    assert.equal(done.units[0]!.directExecution!.checks.length, checked.length, "finish preserves observed validation without reruns");
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(mission.id, started.mission_id);
     assert.equal(mission.attempts?.length, 1);
@@ -126,6 +137,7 @@ for (const actor of ["root", "coordinator"]) for (const cancel of [false, true])
     if (actor === "coordinator") await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Direct correction validated and independently reviewed" }, { sessionID: actor });
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
-    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "fixed\n");
+    assert.equal(await readFile(join(directory, resultPath), "utf8"), "fixed\n");
+    assert.equal((await readRun()).units[0]!.directExecution?.actor, actor, "recovery and acceptance retain the same author without a user turn");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

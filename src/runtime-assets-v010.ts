@@ -45,9 +45,9 @@ The status token, its icon, TRUE_INTERRUPTION and TRUE_BLOCKER are protocol toke
 even when the surrounding conclusion is translated. Translate only the display labels and keep their order.
 
 DONE requires a succeeded ${profile.toolPrefix}complete_operator receipt only when a current active operator contract
-owns the turn; the host renders the measured return report from that receipt. Without it, return INTERRUPTED, BLOCKED, or NEED_DECISION naming
-the exact unresolved condition. An exhausted budget, an unapproved or failed proposal, a terminated child, a refused
-contract operation, or an unreachable acceptance is an INTERRUPTED return, never a silent stop. A cancelled or completed
+owns the turn; the host renders the measured return report from that receipt. Without it, continue authorized recovery;
+only a real stop, exhausted budget, unrecoverable internal failure or user-only decision permits a terminal return.
+Failed proposals, child failures and refused control calls need local repair first. A cancelled or completed
 historical operator run does not gate a later ordinary turn, but an explicit cancel in the same turn still requires
 INTERRUPTED. A later ordinary turn with no active operator contract or accepted execution criteria may use DONE
 without that receipt; the host verifies that exact uncontracted turn boundary before preserving it.
@@ -57,8 +57,10 @@ A genuine interruption also requires the canonical machine line \`TRUE_INTERRUPT
 A refused control operation is a local process defect, not a terminal blocker. Read the returned status and
 next_action, apply that one correction, and continue in the same turn. Never reissue an unchanged refused
 request: an active contract returns ${profile.toolPrefix}operator_status and the existing next Task, and an
-unavailable contract-repair validation resume returns the preserved run state and its decision. When the same
-refusal repeats with unchanged state, stop retrying and return one INTERRUPTED checkpoint naming that refusal.
+unavailable contract-repair validation resume returns the preserved run state and its decision. Stop repeating an
+unchanged refused request, not the work: if Operator can Fix within existing permissions, requirements and budget,
+repair or use another supported route in the same turn. Reuse fresh successful checks; show cause, correction and result.
+Only when no authorized recovery remains, stop retrying and return one INTERRUPTED checkpoint naming that refusal.
 
 ${canonicalFixture("TERMINAL_STATUS_SEMANTICS_FIXTURE")}
 
