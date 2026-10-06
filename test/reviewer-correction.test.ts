@@ -33,6 +33,7 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
   await writeFile(join(directory, "required-test.mjs"), 'import { readFileSync } from "node:fs"; if (readFileSync("result.txt", "utf8").trim() === "bad-required") process.exit(1);\n');
   await writeFile(join(directory, "generate.mjs"), 'import { writeFileSync } from "node:fs"; writeFileSync("result.txt", "ready generated\\n");\n');
   await writeFile(join(directory, "format.mjs"), 'import { writeFileSync } from "node:fs"; writeFileSync("result.txt", "ready formatted\\n");\n');
+  await writeFile(join(directory, "operation.mjs"), 'console.log(JSON.stringify({ status: "executed", attempts: 1 }));\n');
   await exec("git", ["add", "--all"], { cwd: directory });
   await exec("git", ["commit", "--quiet", "-m", "base"], { cwd: directory });
   const agents: Record<string, ObjectValue> = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
@@ -188,17 +189,19 @@ async function fixture(options: { permissionsUnavailable?: boolean } = {}) {
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; validation?: string[]; original?: string; write?: string[]; keepReviewOpen?: boolean; backgroundReview?: boolean } = {}) {
+async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; skipOperation?: boolean; validation?: string[]; original?: string; write?: string[]; keepReviewOpen?: boolean; backgroundReview?: boolean } = {}) {
   const original = options.original ?? "Produce ready output, validate, commit it, preserve all constraints and independently review.";
   await f.prompt("root", original);
   await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
   const plan = await f.tool("root", "plan_units", { units: [{ title: "Ready output", objective: "Produce ready output",
-     read: ["check.mjs", "required-test.mjs", "generate.mjs", "format.mjs"], write: options.readonly ? [] : options.write ?? ["result.txt"], validation: options.validation ?? ["node check.mjs"] }] });
+     read: ["check.mjs", "required-test.mjs", "generate.mjs", "format.mjs"], write: options.readonly ? [] : options.write ?? ["result.txt"], validation: options.validation ?? ["node check.mjs"] }],
+     ...(options.operation ? { execution: { commands: ["node operation.mjs"], directory: f.directory } } : {}) });
   assert(plan.task, JSON.stringify(plan));
   const worker = await f.before("root", "subagent", f.task(plan.task));
   await f.prompt("worker", worker.input.prompt); await f.bind("worker");
   if (!options.readonly) { await f.edit("worker", "wrong"); await f.shell("worker", "git add -- result.txt"); await f.shell("worker", "git commit -m candidate"); }
   for (const command of options.validation ?? ["node check.mjs"]) await f.shell("worker", command);
+  if (options.operation && !options.skipOperation) await f.shell("worker", "node operation.mjs");
   await f.finish(worker, "worker", "Implemented");
   const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
   const dispatch = await f.before("root", "subagent", { ...f.task(review.task), ...(options.backgroundReview ? { background: true } : {}) });
@@ -207,10 +210,10 @@ async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readon
    return { original, dispatch, run: await f.run(), mission: await f.missions.required("root") };
 }
 
-test("initial Reviewer records findings, corrects and validates in one native Task without a handoff reread", async () => {
+for (const operation of [false, true]) test(`initial Reviewer records findings, corrects and validates in one native Task without a handoff reread: ${operation ? "operation" : "implementation"}`, async () => {
   const f = await fixture();
   try {
-    const started = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
+    const started = await initial(f, { operation, keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
     const promptID = started.mission.review!.promptID;
     const investigatedSystem = { sessionID: "author", agent: f.agents.author!.agent, tools: { read: {}, grep: {}, sortie_v010_repair_review: {} }, system: [], messages: [] };
     await f.context(investigatedSystem);
@@ -263,6 +266,7 @@ test("initial Reviewer records findings, corrects and validates in one native Ta
     assert.equal(done.review!.selfRecheck!.callID, started.dispatch.id);
     assert.equal(done.review!.selfRecheck!.promptID, promptID);
     assert.equal(done.corrections![0]!.inlineReview!.callID, started.dispatch.id);
+    assert.deepEqual(done.execution, started.mission.execution, "correction retains the operation result without replaying it");
     assert.equal(f.history.author!.filter(message => message.type === "user").length, 1);
     const unit = (await f.run()).units[0]!;
     assert(unit.directExecution!.finishedAt);
@@ -1669,15 +1673,50 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
   });
 }
 
-for (const mode of ["operation", "readonly", "stale"] as const) test(`Reviewer correction does not broaden mission semantics: ${mode}`, async () => {
+for (const mode of ["readonly", "stale"] as const) test(`Reviewer correction does not broaden mission semantics: ${mode}`, async () => {
   const f = await fixture();
   try {
-    await initial(f, { operation: mode === "operation", readonly: mode === "readonly" });
+    await initial(f, { readonly: mode === "readonly" });
     if (mode === "stale") await writeFile(join(f.directory, "result.txt"), "changed outside review\n");
     await assert.rejects(f.tool("root", "repair_review"), /mission-review-correction-unavailable|mission-review-correction-source-stale/);
     assert.equal((await f.missions.required("root")).corrections, undefined);
     assert.equal(f.rules.length, 0, "ordinary reviews never receive writer permissions");
     assert.equal((await f.tool("root", "operator_status")).budget.consumed_units, 1);
+  } finally { await f.dispose(); }
+});
+
+for (const skipOperation of [false, true]) test(`operation correction recovers the same Reviewer after reload without repeating execution: ${skipOperation ? "not-started" : "executed"}`, async () => {
+  const f = await fixture();
+  try {
+    const previous = await initial(f, { operation: true, skipOperation });
+    await f.start();
+    const prepared = await f.tool("root", "repair_review");
+    assert.equal(prepared.task.task_id, "author");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    // The admitted operation correction activates normally, without another handoff read.
+    await f.edit("author", "ready");
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add -- result.txt");
+    await f.shell("author", "git commit -m operation-correction");
+    await f.finish(dispatch, "author", 'SELF_RECHECKED\nself_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}\nCompared original requirements and retained findings; corrected records do not imply operation success.');
+    const corrected = await f.missions.required("root");
+    assert.deepEqual(corrected.execution, previous.mission.execution);
+    assert.deepEqual(corrected.requirements, previous.mission.requirements);
+    assert.equal(corrected.review!.verdict, "self-rechecked");
+    assert.equal(corrected.review!.child, "author");
+    assert.equal(missionReviewIndependent(corrected, "author"), false);
+    assert.equal(f.history.final, undefined, "no second Reviewer or replacement Worker");
+    const status = await f.tool("root", "operator_status");
+    assert.equal(status.budget.consumed_units, 2);
+    assert.equal(status.budget.reserved_units, 0);
+    assert.equal(status.operation.status, skipOperation ? "not-started" : "executed");
+    const completed = await f.tool("root", "complete_mission");
+    if (skipOperation) {
+      assert.equal(completed.status, "not-ready");
+      assert.equal(completed.operation_status, "not-started");
+      assert.equal((await f.run()).receipt, null, "self-recheck cannot accept an unexecuted operation");
+    } else assert.equal(completed.status, "succeeded");
   } finally { await f.dispose(); }
 });
 

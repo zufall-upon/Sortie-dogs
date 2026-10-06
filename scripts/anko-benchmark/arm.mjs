@@ -10,7 +10,8 @@ import { finished } from 'node:stream/promises';
 import { READ_STALL_MS, MONITOR_INTERVAL_MS, WALL_LIMIT_MS, COST_LIMIT_USD, INSTRUCTION_SHA256,
   ANKO_BASE, CLI_SHA256, CLIENT_LOCK_SHA256, CLI_VERSION, HOST_DATABASE,
   ROOT_MODEL, WORKER_MODEL, noProgressStopReason, shouldStopForNoProgress, progressSignature } from './core.mjs';
-import { observerPlugin as nativeObserverPlugin, observeSessionState, safeNativeEvent } from './observe.mjs';
+import { expectSessionTurn, nativeTurnTerminal, observeSessionTurn, observeToolEvent,
+  observerPlugin as nativeObserverPlugin, observeSessionState, safeNativeEvent } from './observe.mjs';
 import { eligibleReadPermission } from './recovery.mjs';
 import { readOwnedUsage, usageSafetyStopReason } from './usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions } from './settle.mjs';
@@ -138,6 +139,8 @@ function nativeObserver(client, output, project, rootSessionID) {
   const eventsPath = join(output, 'native-events.jsonl');
   const ownedSessionIDs = new Set([rootSessionID]);
   const tools = new Map();
+  const terminalTools = new Set();
+  const turns = new Map();
   const permissions = new Map();
   const progressEventTypes = new Set(['session.execution.started', 'session.execution.succeeded',
     'session.execution.failed', 'session.execution.interrupted', 'session.step.started', 'session.step.ended',
@@ -161,21 +164,10 @@ function nativeObserver(client, output, project, rootSessionID) {
         const safe = safeNativeEvent(event, data.name ?? prior?.name ?? null);
         safe.observed_at = new Date().toISOString();
         safe.ownership_basis = ownedSessionIDs.has(sessionID) ? 'native-session-owned-by-root' : 'isolated-project-awaiting-session-reconciliation';
+        observeToolEvent(tools, terminalTools, safe);
+        observeSessionTurn(turns, safe);
         await appendFile(eventsPath, `${JSON.stringify(safe)}\n`);
         state.events_seen += 1;
-        if (event.type === 'session.tool.called' || event.type === 'session.tool.input.started') {
-          const now = Date.now();
-          tools.set(key, { session_id: sessionID, call_id: data.id,
-            name: data.name ?? prior?.name ?? null, path: safe.path ?? prior?.path ?? null,
-            started_at: prior?.started_at ?? now, last_progress_at: now,
-            last_event_type: event.type, observed_at: safe.observed_at });
-        } else if (event.type === 'session.tool.input.delta' || event.type === 'session.tool.input.ended' ||
-          event.type === 'session.tool.progress') {
-          if (prior) tools.set(key, { ...prior, last_progress_at: Date.now(),
-            last_event_type: event.type, observed_at: safe.observed_at });
-        } else if (event.type === 'session.tool.success' || event.type === 'session.tool.failed') {
-          tools.delete(key);
-        }
         if (event.type === 'permission.asked') permissions.set(data.id, safe);
         if (event.type === 'permission.replied') permissions.delete(data.requestID);
         if (progressEventTypes.has(event.type)) {
@@ -188,7 +180,7 @@ function nativeObserver(client, output, project, rootSessionID) {
       if (!controller.signal.aborted) state.stream_error = String(error);
     }
   })();
-  return { controller, task, ownedSessionIDs, tools, permissions, state, eventsPath,
+  return { controller, task, ownedSessionIDs, tools, terminalTools, turns, permissions, state, eventsPath,
     async stop() {
       controller.abort();
       await Promise.race([task, delay(3_000)]);
@@ -555,8 +547,11 @@ async function persistFinal() {
       priced_usd: finalUsage?.priced_usd ?? null, priced_messages: finalUsage?.priced_messages ?? null,
       unpriced_messages: finalUsage?.unpriced_messages ?? null, pending_messages: finalUsage?.pending_messages ?? null,
       missing_token_messages: finalUsage?.missing_token_messages ?? null,
-      cost_estimate_complete: finalUsage?.cost_estimate_complete ?? false,
-      estimated_total_usd: finalUsage?.estimated_total_usd ?? null, actual_billed_usd: null,
+      recorded_cost_estimate_complete: finalUsage?.cost_estimate_complete ?? false,
+      recorded_estimated_total_usd: finalUsage?.estimated_total_usd ?? null,
+      cost_estimate_complete: settlement?.native_settled === true && finalUsage?.cost_estimate_complete === true,
+      estimated_total_usd: settlement?.native_settled === true ? finalUsage?.estimated_total_usd ?? null : null,
+      actual_billed_usd: null,
       usage_records: finalUsage?.records ?? [], settlement,
     user_interventions: 0,
     mission_phase: mission?.phase ?? null, plans: mission?.plans ?? null,
@@ -634,6 +629,7 @@ async function collectSettlement() {
     observeSession: (sessionID, signal) => client.session.get({ sessionID }, { signal }),
     listPermissions: (sessionID, signal) => client.permission.list({ sessionID }, { signal }),
     activeTools: () => [...(native?.tools.values() ?? [])],
+    isTerminal: session => nativeTurnTerminal(session, native?.turns),
     interrupt: (sessionID, signal) => client.session.interrupt({ sessionID }, { signal }),
     record: snapshot => appendFile(join(output, 'settlement-snapshots.jsonl'), JSON.stringify(snapshot) + '\n') });
   settlement = recovered.settlement;
@@ -953,15 +949,7 @@ try {
       if (hookBatch.events.length) {
         hookEvents.push(...hookBatch.events);
         for (const event of hookBatch.events) {
-          if (!event.session_id || !event.call_id) continue;
-          const key = `${event.session_id}/${event.call_id}`;
-          if (event.phase === 'plugin-hook-before') {
-            const previous = native.tools.get(key);
-            native.tools.set(key, { session_id: event.session_id, call_id: event.call_id,
-              name: event.tool ?? previous?.name ?? null, path: event.path ?? previous?.path ?? null,
-              started_at: previous?.started_at ?? Date.now(), last_progress_at: Date.now(),
-              last_event_type: event.phase, observed_at: event.at });
-          } else if (event.phase === 'plugin-hook-after') native.tools.delete(key);
+          observeToolEvent(native.tools, native.terminalTools, event);
         }
       }
       if (iterationAt - lastPermissionSnapshotAt >= MONITOR_INTERVAL_MS) {
@@ -1088,8 +1076,9 @@ try {
         break;
       }
 
-      const rootTurnSettled = Boolean(state.outcome || state.time?.idle);
-      const allOwnedSessionsSettled = lastUsage.sessions.length > 0 && lastUsage.sessions.every(item => !item.active);
+      const rootTurnSettled = nativeTurnTerminal({ ...state, id: root.id }, native.turns);
+      const allOwnedSessionsSettled = lastUsage.sessions.length > 0 &&
+        lastUsage.sessions.every(item => nativeTurnTerminal(item, native.turns));
       const acceptedReceipt = liveOperator?.phase === 'completed' && liveOperator.receipt?.status === 'succeeded' &&
         liveOperator.receipt?.stop_reason === 'completed';
       if (promptSettled && rootTurnSettled && allOwnedSessionsSettled && !recoveryPending) {
@@ -1110,6 +1099,7 @@ try {
         const signature = hash(JSON.stringify(material));
         const text = `同じRoot sessionと同じMissionの要求内継続。元課題promptは再送しない。nativeでRootと全owned sessionの終了を確認済み: ${JSON.stringify(material)}。pending tool/permissionは0件。事前読込済み適用AGENTS.md (${profile.applicable_agents_sha256})を次に添付するので、内容再取得だけの同一祖先readは不要。未完了の実装・正式検証・Review・要求commit・受理が残る場合だけ既存Missionを継続し、受理済み成功を捏造しない。native終端が確認できた原因の要求内修正のみ行い、同一原因の再派遣を繰り返さない。別trial/armや消費resetは禁止。残り本体上限 ${Math.max(0, wallMs - (Date.now() - started))}ms、累計価格推定 $${lastUsage.priced_usd} / $${costCap}。適用済みAGENTS.md:\n\n${applicableAgentsText}`;
         contextualRecoveryCount += 1;
+        expectSessionTurn(native.turns, root.id);
         await appendFile(join(output, 'recovery-events.jsonl'), `${JSON.stringify({ at: new Date().toISOString(),
           elapsed_ms: Date.now() - started, signature, material, contextual_recovery_count: contextualRecoveryCount,
           original_prompt_replayed: false, prompt: text })}\n`);

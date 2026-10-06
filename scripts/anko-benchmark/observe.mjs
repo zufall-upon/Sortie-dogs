@@ -1,5 +1,59 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { nativeTerminal } from './usage.mjs';
+
+export function observeSessionTurn(turns, event) {
+  if (!event.session_id || !Number.isFinite(event.created)) return;
+  const previous = turns.get(event.session_id) ?? {};
+  if (event.type === 'session.execution.started' && event.created >= (previous.started_at ?? -Infinity)) {
+    turns.set(event.session_id, { ...previous, started_at: event.created,
+      terminal_at: null, terminal_outcome: null });
+  } else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type) &&
+      event.created >= Math.max(previous.started_at ?? -Infinity, previous.terminal_at ?? -Infinity)) {
+    turns.set(event.session_id, { ...previous, terminal_at: event.created,
+      terminal_outcome: event.type.slice('session.execution.'.length) });
+  }
+}
+
+// Enqueue acknowledgement is not evidence of execution or completion.
+export function expectSessionTurn(turns, sessionID, requestedAt = Date.now()) {
+  turns.set(sessionID, { ...(turns.get(sessionID) ?? {}), requested_at: requestedAt });
+}
+
+export function nativeTurnTerminal(session, turns = new Map()) {
+  if (!nativeTerminal(session) || session.active === true) return false;
+  const turn = turns.get(session.id);
+  if (!turn) return true;
+  if (turn.requested_at != null && !(turn.started_at >= turn.requested_at)) return false;
+  if (turn.started_at == null) return true;
+  const idle = session.time_idle ?? session.time?.idle;
+  return idle > turn.started_at || (idle >= turn.started_at && turn.terminal_at >= turn.started_at &&
+    turn.terminal_outcome === (session.idle_outcome ?? session.outcome));
+}
+
+// Native events and polled plugin hooks share terminal tombstones. A delayed
+// before/start event cannot revive a call already ended through either channel.
+export function observeToolEvent(tools, terminalTools, event, now = Date.now()) {
+  if (!event.session_id || !event.call_id) return;
+  const key = `${event.session_id}/${event.call_id}`;
+  const type = event.type ?? event.phase;
+  if (['session.tool.success', 'session.tool.failed', 'plugin-hook-after'].includes(type)) {
+    terminalTools.add(key);
+    tools.delete(key);
+    return;
+  }
+  if (terminalTools.has(key)) return;
+  const prior = tools.get(key);
+  if (['session.tool.called', 'session.tool.input.started', 'plugin-hook-before'].includes(type)) {
+    tools.set(key, { session_id: event.session_id, call_id: event.call_id,
+      name: event.tool ?? prior?.name ?? null, path: event.path ?? prior?.path ?? null,
+      started_at: prior?.started_at ?? now, last_progress_at: now,
+      last_event_type: type, observed_at: event.observed_at ?? event.at });
+  } else if (prior && ['session.tool.input.delta', 'session.tool.input.ended', 'session.tool.progress'].includes(type)) {
+    tools.set(key, { ...prior, last_progress_at: now, last_event_type: type,
+      observed_at: event.observed_at ?? event.at });
+  }
+}
 
 export function safeNativeEvent(event, toolName = null) {
   const data = event?.data && typeof event.data === 'object' ? event.data : {};
