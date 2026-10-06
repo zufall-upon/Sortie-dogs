@@ -2047,10 +2047,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           obligations: policy.proposal.obligations }, run_id: prepared.runID, unit_id: unitID,
           task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
       } };
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown) {
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
-      const previous = await operators.read(root);
+      let previous = await operators.read(root);
       if (previous && mission.runID === previous.runID && previous.units.some(unit => unit.reviewerCorrection)) {
         return JSON.stringify({ ...missionPacket(mission, previous), status: "correction-owner-continuation-required",
           next_action: `Call ${repairReview} to continue the SAME original Reviewer after a terminal failed correction or newer findings. Do not replace the correction owner with a fresh Worker through plan_units; retain requirements, checks and cumulative spend.` });
@@ -2079,15 +2079,54 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
-      if (replanning) {
+      if (replanning && previous) {
+        const previousRunID = previous.runID;
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
+        const ownDirect = previous.units.find(unit => unit.status === "running" &&
+          unit.directExecution?.actor === actor && !unit.reviewerCorrection);
+        // Replanning consumes another ordinary unit; ending this admission does not refund it.
+        const capacity = await control!.currentBudget(root);
+        if (ownDirect && capacity && capacity.remaining_units < plan.units.length) throw new Error(
+          `mission-budget-exhausted: plan needs ${plan.units.length} units; ${capacity.remaining_units} remain. The current run is retained.`);
         for (const unit of previous.units) {
           if (!unit.childSessionID) continue;
           const attempt = [...(mission.attempts ?? [])].reverse().find(item =>
-            item.runID === previous.runID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
+            item.runID === previousRunID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
           const terminal = attempt ? await missionWorkerTerminalProof(root, mission, previous, attempt) :
             { status: "non_rescue", reason: "terminal_record_missing" };
+          if (unit === ownDirect && terminal.status === "non_rescue" && terminal.reason === "direct_unit_still_running") continue;
           if (terminal.status !== "ready") throw new Error(`mission-replan-terminal-unreconciled:${"reason" in terminal ? terminal.reason : "unknown"}`);
+        }
+        if (ownDirect) {
+          // Cold hook state alone cannot prove quiescence. Require actual native tool records;
+          // a completed background launch still owns a running process. Only this exact planner
+          // call may be pending while it ends its own admission.
+          const history = payload(await session("messages", { path: { id: actor }, query: { directory: input.directory } }));
+          if (!Array.isArray(history)) throw new Error("mission-replan-terminal-unreconciled:tool_terminal_records_unavailable");
+          const calls = new Map<string, Record<string, unknown>>();
+          for (const message of history) {
+            if (!record(message) || !record(message.info) || message.info.sessionID !== actor || !Array.isArray(message.parts)) {
+              throw new Error("mission-replan-terminal-unreconciled:tool_terminal_records_unavailable");
+            }
+            for (const part of message.parts) {
+              if (!record(part) || typeof part.type !== "string") throw new Error("mission-replan-terminal-unreconciled:tool_terminal_records_unavailable");
+              if (part.type !== "tool") continue;
+              if (part.callID === planningCallID && planningCallID && part.tool === planUnits) continue;
+              if (typeof part.callID !== "string") throw new Error("mission-replan-terminal-unreconciled:tool_identity_unavailable");
+              const prior = calls.get(part.callID);
+              if (prior && prior.tool !== part.tool) throw new Error("mission-replan-terminal-unreconciled:tool_identity_conflict");
+              calls.set(part.callID, part);
+            }
+          }
+          for (const part of calls.values()) {
+            if (!record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
+                (record(part.state.metadata) && ["running", "pending", "unknown"].includes(String(part.state.metadata.status)))) {
+              throw new Error("mission-replan-terminal-unreconciled:tool_dispatch_active_or_unproven");
+            }
+          }
+          await activateDirect(actor);
+          await control!.finishDirectUnit(root, actor, []);
+          previous = await operators.required(root);
         }
       }
       // A cancelled V2 delegate may leave its Worker Task running after the parent Task aborts.
@@ -2111,7 +2150,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       // Cancellation marks the durable units before interrupting their native sessions. A cancelled
       // status alone therefore cannot prove the old Worker stopped or its reservation settled.
-      const terminalChildren = cancelledPredecessor
+      const terminalChildren = cancelledPredecessor && previous
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
           get: async id => {
             const value = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
@@ -2130,7 +2169,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
       const context = { original_requests: mission.requests, requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [],
         launch_conditions: mission.launchConditions ?? [] };
-      const state = replanning ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
+      const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
@@ -2150,7 +2189,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
         : next);
     }
-    tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Keep investigation/edit/check/requested commit with the same author before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Reviewer FINDINGS stay with the same Reviewer for correction, formal validation and self-recheck.`,
+    tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Keep investigation/edit/check/requested commit with the same author before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Reviewer FINDINGS stay with the same Reviewer for correction, formal validation and self-recheck.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
         execution: { type: "object", properties: { commands: stringList, directory: { type: "string" } },
           required: ["commands", "directory"], additionalProperties: false,
@@ -2162,7 +2201,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try {
           return await serializeDispatchTransition(root, async () => {
             const planned = await declareMissionUnits(root, context.sessionID, mission,
-              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution);
+              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID);
             return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
           });
         } catch (error) {
@@ -3587,10 +3626,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     };
     const before = hooks["tool.execute.before"]!;
     hooks["tool.execute.before"] = async (request, output) => {
-      if (request.tool !== "task") return before(request, output);
       const root = await rootFor(request.sessionID);
-      // Cover the entire admission, including core goal reservation. A prepared
-      // Task obtained via operator_next must not dispatch during proposal approval.
+      // Serialize every admission with direct settlement/replanning, including its
+      // in-flight registration. A new shell must not enter after the quiescence
+      // check and execute under an admission whose writer was already released.
+      // Prepared Tasks also remain serialized with proposal approval.
       return root === undefined ? before(request, output)
         : serializeDispatchTransition(root, () => before(request, output));
     };

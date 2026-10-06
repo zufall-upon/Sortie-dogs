@@ -483,7 +483,7 @@ export class CodexMissionSession {
     const session = this.required(call.threadId);
     const definition = this.hooks.tool?.[call.tool];
     if (definition) {
-      const result = await definition.execute(legacyToolArgs(call.arguments, definition.args), { sessionID: session.id, agent: session.agent });
+      const result = await definition.execute(legacyToolArgs(call.arguments, definition.args), { sessionID: session.id, agent: session.agent, callID: call.callId });
       await this.claimOwner(this.rootOf(session));
       return result;
     }

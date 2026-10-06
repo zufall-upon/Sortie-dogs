@@ -580,7 +580,7 @@ interface OpenCodeToolDefinition {
   args: Record<string, unknown>;
   execute(
     args: Record<string, string>,
-    context: { sessionID: string; agent?: string },
+    context: { sessionID: string; agent?: string; callID?: string },
   ): Promise<string>;
 }
 
