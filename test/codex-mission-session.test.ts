@@ -22,6 +22,7 @@ class ScriptedTransport implements CodexAppServerTransport {
   turnStarts = 0;
   readonly turns: Json[] = [];
   readonly turnRequests: Json[] = [];
+  readonly threadRequests: Json[] = [];
   private currentTurn?: Json;
   private currentTurnID = "turn";
   private sequence = 100;
@@ -51,6 +52,7 @@ class ScriptedTransport implements CodexAppServerTransport {
     else if (message.method === "thread/read") this.push({ id: message.id, result: { thread: this.readThread } });
     else if (message.method === "thread/resume") this.push({ id: message.id, result: { thread: { id: this.id } } });
     else if (message.method === "thread/start") {
+      this.threadRequests.push(message.params);
       assert.equal(message.params.ephemeral, false);
       assert(message.params.dynamicTools.some((tool: Json) => tool.name === "read"));
       this.push({ id: message.id, result: { thread: { id: this.id } } });
@@ -261,5 +263,62 @@ test("Codex command transport loss stops resends and cold recovery preserves unk
     await assert.rejects(recovered.run("Continue"), /unresolved tool execution; no resend/);
     assert.equal(cold.turnStarts, 0);
     assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "running");
+  } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test("explicit Codex model and effort survive shared Task routing", { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-model-override-"));
+  let adapter: CodexMissionSession | undefined;
+  const transports: ScriptedTransport[] = [];
+  let failure: unknown;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6.1-sol", effort: "low", transportFactory: () => {
+      const root = transports.length === 0;
+      const transport = new ScriptedTransport(root ? "root" : "worker", async native => {
+        if (!root) return "Worker finished";
+        try {
+          const started = await native.call("sortie_v010_start_mission", { requirements: ["Validate existing result"],
+            unit: { title: "Validate", objective: "Validate existing result", read: ["result.txt"], write: ["result.txt"], validation: ["node check.mjs"] } });
+          await native.call("task", { ...started.task, model: "openai/gpt-6-astra", variant: "high" });
+        } catch (error) { failure = error; }
+      });
+      transports.push(transport);
+      return transport;
+    } });
+    await adapter.run("Validate existing result");
+    if (failure) throw failure;
+    assert.equal(transports.length, 2);
+    for (const transport of transports) {
+      assert.equal(transport.threadRequests[0].model, "gpt-6.1-sol");
+      assert.equal(transport.turnRequests[0].model, "gpt-6.1-sol");
+      assert.equal(transport.turnRequests[0].effort, "low");
+    }
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const item of [
+  { type: "commandExecution", status: "inProgress" },
+  { type: "fileChange", status: "inProgress" },
+  { type: "mcpToolCall", status: "inProgress" },
+  { type: "mcpToolCall" },
+  { type: "collabAgentToolCall", status: "completed", receiverThreadIds: ["untracked-child"] },
+]) test(`cold resume refuses unproven native ${item.type} (${item.status ?? "missing"})`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-native-unknown-"));
+  let adapter: CodexMissionSession | undefined, recovered: CodexMissionSession | undefined;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    const initial = new ScriptedTransport("root", async native => {
+      await native.call("sortie_v010_start_mission", { requirements: ["Validate existing result"] });
+    });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => initial });
+    await adapter.run("Validate existing result");
+    await adapter.close();
+    const cold = new ScriptedTransport("root", async () => { throw new Error("must not resend"); });
+    cold.readThread = { id: "root", cwd: directory, turns: [{ id: "interrupted", status: "interrupted", itemsView: "full", items: [item] }] };
+    recovered = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => cold });
+    await assert.rejects(recovered.run("Continue"), /unresolved native execution; no resend/);
+    assert.equal(cold.turnStarts, 0);
   } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
 });

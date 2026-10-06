@@ -252,11 +252,11 @@ export class CodexMissionSession {
   private modelRoute(agent: string, stored?: NativeSession["model"], selection?: { model?: string; variant?: string }): NativeSession["model"] {
     const content = runtimeAssets.find(asset => asset.name === agent)?.content;
     const header = content?.split("---")[1] ?? "";
-    const selected = selection?.model || this.options.roleModels?.[agent]?.model || this.options.model ||
+    const selected = this.options.roleModels?.[agent]?.model || this.options.model || selection?.model ||
       (stored ? `${stored.providerID}/${stored.modelID}` : /^model: (.+)$/m.exec(header)?.[1]);
     const [model, embeddedEffort] = (selected ?? "").replace(/^openai\//, "").split("#");
     if (!model || model.includes("/")) throw new Error(`Codex Mission requires an OpenAI model for ${agent}. Set model or roleModels explicitly.`);
-    const effort = selection?.variant || this.options.roleModels?.[agent]?.effort || this.options.effort || embeddedEffort ||
+    const effort = this.options.roleModels?.[agent]?.effort || this.options.effort || selection?.variant || embeddedEffort ||
       stored?.variant || /^variant: (.+)$/m.exec(header)?.[1];
     return { providerID: "openai", modelID: model, ...(effort ? { variant: effort } : {}) };
   }
@@ -298,6 +298,11 @@ export class CodexMissionSession {
         if (!Array.isArray(turn.items) || turn.status === "inProgress" || turn.itemsView !== "full")
           throw new Error(`Codex thread ${id} still has unproven execution; no resend. Reconcile its native execution before resuming.`);
         for (const item of turn.items.filter(object)) {
+          // A terminal parent turn does not prove that its native executions or children stopped.
+          if (item.type === "collabAgentToolCall" ||
+              ["commandExecution", "fileChange", "mcpToolCall"].includes(String(item.type)) &&
+              !["completed", "failed", ...(item.type === "mcpToolCall" ? [] : ["declined"])].includes(String(item.status)))
+            throw new Error(`Codex thread ${id} has an unresolved native execution; no resend. Reconcile its native execution before resuming.`);
           if (item.type !== "dynamicToolCall" || item.status === "completed" && (turn.status === "completed" || item.success === true)) continue;
           const unique = turns.flatMap(entry => Array.isArray(entry.items) ? entry.items.filter(object) : []).filter(entry => entry.id === item.id).length === 1;
           if (!unique) throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
@@ -373,6 +378,9 @@ export class CodexMissionSession {
     const message = { id: messageID, agent: session.agent, model: { ...session.model } };
     const parts = [{ type: "text", text: prompt }];
     await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
+    // Shared Task routing may select a model; explicit adapter overrides still govern every native turn.
+    if (this.options.model || this.options.effort || this.options.roleModels?.[session.agent])
+      message.model = this.modelRoute(session.agent, message.model);
     if (message.model.providerID !== "openai") throw new Error("Codex Mission cannot use a non-OpenAI model route.");
     session.model = message.model;
     session.history.push({ info: { ...message, role: "user", sessionID: session.id }, parts });
