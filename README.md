@@ -99,6 +99,20 @@ settings and sessions. Codex command and file events are post-execution observat
 pre-execution write guard. The stdio transport is the supported initial integration; experimental
 WebSocket transport is intentionally out of scope.
 
+The Codex CLI handles SIGINT/SIGTERM by requesting interruption and cleaning up its
+app-server (exit 130/143). SDK callers can pass an `AbortSignal` as `signal`. Before
+turn dispatch, cancellation settles the reservation and releases its lease. After
+dispatch, app-server exit or an interrupt acknowledgement does not prove that an
+externally hosted command stopped. Cancellation or transport loss therefore preserves
+the active goal/reservation as an unknown outcome and stops lease heartbeats without
+claiming completion. SIGKILL can leave the same unresolved state.
+
+Lease expiry alone does not authorize a retry: subsequent Codex missions refuse with
+`codex-mission-outcome-unknown:no-resend` and the ledger path, including across
+stable/v010 profiles. Inspect the prior worker and ledger before recovery; do not
+delete the ledger or automatically resend the prompt. This is a Codex admission
+check; it does not establish quiescence of external command executors.
+
 Requirements: Node.js 22.6 or newer, npm, and OpenCode V2.
 
 Run these commands in the target project:

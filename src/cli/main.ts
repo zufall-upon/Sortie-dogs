@@ -272,10 +272,15 @@ export async function run(argv: readonly string[]): Promise<number> {
     }
     const manifest = values.get("--manifest"), prompt = values.get("--prompt"), profile = values.get("--profile") ?? "stable";
     if (!manifest || !prompt || !["stable", "v010"].includes(profile)) { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
+    const cancellation = new AbortController();
+    let signalExit: number | undefined;
+    const onTerm = () => { signalExit ??= 143; cancellation.abort(); };
+    const onInt = () => { signalExit ??= 130; cancellation.abort(); };
+    process.on("SIGTERM", onTerm); process.on("SIGINT", onInt);
     try {
       const runner: typeof import("../codex/run-mission.js") = await import("../codex/run-mission.js");
       const profiles: typeof import("../core/runtime-profile.js") = await import("../core/runtime-profile.js");
-      const result = await runner.runCodexMission({ projectRoot: values.get("--project-root") ?? process.cwd(), manifestPath: manifest,
+      const result = await runner.runCodexMission({ signal: cancellation.signal, projectRoot: values.get("--project-root") ?? process.cwd(), manifestPath: manifest,
         prompt, ...(values.get("--executable") ? { executable: values.get("--executable") } : {}),
         ...(values.get("--model") ? { model: values.get("--model") } : {}),
         ...(values.get("--effort") ? { effort: values.get("--effort") } : {}),
@@ -287,10 +292,12 @@ export async function run(argv: readonly string[]): Promise<number> {
         validation_commands: result.validation.items.filter(item => item.type === "commandExecution").map(item => ({
           command: item.command, status: item.status, exit_code: item.exitCode,
         })) })}\n`);
-      return result.settlement.disposition === "succeeded" ? 0 : 1;
+      return signalExit ?? (result.settlement.disposition === "succeeded" ? 0 : 1);
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : "codex-mission-failed"}\n`);
-      return 1;
+      return signalExit ?? 1;
+    } finally {
+      process.off("SIGTERM", onTerm); process.off("SIGINT", onInt);
     }
   }
   if (argv[0] === "init") {

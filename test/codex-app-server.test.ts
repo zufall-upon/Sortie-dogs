@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CodexAppServerHost, type CodexAppServerTransport } from "../src/codex/app-server.ts";
+import { CodexAppServerHost, type CodexAppServerTransport } from "../dist/codex/app-server.js";
 
 class FakeTransport implements CodexAppServerTransport {
   readonly sent: Record<string, unknown>[] = [];
@@ -221,4 +221,21 @@ test("Codex app-server host contains observer failure until turn completion", as
   transport.push({ method: "turn/completed", params: { threadId: "thr_observer", turn: { id: "turn_observer", status: "completed" } } });
   await assert.rejects(run, /observer failed/u);
   await host.close();
+});
+
+
+test("concurrent Codex close callers wait for the same transport cleanup", async () => {
+  const transport = new FakeTransport();
+  let release!: () => void;
+  const cleanup = new Promise<void>(resolve => { release = resolve; });
+  const original = transport.close.bind(transport);
+  transport.close = async () => { await cleanup; await original(); };
+  const host = new CodexAppServerHost(transport);
+  let first = false, second = false;
+  const a = host.close().then(() => { first = true; });
+  const b = host.close().then(() => { second = true; });
+  await tick();
+  assert.equal(first, false); assert.equal(second, false);
+  release(); await Promise.all([a, b]);
+  assert.equal(first, true); assert.equal(second, true);
 });

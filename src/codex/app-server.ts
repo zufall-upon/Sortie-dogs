@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import { terminateTree } from "../core/worktree-commit-artifact.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -26,8 +27,10 @@ export function createCodexAppServerTransport(options: CodexAppServerProcessOpti
     env: options.env,
     shell: false,
     windowsHide: true,
+    detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const exited = new Promise<void>(resolve => { child.once("exit", () => resolve()); child.once("error", () => resolve()); });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   let stderr = "";
   let spawnFailure: Error | undefined;
@@ -53,8 +56,11 @@ export function createCodexAppServerTransport(options: CodexAppServerProcessOpti
     },
     async close() {
       lines.close();
-      if (child.exitCode === null && !child.killed) child.kill();
-      if (child.exitCode === null && !spawnFailure) await new Promise<void>(resolve => child.once("exit", () => resolve()));
+      if (child.pid !== undefined && process.platform !== "win32") await terminateTree(child, exited);
+      else {
+        if (child.exitCode === null && !child.killed) child.kill();
+        if (child.exitCode === null && !spawnFailure) await exited;
+      }
     },
   };
 }
@@ -135,6 +141,7 @@ export class CodexAppServerHost {
   private nextID = 1;
   private initialized = false;
   private closed = false;
+  private closing?: Promise<void>;
   private fault?: unknown;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly notificationBacklog: { method: string; params: JsonObject }[] = [];
@@ -191,6 +198,7 @@ export class CodexAppServerHost {
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}),
       ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}) });
+    if (this.closed) throw new CodexHostError("server-closed", "Codex host was closed.");
     const turnID = object(started) && object(started.turn) ? text(started.turn.id) : undefined;
     if (!turnID) throw new CodexHostError("protocol-invalid-response", "turn/start returned no turn id.");
     return new Promise<CodexTurnResult>((resolve, reject) => {
@@ -206,8 +214,11 @@ export class CodexAppServerHost {
     await this.request("turn/interrupt", { threadId: this.active.threadID, turnId: this.active.turnID });
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    return this.closing ??= this.closeHost();
+  }
+
+  private async closeHost(): Promise<void> {
     this.closed = true;
     const error = new CodexHostError("server-closed", "Codex host was closed.");
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
