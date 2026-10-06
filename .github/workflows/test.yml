@@ -45,3 +45,10 @@ jobs:
           npm --version
       - run: npm ci
       - run: npm run test:windows
+      - name: Native Windows Codex and packed consumer contracts
+        # Invoke Node directly: test:targeted intentionally routes Windows through WSL.
+        # These fixtures need no Codex install, OAuth, secrets or model/API calls.
+        run: >-
+          node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=100000
+          test/codex-app-server.test.ts test/codex-mission-progress.test.ts
+          test/codex-mission-telemetry.test.ts test/plugin-loader.test.ts

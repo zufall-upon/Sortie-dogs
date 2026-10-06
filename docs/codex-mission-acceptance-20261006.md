@@ -53,7 +53,7 @@ policy would not repair the separate `command/exec` path.
 
 The practical run attempted library and CLI repairs, preserved both test files, reported real exit 1
 for EROFS, and did not claim acceptance. A deliberate read-only cold resume used the same root
-`01a10fc8-df29-7eb0-979a-ae6f73e754e9`, ran one package check and remained unaccepted.
+the saved practical root (exact ID retained in local evidence), ran one package check and remained unaccepted.
 This proves refusal/result fidelity and resume, not successful implementation delivery.
 
 ## Current follow-up and next actions
@@ -99,7 +99,7 @@ Evidence is local under `_testenv/codex-practical/`:
 - `workspace-preflight.json`: effective `workspaceWrite`, implicit cwd workspace, network disabled,
   native `:workspace`, and `on-request` approval. The root is the isolated `repo` in that directory.
 - `approved-result.json`, `approved-events.jsonl`, `approved-hashes.json`: same saved root
-  `01a10fc8-df29-7eb0-979a-ae6f73e754e9`; implementation writes, package validation and direct CLI
+  the saved practical root (exact ID retained in local evidence); implementation writes, package validation and direct CLI
   succeeded; all protected hashes unchanged; `accepted: false`.
 - `subprocess-diagnosis.json`: trivial Node child with piped stdio reports `EPERM`; `inherit` and
   `ignore` complete without that error. `ipc-diagnosis.json`: Python pipe and socketpair succeed.
@@ -142,10 +142,10 @@ used the parent execution exception. No network use, installs or settings change
 Final evidence (`parent-result.json`, `parent-boundaries.jsonl`, `parent-events.jsonl`,
 `parent-hashes.json`, `acceptance-summary.json`):
 
-- Same Mission: `mission-a2c6e9ba-0599-49bd-91c3-45c0140c21a2`.
-- Same root: `01a10fc8-df29-7eb0-979a-ae6f73e754e9`.
-- Corrected run: `operator-f1bbdc03-8f58-4d78-b7ad-95864b08b456`.
-- Independent Reviewer: `01a11001-0678-78f1-9e55-6685e4d69462`, actual terminal PASS.
+- Same Mission: the original practical Mission (exact ID retained locally).
+- Same root: the saved practical root (exact ID retained in local evidence).
+- Corrected run: the corrected direct run (exact ID retained locally).
+- Independent Reviewer: the native Reviewer child (exact ID retained locally), actual terminal PASS.
 - `complete_mission`: succeeded; SDK `accepted: true`; Mission and Operator run both completed.
 - Original shared goal retained two consumed units, zero outstanding reservations, and a succeeded
   receipt covering both attempt IDs. The adapter owner is closed; no scope lease file remains.
@@ -185,7 +185,7 @@ Distribution evidence is local under `_testenv/codex-distribution/`:
 - `pack.json` and `sortie-dogs-0.13.8.tgz`; artifact SHA-256
   `569915c6eb943f6e203fb858e5774094921cd3f9f2690f2d7fc661cbb12ae787`.
 - `consumer-summary.json`: 227 archive entries, executable bin, 9 successful checks, no live model or
-  registry access. Package extraction lived under `/tmp/sortie-packed-consumer-hswcl791`; dependencies
+  registry access. Package extraction used a generated directory under `/tmp`; dependencies
   were symlinks to already installed local packages. No package install or global environment edit was
   needed for this isolated smoke.
 - `related.log`: 81 tests passed, exit 0. The existing packed-loader regression now covers Codex root
@@ -216,3 +216,29 @@ Distribution follow-up final validation: full Linux regression passed 113 files,
 (`_testenv/codex-distribution/full.log`). Two independent reviews found no High/Medium issue. All 224
 packed `dist` files match the verified build. The generated consumer dependency tree was removed after
 the smoke; the tarball, protocol records, summaries and reproduction script were retained.
+
+
+## Prepared Windows CI coverage
+
+The existing `windows-latest` job already runs `npm ci`, a native TypeScript build and the Windows
+platform/process/WSL-ownership suite through `npm run test:windows`. A following direct Node step
+adds synthetic Codex app-server protocol, progress, telemetry and packed-consumer contracts. Direct
+Node execution is intentional: `test:targeted` routes Windows to WSL and would not prove native Windows
+package loading. The existing Linux job is unchanged; no additional runner job or paid model service
+is introduced.
+
+The new step requires no Codex installation, OAuth, repository secrets or live model calls. Its
+package consumer installs only from the local tarball and existing npm cache with offline mode.
+Windows OAuth sessions, GUI/Desktop behavior, real Codex process integration and Linux-style Mission
+shell execution are outside that step. Windows results remain pending until the authorized branch/PR
+workflow runs; Linux fixtures are not relabeled as Windows proof. GitHub runner billing follows the
+repository's existing Actions plan; no model/API charge is incurred by these selected tests.
+
+Before publication, local machine paths and real native thread/run IDs were removed from this public
+narrative; exact values remain in ignored local evidence. The committed test dialogues are synthetic
+contract fixtures. Raw live conversations, authentication files, consumer trees and build logs are not
+part of the tracked change or npm tarball.
+
+The exact new Windows-step selection passed 25 tests on Linux (exit 0); workflow YAML parsed with
+the two existing jobs retained. Independent review found no High/Medium issue. These are preparation
+checks, not native Windows results. The runtime source is unchanged from the prior full Linux run.
