@@ -6,7 +6,7 @@ export const CODEX_MISSION_USAGE = `Usage: sortie-dogs codex mission --prompt <t
 
 Runs the existing Mission Operator, Coordinator, Worker and Reviewer through Codex.
 --model and --effort explicitly override all roles; otherwise packaged role defaults apply.
-Uses existing ChatGPT authentication and a repository-local, network-disabled sandbox.`;
+Uses existing ChatGPT authentication and native Codex permissions.`;
 
 export async function runCodexMissionCommand(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === "--help") { process.stdout.write(`${CODEX_MISSION_USAGE}\n`); return 0; }
@@ -49,6 +49,13 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
 
 /** Bounded user-facing progress; do not dump control packets or hidden reasoning. */
 export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
+  if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(event.method))
+    return { thread_id: event.threadId, turn_id: event.params.turnId, phase: "approval-required", method: event.method,
+      reason: typeof event.params.reason === "string" ? event.params.reason.slice(0, 1600) : undefined,
+      command: typeof event.params.command === "string" ? event.params.command.slice(0, 1600) : undefined,
+      item_id: event.params.itemId, host_approval_available: event.params.hostApprovalAvailable === true,
+      next_action: event.params.hostApprovalAvailable === true ? "Await the host approval decision." :
+        "No host approval callback is connected; this request receives no grant. Use a host-integrated SDK client for approval." };
   if (!["item/started", "item/completed"].includes(event.method)) return;
   const item = event.params.item as Record<string, unknown> | undefined;
   if (event.method === "item/completed" && item?.type === "agentMessage" && item.phase === "commentary" && typeof item.text === "string")

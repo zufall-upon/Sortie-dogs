@@ -35,3 +35,14 @@ test("Codex Mission progress preserves nested Task feedback, starts, and bounded
   } } })?.text, "I reject the candidate because it coerces non-string inputs.");
   assert.equal(codexMissionProgress({ method: "item/completed", threadId: "root", params: { item: { type: "reasoning", text: "private" } } }), undefined);
 });
+
+
+test("native approval requests remain visible when the CLI has no approval bridge", () => {
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"]) {
+    const progress = codexMissionProgress({ method, threadId: "root", params: { turnId: "turn", itemId: "item", reason: "Write approved output", hostApprovalAvailable: false } });
+    assert.equal(progress?.phase, "approval-required");
+    assert.equal(progress?.host_approval_available, false);
+    assert.match(String(progress?.next_action), /No host approval callback/);
+    assert.equal(progress?.reason, "Write approved output");
+  }
+});

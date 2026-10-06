@@ -95,7 +95,16 @@ sortie-dogs codex mission --prompt "Implement and review the requested change" -
 This Linux-first route uses `CodexMissionSession` and the existing Mission tools, correction grants,
 validation evidence, and final Operator acceptance. It runs saved native Codex threads with existing
 ChatGPT authentication; it does not import OpenCode settings or introduce a second Mission ledger.
-Commands run through `/bin/bash` in a repository-local, network-disabled sandbox.
+Commands run through `/bin/bash` using the native app-server's configured permissions. Sortie does not
+replace them with a fixed repository-only or network-disabled policy, change host configuration, or select
+full access. Thread turns retain native thread permissions; standalone `command/exec` uses the server's
+configured policy, not a thread's temporary grants. A parent application's in-memory approval is not
+automatically transferred to a separately launched app-server.
+SDK hosts can forward native command/file approval requests through `approval` and permission-subset
+requests through `permissionsApproval`. The native host remains responsible for deciding and enforcing
+the grant. The CLI reports approval requests but has no interactive approval bridge; without a connected
+host callback, no grant is returned. `command/exec` has no thread-scoped approval API, so inheriting the
+configured policy does not add an escalation path for these standalone commands.
 
 Packaged role models and reasoning levels apply by default. `--model` and `--effort` explicitly
 override all roles; SDK callers can use `roleModels` for individual roles. Unsupported native model

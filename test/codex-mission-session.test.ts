@@ -57,6 +57,8 @@ class ScriptedTransport implements CodexAppServerTransport {
       assert(message.params.dynamicTools.some((tool: Json) => tool.name === "read"));
       this.push({ id: message.id, result: { thread: { id: this.id } } });
     } else if (message.method === "turn/start") {
+      assert.equal(message.params.sandboxPolicy, undefined, "turns retain native thread permissions");
+      assert.equal(message.params.approvalPolicy, undefined);
       this.turnStarts++;
       this.turnRequests.push(message.params);
       this.currentTurnID = `turn-${this.turnStarts}`;
@@ -73,7 +75,7 @@ class ScriptedTransport implements CodexAppServerTransport {
       }).catch(error => this.push({ id: message.id, error: { message: String(error) } })));
     } else if (message.method === "command/exec") {
       if (this.dropCommands) { void this.close(); return; }
-      assert.deepEqual(message.params.sandboxPolicy, { type: "workspaceWrite", writableRoots: [message.params.cwd], networkAccess: false });
+      assert.equal(message.params.sandboxPolicy, undefined, "standalone commands inherit native host permissions");
       const [command, ...args] = message.params.command;
       void exec(command, args, { cwd: message.params.cwd }).then(result => this.push({ id: message.id, result: { exitCode: 0, ...result } }),
         error => this.push({ id: message.id, result: { exitCode: error.code, stdout: error.stdout, stderr: error.stderr } }));

@@ -2,7 +2,7 @@ import { codexUsageTotal, codexUsageInfo, codexNativeTime, emptyCodexUsage, type
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { CodexAppServerHost, createCodexAppServerTransport, type CodexDynamicTool, type CodexDynamicToolCall,
-  type CodexTurnEvent, type CodexTurnResult, type CodexAppServerTransport } from "./app-server.js";
+  type CodexTurnEvent, type CodexTurnResult, type CodexAppServerTransport, type CodexAppServerHostOptions } from "./app-server.js";
 import { SortieDogsV010Plugin } from "../plugin/profiled.js";
 import type { OpenCodeHooks } from "../plugin/index.js";
 import { legacyToolArgs, toolSchema } from "../plugin/tool-schema.js";
@@ -34,6 +34,8 @@ export interface CodexMissionSessionOptions {
   readonly effort?: string;
   readonly executable?: string;
   readonly transportFactory?: () => CodexAppServerTransport;
+  readonly approval?: CodexAppServerHostOptions["approval"];
+  readonly permissionsApproval?: CodexAppServerHostOptions["permissionsApproval"];
   readonly onEvent?: (event: CodexTurnEvent & { threadId: string }) => void | Promise<void>;
 }
 
@@ -48,7 +50,6 @@ export class CodexMissionSession {
   private observations: CodexUsageObservation[] = [];
   private readonly ownedRoots = new Set<string>();
   private readonly toolQueues = new Map<string, Promise<unknown>>();
-  private get sandboxPolicy(): JsonObject { return { type: "workspaceWrite", writableRoots: [this.directory], networkAccess: false }; }
   readonly directory: string;
   private constructor(private readonly options: CodexMissionSessionOptions) { this.directory = resolve(options.projectRoot); }
 
@@ -239,6 +240,16 @@ export class CodexMissionSession {
   private createHost(): CodexAppServerHost {
     if (this.closed) throw new Error("Codex Mission adapter is closed.");
     const host = new CodexAppServerHost(this.options.transportFactory?.() ?? createCodexAppServerTransport({ cwd: this.directory, executable: this.options.executable }), {
+      approval: async request => {
+        await this.options.onEvent?.({ ...request, threadId: String(request.params.threadId),
+          params: { ...request.params, hostApprovalAvailable: !!this.options.approval } });
+        return await this.options.approval?.(request) ?? "decline";
+      },
+      permissionsApproval: async request => {
+        await this.options.onEvent?.({ ...request, threadId: String(request.params.threadId),
+          params: { ...request.params, hostApprovalAvailable: !!this.options.permissionsApproval } });
+        return await this.options.permissionsApproval?.(request) ?? { permissions: {}, scope: "turn" };
+      },
       dynamicTool: call => {
         const execution = (this.toolQueues.get(call.threadId) ?? Promise.resolve()).catch(() => undefined).then(() => this.execute(call));
         this.toolQueues.set(call.threadId, execution);
@@ -392,7 +403,7 @@ export class CodexMissionSession {
     try {
       await onDispatch?.(messageID);
       const result = await session.host.runTurn(session.id, parts.map(part => part.text).join("\n"), { cwd: this.directory, clientUserMessageId: messageID,
-        model: message.model.modelID === "unknown" ? undefined : message.model.modelID, effort: message.model.variant ?? this.options.effort, sandboxPolicy: this.sandboxPolicy,
+        model: message.model.modelID === "unknown" ? undefined : message.model.modelID, effort: message.model.variant ?? this.options.effort,
         onEvent: event => {
           if (event.method === "thread/tokenUsage/updated" && object(event.params.tokenUsage)) {
             observation.turnID = typeof event.params.turnId === "string" ? event.params.turnId : observation.turnID;
@@ -460,7 +471,7 @@ export class CodexMissionSession {
         : call.tool === "read" ? [process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", resolve(this.directory, String(args.filePath))]
         : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
       dispatched = true;
-      const result = await session.host.executeCommand(command, this.directory, typeof args.timeout === "number" ? args.timeout : undefined, this.sandboxPolicy);
+      const result = await session.host.executeCommand(command, this.directory, typeof args.timeout === "number" ? args.timeout : undefined);
       text = result.stdout + result.stderr;
       metadata = { exit: result.exitCode, status: "completed" };
     }

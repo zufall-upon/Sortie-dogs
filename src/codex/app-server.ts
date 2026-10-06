@@ -127,9 +127,16 @@ export interface CodexDynamicToolCall {
   readonly arguments: unknown;
 }
 
+export interface CodexPermissionsApprovalResponse {
+  readonly permissions: { readonly network?: JsonObject; readonly fileSystem?: JsonObject };
+  readonly scope: "turn" | "session";
+  readonly strictAutoReview?: boolean;
+}
+
 export interface CodexAppServerHostOptions {
   readonly dynamicTool?: (call: CodexDynamicToolCall) => Promise<string>;
   readonly approval?: CodexApprovalHandler;
+  readonly permissionsApproval?: (request: CodexApprovalRequest) => Promise<CodexPermissionsApprovalResponse> | CodexPermissionsApprovalResponse;
   readonly clientVersion?: string;
   readonly requestTimeoutMs?: number;
 }
@@ -349,7 +356,13 @@ export class CodexAppServerHost {
       return;
     }
     if (method === "item/permissions/requestApproval") {
-      this.transport.send({ id: message.id, result: { permissions: [], scope: "turn" } });
+      let result: CodexPermissionsApprovalResponse = { permissions: {}, scope: "turn" };
+      const active = this.active;
+      try {
+        if (active && params.threadId === active.threadID && params.turnId === active.turnID)
+          result = await this.options.permissionsApproval?.({ method, params }) ?? result;
+      } catch { /* The host did not grant permissions. Keep the protocol pump running. */ }
+      if (!this.closed) this.transport.send({ id: message.id, result });
       return;
     }
     this.transport.send({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${method}` } });

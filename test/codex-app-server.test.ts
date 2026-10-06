@@ -279,3 +279,30 @@ test("Codex dynamic tool completion after close does not write to the closed tra
   finish("late"); await tick();
   assert.equal(transport.sent.length, count);
 });
+
+
+test("native permission requests reach the host and preserve its scoped response", async () => {
+  const transport = new FakeTransport();
+  const requests: unknown[] = [];
+  const granted = { permissions: { fileSystem: { write: ["/approved/output"] } }, scope: "turn" as const, strictAutoReview: true };
+  const host = new CodexAppServerHost(transport, { permissionsApproval: request => { requests.push(request); return granted; } });
+  const init = host.initialize();
+  transport.push({ id: 1, result: {} });
+  await init;
+  const run = host.runTurn("thread", "Continue", { cwd: "/repo" });
+  await tick();
+  transport.push({ id: 2, result: { turn: { id: "turn" } } });
+  await tick();
+  const params = { threadId: "thread", turnId: "turn", itemId: "permission", permissions: { fileSystem: { write: ["/approved/output"] } } };
+  transport.push({ id: 3, method: "item/permissions/requestApproval", params });
+  await tick();
+  assert.deepEqual(requests, [{ method: "item/permissions/requestApproval", params }]);
+  assert.deepEqual(transport.sent.at(-1), { id: 3, result: granted });
+  transport.push({ id: 4, method: "item/permissions/requestApproval", params: { ...params, turnId: "other" } });
+  await tick();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(transport.sent.at(-1), { id: 4, result: { permissions: {}, scope: "turn" } });
+  transport.push({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } });
+  await run;
+  await host.close();
+});
