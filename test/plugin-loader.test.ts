@@ -142,6 +142,21 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     );
 
+    for (const args of [["codex", "--help"], ["codex", "run", "--help"], ["codex", "mission", "--help"]]) {
+      const help = await execFileAsync(process.execPath, [join(consumer, "node_modules", "sortie-dogs", "dist", "cli", "main.js"), ...args], { cwd: consumer });
+      assert.equal(help.stderr, "");
+      assert.match(help.stdout, /Usage: sortie-dogs codex/);
+    }
+    const sdk = await execFileAsync(process.execPath, ["--input-type=module", "--eval", `
+      import assert from 'node:assert/strict';
+      import {CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, runCodexMission} from 'sortie-dogs';
+      for (const value of [CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, runCodexMission]) assert.equal(typeof value, 'function');
+      const mission = await CodexMissionSession.create({projectRoot: process.cwd()});
+      await mission.close();
+      console.log('CODEX SDK PASS');
+    `], { cwd: consumer });
+    assert.equal(sdk.stdout.trim(), "CODEX SDK PASS");
+
     const packedProject = join(fixture, "packed-project");
     await mkdir(packedProject);
     await execFileAsync(process.execPath, [

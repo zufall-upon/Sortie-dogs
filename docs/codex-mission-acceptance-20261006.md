@@ -161,3 +161,58 @@ boundaries, not unresolved requirements of this accepted, authorized Mission.
 
 Final Linux regression: `replan-full-final.log`, 113 files passed, exit 0, 222.360 s.
 No push, release or global configuration change was performed.
+
+
+## Distribution entrypoints and original product scope
+
+The practical Mission above is one end-to-end scenario, not a claim that the original product vision
+is completely qualified on every host. This audit also compared the current README thesis with
+`docs/v0.8-evidence-runtime-roadmap.md` and `docs/v010-preview.md`. Those documents describe their
+historical checkpoints; this branch does not relabel their old performance, Desktop, compaction or
+platform evidence as current Codex results.
+
+| Explicit product contract | Current evidence | Qualification limit |
+| --- | --- | --- |
+| Natural-language goal survives implementation, failed checks, review correction and acceptance | Same native practical Mission accepted; earlier controlled Operator rejection returned to the same Coordinator for correction and acceptance; common requirement/budget ledger retained. | Small real tasks and controlled failure scenarios, not a general autonomous-quality or cost-optimality benchmark. |
+| Additional roles and stronger models only as needed | Existing shared Mission/routing core, direct-unit path, Coordinator/Worker/Reviewer native roles, explicit SDK/CLI model precedence, packaged role assets and common-core regression. | No new claim of five-way native Codex throughput, fastest routing, or performance superiority. |
+| Existing OpenCode and Codex coexist without duplicate setup | Packed imports include existing OpenCode plugin/server/assets and Codex SDK; standalone Codex uses existing CLI/auth. A consumer's OpenCode config remained byte-identical and no Codex config was created. | The consumer reused locally present dependency packages; fresh registry resolution was not tested. |
+| Installation and use reach the same public contract | Tarball extraction outside the checkout; real executable bin; all public entry imports; public TypeScript SDK references; three help paths. | Local artifact only, version still 0.13.8; these new Mission additions are not published under npm latest. |
+| Refusal, interruption, resume and visibility stay explicit | Packed synthetic protocol checks prove auth refusal before thread creation, missing approval bridge explanation, incomplete stdout JSON, stderr progress and SIGTERM 143. Earlier Ubuntu native saved-thread resume and unknown-execution evidence remain applicable to the unchanged adapter. | Synthetic distribution checks are not new model runs. Unknown external work, nested/untracked recovery, and native subprocess EPERM remain explicit limitations. |
+| Existing OpenCode behavior remains intact | Related CLI/V2/plugin-loader/progress regression passes, including packed OpenCode initialization and assets. Full Linux suite includes the common OpenCode lifecycle paths. | Windows-native Mission, Windows Desktop and all-host parity were not validated for this candidate; the Mission shell route is Linux-first. |
+
+Distribution evidence is local under `_testenv/codex-distribution/`:
+
+- `pack.json` and `sortie-dogs-0.13.8.tgz`; artifact SHA-256
+  `569915c6eb943f6e203fb858e5774094921cd3f9f2690f2d7fc661cbb12ae787`.
+- `consumer-summary.json`: 227 archive entries, executable bin, 9 successful checks, no live model or
+  registry access. Package extraction lived under `/tmp/sortie-packed-consumer-hswcl791`; dependencies
+  were symlinks to already installed local packages. No package install or global environment edit was
+  needed for this isolated smoke.
+- `related.log`: 81 tests passed, exit 0. The existing packed-loader regression now covers Codex root
+  exports and all three help entrypoints in addition to OpenCode assets and initialization.
+
+The concrete defects found in this audit were a usage/help mismatch (`codex run --help` returned 2)
+and onboarding ambiguity. Help now returns 0 on stdout. README separates Codex from OpenCode `init`,
+identifies the unpublished local-tarball route and existing-auth prerequisites, adds the public Mission
+SDK lifecycle, and corrects permission-handler and completion/exit descriptions. No new orchestration
+feature, permission store or model execution was introduced.
+
+## Local change summary for eventual publication review
+
+Relative to upstream `0dac848`, this branch connects the existing Mission core to native Codex saved
+sessions and public CLI/SDK entrypoints; preserves model overrides, cwd, permissions and real exits;
+reconciles exact recoverable native receipts while refusing unknown external work; exposes native usage
+and bounded progress; supports explicit authorized parent executors; and repairs same-author direct
+replanning without resetting spend. OpenCode continues using the shared core and its existing plugin
+entrypoints. New tests cover those contracts, and this document retains real Ubuntu evidence and limits.
+
+No merge, push, tag, npm publish, global installation or release-version change was performed. The local
+0.13.8 tarball is an audit artifact, not a replacement for the already published 0.13.8 package. Actual
+publication still needs a separately authorized release/version decision and the repository's fixed
+commit/package release procedure. This audit does not assert universal platform qualification or that
+historical benchmark goals have been newly measured.
+
+Distribution follow-up final validation: full Linux regression passed 113 files, exit 0, 221.810 s
+(`_testenv/codex-distribution/full.log`). Two independent reviews found no High/Medium issue. All 224
+packed `dist` files match the verified build. The generated consumer dependency tree was removed after
+the smoke; the tarball, protocol records, summaries and reproduction script were retained.

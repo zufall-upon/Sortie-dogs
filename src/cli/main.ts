@@ -262,6 +262,7 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] === "codex") {
     if (argv[1] === "mission") return (await import("./codex-mission.js")).runCodexMissionCommand(argv.slice(2));
+    if (argv.length === 3 && argv[1] === "run" && argv[2] === "--help") { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] === "--help" && argv.length === 2) { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] !== "run") { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
     const values = new Map<string, string>();

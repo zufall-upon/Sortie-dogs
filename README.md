@@ -56,7 +56,24 @@ optional measurement rather than a mandatory release gate.
 
 ## Quick start
 
-### Codex host adapter (experimental)
+### Codex host adapter (experimental, unreleased Mission additions)
+
+Choose this route for Codex; OpenCode is not required and **do not run `sortie-dogs init` for it**.
+Use Node.js 22.6 or newer and an existing Codex CLI with ChatGPT authentication. Ubuntu validation
+used Node.js 22.22.1 and Codex 0.160.1. Sortie neither installs Codex nor starts a login flow, copies
+credentials, or creates a second host configuration. Mission execution refuses non-ChatGPT auth.
+
+The Mission additions below are development-branch changes, not a claim about npm's published
+`0.13.8` / `latest`. Given a reviewed local candidate tarball, install it in the target project and
+inspect the entrypoint before running a prompt:
+
+```sh
+npm install --save-dev /path/to/reviewed-sortie-dogs.tgz
+npx --no-install sortie-dogs codex mission --help
+```
+
+A maintainer with checkout dependencies already present can produce that tarball with `npm pack`
+(build included). This does not publish it. Use the packed version for the CLI and SDK below.
 
 Sortie-dogs also exports a host adapter for the official Codex app-server stdio protocol. This is
 separate from selecting an OpenAI model through OpenCode: OpenCode model routing still uses the
@@ -83,13 +100,34 @@ await host.close();
 The adapter reuses Sortie's host-neutral core instead of copying its goal, acceptance, evidence, or
 ledger implementation. It exposes completed Codex items as authoritative observations, supports
 exact persisted-thread resume and turn interruption (ephemeral threads have no resumable rollout), and declines command/file approvals unless the caller
-provides an approval handler. Permission escalation requests receive an empty grant. Unsupported
+provides an approval handler. Permission-subset requests receive an empty grant unless the caller
+connects `permissionsApproval`; approved responses are limited to the native request. Unsupported
 server-initiated requests fail closed.
 
 For the existing Operator → Coordinator → Worker → Reviewer Mission workflow, use:
 
 ```sh
-sortie-dogs codex mission --prompt "Implement and review the requested change" --model gpt-6.1-sol --effort medium
+npx --no-install sortie-dogs codex mission --prompt "Implement and review the requested change" --model gpt-6.1-sol --effort medium
+```
+
+The equivalent public SDK entrypoint is:
+
+```ts
+import { CodexMissionSession } from "sortie-dogs";
+
+const mission = await CodexMissionSession.create({
+  projectRoot: process.cwd(),
+  model: "gpt-6.1-sol", // Choose a model available to the existing signed-in account.
+  effort: "medium",
+  // resumeThreadID: "saved-root-thread-id", // Continue the same Mission when needed.
+});
+try {
+  const result = await mission.run("Implement and review the requested change");
+  console.log(JSON.stringify(result));
+  process.exitCode = result.accepted ? 0 : 1;
+} finally {
+  await mission.close();
+}
 ```
 
 This Linux-first route uses `CodexMissionSession` and the existing Mission tools, correction grants,
@@ -163,6 +201,8 @@ subtotals are counted once. Its pre-terminal snapshot excludes final-answer gene
 retains native thread totals. Terminal accounting observations survive cold reload in the existing Mission;
 missing baselines remain unavailable. Native turn aggregates do not establish model-request counts, API
 costs or remaining subscription allowance, so these values are not inferred.
+CLI exit 0 means Operator acceptance; exit 1 means incomplete work or an execution error; exit 2
+means invalid arguments. A native turn completing alone is not acceptance.
 The CLI writes bounded progress records to stderr: tool start/completion, commands and exit codes,
 replan reasons, next actions, child identity, and public model commentary. Final JSON remains on stdout.
 
@@ -193,7 +233,10 @@ stable/v010 profiles. Inspect the prior worker and ledger before recovery; do no
 delete the ledger or automatically resend the prompt. This is a Codex admission
 check; it does not establish quiescence of external command executors.
 
-Requirements: Node.js 22.6 or newer, npm, and OpenCode V2.
+### OpenCode plugin
+
+Requirements: Node.js 22.6 or newer, npm, and OpenCode V2. These installation and `init` steps
+configure the OpenCode route; they are not prerequisites for the Codex route above.
 
 Run these commands in the target project:
 
