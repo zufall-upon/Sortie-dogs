@@ -78,6 +78,52 @@ test("Codex app-server host declines approvals by default and can interrupt", as
   await host.close();
 });
 
+test("Codex app-server event observers can interrupt without blocking the protocol pump", async () => {
+  const transport = new FakeTransport();
+  const host = new CodexAppServerHost(transport);
+  let interrupt: Promise<void> | undefined;
+  const run = host.runTurn("thr_reentrant", "Wait", { cwd: "C:\\fixture", onEvent: event => {
+    if (event.method === "item/started") interrupt ??= host.interrupt();
+  } });
+  transport.push({ id: 1, result: {} });
+  await tick();
+  transport.push({ id: 2, result: { turn: { id: "turn_reentrant", status: "inProgress" } } });
+  await tick();
+  transport.push({ method: "item/started", params: { threadId: "thr_reentrant", turnId: "turn_reentrant",
+    item: { id: "cmd", type: "commandExecution", status: "inProgress", command: "wait" } } });
+  await tick();
+  const request = transport.sent.at(-1)!;
+  assert.equal(request.method, "turn/interrupt");
+  transport.push({ id: request.id, result: {} });
+  await tick();
+  await interrupt;
+  transport.push({ method: "turn/completed", params: { threadId: "thr_reentrant",
+    turn: { id: "turn_reentrant", status: "interrupted" } } });
+  assert.equal((await run).status, "interrupted");
+  await host.close();
+});
+
+test("Codex app-server keeps a completing turn closeable while its observer is pending", async () => {
+  const transport = new FakeTransport();
+  const host = new CodexAppServerHost(transport);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const run = host.runTurn("thr_pending", "Wait", { cwd: "C:\\fixture", onEvent: event =>
+    event.method === "turn/completed" ? pending : undefined });
+  transport.push({ id: 1, result: {} });
+  await tick();
+  transport.push({ id: 2, result: { turn: { id: "turn_pending", status: "inProgress" } } });
+  await tick();
+  transport.push({ method: "turn/completed", params: { threadId: "thr_pending",
+    turn: { id: "turn_pending", status: "completed" } } });
+  await tick();
+  await assert.rejects(host.runTurn("thr_other", "No overlap", { cwd: "C:\\fixture" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "turn-active");
+  await host.close();
+  await assert.rejects(run, (error: unknown) => error instanceof Error && "code" in error && error.code === "server-closed");
+  release();
+});
+
 test("Codex app-server host resumes exact thread identity", async () => {
   const transport = new FakeTransport();
   const host = new CodexAppServerHost(transport);

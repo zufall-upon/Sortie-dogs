@@ -82,7 +82,7 @@ await host.close();
 
 The adapter reuses Sortie's host-neutral core instead of copying its goal, acceptance, evidence, or
 ledger implementation. It exposes completed Codex items as authoritative observations, supports
-exact thread resume and turn interruption, and declines command/file approvals unless the caller
+exact persisted-thread resume and turn interruption (ephemeral threads have no resumable rollout), and declines command/file approvals unless the caller
 provides an approval handler. Permission escalation requests receive an empty grant. Unsupported
 server-initiated requests fail closed.
 

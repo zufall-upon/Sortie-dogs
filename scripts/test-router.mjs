@@ -68,6 +68,7 @@ async function offload(mode, args) {
   const helper = snapshotHelper(source);
   const liveTestEnvironment = Object.fromEntries([
     'SORTIE_CODEX_LIVE',
+    'SORTIE_CODEX_LIVE_INTERRUPT_RESUME',
     'SORTIE_CODEX_LIVE_EXECUTABLE',
     'SORTIE_CODEX_LIVE_WINDOWS_TEMP',
     'SORTIE_CODEX_LIVE_LINUX_TEMP',

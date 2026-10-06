@@ -119,6 +119,8 @@ interface ActiveTurn {
   finalResponse?: string;
   usage?: JsonObject;
   observerError?: unknown;
+  observer: Promise<void>;
+  completing?: boolean;
   onEvent?: CodexTurnOptions["onEvent"];
   resolve(result: CodexTurnResult): void;
   reject(reason: unknown): void;
@@ -192,7 +194,7 @@ export class CodexAppServerHost {
     const turnID = object(started) && object(started.turn) ? text(started.turn.id) : undefined;
     if (!turnID) throw new CodexHostError("protocol-invalid-response", "turn/start returned no turn id.");
     return new Promise<CodexTurnResult>((resolve, reject) => {
-      this.active = { threadID, turnID, items: [], onEvent: options.onEvent, resolve, reject };
+      this.active = { threadID, turnID, items: [], observer: Promise.resolve(), onEvent: options.onEvent, resolve, reject };
       const backlog = this.notificationBacklog.splice(0);
       void backlog.reduce((prior, event) => prior.then(() => this.notification(event.method, event.params)), Promise.resolve())
         .catch(error => { this.active?.reject(error); this.active = undefined; });
@@ -289,8 +291,11 @@ export class CodexAppServerHost {
     const turn = object(params.turn) ? params.turn : undefined;
     const turnID = text(params.turnId) ?? (turn ? text(turn.id) : undefined);
     if (threadID && threadID !== active.threadID || turnID && turnID !== active.turnID) return;
-    try { await active.onEvent?.({ method, params }); }
-    catch (error) { active.observerError ??= error; }
+    if (active.completing) return;
+    if (active.onEvent) {
+      active.observer = active.observer.then(() => active.onEvent!({ method, params }))
+        .catch(error => { active.observerError ??= error; });
+    }
     if (method === "thread/tokenUsage/updated") active.usage = object(params.tokenUsage) ? params.tokenUsage : params;
     if (method === "item/completed" && object(params.item)) {
       active.items.push(params.item);
@@ -298,12 +303,20 @@ export class CodexAppServerHost {
           (params.item.phase === undefined || params.item.phase === "final_answer")) active.finalResponse = params.item.text;
     }
     if (method !== "turn/completed") return;
+    active.completing = true;
     const status = turn ? text(turn.status) : text(params.status);
     const result: CodexTurnResult = { threadID: active.threadID, turnID: active.turnID, status: status ?? "unknown",
       ...(active.finalResponse ? { finalResponse: active.finalResponse } : {}), items: active.items,
       ...(active.usage ? { usage: active.usage } : {}) };
-    this.active = undefined;
-    if (active.observerError) active.reject(new CodexHostError("request-failed", "Codex turn event observer failed.", active.observerError));
-    else active.resolve(result);
+    // Do not block the protocol pump on observer work. Observers may issue host
+    // requests such as interrupt(), whose response must be read by this pump.
+    // Keep the completing turn active until observers settle so close() can
+    // reject it and a later turn cannot receive an interrupt meant for it.
+    void active.observer.then(() => {
+      if (this.active !== active) return;
+      this.active = undefined;
+      if (active.observerError) active.reject(new CodexHostError("request-failed", "Codex turn event observer failed.", active.observerError));
+      else active.resolve(result);
+    });
   }
 }
