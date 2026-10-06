@@ -50,9 +50,10 @@ test("native approval requests remain visible when the CLI has no approval bridg
 
 test("host execution progress distinguishes selected executor and unknown failure", () => {
   const progress = codexMissionProgress({ method: "sortie/commandExecution", threadId: "root", params: {
-    turnId: "turn", callId: "call", tool: "bash", executor: "host", status: "unknown", reason: "Host connection lost",
+    turnId: "turn", callId: "call", tool: "bash", executor: "host", cwd: "/repo/package with spaces", status: "unknown", reason: "Host connection lost",
   } });
   assert.equal(progress?.executor, "host");
+  assert.equal(progress?.cwd, "/repo/package with spaces");
   assert.equal(progress?.phase, "unknown");
   assert.equal(progress?.detail, "Host connection lost");
 });

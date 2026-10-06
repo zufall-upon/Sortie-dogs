@@ -51,7 +51,7 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
 export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
   if (event.method === "sortie/commandExecution")
     return { thread_id: event.threadId, turn_id: event.params.turnId, call_id: event.params.callId,
-      tool: event.params.tool, executor: event.params.executor, phase: event.params.status,
+      tool: event.params.tool, executor: event.params.executor, cwd: event.params.cwd, phase: event.params.status,
       detail: typeof event.params.reason === "string" ? event.params.reason.slice(0, 1600) : undefined };
   if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(event.method))
     return { thread_id: event.threadId, turn_id: event.params.turnId, phase: "approval-required", method: event.method,
@@ -78,7 +78,7 @@ export function codexMissionProgress(event: CodexTurnEvent & { threadId: string 
   const metadata = record(receipt.metadata) ? receipt.metadata : {};
   return { thread_id: event.threadId, turn_id: event.params.turnId, tool: item.tool,
     phase: event.method === "item/started" ? "started" : "completed", status: item.status, success: item.success,
-    command: bounded(args.command), reason: bounded(args.reason),
+    command: bounded(args.command), workdir: bounded(args.workdir), cwd: bounded(metadata.cwd), reason: bounded(args.reason),
     agent: bounded(args.subagent_type), description: bounded(args.description), child_session_id: bounded(metadata.sessionId),
     outcome: bounded(receipt.status), exit: metadata.exit, executor: metadata.executor,
     next_action: bounded(receipt.next_action),

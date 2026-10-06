@@ -318,7 +318,10 @@ export class CodexMissionSession {
         developerInstructions: content.replace(/^---\n[\s\S]*?\n---\n/, "") +
           "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
           "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
-          "Native shell and file operations outside these functions do not provide Mission validation evidence.",
+          "Native shell and file operations outside these functions do not provide Mission validation evidence. " +
+          "Declare formal validation as exact executable shell commands from the project root, without prose annotations such as (workdir: ...). " +
+          "Use a root-relative command or an explicit shell cd for a subdirectory formal check. bash workdir changes that invocation only; " +
+          "a command run in another directory does not validate a root-directory entry.",
         dynamicTools: this.tools(content), config: { "features.shell_tool": false, "features.unified_exec": false } });
       if (this.closed) throw new Error("Codex Mission adapter is closed.");
       const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [], usageBaseline: emptyCodexUsage(), createdAt: Date.now(),
@@ -407,7 +410,7 @@ export class CodexMissionSession {
       ({ type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } });
     const string = { type: "string" };
     tools.push(define("bash", "Run a foreground command through the native Codex sandbox. Preserve formal validation commands exactly.",
-      { command: string, timeout: { type: "integer", minimum: 1, maximum: 1200000 } }, ["command"]));
+      { command: string, workdir: string, timeout: { type: "integer", minimum: 1, maximum: 1200000 } }, ["command"]));
     tools.push(define("read", "Read a UTF-8 file through the native Codex sandbox.", { filePath: string }));
     tools.push(define("write", "Write a UTF-8 file through the native Codex sandbox.", { filePath: string, content: string }));
     tools.push(define("task", "Run a returned Mission Task, or resume its existing task_id. Preserve the host's prompt and subagent_type.",
@@ -480,6 +483,7 @@ export class CodexMissionSession {
     await this.hooks["tool.execute.before"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId }, output);
     const args = output.args;
     const start = Date.now();
+    const cwd = call.tool === "bash" && typeof args.workdir === "string" ? resolve(this.directory, args.workdir) : this.directory;
     let text: string;
     let dispatched = false;
     let child: NativeSession | undefined;
@@ -504,14 +508,14 @@ export class CodexMissionSession {
         : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
       const executor = this.options.executeCommand ? "host" : "native";
       await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,
-        params: { turnId: call.turnId, callId: call.callId, tool: call.tool, executor, status: "started" } });
+        params: { turnId: call.turnId, callId: call.callId, tool: call.tool, executor, cwd, status: "started" } });
       if (this.closed) throw new Error("Codex Mission adapter is closed; command was not started.");
       dispatched = true;
       const timeoutMs = typeof args.timeout === "number" ? args.timeout : 120_000;
       const result: CodexMissionCommandResult = this.options.executeCommand
-        ? await this.executeHostCommand({ tool: call.tool as CodexMissionCommandRequest["tool"], command, cwd: this.directory, timeoutMs,
+        ? await this.executeHostCommand({ tool: call.tool as CodexMissionCommandRequest["tool"], command, cwd, timeoutMs,
           threadId: session.id, turnId: call.turnId, callId: call.callId, signal: this.executionAbort.signal })
-        : { status: "completed", ...await session.host.executeCommand(command, this.directory, timeoutMs) };
+        : { status: "completed", ...await session.host.executeCommand(command, cwd, timeoutMs) };
       if (this.closed || this.executionAbort.signal.aborted) throw new Error("Host execution interrupted; completion is unknown.");
       if (result.status === "denied" || result.status === "not-started") {
         dispatched = false; // Explicit host proof that no command ran; there is no exit or validation result.
@@ -521,14 +525,14 @@ export class CodexMissionSession {
       if (!Number.isSafeInteger(result.exitCode) || typeof result.stdout !== "string" || typeof result.stderr !== "string")
         throw new Error("Host executor returned no authoritative command result; completion is unknown.");
       text = result.stdout + result.stderr;
-      metadata = { exit: result.exitCode, status: "completed", executor };
+      metadata = { exit: result.exitCode, status: "completed", executor, cwd };
     }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (call.tool !== "task") {
         try { await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,
           params: { turnId: call.turnId, callId: call.callId, tool: call.tool,
-            executor: this.options.executeCommand ? "host" : "native", status: dispatched ? "unknown" : "not-started", reason } }); }
+            executor: this.options.executeCommand ? "host" : "native", cwd, status: dispatched ? "unknown" : "not-started", reason } }); }
         catch { /* Progress failure cannot suppress execution reconciliation. */ }
       }
       session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id, codexToolReceipt: true }, parts: [{ type: "tool", tool: call.tool,

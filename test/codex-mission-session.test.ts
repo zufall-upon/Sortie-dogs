@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -423,8 +423,58 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
       assert.equal(afterReceipts[0]?.metadata?.exit, outcome === "failed" ? 7 : undefined);
       if (unknown) {
         assert.equal(afterReceipts.length, 0, "unknown execution never produces terminal evidence");
-        assert(events.some(event => event.method === "sortie/commandExecution" && event.params.status === "unknown" && event.params.reason));
+        assert(events.some(event => event.method === "sortie/commandExecution" && event.params.status === "unknown" && event.params.cwd === directory && event.params.reason));
       }
     }
   } finally { authorize(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+for (const delegated of [false, true]) test(`bash workdir matches shared validation identity through ${delegated ? "host" : "native"} executor`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-workdir-"));
+  const nested = join(directory, "package with spaces");
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  let hostCalls = 0;
+  const events: Json[] = [];
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(nested);
+    await writeFile(join(directory, "check.mjs"), "process.exit(7)");
+    await writeFile(join(nested, "check.mjs"), "console.log(process.cwd())");
+    const native = new ScriptedTransport("root", async host => {
+      try {
+        await host.call("sortie_v010_start_mission", { requirements: ["Fix root check"] });
+        await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Fix root", objective: "Fix root check",
+          read: ["check.mjs", "package with spaces/check.mjs"], write: ["check.mjs"], validation: ["node check.mjs"] }] });
+        for (const workdir of ["package with spaces", nested]) {
+          const result = await host.call("bash", { command: "node check.mjs", workdir });
+          assert.equal(result.metadata.exit, 0);
+          assert.equal(result.output.trim(), nested);
+          assert.equal(result.metadata.cwd, nested);
+          assert.equal((await host.call("sortie_v010_finish_direct_unit", {})).status, "direct-unit-awaits-validation",
+            "same command in a different directory is not the declared root validation");
+        }
+        assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 7);
+        await host.call("write", { filePath: "check.mjs", content: "process.exit(0)" });
+        assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+        await host.call("sortie_v010_finish_direct_unit", {});
+        await host.call("sortie_v010_review_mission", { risk_tags: [] });
+        await host.call("sortie_v010_complete_mission", {});
+      } catch (error) { failure = error; }
+    });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      onEvent: event => { events.push(event); }, ...(delegated ? { executeCommand: async (request: any) => {
+        hostCalls++;
+        try { const result = await exec(request.command[0], request.command.slice(1), { cwd: request.cwd }); return { status: "completed" as const, exitCode: 0, ...result }; }
+        catch (error: any) { return { status: "completed" as const, exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
+      } } : {}) });
+    const result = await adapter.run("Fix root check");
+    if (failure) throw failure;
+    assert.equal(result.accepted, true);
+    const bash = native.threadRequests[0].dynamicTools.find((tool: Json) => tool.name === "bash");
+    assert.equal(bash.inputSchema.properties.workdir.type, "string");
+    assert(events.some(event => event.method === "sortie/commandExecution" && event.params.cwd === nested));
+    assert.equal(hostCalls, delegated ? 5 : 0);
+    assert.equal(native.commandExecutions, delegated ? 0 : 5);
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });
