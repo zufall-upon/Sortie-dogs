@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
@@ -103,9 +103,44 @@ export interface MissionSelfRecheck {
   unresolvedFindings: string[];
   residualMajor?: { reachable_path: string; consequence: string };
 }
+export interface CodexMissionOwner {
+  pid: number; bootID?: string; startTicks?: string; generation: string; closed?: boolean;
+}
+
+async function codexProcessStart(pid: number): Promise<string> {
+  const value = await readFile(`/proc/${pid}/stat`, "utf8");
+  const ticks = value.slice(value.lastIndexOf(")") + 2).split(" ")[19];
+  if (!ticks || !/^\d+$/.test(ticks)) throw new Error("codex-process-identity-unavailable");
+  return ticks;
+}
+export async function codexProcessOwner(): Promise<CodexMissionOwner> {
+  const owner: CodexMissionOwner = { pid: process.pid, generation: randomUUID() };
+  if (process.platform === "linux") {
+    owner.bootID = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+    owner.startTicks = await codexProcessStart(process.pid);
+  }
+  return owner;
+}
+export async function codexOwnerGone(owner: CodexMissionOwner | undefined): Promise<boolean> {
+  if (!owner) return false;
+  if (owner.closed) return true;
+  if (process.platform !== "linux" || !owner.bootID || !owner.startTicks || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return false;
+  try {
+    if ((await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim() !== owner.bootID) return true;
+    return await codexProcessStart(owner.pid) !== owner.startTicks;
+  } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+}
+
+export interface CodexNotStartedProof {
+  missionID: string; threadID: string; turnID: string; callID: string; inputHash: string;
+  ownerGeneration: string;
+}
 export interface OperatorMission {
   /** Native transport identity; execution and recovery remain in this Mission. */
   executionHost?: "codex";
+  /** Adapter liveness only; unit execution/settlement remain in the existing run ledger. */
+  codexOwner?: CodexMissionOwner;
+  codexNotStarted?: CodexNotStartedProof[];
   version: "0.12";
   id: string;
   root: string;
@@ -337,6 +372,41 @@ export class OperatorMissionRuntime {
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
     return state;
   }
+  /** Serialize host recovery claims across processes; a stale lock never authorizes takeover. */
+  async codexRecovery<T>(root: string, action: (state: OperatorMission) => Promise<T>): Promise<T> {
+    const lock = `${this.file(root)}.codex-recovery.lock`;
+    const owner = await codexProcessOwner();
+    const marker = `owner.${owner.pid}.${owner.bootID ?? "unknown"}.${owner.startTicks ?? "unknown"}.${owner.generation}`;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      let acquired = false;
+      const staging = `${lock}.${owner.generation}.tmp`;
+      try {
+        await mkdir(staging);
+        await open(join(staging, marker), "wx", 0o600).then(handle => handle.close());
+        // Publish owner and lock together. rename cannot replace another nonempty owner directory.
+        await rename(staging, lock);
+        acquired = true;
+      } catch { /* Another live claimant owns this short metadata transaction. */ }
+      finally { await rm(staging, { recursive: true, force: true }); }
+      if (acquired) {
+        try { return await action(await this.required(root)); }
+        finally { await unlink(join(lock, marker)); await rmdir(lock).catch(() => undefined); }
+      }
+      await unlink(join(lock, marker)).catch(() => undefined);
+      const names = await readdir(lock).catch(() => []);
+      if (names.length === 1) {
+        const match = /^owner\.(\d+)\.([a-f0-9-]+)\.(\d+)\.([a-f0-9-]+)$/.exec(names[0]!);
+        if (match && await codexOwnerGone({ pid: Number(match[1]), bootID: match[2], startTicks: match[3], generation: match[4]! })) {
+          // Remove only the dead owner's unique marker; never unlink a replacement owner's file.
+          await unlink(join(lock, names[0]!)).catch(() => undefined);
+        }
+      }
+      // Live locks are published nonempty; a replacement marker prevents this removal.
+      await rmdir(lock).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error("codex-mission-recovery-busy");
+  }
   /** Current Mission records only; request captures and archived generations are excluded. */
   async current(): Promise<OperatorMission[]> {
     const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
@@ -410,6 +480,7 @@ export class OperatorMissionRuntime {
         previous?.runID ?? previous?.supersededRunID;
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         kind: options.kind ?? "implementation", ...(options.executionHost ? { executionHost: options.executionHost } : {}),
+        ...(previous?.codexNotStarted ? { codexNotStarted: previous.codexNotStarted } : {}),
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),

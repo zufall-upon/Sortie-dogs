@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { CodexAppServerHost, createCodexAppServerTransport, type CodexDynamicTool, type CodexDynamicToolCall,
   type CodexTurnEvent, type CodexTurnResult, type CodexAppServerTransport } from "./app-server.js";
@@ -7,7 +7,8 @@ import type { OpenCodeHooks } from "../plugin/index.js";
 import { legacyToolArgs, toolSchema } from "../plugin/tool-schema.js";
 import { V010_RUNTIME_PROFILE as profile } from "../core/runtime-profile.js";
 import { runtimeAssets } from "../runtime-assets-v010.js";
-import { OperatorMissionRuntime } from "../core/operator-mission.js";
+import { OperatorRuntime } from "../core/operator-runtime.js";
+import { OperatorMissionRuntime, type CodexMissionOwner, type CodexNotStartedProof, codexProcessOwner, codexOwnerGone } from "../core/operator-mission.js";
 
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -40,6 +41,8 @@ export class CodexMissionSession {
   private closed = false;
   private readonly hosts = new Set<CodexAppServerHost>();
   private root?: string;
+  private owner!: CodexMissionOwner;
+  private readonly ownedRoots = new Set<string>();
   private readonly toolQueues = new Map<string, Promise<unknown>>();
   private get sandboxPolicy(): JsonObject { return { type: "workspaceWrite", writableRoots: [this.directory], networkAccess: false }; }
   readonly directory: string;
@@ -47,6 +50,7 @@ export class CodexMissionSession {
 
   static async create(options: CodexMissionSessionOptions): Promise<CodexMissionSession> {
     const adapter = new CodexMissionSession(options);
+    adapter.owner = await codexProcessOwner();
     const id = (request: { path: { id: string } }) => request.path.id;
     const info = (session: NativeSession) => ({ id: session.id, agent: session.agent, parentID: session.parentID,
       outcome: session.outcome, model: session.model });
@@ -71,10 +75,13 @@ export class CodexMissionSession {
         if (!missions.some(item => item.executionHost === "codex" && item.root === resume)) throw new Error("Codex Mission resume does not belong to this repository.");
         await this.restoreSession(resume, "dog-operator");
         this.root = resume;
+        await this.claimOwner(resume);
+        await this.hooks.tool?.sortie_v010_operator_status?.execute({ view: "full" }, { sessionID: resume, agent: "dog-operator" });
       }
     }
     const session = this.root ? this.required(this.root) : await this.createSession("dog-operator");
     this.root = session.id;
+    await this.claimOwner(session.id);
     const previous = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
     const turn = await this.prompt(session, prompt);
     const mission = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
@@ -83,9 +90,71 @@ export class CodexMissionSession {
       ({ thread_id: item.id, agent: item.agent, model: item.model, usage: item.usage ?? null, usage_scope: "native-thread-cumulative", cost: null })) };
   }
 
-  async close(): Promise<void> {
+  private async stopHosts(): Promise<void> {
     this.closed = true;
     await Promise.all([...this.hosts].map(host => host.close()));
+  }
+
+  async close(): Promise<void> {
+    await this.stopHosts();
+    await Promise.allSettled([...this.toolQueues.values()]);
+    const missions = new OperatorMissionRuntime(this.directory, profile);
+    for (const root of this.ownedRoots) await missions.codexRecovery(root, async state => {
+      if (state.codexOwner?.generation === this.owner.generation) await missions.update(root, current => {
+        if (current.codexOwner?.generation === this.owner.generation) current.codexOwner.closed = true;
+      });
+    });
+  }
+
+  private async claimOwner(root: string): Promise<void> {
+    const missions = new OperatorMissionRuntime(this.directory, profile);
+    const existing = await missions.read(root);
+    if (!existing) return;
+    if (existing.codexOwner?.generation === this.owner.generation) { this.ownedRoots.add(root); return; }
+    await missions.codexRecovery(root, async state => {
+      if (state.codexOwner && state.codexOwner.generation !== this.owner.generation && !await codexOwnerGone(state.codexOwner))
+        throw new Error("codex-mission-owner-active:no-resend");
+      await missions.update(root, current => { current.codexOwner = { ...this.owner }; });
+    });
+    this.ownedRoots.add(root);
+  }
+
+  private rootOf(session: NativeSession): string {
+    let current = session;
+    while (current.parentID) current = this.required(current.parentID);
+    return current.id;
+  }
+
+  private async recoverNotStarted(threadID: string, turn: JsonObject, item: JsonObject): Promise<boolean> {
+    if (item.tool !== "task" || !object(item.arguments) || item.arguments.task_id || typeof item.id !== "string" || typeof turn.id !== "string" ||
+        !["completed", "interrupted", "failed"].includes(String(turn.status))) return false;
+    const args = item.arguments;
+    const inputHash = createHash("sha256").update(JSON.stringify(item.arguments)).digest("hex");
+    const missions = new OperatorMissionRuntime(this.directory, profile);
+    const records = (await missions.current()).filter(state => state.executionHost === "codex");
+    for (const record of records) {
+      const matches = (proof: CodexNotStartedProof) => proof.threadID === threadID &&
+        proof.turnID === turn.id && proof.callID === item.id && proof.inputHash === inputHash;
+      if (record.codexNotStarted?.some(matches)) return true;
+      if (!await codexOwnerGone(record.codexOwner)) continue;
+      const recovered = await missions.codexRecovery(record.root, async state => {
+        if (state.id !== record.id || !await codexOwnerGone(state.codexOwner)) return false;
+        if (state.codexNotStarted?.some(matches)) return true;
+        const coordinator = state.root === threadID && state.callID === item.id && state.dispatchOpen && state.coordinator === null &&
+          args.subagent_type === missions.task(state).subagent_type && args.prompt === missions.task(state).prompt;
+        const run = state.runID ? await new OperatorRuntime(this.directory, profile).read(state.root) : undefined;
+        const unit = run?.units.find(unit => unit.callID === item.id && unit.status === "running" && unit.childSessionID === null);
+        const worker = run?.runID === state.runID && (run?.operatorSessionID ?? state.root) === threadID && unit &&
+          new OperatorRuntime(this.directory, profile).matchesRecordedWorkerTask(run!, unit.unit.id, item.arguments);
+        if (!coordinator && !worker) return false;
+        const proof: CodexNotStartedProof = { missionID: state.id, threadID, turnID: String(turn.id), callID: String(item.id), inputHash,
+          ownerGeneration: state.codexOwner!.generation };
+        await missions.update(state.root, current => { (current.codexNotStarted ??= []).push(proof); });
+        return true;
+      });
+      if (recovered) return true;
+    }
+    return false;
   }
 
   private required(id: string): NativeSession {
@@ -155,9 +224,14 @@ export class CodexMissionSession {
       for (const turn of turns) {
         if (!Array.isArray(turn.items) || turn.status === "inProgress" || turn.itemsView !== "full")
           throw new Error(`Codex thread ${id} still has unproven execution; no resend. Reconcile its native execution before resuming.`);
-        if (turn.items.filter(object).some(item => item.type === "dynamicToolCall" &&
-            (item.status !== "completed" || turn.status !== "completed" && item.success !== true)))
-          throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
+        for (const item of turn.items.filter(object)) {
+          if (item.type !== "dynamicToolCall" || item.status === "completed" && (turn.status === "completed" || item.success === true)) continue;
+          const unique = turns.flatMap(entry => Array.isArray(entry.items) ? entry.items.filter(object) : []).filter(entry => entry.id === item.id).length === 1;
+          if (!unique || !await this.recoverNotStarted(id, turn, item))
+            throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
+          Object.assign(item, { status: "completed", success: false, contentItems: [{ type: "inputText", text: JSON.stringify({
+            output: "Host reconciled this exact Task as not started; no native child was dispatched.", metadata: { status: "error", codex_not_started: true } }) }] });
+        }
       }
       await host.resumeThread(id);
       const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [],
@@ -236,8 +310,13 @@ export class CodexMissionSession {
     if (this.closed) throw new Error("Codex Mission adapter is closed.");
     const session = this.required(call.threadId);
     const definition = this.hooks.tool?.[call.tool];
-    if (definition) return definition.execute(legacyToolArgs(call.arguments, definition.args), { sessionID: session.id, agent: session.agent });
+    if (definition) {
+      const result = await definition.execute(legacyToolArgs(call.arguments, definition.args), { sessionID: session.id, agent: session.agent });
+      await this.claimOwner(this.rootOf(session));
+      return result;
+    }
     if (!["bash", "read", "write", "task"].includes(call.tool) || !object(call.arguments)) throw new Error("Unsupported Codex Mission tool.");
+    await this.claimOwner(this.rootOf(session));
     const output = { args: { ...call.arguments } };
     await this.hooks["tool.execute.before"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId }, output);
     const args = output.args;
@@ -273,13 +352,23 @@ export class CodexMissionSession {
           metadata: { status: dispatched ? "running" : "error", ...(child ? { sessionId: child.id } : {}) },
           time: { start, ...(dispatched ? {} : { end: Date.now() }) } } }] });
       if (!dispatched) {
+        if (call.tool === "task" && !args.task_id) {
+          const root = this.rootOf(session), missions = new OperatorMissionRuntime(this.directory, profile);
+          await missions.update(root, current => {
+            const proof: CodexNotStartedProof = { missionID: current.id, threadID: call.threadId, turnID: call.turnId,
+              callID: call.callId, inputHash: createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex"),
+              ownerGeneration: this.owner.generation };
+            if (!current.codexNotStarted?.some(item => item.callID === proof.callID && item.turnID === proof.turnID && item.threadID === proof.threadID))
+              (current.codexNotStarted ??= []).push(proof);
+          });
+        }
         if (child) child.outcome = "failed";
         await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args },
           { status: "error", output: reason, metadata: { status: "error", ...(child ? { sessionId: child.id } : {}) } });
       }
       // A lost transport after dispatch does not prove an external executor stopped.
       // Stop the whole adapter so the model cannot resend that unknown operation.
-      if (dispatched) await this.close().catch(() => undefined);
+      if (dispatched) await this.stopHosts().catch(() => undefined);
       throw error;
     }
     const time = { start, end: Date.now() };

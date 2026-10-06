@@ -103,12 +103,22 @@ names fail rather than silently selecting another model. Availability depends on
 
 Use `--resume <root-thread-id>` to continue a saved Mission root. Without it, a single unfinished Codex
 Mission in this repository is selected automatically; multiple unfinished roots require an explicit
-selection. Resume restores native messages and tool evidence, including child sessions. Unresolved
-native execution is rejected before another prompt is sent. SIGINT/SIGTERM closes the adapter and exits
-130/143 while preserving uncertain execution: app-server exit does not prove an external command has
-stopped. Inspect the original executor before recovery; do not delete Mission state to force a retry.
+selection. Resume restores native messages and tool evidence, including child sessions. Completed native
+receipts feed the existing reservation reconciliation without replaying tool execution. A new Task stopped
+before child binding can be recovered when the exact terminal parent thread/turn/call/input matches and
+the prior adapter is closed or its Linux process identity proves it is gone. The host retains that proof in
+the existing Mission and reconciles the reservation before another model prompt; repeated recovery does
+not settle it again. Concurrent recovery claims are serialized.
+
+SIGINT/SIGTERM closes the adapter and exits 130/143. Bound children without an exact completed dispatch,
+and commands sent without a saved terminal receipt, remain unknown and are not resent. App-server exit
+does not prove an external command has stopped. Linux process-death checks do not prove external writer
+quiescence either; other platforms require a clean adapter close for automatic prelaunch recovery.
+Inspect the original executor before recovery; do not delete Mission state to force a retry.
 Per-session usage is native thread cumulative usage (including earlier turns), not a Mission total;
 monetary cost is unavailable and reported as `null`.
+The CLI writes bounded progress records to stderr: tool start/completion, commands and exit codes,
+replan reasons, next actions, child identity, and public model commentary. Final JSON remains on stdout.
 
 For a manifest-bound mission, use the SDK `runCodexMission(...)` or the CLI:
 

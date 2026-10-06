@@ -1,3 +1,4 @@
+import type { CodexTurnEvent } from "../codex/app-server.js";
 import { CodexMissionSession } from "../codex/mission-session.js";
 
 export const CODEX_MISSION_USAGE = `Usage: sortie-dogs codex mission --prompt <text>
@@ -28,10 +29,8 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
   try {
     adapter = await CodexMissionSession.create({ projectRoot: values.get("--project-root") ?? process.cwd(),
       resumeThreadID: values.get("--resume"), executable: values.get("--executable"), model: values.get("--model"), effort: values.get("--effort"), onEvent: event => {
-        if (event.method !== "item/completed") return;
-        const item = event.params.item as Record<string, unknown> | undefined;
-        if (item?.type === "dynamicToolCall") process.stderr.write(`${JSON.stringify({ thread_id: event.threadId,
-          tool: item.tool, status: item.status, success: item.success })}\n`);
+        const progress = codexMissionProgress(event);
+        if (progress) process.stderr.write(`${JSON.stringify(progress)}\n`);
       } });
     if (signalExit) return signalExit;
     const result = await adapter.run(prompt);
@@ -46,4 +45,32 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
     try { await adapter?.close(); }
     finally { process.off("SIGTERM", onTerm); process.off("SIGINT", onInt); }
   }
+}
+
+/** Bounded user-facing progress; do not dump control packets or hidden reasoning. */
+export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
+  if (!["item/started", "item/completed"].includes(event.method)) return;
+  const item = event.params.item as Record<string, unknown> | undefined;
+  if (event.method === "item/completed" && item?.type === "agentMessage" && item.phase === "commentary" && typeof item.text === "string")
+    return { thread_id: event.threadId, turn_id: event.params.turnId, phase: "commentary", text: item.text.slice(0, 1600) };
+  if (item?.type !== "dynamicToolCall") return;
+  const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+  const bounded = (value: unknown) => typeof value === "string" ? value.slice(0, 1600) : undefined;
+  const args = record(item.arguments) ? item.arguments : {};
+  let receipt: Record<string, unknown> = {};
+  const contents = Array.isArray(item.contentItems) ? item.contentItems : [];
+  const text = contents.find(part => record(part) && part.type === "inputText")?.text;
+  try { const parsed: unknown = JSON.parse(String(text)); if (record(parsed)) receipt = parsed; } catch { /* Plain native failure. */ }
+  if (typeof receipt.output === "string") {
+    try { const nested: unknown = JSON.parse(receipt.output); if (record(nested)) receipt = { ...nested, ...receipt }; } catch { /* Ordinary command output. */ }
+  }
+  const metadata = record(receipt.metadata) ? receipt.metadata : {};
+  return { thread_id: event.threadId, turn_id: event.params.turnId, tool: item.tool,
+    phase: event.method === "item/started" ? "started" : "completed", status: item.status, success: item.success,
+    command: bounded(args.command), reason: bounded(args.reason),
+    agent: bounded(args.subagent_type), description: bounded(args.description), child_session_id: bounded(metadata.sessionId),
+    outcome: bounded(receipt.status), exit: metadata.exit,
+    next_action: bounded(receipt.next_action),
+    summary: bounded(args.summary ?? receipt.summary),
+    detail: bounded(receipt.reason ?? receipt.error ?? (item.success === false ? text : undefined)) };
 }
