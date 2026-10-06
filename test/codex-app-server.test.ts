@@ -306,3 +306,32 @@ test("native permission requests reach the host and preserve its scoped response
   await run;
   await host.close();
 });
+
+
+test("explicit native profile is transported through start, resume and standalone execution", async () => {
+  const transport = new FakeTransport();
+  const host = new CodexAppServerHost(transport, { experimentalApi: true });
+  const init = host.initialize();
+  assert.equal((transport.sent[0].params as any).capabilities.experimentalApi, true);
+  transport.push({ id: 1, result: {} }); await init;
+  const effective = { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", networkAccess: false },
+    activePermissionProfile: { id: ":workspace" }, approvalPolicy: "on-request", approvalsReviewer: "user" };
+  const start = host.startThread({ cwd: "/repo", permissions: ":workspace" }); await tick();
+  assert.equal((transport.sent.at(-1)?.params as any).permissions, ":workspace");
+  transport.push({ id: 2, result: effective }); await start;
+  assert.equal(host.threadPermissions("thread")?.profile, ":workspace");
+  assert.equal(host.threadPermissions("thread")?.networkAccess, false);
+  const resume = host.resumeThread("thread", ":workspace"); await tick();
+  assert.equal((transport.sent.at(-1)?.params as any).permissions, ":workspace");
+  transport.push({ id: 3, result: effective }); await resume;
+  const command = host.executeCommand(["node", "check.mjs"], "/repo", 1000, undefined, ":workspace"); await tick();
+  const params = transport.sent.at(-1)?.params as any;
+  assert.equal(params.permissionProfile, ":workspace"); assert.equal(params.sandboxPolicy, undefined);
+  transport.push({ id: 4, result: { exitCode: 7, stdout: "", stderr: "failed" } });
+  assert.equal((await command).exitCode, 7);
+  const rejected = host.resumeThread("thread", "unavailable"); await tick();
+  transport.push({ id: 5, error: { message: "unknown profile" } });
+  await assert.rejects(rejected, /unknown profile/);
+  assert.equal(transport.sent.filter(item => item.method === "thread/resume").length, 2, "no fallback to a different profile");
+  await host.close();
+});

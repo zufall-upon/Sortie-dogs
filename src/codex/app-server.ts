@@ -134,6 +134,8 @@ export interface CodexPermissionsApprovalResponse {
 }
 
 export interface CodexAppServerHostOptions {
+  /** Required by native permission-profile APIs; Mission dynamic-tool sessions already enable it. */
+  readonly experimentalApi?: boolean;
   readonly dynamicTool?: (call: CodexDynamicToolCall) => Promise<string>;
   readonly approval?: CodexApprovalHandler;
   readonly permissionsApproval?: (request: CodexApprovalRequest) => Promise<CodexPermissionsApprovalResponse> | CodexPermissionsApprovalResponse;
@@ -164,6 +166,7 @@ interface ActiveTurn {
 export class CodexAppServerHost {
   private nextID = 1;
   private initialized = false;
+  private readonly permissions = new Map<string, JsonObject>();
   private readonly models = new Map<string, string>();
   private closed = false;
   private closing?: Promise<void>;
@@ -184,25 +187,38 @@ export class CodexAppServerHost {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await this.request("initialize", { clientInfo: { name: "sortie_dogs", title: "Sortie-dogs", version: this.options.clientVersion ?? "0.13.8" },
-      ...(this.options.dynamicTool ? { capabilities: { experimentalApi: true } } : {}) });
+      ...(this.options.dynamicTool || this.options.experimentalApi ? { capabilities: { experimentalApi: true } } : {}) });
     this.transport.send({ method: "initialized", params: {} });
     this.initialized = true;
   }
 
-  async startThread(params: { cwd: string; model?: string; ephemeral?: boolean; developerInstructions?: string; dynamicTools?: readonly CodexDynamicTool[]; config?: JsonObject } ): Promise<string> {
+  async startThread(params: { cwd: string; model?: string; ephemeral?: boolean; permissions?: string; developerInstructions?: string; dynamicTools?: readonly CodexDynamicTool[]; config?: JsonObject } ): Promise<string> {
     await this.initialize();
     const result = await this.request("thread/start", { cwd: params.cwd, ...(params.model ? { model: params.model, allowProviderModelFallback: false } : {}),
       ...(params.ephemeral === undefined ? {} : { ephemeral: params.ephemeral }),
+      ...(params.permissions ? { permissions: params.permissions } : {}),
       ...(params.developerInstructions ? { developerInstructions: params.developerInstructions } : {}),
       ...(params.dynamicTools ? { dynamicTools: params.dynamicTools } : {}),
       ...(params.config ? { config: params.config } : {}) });
     const id = object(result) && object(result.thread) ? text(result.thread.id) : undefined;
     if (!id) throw new CodexHostError("protocol-invalid-response", "thread/start returned no thread id.");
     if (object(result) && typeof result.model === "string") this.models.set(id, result.model);
+    this.capturePermissions(id, result);
     return id;
   }
 
   threadModel(threadID: string): string | undefined { return this.models.get(threadID); }
+
+  threadPermissions(threadID: string): JsonObject | undefined { return this.permissions.get(threadID); }
+
+  private capturePermissions(threadID: string, result: unknown): void {
+    if (!object(result)) return;
+    const sandbox = object(result.sandbox) ? result.sandbox : undefined;
+    const profile = object(result.activePermissionProfile) ? result.activePermissionProfile : undefined;
+    this.permissions.set(threadID, { profile: text(profile?.id) ?? null, sandbox: text(sandbox?.type) ?? null,
+      networkAccess: typeof sandbox?.networkAccess === "boolean" ? sandbox.networkAccess : null,
+      approvalPolicy: result.approvalPolicy ?? null, approvalsReviewer: result.approvalsReviewer ?? null });
+  }
 
   /** Read only the authentication mode and plan class; never expose tokens or account identifiers. */
   async authenticationState(): Promise<CodexAuthenticationState> {
@@ -223,11 +239,12 @@ export class CodexAppServerHost {
     return result.thread;
   }
 
-  async resumeThread(threadID: string): Promise<void> {
+  async resumeThread(threadID: string, permissions?: string): Promise<void> {
     await this.initialize();
-    const result = await this.request("thread/resume", { threadId: threadID });
+    const result = await this.request("thread/resume", { threadId: threadID, ...(permissions ? { permissions } : {}) });
     const id = object(result) && object(result.thread) ? text(result.thread.id) : undefined;
     if (id !== threadID) throw new CodexHostError("protocol-invalid-response", "thread/resume returned a different thread id.");
+    this.capturePermissions(threadID, result);
   }
 
   async runTurn(threadID: string, prompt: string, options: CodexTurnOptions): Promise<CodexTurnResult> {
@@ -251,9 +268,9 @@ export class CodexAppServerHost {
   }
 
   /** Execute through Codex's configured native sandbox, without overriding permissions. */
-  async executeCommand(command: readonly string[], cwd: string, timeoutMs = 120_000, sandboxPolicy?: JsonObject): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  async executeCommand(command: readonly string[], cwd: string, timeoutMs = 120_000, sandboxPolicy?: JsonObject, permissionProfile?: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     await this.initialize();
-    const result = await this.request("command/exec", { command, cwd, timeoutMs, ...(sandboxPolicy ? { sandboxPolicy } : {}) }, timeoutMs + 30_000);
+    const result = await this.request("command/exec", { command, cwd, timeoutMs, ...(sandboxPolicy ? { sandboxPolicy } : {}), ...(permissionProfile ? { permissionProfile } : {}) }, timeoutMs + 30_000);
     if (!object(result) || typeof result.exitCode !== "number" || typeof result.stdout !== "string" || typeof result.stderr !== "string")
       throw new CodexHostError("protocol-invalid-response", "command/exec returned an invalid result.");
     return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };

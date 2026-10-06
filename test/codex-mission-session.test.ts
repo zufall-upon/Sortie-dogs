@@ -24,6 +24,7 @@ class ScriptedTransport implements CodexAppServerTransport {
   readonly turns: Json[] = [];
   readonly turnRequests: Json[] = [];
   readonly threadRequests: Json[] = [];
+  readonly commandRequests: Json[] = [];
   private currentTurn?: Json;
   private currentTurnID = "turn";
   private sequence = 100;
@@ -76,6 +77,7 @@ class ScriptedTransport implements CodexAppServerTransport {
       }).catch(error => this.push({ id: message.id, error: { message: String(error) } })));
     } else if (message.method === "command/exec") {
       this.commandExecutions++;
+      this.commandRequests.push(message.params);
       if (this.dropCommands) { void this.close(); return; }
       assert.equal(message.params.sandboxPolicy, undefined, "standalone commands inherit native host permissions");
       const [command, ...args] = message.params.command;
@@ -462,7 +464,7 @@ for (const delegated of [false, true]) test(`bash workdir matches shared validat
         await host.call("sortie_v010_complete_mission", {});
       } catch (error) { failure = error; }
     });
-    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+    adapter = await CodexMissionSession.create({ projectRoot: directory, permissions: ":workspace", transportFactory: () => native,
       onEvent: event => { events.push(event); }, ...(delegated ? { executeCommand: async (request: any) => {
         hostCalls++;
         try { const result = await exec(request.command[0], request.command.slice(1), { cwd: request.cwd }); return { status: "completed" as const, exitCode: 0, ...result }; }
@@ -471,6 +473,8 @@ for (const delegated of [false, true]) test(`bash workdir matches shared validat
     const result = await adapter.run("Fix root check");
     if (failure) throw failure;
     assert.equal(result.accepted, true);
+    assert.equal(native.threadRequests[0].permissions, ":workspace");
+    assert(native.commandRequests.every(request => request.permissionProfile === ":workspace"));
     const bash = native.threadRequests[0].dynamicTools.find((tool: Json) => tool.name === "bash");
     assert.equal(bash.inputSchema.properties.workdir.type, "string");
     assert(events.some(event => event.method === "sortie/commandExecution" && event.params.cwd === nested));

@@ -44,6 +44,8 @@ export type CodexMissionCommandExecutor = (request: CodexMissionCommandRequest) 
 export interface CodexMissionSessionOptions {
   readonly projectRoot: string;
   readonly resumeThreadID?: string;
+  /** Explicit native profile selection; omission preserves native defaults. Does not configure a delegated host executor. */
+  readonly permissions?: string;
   /** Explicit override for every role. Otherwise retain the packaged role model. */
   readonly model?: string;
   readonly roleModels?: Readonly<Record<string, { model: string; effort?: string }>>;
@@ -304,6 +306,12 @@ export class CodexMissionSession {
     return { providerID: "openai", modelID: model, ...(effort ? { variant: effort } : {}) };
   }
 
+  private async reportPermissions(host: CodexAppServerHost, threadId: string): Promise<void> {
+    await this.options.onEvent?.({ method: "sortie/permissions", threadId,
+      params: { ...host.threadPermissions(threadId), requestedProfile: this.options.permissions ?? null,
+        commandExecutor: this.options.executeCommand ? "host" : "native" } });
+  }
+
   private async createSession(agent: string, parentID?: string, selection?: { model?: string; variant?: string }): Promise<NativeSession> {
     if (this.closed) throw new Error("Codex Mission adapter is closed.");
     const content = runtimeAssets.find(asset => asset.name === agent)?.content;
@@ -314,7 +322,7 @@ export class CodexMissionSession {
     try {
       const auth = await host.authenticationState();
       if (auth.type !== "chatgpt") throw new Error("Codex Mission requires existing ChatGPT authentication.");
-      const thread = await host.startThread({ cwd: this.directory, model, ephemeral: false,
+      const thread = await host.startThread({ cwd: this.directory, model, ephemeral: false, permissions: this.options.permissions,
         developerInstructions: content.replace(/^---\n[\s\S]*?\n---\n/, "") +
           "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
           "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
@@ -327,6 +335,7 @@ export class CodexMissionSession {
       const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [], usageBaseline: emptyCodexUsage(), createdAt: Date.now(),
         model: { providerID: "openai", modelID: host.threadModel(thread) ?? model, ...(effort ? { variant: effort } : {}) } };
       this.sessions.set(thread, session);
+      await this.reportPermissions(host, thread);
       return session;
     } catch (error) { await host.close(); throw error; }
   }
@@ -362,7 +371,8 @@ export class CodexMissionSession {
           }
         }
       }
-      await host.resumeThread(id);
+      await host.resumeThread(id, this.options.permissions);
+      await this.reportPermissions(host, id);
       const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [], createdAt: codexNativeTime(thread.createdAt),
         model: this.modelRoute(agent, { providerID: String(thread.modelProvider), modelID: typeof thread.model === "string" ? thread.model : "unknown",
           ...(typeof thread.reasoningEffort === "string" ? { variant: thread.reasoningEffort } : {}) }) };
@@ -515,7 +525,7 @@ export class CodexMissionSession {
       const result: CodexMissionCommandResult = this.options.executeCommand
         ? await this.executeHostCommand({ tool: call.tool as CodexMissionCommandRequest["tool"], command, cwd, timeoutMs,
           threadId: session.id, turnId: call.turnId, callId: call.callId, signal: this.executionAbort.signal })
-        : { status: "completed", ...await session.host.executeCommand(command, cwd, timeoutMs) };
+        : { status: "completed", ...await session.host.executeCommand(command, cwd, timeoutMs, undefined, this.options.permissions) };
       if (this.closed || this.executionAbort.signal.aborted) throw new Error("Host execution interrupted; completion is unknown.");
       if (result.status === "denied" || result.status === "not-started") {
         dispatched = false; // Explicit host proof that no command ran; there is no exit or validation result.

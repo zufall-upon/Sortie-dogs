@@ -105,6 +105,13 @@ requests through `permissionsApproval`. The native host remains responsible for 
 the grant. The CLI reports approval requests but has no interactive approval bridge; without a connected
 host callback, no grant is returned. `command/exec` has no thread-scoped approval API, so inheriting the
 configured policy does not add an escalation path for these standalone commands.
+Use SDK `permissions` or CLI `--permissions <native-profile>` only to explicitly select an existing
+native profile for thread start/resume and standalone commands. Omission retains native defaults,
+which may be read-only. Invalid or disallowed profiles fail through the native server without fallback;
+no configuration file is changed. Low-level `CodexAppServerHost` callers must opt into
+`experimentalApi: true` for profile APIs; Mission sessions already negotiate that capability. Progress reports the effective native profile, sandbox and approval
+routing. This selection does not configure a delegated parent-host executor's own permissions.
+See [Ubuntu acceptance evidence and remaining work](docs/codex-mission-acceptance-20261006.md).
 
 For a parent application with an existing approval-aware executor, pass the optional SDK
 `executeCommand` callback. It receives the exact post-hook argv, cwd, timeout, thread/turn/call identity,

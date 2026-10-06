@@ -57,3 +57,14 @@ test("host execution progress distinguishes selected executor and unknown failur
   assert.equal(progress?.phase, "unknown");
   assert.equal(progress?.detail, "Host connection lost");
 });
+
+
+test("effective native permissions are visible without implying host-executor authority", () => {
+  const progress = codexMissionProgress({ method: "sortie/permissions", threadId: "root", params: {
+    requestedProfile: null, profile: ":read-only", sandbox: "readOnly", networkAccess: false,
+    approvalPolicy: "on-request", approvalsReviewer: "user", commandExecutor: "host",
+  } });
+  assert.equal(progress?.effective_profile, ":read-only");
+  assert.equal(progress?.requested_profile, null);
+  assert.equal(progress?.command_executor, "host");
+});
