@@ -1,0 +1,293 @@
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { CodexAppServerHost, createCodexAppServerTransport, type CodexDynamicTool, type CodexDynamicToolCall,
+  type CodexTurnEvent, type CodexTurnResult, type CodexAppServerTransport } from "./app-server.js";
+import { SortieDogsV010Plugin } from "../plugin/profiled.js";
+import type { OpenCodeHooks } from "../plugin/index.js";
+import { legacyToolArgs, toolSchema } from "../plugin/tool-schema.js";
+import { V010_RUNTIME_PROFILE as profile } from "../core/runtime-profile.js";
+import { runtimeAssets } from "../runtime-assets-v010.js";
+import { OperatorMissionRuntime } from "../core/operator-mission.js";
+
+type JsonObject = Record<string, unknown>;
+const object = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
+interface NativeSession {
+  id: string;
+  agent: string;
+  model: { providerID: string; modelID: string; variant?: string };
+  parentID?: string;
+  outcome: string;
+  host: CodexAppServerHost;
+  history: JsonObject[];
+  usage?: JsonObject;
+}
+export interface CodexMissionSessionOptions {
+  readonly projectRoot: string;
+  readonly resumeThreadID?: string;
+  /** Explicit override for every role. Otherwise retain the packaged role model. */
+  readonly model?: string;
+  readonly roleModels?: Readonly<Record<string, { model: string; effort?: string }>>;
+  readonly effort?: string;
+  readonly executable?: string;
+  readonly transportFactory?: () => CodexAppServerTransport;
+  readonly onEvent?: (event: CodexTurnEvent & { threadId: string }) => void | Promise<void>;
+}
+
+/** Native Codex transport for the existing Mission tools, roles and acceptance state. */
+export class CodexMissionSession {
+  private hooks!: OpenCodeHooks;
+  private readonly sessions = new Map<string, NativeSession>();
+  private closed = false;
+  private readonly hosts = new Set<CodexAppServerHost>();
+  private root?: string;
+  private readonly toolQueues = new Map<string, Promise<unknown>>();
+  private get sandboxPolicy(): JsonObject { return { type: "workspaceWrite", writableRoots: [this.directory], networkAccess: false }; }
+  readonly directory: string;
+  private constructor(private readonly options: CodexMissionSessionOptions) { this.directory = resolve(options.projectRoot); }
+
+  static async create(options: CodexMissionSessionOptions): Promise<CodexMissionSession> {
+    const adapter = new CodexMissionSession(options);
+    const id = (request: { path: { id: string } }) => request.path.id;
+    const info = (session: NativeSession) => ({ id: session.id, agent: session.agent, parentID: session.parentID,
+      outcome: session.outcome, model: session.model });
+    adapter.hooks = await SortieDogsV010Plugin({ directory: adapter.directory, executionHost: "codex", returnReportTransport: "tool-result", reviewerCorrectionPermissions: true, client: { session: {
+      get: async (request: { path: { id: string } }) => ({ data: info(adapter.required(id(request))) }),
+      messages: async (request: { path: { id: string } }) => ({ data: adapter.required(id(request)).history }),
+      children: async (request: { path: { id: string } }) => ({ data: [...adapter.sessions.values()]
+        .filter(session => session.parentID === id(request)).map(info) }),
+      abort: async (request: { path: { id: string } }) => { await adapter.required(id(request)).host.interrupt(); return { data: true }; },
+    } } } as never);
+    return adapter;
+  }
+
+  async run(prompt: string): Promise<{ rootSessionID: string; turn: CodexTurnResult; accepted: boolean; sessions: readonly JsonObject[] }> {
+    if (this.closed) throw new Error("Codex Mission adapter is closed.");
+    if (!this.root) {
+      const missions = await new OperatorMissionRuntime(this.directory, profile).current();
+      const active = missions.filter(item => item.executionHost === "codex" && !["completed", "cancelled"].includes(item.phase));
+      const resume = this.options.resumeThreadID ?? (active.length === 1 ? active[0].root : undefined);
+      if (active.length && !resume) throw new Error(`Select the existing Codex Mission with --resume: ${active.map(item => item.root).join(", ")}`);
+      if (resume) {
+        if (!missions.some(item => item.executionHost === "codex" && item.root === resume)) throw new Error("Codex Mission resume does not belong to this repository.");
+        await this.restoreSession(resume, "dog-operator");
+        this.root = resume;
+      }
+    }
+    const session = this.root ? this.required(this.root) : await this.createSession("dog-operator");
+    this.root = session.id;
+    const previous = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
+    const turn = await this.prompt(session, prompt);
+    const mission = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
+    return { rootSessionID: session.id, turn, accepted: turn.status === "completed" && mission?.phase === "completed" &&
+      (previous?.phase !== "completed" || previous.id !== mission.id), sessions: [...this.sessions.values()].map(item =>
+      ({ thread_id: item.id, agent: item.agent, model: item.model, usage: item.usage ?? null, usage_scope: "native-thread-cumulative", cost: null })) };
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await Promise.all([...this.hosts].map(host => host.close()));
+  }
+
+  private required(id: string): NativeSession {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error(`Unknown native Codex session: ${id}`);
+    return session;
+  }
+
+  private createHost(): CodexAppServerHost {
+    if (this.closed) throw new Error("Codex Mission adapter is closed.");
+    const host = new CodexAppServerHost(this.options.transportFactory?.() ?? createCodexAppServerTransport({ cwd: this.directory, executable: this.options.executable }), {
+      dynamicTool: call => {
+        const execution = (this.toolQueues.get(call.threadId) ?? Promise.resolve()).catch(() => undefined).then(() => this.execute(call));
+        this.toolQueues.set(call.threadId, execution);
+        return execution;
+      },
+    });
+    this.hosts.add(host);
+    return host;
+  }
+
+  private modelRoute(agent: string, stored?: NativeSession["model"], selection?: { model?: string; variant?: string }): NativeSession["model"] {
+    const content = runtimeAssets.find(asset => asset.name === agent)?.content;
+    const header = content?.split("---")[1] ?? "";
+    const selected = selection?.model || this.options.roleModels?.[agent]?.model || this.options.model ||
+      (stored ? `${stored.providerID}/${stored.modelID}` : /^model: (.+)$/m.exec(header)?.[1]);
+    const [model, embeddedEffort] = (selected ?? "").replace(/^openai\//, "").split("#");
+    if (!model || model.includes("/")) throw new Error(`Codex Mission requires an OpenAI model for ${agent}. Set model or roleModels explicitly.`);
+    const effort = selection?.variant || this.options.roleModels?.[agent]?.effort || this.options.effort || embeddedEffort ||
+      stored?.variant || /^variant: (.+)$/m.exec(header)?.[1];
+    return { providerID: "openai", modelID: model, ...(effort ? { variant: effort } : {}) };
+  }
+
+  private async createSession(agent: string, parentID?: string, selection?: { model?: string; variant?: string }): Promise<NativeSession> {
+    if (this.closed) throw new Error("Codex Mission adapter is closed.");
+    const content = runtimeAssets.find(asset => asset.name === agent)?.content;
+    if (!content) throw new Error(`Codex Mission role not supported: ${agent}`);
+    const route = this.modelRoute(agent, undefined, selection);
+    const model = route.modelID, effort = route.variant;
+    const host = this.createHost();
+    try {
+      const auth = await host.authenticationState();
+      if (auth.type !== "chatgpt") throw new Error("Codex Mission requires existing ChatGPT authentication.");
+      const thread = await host.startThread({ cwd: this.directory, model, ephemeral: false,
+        developerInstructions: content.replace(/^---\n[\s\S]*?\n---\n/, "") +
+          "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
+          "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
+          "Native shell and file operations outside these functions do not provide Mission validation evidence.",
+        dynamicTools: this.tools(content), config: { "features.shell_tool": false, "features.unified_exec": false } });
+      if (this.closed) throw new Error("Codex Mission adapter is closed.");
+      const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [],
+        model: { providerID: "openai", modelID: host.threadModel(thread) ?? model, ...(effort ? { variant: effort } : {}) } };
+      this.sessions.set(thread, session);
+      return session;
+    } catch (error) { await host.close(); throw error; }
+  }
+
+  private async restoreSession(id: string, agent: string, parentID?: string): Promise<NativeSession> {
+    if (this.sessions.has(id)) return this.required(id);
+    const host = this.createHost();
+    try {
+      if ((await host.authenticationState()).type !== "chatgpt") throw new Error("Codex Mission requires existing ChatGPT authentication.");
+      const thread = await host.readThread(id);
+      if (typeof thread.cwd !== "string" || resolve(thread.cwd) !== this.directory || !Array.isArray(thread.turns))
+        throw new Error(`Codex thread ${id} has no matching repository history.`);
+      const turns = thread.turns.filter(object);
+      for (const turn of turns) {
+        if (!Array.isArray(turn.items) || turn.status === "inProgress" || turn.itemsView !== "full")
+          throw new Error(`Codex thread ${id} still has unproven execution; no resend. Reconcile its native execution before resuming.`);
+        if (turn.items.filter(object).some(item => item.type === "dynamicToolCall" &&
+            (item.status !== "completed" || turn.status !== "completed" && item.success !== true)))
+          throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
+      }
+      await host.resumeThread(id);
+      const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [],
+        model: this.modelRoute(agent, { providerID: String(thread.modelProvider), modelID: typeof thread.model === "string" ? thread.model : "unknown",
+          ...(typeof thread.reasoningEffort === "string" ? { variant: thread.reasoningEffort } : {}) }) };
+      this.sessions.set(id, session);
+      for (const turn of turns) {
+        for (const item of (turn.items as unknown[]).filter(object)) {
+          if (item.type === "userMessage" && Array.isArray(item.content)) {
+            session.history.push({ info: { id: item.clientId ?? item.id, role: "user", sessionID: id, agent, model: session.model },
+              parts: item.content.filter(object).filter(part => part.type === "text").map(part => ({ type: "text", text: part.text })) });
+          } else if (item.type === "dynamicToolCall" && typeof item.tool === "string" && object(item.arguments) && Array.isArray(item.contentItems)) {
+            const source = item.contentItems.filter(object).find(part => part.type === "inputText");
+            let result: JsonObject | undefined;
+            try { const value: unknown = JSON.parse(String(source?.text)); if (object(value)) result = value; } catch { /* A declined call has no completed native tool receipt. */ }
+            const metadata = object(result?.metadata) ? result.metadata : {};
+            session.history.push({ info: { id: item.id, role: "assistant", sessionID: id }, parts: [{ type: "tool", tool: item.tool, callID: item.id,
+              state: { status: item.success === true ? "completed" : "error", input: item.arguments, output: result?.output, metadata,
+                ...(object(metadata.sortie_execution) ? { time: metadata.sortie_execution } : {}) } }] });
+            if (item.tool === "task" && typeof metadata.sessionId === "string" && typeof item.arguments.subagent_type === "string")
+              await this.restoreSession(metadata.sessionId, item.arguments.subagent_type, id);
+          }
+        }
+        const final = (turn.items as unknown[]).filter(object).filter(item => item.type === "agentMessage" &&
+          (item.phase == null || item.phase === "final_answer")).at(-1);
+        session.history.push({ info: { id: turn.id, role: "assistant", sessionID: id, finish: turn.status === "completed" ? "stop" : "error",
+          ...(turn.error ? { error: turn.error } : {}), time: { created: Number(turn.startedAt) * 1000, completed: Number(turn.completedAt) * 1000 } },
+          parts: [{ type: "text", text: final?.text ?? "" }] });
+      }
+      return session;
+    } catch (error) { await host.close(); throw error; }
+  }
+
+  private tools(content: string): CodexDynamicTool[] {
+    const declared = new Set([...content.split("---")[1].matchAll(/^  (sortie_[a-z0-9_]+): true$/gm)].map(match => match[1]));
+    const tools = Object.entries(this.hooks.tool ?? {}).filter(([name]) => declared.has(name)).map(([name, tool]) => ({ type: "function" as const, name,
+      description: tool.description, inputSchema: toolSchema(tool.args) }));
+    const define = (name: string, description: string, properties: JsonObject, required = Object.keys(properties)): CodexDynamicTool =>
+      ({ type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } });
+    const string = { type: "string" };
+    tools.push(define("bash", "Run a foreground command through the native Codex sandbox. Preserve formal validation commands exactly.",
+      { command: string, timeout: { type: "integer", minimum: 1, maximum: 1200000 } }, ["command"]));
+    tools.push(define("read", "Read a UTF-8 file through the native Codex sandbox.", { filePath: string }));
+    tools.push(define("write", "Write a UTF-8 file through the native Codex sandbox.", { filePath: string, content: string }));
+    tools.push(define("task", "Run a returned Mission Task, or resume its existing task_id. Preserve the host's prompt and subagent_type.",
+      { description: string, prompt: string, subagent_type: string, task_id: string, model: string, variant: string }, ["description", "prompt", "subagent_type"]));
+    return tools;
+  }
+
+  private async prompt(session: NativeSession, prompt: string, onDispatch?: () => void): Promise<CodexTurnResult> {
+    const startedAt = Date.now();
+    const messageID = randomUUID();
+    const message = { id: messageID, agent: session.agent, model: { ...session.model } };
+    const parts = [{ type: "text", text: prompt }];
+    await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
+    if (message.model.providerID !== "openai") throw new Error("Codex Mission cannot use a non-OpenAI model route.");
+    session.model = message.model;
+    session.history.push({ info: { ...message, role: "user", sessionID: session.id }, parts });
+    session.outcome = "running";
+    try {
+      onDispatch?.();
+      const result = await session.host.runTurn(session.id, parts.map(part => part.text).join("\n"), { cwd: this.directory, clientUserMessageId: messageID,
+        model: message.model.modelID === "unknown" ? undefined : message.model.modelID, effort: message.model.variant ?? this.options.effort, sandboxPolicy: this.sandboxPolicy,
+        onEvent: event => this.options.onEvent?.({ ...event, threadId: session.id }) });
+      session.outcome = result.status === "completed" ? "succeeded" : result.status;
+      session.usage = result.usage;
+      session.history.push({ info: { id: result.turnID, role: "assistant", sessionID: session.id,
+        finish: result.status === "completed" ? "stop" : "error", time: { created: startedAt, completed: Date.now() },
+        ...(result.status === "completed" ? {} : { error: { name: result.status } }) },
+        parts: [{ type: "text", text: result.finalResponse ?? "" }] });
+      return result;
+    } catch (error) { session.outcome = "unknown"; throw error; }
+  }
+
+  private async execute(call: CodexDynamicToolCall): Promise<string> {
+    if (this.closed) throw new Error("Codex Mission adapter is closed.");
+    const session = this.required(call.threadId);
+    const definition = this.hooks.tool?.[call.tool];
+    if (definition) return definition.execute(legacyToolArgs(call.arguments, definition.args), { sessionID: session.id, agent: session.agent });
+    if (!["bash", "read", "write", "task"].includes(call.tool) || !object(call.arguments)) throw new Error("Unsupported Codex Mission tool.");
+    const output = { args: { ...call.arguments } };
+    await this.hooks["tool.execute.before"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId }, output);
+    const args = output.args;
+    const start = Date.now();
+    let text: string;
+    let dispatched = false;
+    let child: NativeSession | undefined;
+    let metadata: JsonObject;
+    try {
+    if (call.tool === "task") {
+      child = typeof args.task_id === "string" && args.task_id ? this.required(args.task_id) : undefined;
+      if (child && (child.parentID !== session.id || child.agent !== args.subagent_type)) throw new Error("Task resume lineage mismatch.");
+      child ??= await this.createSession(String(args.subagent_type), session.id, {
+        ...(typeof args.model === "string" ? { model: args.model } : {}), ...(typeof args.variant === "string" ? { variant: args.variant } : {}) });
+      await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args },
+        { output: "", metadata: { sessionId: child.id, status: "running" } });
+      const result = await this.prompt(child, String(args.prompt), () => { dispatched = true; });
+      text = result.finalResponse ?? "";
+      metadata = { sessionId: child.id, status: result.status };
+    } else {
+      const command = call.tool === "bash" ? ["/bin/bash", "-c", String(args.command)]
+        : call.tool === "read" ? [process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", resolve(this.directory, String(args.filePath))]
+        : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
+      dispatched = true;
+      const result = await session.host.executeCommand(command, this.directory, typeof args.timeout === "number" ? args.timeout : undefined, this.sandboxPolicy);
+      text = result.stdout + result.stderr;
+      metadata = { exit: result.exitCode, status: "completed" };
+    }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id }, parts: [{ type: "tool", tool: call.tool,
+        callID: call.callId, state: { status: dispatched ? "running" : "error", input: args, error: reason,
+          metadata: { status: dispatched ? "running" : "error", ...(child ? { sessionId: child.id } : {}) },
+          time: { start, ...(dispatched ? {} : { end: Date.now() }) } } }] });
+      if (!dispatched) {
+        if (child) child.outcome = "failed";
+        await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args },
+          { status: "error", output: reason, metadata: { status: "error", ...(child ? { sessionId: child.id } : {}) } });
+      }
+      // A lost transport after dispatch does not prove an external executor stopped.
+      // Stop the whole adapter so the model cannot resend that unknown operation.
+      if (dispatched) await this.close().catch(() => undefined);
+      throw error;
+    }
+    const time = { start, end: Date.now() };
+    metadata.sortie_execution = time;
+    session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id }, parts: [{ type: "tool", tool: call.tool,
+      callID: call.callId, state: { status: "completed", input: args, output: text, metadata, time } }] });
+    const after = { output: text, metadata };
+    await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args }, after);
+    return JSON.stringify({ output: after.output, metadata: { ...(object(after.metadata) ? after.metadata : {}), sortie_execution: time } });
+  }
+}

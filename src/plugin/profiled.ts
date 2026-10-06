@@ -1875,7 +1875,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
           const cancelled = await operators.read(context.sessionID);
           let mission = await missions.start(context.sessionID, requirements, args.intent === "replace" || args.intent === "new", {
-              kind: args.kind === "operation" ? "operation" : "implementation",
+              kind: args.kind === "operation" ? "operation" : "implementation", executionHost: input.executionHost,
               context: missionConversationContext(await messages(context.sessionID)),
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });

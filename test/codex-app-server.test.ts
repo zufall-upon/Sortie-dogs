@@ -239,3 +239,43 @@ test("concurrent Codex close callers wait for the same transport cleanup", async
   release(); await Promise.all([a, b]);
   assert.equal(first, true); assert.equal(second, true);
 });
+
+test("Codex dynamic tools can call native command/exec without blocking responses", async () => {
+  const transport = new FakeTransport();
+  const host = new CodexAppServerHost(transport, { dynamicTool: async call => {
+    assert.equal(call.tool, "bash");
+    const result = await host.executeCommand(["/bin/bash", "-lc", "false"], "/fixture");
+    return JSON.stringify(result);
+  } });
+  const run = host.runTurn("thread", "Check", { cwd: "/fixture" });
+  assert.deepEqual((transport.sent[0]?.params as Record<string, unknown>).capabilities, { experimentalApi: true });
+  transport.push({ id: 1, result: {} }); await tick();
+  transport.push({ id: 2, result: { turn: { id: "turn" } } }); await tick();
+  transport.push({ id: "dynamic-call", method: "item/tool/call", params: { threadId: "thread", turnId: "turn", callId: "call", tool: "bash", arguments: {} } });
+  await tick();
+  const command = transport.sent.at(-1)!;
+  assert.equal(command.method, "command/exec");
+  assert.deepEqual(command.params, { command: ["/bin/bash", "-lc", "false"], cwd: "/fixture", timeoutMs: 120000 });
+  transport.push({ id: command.id, result: { exitCode: 1, stdout: "", stderr: "failed" } }); await tick();
+  assert.deepEqual(transport.sent.at(-1), { id: "dynamic-call", result: { contentItems: [{ type: "inputText", text: JSON.stringify({ exitCode: 1, stdout: "", stderr: "failed" }) }], success: true } });
+  transport.push({ id: 99, method: "item/tool/call", params: { threadId: "other", turnId: "turn", callId: "other", tool: "bash", arguments: {} } }); await tick();
+  assert.equal((transport.sent.at(-1)!.result as {success:boolean}).success, false);
+  transport.push({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } });
+  assert.equal((await run).status, "completed");
+  await host.close();
+});
+
+test("Codex dynamic tool completion after close does not write to the closed transport", async () => {
+  const transport = new FakeTransport();
+  let finish!: (value: string) => void;
+  const host = new CodexAppServerHost(transport, { dynamicTool: () => new Promise(resolve => { finish = resolve; }) });
+  const run = host.runTurn("thread", "Check", { cwd: "/fixture" });
+  const rejected = assert.rejects(run, /closed/);
+  transport.push({ id: 1, result: {} }); await tick();
+  transport.push({ id: 2, result: { turn: { id: "turn" } } }); await tick();
+  transport.push({ id: 99, method: "item/tool/call", params: { threadId: "thread", turnId: "turn", callId: "call", tool: "bash", arguments: {} } }); await tick();
+  await host.close(); await rejected;
+  const count = transport.sent.length;
+  finish("late"); await tick();
+  assert.equal(transport.sent.length, count);
+});

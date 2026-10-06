@@ -44,7 +44,9 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
 const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
        sortie-dogs init --global [--profile stable|v010]
 This beta package defaults to the v010 profile.`;
-const CODEX_USAGE = `Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
+const CODEX_USAGE = `Natural-language Mission: sortie-dogs codex mission --prompt <text> (mission --help for options)
+
+Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
   [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>]
   [--trusted-pwsh <absolute-pwsh.exe>] [--profile stable|v010]
 
@@ -259,6 +261,7 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] === "codex") {
+    if (argv[1] === "mission") return (await import("./codex-mission.js")).runCodexMissionCommand(argv.slice(2));
     if (argv[1] === "--help" && argv.length === 2) { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] !== "run") { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
     const values = new Map<string, string>();

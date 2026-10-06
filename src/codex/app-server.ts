@@ -88,6 +88,7 @@ export interface CodexTurnEvent {
 
 export interface CodexTurnOptions {
   readonly cwd: string;
+  readonly clientUserMessageId?: string;
   readonly sandboxPolicy?: JsonObject;
   readonly approvalPolicy?: "untrusted" | "on-failure" | "on-request" | "never" | "unlessTrusted" | "onRequest";
   readonly model?: string;
@@ -111,7 +112,23 @@ export interface CodexAuthenticationState {
   readonly requiresOpenaiAuth: boolean;
 }
 
+export interface CodexDynamicTool {
+  readonly type: "function";
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: JsonObject;
+}
+
+export interface CodexDynamicToolCall {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly callId: string;
+  readonly tool: string;
+  readonly arguments: unknown;
+}
+
 export interface CodexAppServerHostOptions {
+  readonly dynamicTool?: (call: CodexDynamicToolCall) => Promise<string>;
   readonly approval?: CodexApprovalHandler;
   readonly clientVersion?: string;
   readonly requestTimeoutMs?: number;
@@ -140,6 +157,7 @@ interface ActiveTurn {
 export class CodexAppServerHost {
   private nextID = 1;
   private initialized = false;
+  private readonly models = new Map<string, string>();
   private closed = false;
   private closing?: Promise<void>;
   private fault?: unknown;
@@ -158,19 +176,26 @@ export class CodexAppServerHost {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    await this.request("initialize", { clientInfo: { name: "sortie_dogs", title: "Sortie-dogs", version: this.options.clientVersion ?? "0.13.8" } });
+    await this.request("initialize", { clientInfo: { name: "sortie_dogs", title: "Sortie-dogs", version: this.options.clientVersion ?? "0.13.8" },
+      ...(this.options.dynamicTool ? { capabilities: { experimentalApi: true } } : {}) });
     this.transport.send({ method: "initialized", params: {} });
     this.initialized = true;
   }
 
-  async startThread(params: { cwd: string; model?: string; ephemeral?: boolean } ): Promise<string> {
+  async startThread(params: { cwd: string; model?: string; ephemeral?: boolean; developerInstructions?: string; dynamicTools?: readonly CodexDynamicTool[]; config?: JsonObject } ): Promise<string> {
     await this.initialize();
-    const result = await this.request("thread/start", { cwd: params.cwd, ...(params.model ? { model: params.model } : {}),
-      ...(params.ephemeral === undefined ? {} : { ephemeral: params.ephemeral }) });
+    const result = await this.request("thread/start", { cwd: params.cwd, ...(params.model ? { model: params.model, allowProviderModelFallback: false } : {}),
+      ...(params.ephemeral === undefined ? {} : { ephemeral: params.ephemeral }),
+      ...(params.developerInstructions ? { developerInstructions: params.developerInstructions } : {}),
+      ...(params.dynamicTools ? { dynamicTools: params.dynamicTools } : {}),
+      ...(params.config ? { config: params.config } : {}) });
     const id = object(result) && object(result.thread) ? text(result.thread.id) : undefined;
     if (!id) throw new CodexHostError("protocol-invalid-response", "thread/start returned no thread id.");
+    if (object(result) && typeof result.model === "string") this.models.set(id, result.model);
     return id;
   }
+
+  threadModel(threadID: string): string | undefined { return this.models.get(threadID); }
 
   /** Read only the authentication mode and plan class; never expose tokens or account identifiers. */
   async authenticationState(): Promise<CodexAuthenticationState> {
@@ -181,6 +206,14 @@ export class CodexAppServerHost {
     const planType = account ? text(account.planType) : undefined;
     return { type: account ? text(account.type) ?? "unknown" : null, ...(planType ? { planType } : {}),
       requiresOpenaiAuth: result.requiresOpenaiAuth === true };
+  }
+
+  async readThread(threadID: string): Promise<JsonObject> {
+    await this.initialize();
+    const result = await this.request("thread/read", { threadId: threadID, includeTurns: true });
+    if (!object(result) || !object(result.thread) || result.thread.id !== threadID)
+      throw new CodexHostError("protocol-invalid-response", "thread/read returned an invalid thread.");
+    return result.thread;
   }
 
   async resumeThread(threadID: string): Promise<void> {
@@ -194,6 +227,7 @@ export class CodexAppServerHost {
     await this.initialize();
     if (this.active) throw new CodexHostError("turn-active", "This host already has an active turn.");
     const started = await this.request("turn/start", { threadId: threadID, input: [{ type: "text", text: prompt }], cwd: options.cwd,
+      ...(options.clientUserMessageId ? { clientUserMessageId: options.clientUserMessageId } : {}),
       ...(options.sandboxPolicy ? { sandboxPolicy: options.sandboxPolicy } : {}),
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}),
@@ -207,6 +241,15 @@ export class CodexAppServerHost {
       void backlog.reduce((prior, event) => prior.then(() => this.notification(event.method, event.params)), Promise.resolve())
         .catch(error => { this.active?.reject(error); this.active = undefined; });
     });
+  }
+
+  /** Execute through Codex's configured native sandbox, without overriding permissions. */
+  async executeCommand(command: readonly string[], cwd: string, timeoutMs = 120_000, sandboxPolicy?: JsonObject): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    await this.initialize();
+    const result = await this.request("command/exec", { command, cwd, timeoutMs, ...(sandboxPolicy ? { sandboxPolicy } : {}) }, timeoutMs + 30_000);
+    if (!object(result) || typeof result.exitCode !== "number" || typeof result.stdout !== "string" || typeof result.stderr !== "string")
+      throw new CodexHostError("protocol-invalid-response", "command/exec returned an invalid result.");
+    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   }
 
   async interrupt(): Promise<void> {
@@ -229,7 +272,7 @@ export class CodexAppServerHost {
     await this.pump.catch(() => undefined);
   }
 
-  private request(method: string, params: JsonObject): Promise<unknown> {
+  private request(method: string, params: JsonObject, timeoutMs = this.options.requestTimeoutMs ?? 30_000): Promise<unknown> {
     if (this.closed) return Promise.reject(new CodexHostError("server-closed", "Codex host is closed."));
     if (this.fault) return Promise.reject(this.fault);
     const id = this.nextID++;
@@ -237,7 +280,7 @@ export class CodexAppServerHost {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new CodexHostError("request-failed", `${method} response timed out.`));
-      }, this.options.requestTimeoutMs ?? 30_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.transport.send({ method, id, params });
     });
@@ -256,7 +299,13 @@ export class CodexAppServerHost {
           else pending.resolve(raw.result);
           continue;
         }
-        if (typeof raw.id === "number" && typeof raw.method === "string") { await this.answerServerRequest(raw); continue; }
+        if ((typeof raw.id === "number" || typeof raw.id === "string") && typeof raw.method === "string") {
+          // A dynamic tool may call command/exec on this connection. Keep reading its response.
+          void this.answerServerRequest(raw).catch(error => {
+            if (!this.closed) { this.active?.reject(error); this.active = undefined; }
+          });
+          continue;
+        }
         if (typeof raw.method === "string") await this.notification(raw.method, object(raw.params) ? raw.params : {});
       }
       if (!this.closed) throw new CodexHostError("server-closed", "Codex app-server message stream ended.");
@@ -270,8 +319,25 @@ export class CodexAppServerHost {
   }
 
   private async answerServerRequest(message: JsonObject): Promise<void> {
+    if (this.closed) return;
     const method = String(message.method);
     const params = object(message.params) ? message.params : {};
+    if (method === "item/tool/call") {
+      const active = this.active;
+      let result: { contentItems: { type: "inputText"; text: string }[]; success: boolean };
+      try {
+        if (!active || active.completing || params.threadId !== active.threadID || params.turnId !== active.turnID ||
+            (params.namespace != null) || typeof params.callId !== "string" || typeof params.tool !== "string" || !this.options.dynamicTool)
+          throw new Error("Dynamic tool call does not belong to an active Sortie turn.");
+        const output = await this.options.dynamicTool({ threadId: active.threadID, turnId: active.turnID,
+          callId: params.callId, tool: params.tool, arguments: params.arguments });
+        result = { contentItems: [{ type: "inputText", text: output }], success: true };
+      } catch (error) {
+        result = { contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : "Dynamic tool failed." }], success: false };
+      }
+      if (!this.closed) this.transport.send({ id: message.id, result });
+      return;
+    }
     if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
       let decision: CodexApprovalDecision = "decline";
       const active = this.active;
@@ -279,7 +345,7 @@ export class CodexAppServerHost {
       try { if (inScope) decision = await this.options.approval?.({ method, params }) ?? "decline"; }
       catch { /* Handler failure must decline this request without stopping the protocol pump. */ }
       if (Array.isArray(params.availableDecisions) && !params.availableDecisions.includes(decision)) decision = "decline";
-      this.transport.send({ id: message.id, result: { decision } });
+      if (!this.closed) this.transport.send({ id: message.id, result: { decision } });
       return;
     }
     if (method === "item/permissions/requestApproval") {
@@ -311,7 +377,7 @@ export class CodexAppServerHost {
     if (method === "item/completed" && object(params.item)) {
       active.items.push(params.item);
       if (params.item.type === "agentMessage" && typeof params.item.text === "string" &&
-          (params.item.phase === undefined || params.item.phase === "final_answer")) active.finalResponse = params.item.text;
+          (params.item.phase == null || params.item.phase === "final_answer")) active.finalResponse = params.item.text;
     }
     if (method !== "turn/completed") return;
     active.completing = true;

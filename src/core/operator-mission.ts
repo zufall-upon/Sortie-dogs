@@ -104,6 +104,8 @@ export interface MissionSelfRecheck {
   residualMajor?: { reachable_path: string; consequence: string };
 }
 export interface OperatorMission {
+  /** Native transport identity; execution and recovery remain in this Mission. */
+  executionHost?: "codex";
   version: "0.12";
   id: string;
   root: string;
@@ -335,6 +337,21 @@ export class OperatorMissionRuntime {
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
     return state;
   }
+  /** Current Mission records only; request captures and archived generations are excluded. */
+  async current(): Promise<OperatorMission[]> {
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
+    let entries: string[];
+    try { entries = await readdir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    const result: OperatorMission[] = [];
+    for (const entry of entries.filter(name => /^[a-f0-9]{64}\.json$/u.test(name))) {
+      const state = await this.load<OperatorMission>(join(directory, entry));
+      if (!state || typeof state.root !== "string" || this.file(state.root) !== join(directory, entry)) throw new Error("mission-state-invalid");
+      result.push(await this.required(state.root));
+    }
+    return result;
+  }
+
   async required(root: string): Promise<OperatorMission> {
     const state = await this.read(root);
     if (!state) throw new Error("mission-missing: call start_mission once with the user's requirements");
@@ -365,7 +382,7 @@ export class OperatorMissionRuntime {
     });
   }
   start(root: string, requirements: unknown, replaceRequirements = false,
-    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string } = {}): Promise<OperatorMission> {
+    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string; executionHost?: "codex" } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -392,7 +409,7 @@ export class OperatorMissionRuntime {
       const predecessor = (replaceRequirements ? options.cancelledRunID : undefined) ??
         previous?.runID ?? previous?.supersededRunID;
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
-        kind: options.kind ?? "implementation",
+        kind: options.kind ?? "implementation", ...(options.executionHost ? { executionHost: options.executionHost } : {}),
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),

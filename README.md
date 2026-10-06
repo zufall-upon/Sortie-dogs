@@ -86,6 +86,30 @@ exact persisted-thread resume and turn interruption (ephemeral threads have no r
 provides an approval handler. Permission escalation requests receive an empty grant. Unsupported
 server-initiated requests fail closed.
 
+For the existing Operator → Coordinator → Worker → Reviewer Mission workflow, use:
+
+```sh
+sortie-dogs codex mission --prompt "Implement and review the requested change" --model gpt-6.1-sol --effort medium
+```
+
+This Linux-first route uses `CodexMissionSession` and the existing Mission tools, correction grants,
+validation evidence, and final Operator acceptance. It runs saved native Codex threads with existing
+ChatGPT authentication; it does not import OpenCode settings or introduce a second Mission ledger.
+Commands run through `/bin/bash` in a repository-local, network-disabled sandbox.
+
+Packaged role models and reasoning levels apply by default. `--model` and `--effort` explicitly
+override all roles; SDK callers can use `roleModels` for individual roles. Unsupported native model
+names fail rather than silently selecting another model. Availability depends on the signed-in account.
+
+Use `--resume <root-thread-id>` to continue a saved Mission root. Without it, a single unfinished Codex
+Mission in this repository is selected automatically; multiple unfinished roots require an explicit
+selection. Resume restores native messages and tool evidence, including child sessions. Unresolved
+native execution is rejected before another prompt is sent. SIGINT/SIGTERM closes the adapter and exits
+130/143 while preserving uncertain execution: app-server exit does not prove an external command has
+stopped. Inspect the original executor before recovery; do not delete Mission state to force a retry.
+Per-session usage is native thread cumulative usage (including earlier turns), not a Mission total;
+monetary cost is unavailable and reported as `null`.
+
 For a manifest-bound mission, use the SDK `runCodexMission(...)` or the CLI:
 
 ```sh
@@ -99,7 +123,7 @@ settings and sessions. Codex command and file events are post-execution observat
 pre-execution write guard. The stdio transport is the supported initial integration; experimental
 WebSocket transport is intentionally out of scope.
 
-The Codex CLI handles SIGINT/SIGTERM by requesting interruption and cleaning up its
+The manifest-run CLI handles SIGINT/SIGTERM by requesting interruption and cleaning up its
 app-server (exit 130/143). SDK callers can pass an `AbortSignal` as `signal`. Before
 turn dispatch, cancellation settles the reservation and releases its lease. After
 dispatch, app-server exit or an interrupt acknowledgement does not prove that an
