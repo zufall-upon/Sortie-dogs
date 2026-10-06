@@ -58,4 +58,3 @@ export function legacyToolArgs(input: unknown, args: Record<string, unknown>): R
   }
   return value as Record<string, string>;
 }
-
