@@ -30,7 +30,8 @@
     "node": ">=22.6.0"
   },
   "files": [
-    "dist"
+    "dist",
+    ".agents/skills/sortie-dogs"
   ],
   "exports": {
     ".": {

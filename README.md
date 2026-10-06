@@ -69,11 +69,27 @@ inspect the entrypoint before running a prompt:
 
 ```sh
 npm install --save-dev /path/to/reviewed-sortie-dogs.tgz
+npx --no-install sortie-dogs codex init .
 npx --no-install sortie-dogs codex mission --help
 ```
 
 A maintainer with checkout dependencies already present can produce that tarball with `npm pack`
 (build included). This does not publish it. Use the packed version for the CLI and SDK below.
+`codex init` installs only `.agents/skills/sortie-dogs`; it does not create or edit `.opencode`.
+It refuses to overwrite a skill whose ownership cannot be established.
+
+After restarting Codex or opening the project in a new chat, invoke the installed skill explicitly:
+
+```text
+$sortie-dogs Implement and verify the requested change
+```
+
+`$sortie-dogs` is the current direct Skills syntax. Codex does not expose arbitrary custom commands
+as exact `/sortie-dogs` slash commands; `/skills` opens the skill picker. The skill is intentionally
+explicit-only so child Codex Mission turns cannot invoke another Sortie Mission recursively.
+On POSIX it selects the natural-language Mission route below. On Windows it derives a bounded
+operation manifest and uses `codex run`, which retains the documented post-execution observation
+boundary instead of claiming a pre-execution guard.
 
 Sortie-dogs also exports a host adapter for the official Codex app-server stdio protocol. This is
 separate from selecting an OpenAI model through OpenCode: OpenCode model routing still uses the
