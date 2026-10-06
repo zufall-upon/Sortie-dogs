@@ -185,6 +185,8 @@ const GENERATED_PARALLEL_ACCEPTANCE = "Complete the prepared parallel descriptor
 export const PARALLEL_COMMIT_ARTIFACT_CAPABILITY = "sortie_create_parallel_commit_artifact";
 
 export interface OpenCodePluginInput {
+  /** Host-owned native identity, never a model-authored field. */
+  executionHost?: "codex";
   directory: string;
   worktree?: string;
   /** Optional host-injected lifecycle observation window; production callers use the core default. */
@@ -578,7 +580,7 @@ interface OpenCodeToolDefinition {
   args: Record<string, unknown>;
   execute(
     args: Record<string, string>,
-    context: { sessionID: string; agent?: string },
+    context: { sessionID: string; agent?: string; callID?: string },
   ): Promise<string>;
 }
 

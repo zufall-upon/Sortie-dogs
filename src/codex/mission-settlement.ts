@@ -65,10 +65,16 @@ const powershellEnvelopePayload = (raw: string, trustedExecutable?: string): str
   return identity(match[1]!) === identity(trustedExecutable) ? match[2] : undefined;
 };
 
+// Linux Codex reports the system bash command as one single-quoted payload.
+// Admit only the observed absolute executable and flags. The payload still goes
+// through the shared exact declared-command matcher; never evaluate shell text.
+const bashEnvelopePayload = (raw: string): string | undefined =>
+  /^\/bin\/bash -lc '([^'\r\n]*)'$/u.exec(raw)?.[1];
+
 const declaredMembers = (item: JsonObject, expected: readonly string[], trustedExecutable?: string): string[] | undefined => {
   const raw = commandText(item);
   if (!raw) return undefined;
-  const payload = powershellEnvelopePayload(raw, trustedExecutable);
+  const payload = powershellEnvelopePayload(raw, trustedExecutable) ?? bashEnvelopePayload(raw);
   return canonicalDeclaredValidationMembers(raw, expected) ?? (payload === undefined ? undefined :
     canonicalDeclaredValidationMembers(payload, expected));
 };

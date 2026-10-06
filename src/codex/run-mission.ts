@@ -1,17 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, readFile, readlink, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { durableScopeRoot } from "../core/durable-scope-root.js";
 import { goalFingerprint, type GoalAcceptanceContract, type GoalFlightState } from "../core/goal-bound.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { RunFlightLedger } from "../core/run-flight-ledger.js";
 import { ScopeLeaseRegistry } from "../core/scope-lease-registry.js";
-import { STABLE_RUNTIME_PROFILE, type RuntimeProfile } from "../core/runtime-profile.js";
+import { STABLE_RUNTIME_PROFILE, RUNTIME_PROFILES, type RuntimeProfile } from "../core/runtime-profile.js";
 import type { OperationManifest } from "../core/types.js";
 import { validateOperationManifestSchema } from "../core/validate-schema.js";
 import type { SerialDispatchSettlement } from "../plugin/runtime-bridge.js";
-import { CodexAppServerHost, createCodexAppServerTransport, type CodexTurnResult } from "./app-server.js";
+import { CodexAppServerHost, CodexHostError, createCodexAppServerTransport, type CodexTurnResult } from "./app-server.js";
 import { CodexMissionSettlementBridge, type CodexValidationObservation } from "./mission-settlement.js";
 import { CodexProtectedEvidenceCapture } from "./protected-evidence.js";
 import { promisify } from "node:util";
@@ -26,6 +26,7 @@ export interface RunCodexMissionOptions {
   readonly trustedPowerShellExecutable?: string;
   readonly profile?: RuntimeProfile;
   readonly rootSessionID?: string;
+  readonly signal?: AbortSignal;
 }
 
 export interface RunCodexMissionResult {
@@ -85,8 +86,31 @@ function changedPaths(before: ReadonlyMap<string, string>, after: ReadonlyMap<st
   return [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path) !== after.get(path)).sort();
 }
 
+/** An expired lease is not proof that an interrupted external writer finished. */
+async function rejectUnresolvedCodexFlight(scopeRoot: string): Promise<void> {
+  for (const profile of Object.values(RUNTIME_PROFILES)) {
+    const directory = join(dirname(scopeRoot), profile.flightDirectory);
+    const files = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    for (const file of files.filter(file => file.endsWith(".json"))) {
+      const path = join(directory, file);
+      const raw = JSON.parse(await readFile(path, "utf8"));
+      // Legacy run ledgers coexist here; only goal ledgers can own Codex missions.
+      if (!Object.hasOwn(raw, "goal_events")) continue;
+      const { state } = await RunFlightLedger.readGoalFile(path);
+      if (state.selected_agent === "codex" && state.phase === "active") {
+        throw new Error(`codex-mission-outcome-unknown:no-resend:${path}`);
+      }
+    }
+  }
+}
+
 /** Run one Codex implementation and settle its validation into Sortie's existing goal ledger. */
 export async function runCodexMission(options: RunCodexMissionOptions): Promise<RunCodexMissionResult> {
+  const checkCancelled = () => { if (options.signal?.aborted) throw new Error("codex-mission-cancelled"); };
+  checkCancelled();
   if (!options.prompt.trim()) throw new Error("codex-mission-prompt-required");
   const projectRoot = await realpath(resolve(options.projectRoot));
   const manifestPath = resolve(projectRoot, options.manifestPath);
@@ -126,11 +150,32 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
   let reservationID: string | undefined;
   let unitID: string | undefined;
   let startedAt: string | undefined;
+  let turnAttempted = false;
+  let outcomeUnknown = false;
+  let closing: Promise<void> | undefined;
+  let stopping: Promise<void> | undefined;
+  const closeHost = () => closing ??= host?.close() ?? Promise.resolve();
+  const cancel = () => {
+    stopping ??= (async () => {
+      if (host) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try { await Promise.race([host.interrupt().catch(() => undefined),
+          new Promise<void>(resolve => { timer = setTimeout(resolve, 1000); })]); }
+        finally { clearTimeout(timer); }
+        await closeHost();
+      }
+    })();
+    void stopping.catch(() => undefined);
+  };
+  options.signal?.addEventListener("abort", cancel, { once: true });
   try {
+    checkCancelled();
+    await rejectUnresolvedCodexFlight(scopeRoot);
     ledger = await RunFlightLedger.openGoal(ledgerPath);
-    host = new CodexAppServerHost(createCodexAppServerTransport({ executable: options.executable }));
     const initial = (await ledger.readGoal()).state;
     if (initial.goal_id !== null && initial.phase === "active") throw new Error("codex-mission-active-goal");
+    checkCancelled();
+    host = new CodexAppServerHost(createCodexAppServerTransport({ executable: options.executable }));
     const contract = acceptanceContract(manifest);
     goalID = `codex-${randomUUID()}`;
     const fingerprint = goalFingerprint({ manifest: sha256(source), prompt: options.prompt, contract });
@@ -144,12 +189,16 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
     unitID = manifest.task_id;
     await ledger.appendGoal({ kind: "dispatch.reserved", at: new Date().toISOString(), reservation_id: reservationID,
       goal_id: goalID, unit_id: unitID, session_id: rootSessionID, ticket_id: null });
+    checkCancelled();
     const threadID = await host.startThread({ cwd: projectRoot, model: options.model, ephemeral: true });
     const sandboxPolicy = { type: "workspaceWrite", writableRoots: [projectRoot], networkAccess: false };
     const before = await projectSnapshot(projectRoot, profile);
+    checkCancelled();
+    turnAttempted = true;
     const implementation = await host.runTurn(threadID,
       `${options.prompt}\n\nWork only within the operation manifest scope. Do not run validation commands yet.`,
       { cwd: projectRoot, approvalPolicy: "never", sandboxPolicy, model: options.model, effort: options.effort });
+    checkCancelled();
     if (implementation.status !== "completed") throw new Error(implementation.status === "interrupted"
       ? "codex-mission-implementation-interrupted" : "codex-mission-implementation-failed");
     await lease.assertHeld();
@@ -161,10 +210,14 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
       goalState, unitID, declaredValidation: manifest.validation, owner: "coordinator" });
     if (!capture) throw new Error("codex-mission-evidence-admission-failed");
     const validationStartedAt = new Date().toISOString();
+    checkCancelled();
     const validation = await host.runTurn(threadID,
       `Run only these validation commands, once each and in order. Do not modify files:\n${manifest.validation.map(command => `- ${command}`).join("\n")}`,
       { cwd: projectRoot, approvalPolicy: "never", sandboxPolicy, model: options.model, effort: options.effort });
+    checkCancelled();
     await lease.assertHeld();
+    await closeHost();
+    checkCancelled();
     const observations: CodexValidationObservation[] = [];
     const bridge = new CodexMissionSettlementBridge({
       observedValidation: async value => { observations.push(...value); },
@@ -195,12 +248,25 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
     return { rootSessionID, ledgerPath, implementation, validation, observations, settlement,
       state: (await ledger.readGoal()).state };
   } catch (error) {
+    if (turnAttempted) {
+      // Killing the app-server is not proof that an externally hosted command
+      // stopped. Preserve an unknown reservation rather than claiming success
+      // or compensating an unconfirmed writer to a terminal state.
+      outcomeUnknown = options.signal?.aborted === true || error instanceof CodexHostError;
+      try {
+        if (options.signal?.aborted) { cancel(); await stopping; }
+        await closeHost();
+      } catch { outcomeUnknown = true; }
+      outcomeUnknown ||= options.signal?.aborted === true;
+      if (outcomeUnknown) throw new Error(`codex-mission-outcome-unknown:no-resend:${ledgerPath}`, { cause: error });
+    }
+    if (options.signal?.aborted) { cancel(); await stopping; }
     let compensation: unknown;
     try {
       if (ledger && goalID && reservationID && unitID && startedAt) {
         let state = (await ledger.readGoal()).state;
         if (state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
-          const interrupted = error instanceof Error && error.message === "codex-mission-implementation-interrupted";
+          const interrupted = options.signal?.aborted || (error instanceof Error && error.message === "codex-mission-implementation-interrupted");
           await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(), reservation_id: reservationID,
             receipt_id: randomUUID(), goal_id: goalID, unit_id: unitID, disposition: interrupted ? "cancelled" : "failed",
             result_class: interrupted ? "interrupted" : "process-defect",
@@ -217,9 +283,17 @@ export async function runCodexMission(options: RunCodexMissionOptions): Promise<
       }
     } catch (failure) { compensation = failure; }
     if (compensation) throw new Error(`codex-mission-compensation-failed:${error instanceof Error ? error.message : String(error)}`, { cause: compensation });
+    if (options.signal?.aborted) throw new Error("codex-mission-cancelled", { cause: error });
     throw error;
   } finally {
-    try { await host?.close(); }
-    finally { await lease.release().catch(() => lease.close()); }
+    options.signal?.removeEventListener("abort", cancel);
+    try { await stopping; await closeHost(); }
+    catch (error) {
+      lease.close();
+      if (turnAttempted) throw new Error(`codex-mission-outcome-unknown:no-resend:${ledgerPath}`, { cause: error });
+      throw error;
+    }
+    if (outcomeUnknown) lease.close();
+    else await lease.release().catch(() => lease.close());
   }
 }

@@ -183,3 +183,38 @@ test("Codex settlement rejects arbitrary or nested PowerShell wrappers", async (
     assert.equal(captured, false);
   }
 });
+
+
+test("Codex settlement unwraps Linux system bash and retains native failure and interruption", async () => {
+  const wrapped = "/bin/bash -lc 'node verify.js'";
+  for (const [status, exitCode, disposition] of [
+    ["completed", 0, "succeeded"], ["completed", 7, "failed"], ["interrupted", null, "cancelled"],
+  ] as const) {
+    const state = target();
+    const result = await new CodexMissionSettlementBridge(state.target).settle(request(turn({ status, items: [
+      { id: "cmd-bash", type: "commandExecution", command: wrapped, status: exitCode === null ? "interrupted" : "completed", exitCode },
+    ] }), async () => [evidence]));
+    assert.equal(result.disposition, disposition);
+    assert.equal(state.observations[0]![0]!.rawCommand, wrapped);
+    assert.deepEqual(state.observations[0]![0]!.canonicalCommands, [command]);
+    assert.equal(state.observations[0]![0]!.exitCode, exitCode);
+  }
+});
+
+test("Codex settlement rejects untrusted or altered bash envelopes", async () => {
+  for (const wrapped of [
+    "/tmp/bash -lc 'node verify.js'", "bash -lc 'node verify.js'",
+    "/bin/bash -c 'node verify.js'", '/bin/bash -lc "node verify.js"',
+    "/bin/bash -lc 'node verify.js' extra", "/bin/bash -lc 'node verify.js; echo extra'",
+    "/bin/bash -lc 'node verify.js && echo extra'", "/bin/bash -lc 'bash -c node verify.js'",
+  ]) {
+    const state = target();
+    let captured = false;
+    const result = await new CodexMissionSettlementBridge(state.target).settle(request(turn({ items: [
+      { type: "commandExecution", command: wrapped, status: "completed", exitCode: 0 },
+    ] }), async () => { captured = true; return [evidence]; }));
+    assert.equal(result.disposition, "failed", wrapped);
+    assert.equal(captured, false, wrapped);
+    assert.equal(state.observations.length, 0, wrapped);
+  }
+});

@@ -14,7 +14,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction"] as const) test(`${actor} direct execution: ${mode}`, async t => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan"] as const) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
@@ -43,9 +43,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     };
     const history: Record<string, Record<string, unknown>[]> = {};
     const aborted: string[] = [];
+    let historyAvailable = true;
+    let historyBarrier: (() => Promise<void>) | undefined;
     const create = () => SortieDogsV010Plugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
-      messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }),
+      messages: async ({ path }: { path: { id: string } }) => { await historyBarrier?.(); return historyAvailable ? ({ data: history[path.id] ?? [] }) : undefined; },
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents).filter(([, item]) => item.parentID === path.id)
         .map(([id, item]) => ({ id, ...item })) }),
       abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); agents[path.id]!.outcome = "interrupted"; return { data: true }; },
@@ -66,7 +68,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     }
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{ title: "Fix result",
       objective: "Create result.txt accepted by check.mjs", read: ["check.mjs", ...(mode === "junction" ? ["profile/**"] : [])],
-       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])], validation: ["node check.mjs"] }] }, { sessionID: actor }));
+       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])], validation: [mode.endsWith("replan") ? "node check.mjs (workdir: project root)" : "node check.mjs"] }] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -107,6 +109,73 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: actor, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
       return exit;
     };
+    if (mode.endsWith("replan")) {
+      const replacement = { executor: "self", reason: "Remove the invalid prose directory annotation; retain requirements",
+        units: [{ title: "Fix result", objective: "Create result.txt accepted by check.mjs", read: ["check.mjs"],
+          write: [resultPath, "reports/**"], validation: ["node check.mjs"] }] };
+      const plan = () => hooks.tool!.sortie_v010_plan_units.execute(replacement as never, { sessionID: actor, callID: "current-plan" });
+      await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ ...replacement, reason: "" } as never, { sessionID: actor }), /reason-required/);
+      const invalid = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ ...replacement,
+        units: [{ ...replacement.units[0], validation: ["Check: node check.mjs"] }] } as never, { sessionID: actor }));
+      assert.equal(invalid.status, "invalid-plan");
+      assert.equal((await readRun()).runID, before.runID);
+      assert.equal((await readRun()).units[0]!.status, "running");
+      if (mode === "cold-replan") hooks = await create();
+      await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" });
+      historyAvailable = false;
+      assert.match(JSON.parse(await plan()).status, /tool_terminal_records_unavailable/);
+      assert.equal((await readRun()).units[0]!.status, "running");
+      historyAvailable = true;
+      for (const malformed of [{ parts: [] }, { info: { sessionID: actor } }, { info: { sessionID: "other" }, parts: [] }]) {
+        (history[actor] ??= []).push(malformed);
+        assert.match(JSON.parse(await plan()).status, /tool_terminal_records_unavailable/);
+        assert.equal((await readRun()).units[0]!.status, "running");
+        history[actor]!.pop();
+      }
+      const unfinished = { info: { id: "unfinished", role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID: "unfinished",
+        state: { status: "running", input: { command: "node check.mjs" }, metadata: { status: "running" } } }] };
+      (history[actor] ??= []).push(unfinished);
+      assert.match(JSON.parse(await plan()).status, /tool_dispatch_active_or_unproven/);
+      unfinished.parts[0]!.state.status = "completed";
+      assert.match(JSON.parse(await plan()).status, /tool_dispatch_active_or_unproven/, "background launch completion is not process completion");
+      unfinished.parts[0]!.state.metadata.status = "completed";
+      (history[actor] ??= []).push({ info: { role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "sortie_v010_plan_units",
+        callID: "other-plan", state: { status: "running" } }] });
+      assert.match(JSON.parse(await plan()).status, /tool_dispatch_active_or_unproven/, "only the exact current planner is excluded");
+      history[actor]!.pop();
+      (history[actor] ??= []).push({ info: { role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "sortie_v010_plan_units",
+        callID: "current-plan", state: { status: "running" } }] });
+      let corrected: { status: string };
+      if (mode === "replan") {
+        let entered!: () => void, release!: () => void;
+        const enteredHistory = new Promise<void>(resolve => { entered = resolve; });
+        const holdHistory = new Promise<void>(resolve => { release = resolve; });
+        historyBarrier = async () => { entered(); await holdHistory; };
+        const planning = plan();
+        await enteredHistory;
+        let admitted = false;
+        const concurrentArgs = { filePath: join(directory, "check.mjs") };
+        const concurrent = hooks["tool.execute.before"]!({ tool: "read", sessionID: actor, callID: "concurrent-read" }, { args: concurrentArgs })
+          .then(() => { admitted = true; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(admitted, false, "ordinary tool admission waits for the whole replan transition");
+        historyBarrier = undefined; release();
+        corrected = JSON.parse(await planning);
+        await concurrent;
+        await hooks["tool.execute.after"]!({ tool: "read", sessionID: actor, callID: "concurrent-read", args: concurrentArgs }, { output: "inspected" });
+      } else corrected = JSON.parse(await plan());
+      assert.equal(corrected.status, "direct-unit-running", JSON.stringify(corrected));
+      history[actor]!.pop();
+      const revised = await readRun();
+      assert.notEqual(revised.runID, before.runID);
+      assert.deepEqual(revised.acceptance, before.acceptance);
+      const retained = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(retained.id, started.mission_id);
+      assert.equal(retained.attempts?.length, 2);
+      const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+      assert.equal(status.budget.consumed_units, 1, JSON.stringify(status.budget));
+      assert.equal(status.budget.reserved_units, 1);
+    }
     await write("broken\n");
     assert.equal(await check(), 1);
     const failed = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
@@ -139,7 +208,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     assert.equal(done.units[0]!.directExecution!.checks.length, checked.length, "finish preserves observed validation without reruns");
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(mission.id, started.mission_id);
-    assert.equal(mission.attempts?.length, 1);
+    assert.equal(mission.attempts?.length, mode.endsWith("replan") ? 2 : 1);
     assert.equal(mission.attempts?.[0]?.kind, "direct_execution");
     assert.equal(mission.attempts?.[0]?.terminal, undefined, "active parent is not a native child terminal");
     await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);

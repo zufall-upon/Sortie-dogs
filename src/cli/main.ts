@@ -44,7 +44,9 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
 const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
        sortie-dogs init --global [--profile stable|v010]
 This beta package defaults to the v010 profile.`;
-const CODEX_USAGE = `Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
+const CODEX_USAGE = `Natural-language Mission: sortie-dogs codex mission --prompt <text> (mission --help for options)
+
+Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
   [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>]
   [--trusted-pwsh <absolute-pwsh.exe>] [--profile stable|v010]
 
@@ -259,6 +261,8 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] === "codex") {
+    if (argv[1] === "mission") return (await import("./codex-mission.js")).runCodexMissionCommand(argv.slice(2));
+    if (argv.length === 3 && argv[1] === "run" && argv[2] === "--help") { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] === "--help" && argv.length === 2) { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] !== "run") { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
     const values = new Map<string, string>();
@@ -272,10 +276,15 @@ export async function run(argv: readonly string[]): Promise<number> {
     }
     const manifest = values.get("--manifest"), prompt = values.get("--prompt"), profile = values.get("--profile") ?? "stable";
     if (!manifest || !prompt || !["stable", "v010"].includes(profile)) { process.stderr.write(`${CODEX_USAGE}\n`); return 2; }
+    const cancellation = new AbortController();
+    let signalExit: number | undefined;
+    const onTerm = () => { signalExit ??= 143; cancellation.abort(); };
+    const onInt = () => { signalExit ??= 130; cancellation.abort(); };
+    process.on("SIGTERM", onTerm); process.on("SIGINT", onInt);
     try {
       const runner: typeof import("../codex/run-mission.js") = await import("../codex/run-mission.js");
       const profiles: typeof import("../core/runtime-profile.js") = await import("../core/runtime-profile.js");
-      const result = await runner.runCodexMission({ projectRoot: values.get("--project-root") ?? process.cwd(), manifestPath: manifest,
+      const result = await runner.runCodexMission({ signal: cancellation.signal, projectRoot: values.get("--project-root") ?? process.cwd(), manifestPath: manifest,
         prompt, ...(values.get("--executable") ? { executable: values.get("--executable") } : {}),
         ...(values.get("--model") ? { model: values.get("--model") } : {}),
         ...(values.get("--effort") ? { effort: values.get("--effort") } : {}),
@@ -287,10 +296,12 @@ export async function run(argv: readonly string[]): Promise<number> {
         validation_commands: result.validation.items.filter(item => item.type === "commandExecution").map(item => ({
           command: item.command, status: item.status, exit_code: item.exitCode,
         })) })}\n`);
-      return result.settlement.disposition === "succeeded" ? 0 : 1;
+      return signalExit ?? (result.settlement.disposition === "succeeded" ? 0 : 1);
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : "codex-mission-failed"}\n`);
-      return 1;
+      return signalExit ?? 1;
+    } finally {
+      process.off("SIGTERM", onTerm); process.off("SIGINT", onInt);
     }
   }
   if (argv[0] === "init") {

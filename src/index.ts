@@ -326,3 +326,6 @@ export type {
   RetainedStateWarning,
   RetainedValidationAttempt,
 } from "./core/retained-state.js";
+
+export { CodexMissionSession } from "./codex/mission-session.js";
+export type { CodexMissionSessionOptions, CodexMissionCommandRequest, CodexMissionCommandResult, CodexMissionCommandExecutor } from "./codex/mission-session.js";

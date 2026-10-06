@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -173,4 +173,124 @@ test("runCodexMission can append a new terminal goal for the same explicit root 
   assert.equal(second.state.phase, "terminal");
   const ledger = await RunFlightLedger.readGoalFile(second.ledgerPath);
   assert.equal(ledger.records.filter(record => record.event.kind === "goal.terminal").length, 2);
+});
+
+
+test("Codex CLI SIGTERM compensates startup but preserves dispatched work as unknown", { skip: process.platform === "win32", timeout: 30_000 }, async () => {
+  for (const phase of ["startup", "implementation", "validation"]) {
+    const fixture = await scriptedMission("success");
+    const ready = join(fixture.root, ".git", "ready");
+    await writeFile(join(fixture.root, "scripted-server.mjs"), `import {createInterface} from 'node:readline'; import {writeFile} from 'node:fs/promises';
+const out=x=>process.stdout.write(JSON.stringify(x)+'\\n');let turns=0;
+for await(const line of createInterface({input:process.stdin})){const m=JSON.parse(line);
+if(m.method==='initialize'){if(${JSON.stringify(phase)}==='startup')await writeFile(${JSON.stringify(ready)},String(process.pid));else out({id:m.id,result:{}});}
+else if(m.method==='thread/start')out({id:m.id,result:{thread:{id:'thread'}}});
+else if(m.method==='turn/start'){turns++;const id='turn-'+turns;out({id:m.id,result:{turn:{id}}});
+if(${JSON.stringify(phase)}==='validation'&&turns===1)out({method:'turn/completed',params:{threadId:'thread',turn:{id,status:'completed'}}});
+else await writeFile(${JSON.stringify(ready)},String(process.pid));}
+else if(m.method==='turn/interrupt'){out({id:m.id,result:{}});out({method:'turn/completed',params:{threadId:'thread',turn:{id:'turn-'+turns,status:'interrupted'}}});}}
+`);
+    const child = spawn(process.execPath, [join(process.cwd(), "dist/cli/main.js"), "codex", "run", "--project-root", fixture.root,
+      "--manifest", "operation-manifest.json", "--executable", fixture.executable, "--prompt", "Wait"], { stdio: "ignore" });
+    const closed = new Promise<number | null>(resolve => child.once("exit", resolve));
+    try {
+      const deadline = Date.now() + 5000;
+      while (!(await readFile(ready, "utf8").catch(() => ""))) {
+        assert.ok(Date.now() < deadline, `server never reached ${phase}`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      child.kill("SIGTERM");
+      assert.equal(await closed, 143, phase);
+      const directory = join(fixture.root, ".git", "sortie-dogs", "run-flight");
+      const files = await readdir(directory);
+      const { records, state } = await RunFlightLedger.readGoalFile(join(directory, files[0]!));
+      assert.equal(state.phase, phase === "startup" ? "stopped" : "active", phase);
+      assert.equal(state.outstanding_reservations.length, phase === "startup" ? 0 : 1);
+      assert.equal(records.filter(r => r.event.kind === "dispatch.reserved").length, 1);
+      const settled = records.find(r => r.event.kind === "unit.settled")?.event;
+      if (phase === "startup") assert.equal(settled?.kind === "unit.settled" && settled.disposition, "cancelled");
+      else assert.equal(settled, undefined);
+      const leases = JSON.parse(await readFile(join(fixture.root, ".git/sortie-dogs/scope-leases/scope-leases.json"), "utf8"));
+      assert.equal(leases.leases.length, phase === "startup" ? 0 : 1);
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+  }
+});
+
+test("Codex mission refuses unresolved prior goal across fresh identities and runtime profiles", { skip: process.platform === "win32" }, async () => {
+  const fixture = await scriptedMission("success");
+  const result = await runCodexMission({ projectRoot: fixture.root, manifestPath: "operation-manifest.json",
+    prompt: "Wait", executable: fixture.executable });
+  const raw = JSON.parse(await readFile(result.ledgerPath, "utf8"));
+  raw.goal_events = raw.goal_events.slice(0, 2);
+  await writeFile(result.ledgerPath, JSON.stringify(raw));
+  const { V010_RUNTIME_PROFILE } = await import("../dist/core/runtime-profile.js");
+  for (const profile of [undefined, V010_RUNTIME_PROFILE]) {
+    await assert.rejects(runCodexMission({ projectRoot: fixture.root, manifestPath: "operation-manifest.json",
+      prompt: "Must not resend", executable: "must-not-spawn", profile }), /codex-mission-outcome-unknown:no-resend/u);
+  }
+  const { state } = await RunFlightLedger.readGoalFile(result.ledgerPath);
+  assert.equal(state.phase, "active");
+  assert.equal(state.outstanding_reservations.length, 1);
+  assert.equal((await readdir(join(fixture.root, ".git/sortie-dogs/run-flight"))).length, 1);
+  assert.equal(await new ScopeLeaseRegistry(join(fixture.root, ".git/sortie-dogs/scope-leases"))
+    .hasConflictingLease({ read: [], write: ["**"] }), false);
+});
+
+
+test("Codex mission preserves unknown outcome when transport dies during a dispatched turn", { skip: process.platform === "win32" }, async () => {
+  const fixture = await scriptedMission("success");
+  const path = join(fixture.root, "scripted-server.mjs");
+  const server = await readFile(path, "utf8");
+  await writeFile(path, server.replace("else if(m.method==='turn/start'){", "else if(m.method==='turn/start'){process.exit(3);"));
+  await assert.rejects(runCodexMission({ projectRoot: fixture.root, manifestPath: "operation-manifest.json",
+    prompt: "Wait", executable: fixture.executable }), /codex-mission-outcome-unknown:no-resend/u);
+  const directory = join(fixture.root, ".git/sortie-dogs/run-flight");
+  const { state } = await RunFlightLedger.readGoalFile(join(directory, (await readdir(directory))[0]!));
+  assert.equal(state.phase, "active"); assert.equal(state.outstanding_reservations.length, 1);
+  const leases = JSON.parse(await readFile(join(fixture.root, ".git/sortie-dogs/scope-leases/scope-leases.json"), "utf8"));
+  assert.equal(leases.leases.length, 1);
+});
+
+test("Codex cleanup failure cannot terminalize completed validation or implementation failure", { skip: process.platform === "win32" }, async t => {
+  const { CodexAppServerHost } = await import("../dist/codex/app-server.js");
+  const original = CodexAppServerHost.prototype.close;
+  t.mock.method(CodexAppServerHost.prototype, "close", async function (this: InstanceType<typeof CodexAppServerHost>) {
+    await original.call(this);
+    throw new Error("unconfirmed-cleanup");
+  });
+  for (const scopeFailure of [false, true]) {
+    const fixture = await scriptedMission("success");
+    if (scopeFailure) {
+      const path = join(fixture.root, "operation-manifest.json");
+      const manifest = JSON.parse(await readFile(path, "utf8"));
+      manifest.write = [];
+      await writeFile(path, JSON.stringify(manifest));
+    }
+    await assert.rejects(runCodexMission({ projectRoot: fixture.root, manifestPath: "operation-manifest.json",
+      prompt: "Wait", executable: fixture.executable }), /codex-mission-outcome-unknown:no-resend/u);
+    const directory = join(fixture.root, ".git/sortie-dogs/run-flight");
+    const { state } = await RunFlightLedger.readGoalFile(join(directory, (await readdir(directory))[0]!));
+    assert.equal(state.phase, "active"); assert.equal(state.outstanding_reservations.length, 1);
+    const leases = JSON.parse(await readFile(join(fixture.root, ".git/sortie-dogs/scope-leases/scope-leases.json"), "utf8"));
+    assert.equal(leases.leases.length, 1);
+  }
+});
+
+test("cancellation arriving during error cleanup cannot compensate dispatched work", { skip: process.platform === "win32" }, async t => {
+  const fixture = await scriptedMission("success");
+  const path = join(fixture.root, "operation-manifest.json");
+  const manifest = JSON.parse(await readFile(path, "utf8")); manifest.write = [];
+  await writeFile(path, JSON.stringify(manifest));
+  const controller = new AbortController();
+  const { CodexAppServerHost } = await import("../dist/codex/app-server.js");
+  const original = CodexAppServerHost.prototype.close;
+  t.mock.method(CodexAppServerHost.prototype, "close", async function (this: InstanceType<typeof CodexAppServerHost>) {
+    await original.call(this);
+    controller.abort();
+  });
+  await assert.rejects(runCodexMission({ projectRoot: fixture.root, manifestPath: "operation-manifest.json",
+    prompt: "Wait", executable: fixture.executable, signal: controller.signal }), /codex-mission-outcome-unknown:no-resend/u);
+  const directory = join(fixture.root, ".git/sortie-dogs/run-flight");
+  const { state } = await RunFlightLedger.readGoalFile(join(directory, (await readdir(directory))[0]!));
+  assert.equal(state.phase, "active"); assert.equal(state.outstanding_reservations.length, 1);
 });

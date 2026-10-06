@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
@@ -37,6 +37,13 @@ export interface MissionConsultation {
   outcome?: "completed" | "failed" | "unknown";
   result?: string;
 }
+export interface CodexWorkerDispatch {
+  missionID: string; runID: string; unitID: string; threadID: string; turnID: string; callID: string;
+  inputHash: string; childThreadID: string; clientUserMessageID: string; ownerGeneration: string;
+}
+export interface CodexCompletedTaskProof {
+  dispatch: CodexWorkerDispatch; childTurnID: string;
+}
 export interface MissionAttempt {
   attemptID: string;
   runID: string;
@@ -50,6 +57,8 @@ export interface MissionAttempt {
   callID?: string;
   childSessionID?: string;
   dispatchFingerprint?: string;
+  /** Exact native request binding written before this Worker turn is sent. */
+  codexDispatch?: CodexWorkerDispatch;
   nativeOutcome?: "completed" | "failed" | "unknown";
   terminal?: import("../plugin/runtime-bridge.js").MissionWorkerTerminalRecord;
   observedModel?: string;
@@ -103,7 +112,59 @@ export interface MissionSelfRecheck {
   unresolvedFindings: string[];
   residualMajor?: { reachable_path: string; consequence: string };
 }
+export interface CodexUsageTotal {
+  totalTokens: number; inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number;
+  outputTokens: number; reasoningOutputTokens: number;
+}
+export interface CodexUsageObservation {
+  threadID: string; turnID: string; startedAt: number; updatedAt: number;
+  agent: string; model: { providerID: string; modelID: string };
+  total?: CodexUsageTotal; baseline?: CodexUsageTotal;
+  /** Set only after a native terminal result; active snapshots cannot seed another turn. */
+  terminal?: boolean;
+}
+export interface CodexMissionOwner {
+  pid: number; bootID?: string; startTicks?: string; generation: string; closed?: boolean;
+}
+
+async function codexProcessStart(pid: number): Promise<string> {
+  const value = await readFile(`/proc/${pid}/stat`, "utf8");
+  const ticks = value.slice(value.lastIndexOf(")") + 2).split(" ")[19];
+  if (!ticks || !/^\d+$/.test(ticks)) throw new Error("codex-process-identity-unavailable");
+  return ticks;
+}
+export async function codexProcessOwner(): Promise<CodexMissionOwner> {
+  const owner: CodexMissionOwner = { pid: process.pid, generation: randomUUID() };
+  if (process.platform === "linux") {
+    owner.bootID = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+    owner.startTicks = await codexProcessStart(process.pid);
+  }
+  return owner;
+}
+export async function codexOwnerGone(owner: CodexMissionOwner | undefined): Promise<boolean> {
+  if (!owner) return false;
+  if (owner.closed) return true;
+  if (process.platform !== "linux" || !owner.bootID || !owner.startTicks || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return false;
+  try {
+    if ((await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim() !== owner.bootID) return true;
+    return await codexProcessStart(owner.pid) !== owner.startTicks;
+  } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+}
+
+export interface CodexNotStartedProof {
+  missionID: string; threadID: string; turnID: string; callID: string; inputHash: string;
+  ownerGeneration: string;
+}
 export interface OperatorMission {
+  /** Native transport identity; execution and recovery remain in this Mission. */
+  executionHost?: "codex";
+  /** Adapter liveness only; unit execution/settlement remain in the existing run ledger. */
+  codexOwner?: CodexMissionOwner;
+  /** Final native accounting observations; execution authority remains in attempts and the goal ledger. */
+  codexUsage?: CodexUsageObservation[];
+  codexNotStarted?: CodexNotStartedProof[];
+  /** Missing parent receipts reconciled from exact completed native Worker turns. */
+  codexCompletedTasks?: CodexCompletedTaskProof[];
   version: "0.12";
   id: string;
   root: string;
@@ -263,7 +324,7 @@ export function missionConversationContext(messages: readonly Record<string, unk
 
 /** Durable user intent and dispatch ownership. Execution/evidence still belong to the v0.10 engine. */
 export class OperatorMissionRuntime {
-  private readonly writes = new Map<string, Promise<unknown>>();
+  private static readonly writes = new Map<string, Promise<unknown>>();
   constructor(readonly projectRoot: string, readonly profile: RuntimeProfile) {}
   private file(root: string, suffix = ""): string {
     return join(this.projectRoot, this.profile.stateDirectory, "missions", `${digest(root)}${suffix}.json`);
@@ -325,16 +386,67 @@ export class OperatorMissionRuntime {
     finally { await rm(temporary, { force: true }); }
   }
   private async serial<T>(root: string, operation: () => Promise<T>): Promise<T> {
-    const current = (this.writes.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
-    this.writes.set(root, current);
-    try { return await current; } finally { if (this.writes.get(root) === current) this.writes.delete(root); }
+    const key = this.file(root);
+    const current = (OperatorMissionRuntime.writes.get(key) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    OperatorMissionRuntime.writes.set(key, current);
+    try { return await current; } finally { if (OperatorMissionRuntime.writes.get(key) === current) OperatorMissionRuntime.writes.delete(key); }
   }
   async read(root: string): Promise<OperatorMission | undefined> {
-    await this.writes.get(root);
+    await OperatorMissionRuntime.writes.get(this.file(root));
     const state = await this.loadMission(root);
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
     return state;
   }
+  /** Serialize host recovery claims across processes; a stale lock never authorizes takeover. */
+  async codexRecovery<T>(root: string, action: (state: OperatorMission) => Promise<T>): Promise<T> {
+    const lock = `${this.file(root)}.codex-recovery.lock`;
+    const owner = await codexProcessOwner();
+    const marker = `owner.${owner.pid}.${owner.bootID ?? "unknown"}.${owner.startTicks ?? "unknown"}.${owner.generation}`;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      let acquired = false;
+      const staging = `${lock}.${owner.generation}.tmp`;
+      try {
+        await mkdir(staging);
+        await open(join(staging, marker), "wx", 0o600).then(handle => handle.close());
+        // Publish owner and lock together. rename cannot replace another nonempty owner directory.
+        await rename(staging, lock);
+        acquired = true;
+      } catch { /* Another live claimant owns this short metadata transaction. */ }
+      finally { await rm(staging, { recursive: true, force: true }); }
+      if (acquired) {
+        try { return await action(await this.required(root)); }
+        finally { await unlink(join(lock, marker)); await rmdir(lock).catch(() => undefined); }
+      }
+      await unlink(join(lock, marker)).catch(() => undefined);
+      const names = await readdir(lock).catch(() => []);
+      if (names.length === 1) {
+        const match = /^owner\.(\d+)\.([a-f0-9-]+)\.(\d+)\.([a-f0-9-]+)$/.exec(names[0]!);
+        if (match && await codexOwnerGone({ pid: Number(match[1]), bootID: match[2], startTicks: match[3], generation: match[4]! })) {
+          // Remove only the dead owner's unique marker; never unlink a replacement owner's file.
+          await unlink(join(lock, names[0]!)).catch(() => undefined);
+        }
+      }
+      // Live locks are published nonempty; a replacement marker prevents this removal.
+      await rmdir(lock).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error("codex-mission-recovery-busy");
+  }
+  /** Current Mission records only; request captures and archived generations are excluded. */
+  async current(): Promise<OperatorMission[]> {
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
+    let entries: string[];
+    try { entries = await readdir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    const result: OperatorMission[] = [];
+    for (const entry of entries.filter(name => /^[a-f0-9]{64}\.json$/u.test(name))) {
+      const state = await this.load<OperatorMission>(join(directory, entry));
+      if (!state || typeof state.root !== "string" || this.file(state.root) !== join(directory, entry)) throw new Error("mission-state-invalid");
+      result.push(await this.required(state.root));
+    }
+    return result;
+  }
+
   async required(root: string): Promise<OperatorMission> {
     const state = await this.read(root);
     if (!state) throw new Error("mission-missing: call start_mission once with the user's requirements");
@@ -365,7 +477,7 @@ export class OperatorMissionRuntime {
     });
   }
   start(root: string, requirements: unknown, replaceRequirements = false,
-    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string } = {}): Promise<OperatorMission> {
+    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string; executionHost?: "codex" } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -392,7 +504,10 @@ export class OperatorMissionRuntime {
       const predecessor = (replaceRequirements ? options.cancelledRunID : undefined) ??
         previous?.runID ?? previous?.supersededRunID;
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
-        kind: options.kind ?? "implementation",
+        kind: options.kind ?? "implementation", ...(options.executionHost ? { executionHost: options.executionHost } : {}),
+        ...(previous?.codexNotStarted ? { codexNotStarted: previous.codexNotStarted } : {}),
+        ...(previous?.codexCompletedTasks ? { codexCompletedTasks: previous.codexCompletedTasks } : {}),
+        ...(previous?.codexUsage ? { codexUsage: previous.codexUsage } : {}),
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),
