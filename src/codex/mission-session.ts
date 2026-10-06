@@ -327,9 +327,9 @@ export class CodexMissionSession {
           "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
           "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
           "Native shell and file operations outside these functions do not provide Mission validation evidence. " +
-          "Declare formal validation as exact executable shell commands from the project root, without prose annotations such as (workdir: ...). " +
-          "Use a root-relative command or an explicit shell cd for a subdirectory formal check. bash workdir changes that invocation only; " +
-          "a command run in another directory does not validate a root-directory entry.",
+          "Declare formal validation as exact executable shell commands, without prose annotations such as (workdir: ...). " +
+          "Validation cwd defaults to the project root. Use validation_cwd in plan_units to register another directory for each exact command, then pass the matching bash workdir. " +
+          "A bash workdir alone does not change the registered validation cwd; a check in another directory does not prove the registered entry.",
         dynamicTools: this.tools(content), config: { "features.shell_tool": false, "features.unified_exec": false } });
       if (this.closed) throw new Error("Codex Mission adapter is closed.");
       const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [], usageBaseline: emptyCodexUsage(), createdAt: Date.now(),

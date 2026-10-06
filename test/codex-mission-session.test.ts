@@ -474,6 +474,8 @@ for (const delegated of [false, true]) test(`bash workdir matches shared validat
     if (failure) throw failure;
     assert.equal(result.accepted, true);
     assert.equal(native.threadRequests[0].permissions, ":workspace");
+    assert.match(native.threadRequests[0].developerInstructions, /validation_cwd.*matching bash workdir/,
+      "transport guidance must preserve registered package validation instead of insisting on root cwd");
     assert(native.commandRequests.every(request => request.permissionProfile === ":workspace"));
     const bash = native.threadRequests[0].dynamicTools.find((tool: Json) => tool.name === "bash");
     assert.equal(bash.inputSchema.properties.workdir.type, "string");

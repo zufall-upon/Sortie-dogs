@@ -286,3 +286,56 @@ subprocess restriction described above.
 Final Linux `npm run test:full`: 113 files completed, 1773 tests passed, 2 existing live tests skipped,
 zero failures, exit 0, 222.944 s (test phase). No extra live model turn was used to
 reconfirm these deterministic defects.
+
+## Cold-resume, correction and progress cross-check
+
+The follow-up on `02b4b73` reused isolated copies of the existing scripted Codex and
+Reviewer fixtures. Passing cross-checks remain ignored local probes rather than new
+permanent copies of already covered happy paths. Evidence is under
+`_testenv/continuity-next/`.
+
+- `cold-cwd-probe.ts` / `cold-cwd.log`: a registered package check returns exit 7;
+  closing and recreating the Codex adapter retains that cwd and failure in progress.
+  The same command returning exit 0 at the project root still cannot finish the unit.
+  Repair and validation in the registered package then reach acceptance with the
+  same Mission and run IDs. Command progress reports the actual package directory.
+- `reviewer-cwd-probe.ts` / `reviewer-cwd-background.log`: a correction inherits the
+  package cwd, records exit 7, reloads the plugin with an existing background Task
+  receipt, and uses the established handoff rebinding path. The subsequent successful
+  check, saved correction check directory, progress formal proof and native author
+  self-recheck agree; the same Mission reaches completion.
+- The unsuccessful probe logs were retained: omitting cold rebinding leaves no live
+  write-gate binding, and omitting the parent Task receipt does not establish the
+  correction terminal. These are not relabeled as accepted runs. The successful
+  case uses the existing recovery protocol; it introduces no permission expansion,
+  new Task or invented terminal receipt.
+
+The one additional mismatch was in new Codex thread instructions: they still directed
+all formal validation to the project root despite `validation_cwd` support. The text
+now explains the root default, exact command-to-directory registration and matching
+`bash workdir`. Existing workdir tests reproduce the old contradiction and check the
+updated guidance. No runtime acceptance, settlement or authorization logic changed.
+
+Remaining qualification boundaries are concrete:
+
+- Scripted transport and plugin reload prove shared state/receipt handling, not an
+  actual OpenCode application restart. The already pending manual restart must report
+  the loaded runtime and exercise the same saved Task; no independent code change is
+  justified by these passing fixtures alone.
+- Codex recovery of a lost parent Task response is currently supported for the exact
+  proven leaf Worker case, not arbitrary Reviewer/nested work. An unobserved Reviewer
+  receipt must first be reconciled from its actual native history; automatic resend
+  would not prove that the old work stopped. This audit does not broaden recovery.
+- Existing saved native threads retain their original developer instructions. The
+  guidance change affects new threads; it does not claim to rewrite old rollouts.
+- Native subprocess capture restrictions remain as previously recorded. This audit
+  made no live model call or native-permission change and did not bypass them.
+
+Within the audited cwd/receipt/progress paths, no additional runtime inconsistency was
+reproduced after the previous two fixes. Broader quality and efficiency claims still
+require measured real workloads; adding more normal-path fixtures would not supply
+that evidence.
+
+Guidance follow-up validation: related 46/46 passed; final Linux full suite completed
+113 files, 1773 passed, 2 existing live skips, zero failures, exit 0, 222.608 s
+(test phase). Independent review found no High/Medium issue.
