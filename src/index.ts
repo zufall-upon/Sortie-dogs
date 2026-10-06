@@ -328,4 +328,4 @@ export type {
 } from "./core/retained-state.js";
 
 export { CodexMissionSession } from "./codex/mission-session.js";
-export type { CodexMissionSessionOptions } from "./codex/mission-session.js";
+export type { CodexMissionSessionOptions, CodexMissionCommandRequest, CodexMissionCommandResult, CodexMissionCommandExecutor } from "./codex/mission-session.js";

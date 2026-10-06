@@ -19,6 +19,7 @@ class ScriptedTransport implements CodexAppServerTransport {
   readonly failures = new Set<string>();
   readThread?: Json;
   dropCommands = false;
+  commandExecutions = 0;
   turnStarts = 0;
   readonly turns: Json[] = [];
   readonly turnRequests: Json[] = [];
@@ -74,6 +75,7 @@ class ScriptedTransport implements CodexAppServerTransport {
         this.push({ method: "turn/completed", params: { threadId: this.id, turn: { id: this.currentTurnID, status: "completed" } } });
       }).catch(error => this.push({ id: message.id, error: { message: String(error) } })));
     } else if (message.method === "command/exec") {
+      this.commandExecutions++;
       if (this.dropCommands) { void this.close(); return; }
       assert.equal(message.params.sandboxPolicy, undefined, "standalone commands inherit native host permissions");
       const [command, ...args] = message.params.command;
@@ -323,4 +325,106 @@ for (const item of [
     await assert.rejects(recovered.run("Continue"), /unresolved native execution; no resend/);
     assert.equal(cold.turnStarts, 0);
   } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+
+for (const outcome of ["approved", "failed", "denied", "not-started", "interrupted", "invalid", "throw", "abort", "close-race"] as const)
+test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-host-executor-"));
+  let adapter: CodexMissionSession | undefined;
+  let failure: unknown;
+  let dispatched = 0, executions = 0;
+  const beforeCalls: string[] = [], afterReceipts: Json[] = [];
+  let entered!: () => void, authorize!: () => void;
+  const entry = new Promise<void>(resolve => { entered = resolve; });
+  const approval = new Promise<void>(resolve => { authorize = resolve; });
+  const events: Json[] = [];
+  const unknown = ["interrupted", "invalid", "throw", "abort", "close-race"].includes(outcome);
+  const native = new ScriptedTransport("root", async host => {
+    try {
+      await host.call("sortie_v010_start_mission", { requirements: ["Validate existing result"] });
+      await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Validate", objective: "Validate existing result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      const receipt = await host.call("bash", { command: "node check.mjs" }, !["denied", "not-started"].includes(outcome));
+      if (outcome === "approved" || outcome === "failed") {
+        assert.equal(receipt.metadata.exit, outcome === "approved" ? 0 : 7);
+        assert.equal(receipt.metadata.executor, "host");
+      } else assert.match(receipt.error, new RegExp(`Host command ${outcome}`));
+      const finished = await host.call("sortie_v010_finish_direct_unit", {});
+      if (outcome === "approved") {
+        await host.call("sortie_v010_review_mission", { risk_tags: [] });
+        assert.equal((await host.call("sortie_v010_complete_mission", {})).status, "succeeded");
+      } else assert.equal(finished.status, "direct-unit-awaits-validation");
+    } catch (error) { failure = error; }
+  });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), `process.exit(${outcome === "failed" ? 7 : 0})`);
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      onEvent: event => { events.push(event); }, executeCommand: async request => {
+        dispatched++;
+        try {
+        assert.deepEqual(request.command, ["/bin/bash", "-c", "node check.mjs"]);
+        assert.equal(request.cwd, directory);
+        assert.equal(request.threadId, "root");
+        assert.equal(request.tool, "bash");
+        assert(request.callId && request.turnId);
+        assert.deepEqual(beforeCalls, [request.callId], "shared before hook precedes host dispatch");
+        } catch (error) { failure = error; throw error; }
+        entered();
+        await approval;
+        if (outcome === "abort") {
+          assert.equal(request.signal.aborted, true);
+          return { status: "completed", exitCode: 0, stdout: "late result must not validate", stderr: "" };
+        }
+        if (outcome === "close-race") { void adapter!.close(); return { status: "completed", exitCode: 0, stdout: "raced result", stderr: "" }; }
+        if (outcome === "throw") throw new Error("Host connection lost");
+        if (outcome === "invalid") return { status: "completed", exitCode: undefined, stdout: "approved only", stderr: "" } as any;
+        if (["denied", "not-started", "interrupted"].includes(outcome)) return { status: outcome as "denied" | "not-started" | "interrupted", reason: "fixture host decision" };
+        executions++;
+        try {
+          const result = await exec(request.command[0], request.command.slice(1), { cwd: request.cwd });
+          return { status: "completed", exitCode: 0, ...result };
+        } catch (error: any) { return { status: "completed", exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
+      } });
+    const hooks = (adapter as any).hooks;
+    const before = hooks["tool.execute.before"], after = hooks["tool.execute.after"];
+    hooks["tool.execute.before"] = async (input: Json, output: Json) => {
+      await before(input, output);
+      if (input.tool === "bash") beforeCalls.push(input.callID);
+    };
+    hooks["tool.execute.after"] = async (input: Json, output: Json) => {
+      if (input.tool === "bash") afterReceipts.push(structuredClone(output));
+      await after(input, output);
+    };
+    const running = adapter.run("Validate existing result");
+    const observed = running.then(value => ({ value }), error => ({ error }));
+    await Promise.race([entry, observed.then(result => { throw failure ?? ("error" in result ? result.error : new Error("host not reached")); })]);
+    assert.equal(executions, 0, "waiting for host approval does not execute or validate");
+    assert.equal(afterReceipts.length, 0, "approval alone is not validation evidence");
+    if (outcome === "abort") await adapter.close();
+    authorize();
+    const result = await observed;
+    if (unknown) {
+      assert("error" in result, JSON.stringify(result));
+      await assert.rejects(adapter.run("retry"), /closed/);
+    } else {
+      if (failure) throw failure;
+      assert("value" in result, JSON.stringify(result));
+      assert.equal(result.value.accepted, outcome === "approved");
+    }
+    assert.equal(dispatched, 1);
+    assert.equal(native.commandExecutions, 0, "never fall back after host dispatch or denial");
+    assert.equal(executions, outcome === "approved" || outcome === "failed" ? 1 : 0);
+    assert(events.some(event => event.method === "sortie/commandExecution" && event.params.executor === "host"));
+    if (outcome !== "approved") {
+      const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.notEqual(state.phase, "completed");
+      assert.equal(afterReceipts[0]?.metadata?.exit, outcome === "failed" ? 7 : undefined);
+      if (unknown) {
+        assert.equal(afterReceipts.length, 0, "unknown execution never produces terminal evidence");
+        assert(events.some(event => event.method === "sortie/commandExecution" && event.params.status === "unknown" && event.params.reason));
+      }
+    }
+  } finally { authorize(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });

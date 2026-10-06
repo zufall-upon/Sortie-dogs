@@ -49,6 +49,10 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
 
 /** Bounded user-facing progress; do not dump control packets or hidden reasoning. */
 export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
+  if (event.method === "sortie/commandExecution")
+    return { thread_id: event.threadId, turn_id: event.params.turnId, call_id: event.params.callId,
+      tool: event.params.tool, executor: event.params.executor, phase: event.params.status,
+      detail: typeof event.params.reason === "string" ? event.params.reason.slice(0, 1600) : undefined };
   if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(event.method))
     return { thread_id: event.threadId, turn_id: event.params.turnId, phase: "approval-required", method: event.method,
       reason: typeof event.params.reason === "string" ? event.params.reason.slice(0, 1600) : undefined,
@@ -76,7 +80,7 @@ export function codexMissionProgress(event: CodexTurnEvent & { threadId: string 
     phase: event.method === "item/started" ? "started" : "completed", status: item.status, success: item.success,
     command: bounded(args.command), reason: bounded(args.reason),
     agent: bounded(args.subagent_type), description: bounded(args.description), child_session_id: bounded(metadata.sessionId),
-    outcome: bounded(receipt.status), exit: metadata.exit,
+    outcome: bounded(receipt.status), exit: metadata.exit, executor: metadata.executor,
     next_action: bounded(receipt.next_action),
     summary: bounded(args.summary ?? receipt.summary),
     detail: bounded(receipt.reason ?? receipt.error ?? (item.success === false ? text : undefined)) };

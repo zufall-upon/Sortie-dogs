@@ -25,6 +25,22 @@ interface NativeSession {
   usageBaseline?: CodexUsageTotal;
   createdAt?: number;
 }
+export interface CodexMissionCommandRequest {
+  readonly tool: "bash" | "read" | "write";
+  readonly command: readonly string[];
+  readonly cwd: string;
+  readonly timeoutMs: number;
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly callId: string;
+  readonly signal: AbortSignal;
+}
+/** The host owns authorization and execution. Never return completed for approval alone. */
+export type CodexMissionCommandResult =
+  | { readonly status: "completed"; readonly exitCode: number; readonly stdout: string; readonly stderr: string }
+  | { readonly status: "denied" | "not-started" | "interrupted" | "unknown"; readonly reason: string };
+export type CodexMissionCommandExecutor = (request: CodexMissionCommandRequest) => Promise<CodexMissionCommandResult>;
+
 export interface CodexMissionSessionOptions {
   readonly projectRoot: string;
   readonly resumeThreadID?: string;
@@ -34,6 +50,8 @@ export interface CodexMissionSessionOptions {
   readonly effort?: string;
   readonly executable?: string;
   readonly transportFactory?: () => CodexAppServerTransport;
+  /** Delegate exact post-hook commands to the parent host; omission retains native command/exec. */
+  readonly executeCommand?: CodexMissionCommandExecutor;
   readonly approval?: CodexAppServerHostOptions["approval"];
   readonly permissionsApproval?: CodexAppServerHostOptions["permissionsApproval"];
   readonly onEvent?: (event: CodexTurnEvent & { threadId: string }) => void | Promise<void>;
@@ -44,6 +62,7 @@ export class CodexMissionSession {
   private hooks!: OpenCodeHooks;
   private readonly sessions = new Map<string, NativeSession>();
   private closed = false;
+  private readonly executionAbort = new AbortController();
   private readonly hosts = new Set<CodexAppServerHost>();
   private root?: string;
   private owner!: CodexMissionOwner;
@@ -98,6 +117,7 @@ export class CodexMissionSession {
 
   private async stopHosts(): Promise<void> {
     this.closed = true;
+    this.executionAbort.abort();
     await Promise.all([...this.hosts].map(host => host.close()));
   }
 
@@ -235,6 +255,18 @@ export class CodexMissionSession {
     const session = this.sessions.get(id);
     if (!session) throw new Error(`Unknown native Codex session: ${id}`);
     return session;
+  }
+
+  private async executeHostCommand(request: CodexMissionCommandRequest): Promise<CodexMissionCommandResult> {
+    const signal = request.signal;
+    if (signal.aborted) throw new Error("Host execution interrupted; completion is unknown.");
+    let abort: () => void = () => undefined;
+    const stopped = new Promise<never>((_, reject) => {
+      abort = () => reject(new Error("Host execution interrupted; completion is unknown."));
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    try { return await Promise.race([this.options.executeCommand!(request), stopped]); }
+    finally { signal.removeEventListener("abort", abort); }
   }
 
   private createHost(): CodexAppServerHost {
@@ -470,13 +502,35 @@ export class CodexMissionSession {
       const command = call.tool === "bash" ? ["/bin/bash", "-c", String(args.command)]
         : call.tool === "read" ? [process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", resolve(this.directory, String(args.filePath))]
         : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
+      const executor = this.options.executeCommand ? "host" : "native";
+      await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,
+        params: { turnId: call.turnId, callId: call.callId, tool: call.tool, executor, status: "started" } });
+      if (this.closed) throw new Error("Codex Mission adapter is closed; command was not started.");
       dispatched = true;
-      const result = await session.host.executeCommand(command, this.directory, typeof args.timeout === "number" ? args.timeout : undefined);
+      const timeoutMs = typeof args.timeout === "number" ? args.timeout : 120_000;
+      const result: CodexMissionCommandResult = this.options.executeCommand
+        ? await this.executeHostCommand({ tool: call.tool as CodexMissionCommandRequest["tool"], command, cwd: this.directory, timeoutMs,
+          threadId: session.id, turnId: call.turnId, callId: call.callId, signal: this.executionAbort.signal })
+        : { status: "completed", ...await session.host.executeCommand(command, this.directory, timeoutMs) };
+      if (this.closed || this.executionAbort.signal.aborted) throw new Error("Host execution interrupted; completion is unknown.");
+      if (result.status === "denied" || result.status === "not-started") {
+        dispatched = false; // Explicit host proof that no command ran; there is no exit or validation result.
+        throw new Error(`Host command ${result.status}: ${result.reason}`);
+      }
+      if (result.status !== "completed") throw new Error(`Host command ${result.status}: ${result.reason}; completion is unknown.`);
+      if (!Number.isSafeInteger(result.exitCode) || typeof result.stdout !== "string" || typeof result.stderr !== "string")
+        throw new Error("Host executor returned no authoritative command result; completion is unknown.");
       text = result.stdout + result.stderr;
-      metadata = { exit: result.exitCode, status: "completed" };
+      metadata = { exit: result.exitCode, status: "completed", executor };
     }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (call.tool !== "task") {
+        try { await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,
+          params: { turnId: call.turnId, callId: call.callId, tool: call.tool,
+            executor: this.options.executeCommand ? "host" : "native", status: dispatched ? "unknown" : "not-started", reason } }); }
+        catch { /* Progress failure cannot suppress execution reconciliation. */ }
+      }
       session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id, codexToolReceipt: true }, parts: [{ type: "tool", tool: call.tool,
         callID: call.callId, state: { status: dispatched ? "running" : "error", input: args, error: reason,
           metadata: { status: dispatched ? "running" : "error", ...(child ? { sessionId: child.id } : {}) },

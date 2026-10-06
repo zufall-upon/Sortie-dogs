@@ -46,3 +46,13 @@ test("native approval requests remain visible when the CLI has no approval bridg
     assert.equal(progress?.reason, "Write approved output");
   }
 });
+
+
+test("host execution progress distinguishes selected executor and unknown failure", () => {
+  const progress = codexMissionProgress({ method: "sortie/commandExecution", threadId: "root", params: {
+    turnId: "turn", callId: "call", tool: "bash", executor: "host", status: "unknown", reason: "Host connection lost",
+  } });
+  assert.equal(progress?.executor, "host");
+  assert.equal(progress?.phase, "unknown");
+  assert.equal(progress?.detail, "Host connection lost");
+});

@@ -106,6 +106,20 @@ the grant. The CLI reports approval requests but has no interactive approval bri
 host callback, no grant is returned. `command/exec` has no thread-scoped approval API, so inheriting the
 configured policy does not add an escalation path for these standalone commands.
 
+For a parent application with an existing approval-aware executor, pass the optional SDK
+`executeCommand` callback. It receives the exact post-hook argv, cwd, timeout, thread/turn/call identity,
+and an AbortSignal for bash/read/write operations. The parent owns approval and execution; Sortie does
+not infer a grant from prompt text or create another permission store. Return `completed` only after
+execution ends, with the real integer exitCode, stdout and stderr. Approval alone is not a result.
+`denied` and `not-started` explicitly mean nothing ran and create no validation exit. `interrupted`,
+`unknown`, exceptions and invalid results retain unknown execution and stop resends. The host owns
+command timeout enforcement; Sortie does not add a separate deadline to its approval interaction.
+Closing the adapter signals cancellation; late callback results cannot establish validation, and the
+host must reconcile any still-running process. Omission keeps native `command/exec`; a connected
+executor never falls back to native execution after rejection or failure. Existing Mission before/after
+hooks, command identity and validation acceptance remain shared. CLI progress identifies the selected
+executor; the CLI itself does not attach a parent executor.
+
 Packaged role models and reasoning levels apply by default. `--model` and `--effort` explicitly
 override all roles; SDK callers can use `roleModels` for individual roles. Unsupported native model
 names fail rather than silently selecting another model. Availability depends on the signed-in account.
