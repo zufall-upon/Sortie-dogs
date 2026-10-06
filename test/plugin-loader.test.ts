@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -98,7 +98,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
   try {
     const { stdout: packOutput } = await execFileAsync(
       process.execPath,
-      [npmCli, "pack", "--ignore-scripts", "--json", "--pack-destination", fixture],
+      [npmCli, "pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", fixture],
       { cwd: projectRoot },
     );
     const packed = JSON.parse(packOutput) as Array<{ filename: string; files?: Array<{ path: string }> }>;
@@ -113,22 +113,19 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       join(consumer, "package.json"),
       JSON.stringify({ name: "package-export-consumer", private: true, type: "module" }),
     );
-    await execFileAsync(
-      process.execPath,
-      [
-        npmCli,
-        "install",
-        "--offline",
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-        "--no-package-lock",
-        "--prefix",
-        consumer,
-        tarball,
-      ],
-      { cwd: projectRoot },
-    );
+    // npm ci caches tarballs, not necessarily registry metadata. A second offline
+    // install can therefore fail on a fresh runner despite every dependency being
+    // present. Test the actual packed files with those already installed dependencies.
+    const consumerModules = join(consumer, "node_modules");
+    await mkdir(consumerModules);
+    await execFileAsync("tar", ["-xzf", tarball, "-C", consumerModules], { cwd: consumer });
+    await rename(join(consumerModules, "package"), join(consumerModules, "sortie-dogs"));
+    const dependencies = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8")).dependencies;
+    for (const name of Object.keys(dependencies)) {
+      const target = join(consumerModules, name);
+      await mkdir(dirname(target), { recursive: true });
+      await symlink(join(projectRoot, "node_modules", name), target, process.platform === "win32" ? "junction" : "dir");
+    }
 
     const installedPackage = JSON.parse(await readFile(
       join(consumer, "node_modules", "sortie-dogs", "package.json"),

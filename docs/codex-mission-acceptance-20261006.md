@@ -228,7 +228,8 @@ package loading. The existing Linux job is unchanged; no additional runner job o
 is introduced.
 
 The new step requires no Codex installation, OAuth, repository secrets or live model calls. Its
-package consumer installs only from the local tarball and existing npm cache with offline mode.
+package consumer extracts the locally produced tarball using the standard runner tar utility and links
+already installed dependencies; it does not resolve packages from registry metadata or fetch packages.
 Windows OAuth sessions, GUI/Desktop behavior, real Codex process integration and Linux-style Mission
 shell execution are outside that step. Windows results remain pending until the authorized branch/PR
 workflow runs; Linux fixtures are not relabeled as Windows proof. GitHub runner billing follows the
@@ -242,3 +243,10 @@ part of the tracked change or npm tarball.
 The exact new Windows-step selection passed 25 tests on Linux (exit 0); workflow YAML parsed with
 the two existing jobs retained. Independent review found no High/Medium issue. These are preparation
 checks, not native Windows results. The runtime source is unchanged from the prior full Linux run.
+
+
+The first authorized Windows CI run passed the existing Windows suite but exposed an `ENOTCACHED`
+assumption in the added packed-consumer fixture: `npm ci` had cached package tarballs without the
+registry metadata needed by a fresh offline install. The fixture now extracts the real local tarball
+and links already installed dependencies (junctions on Windows). No product runtime behavior, test
+assertion, credentials or registry access was added. The original failure is retained in CI history.
