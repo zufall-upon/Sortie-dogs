@@ -43,7 +43,7 @@ export interface RunRoleMetrics {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly cost: number | undefined;
-  readonly steps: number;
+  readonly steps: number | undefined;
   readonly cacheRatio: number | undefined;
 }
 
@@ -216,6 +216,7 @@ interface MutableRoleMetrics {
   cost: number;
   costAvailable: boolean;
   steps: number;
+  stepsAvailable: boolean;
 }
 
 function messageTokens(message: Record<string, unknown>): MessageTokens | undefined {
@@ -322,6 +323,7 @@ export async function collectRunMetrics(
   let tokensAvailable = true;
   let messagesComplete = true;
   let steps = 0;
+  let stepsAvailable = true;
   let cost = 0;
   let costAvailable = true;
   const roleMetrics = new Map<string, MutableRoleMetrics>();
@@ -356,6 +358,8 @@ export async function collectRunMetrics(
       observedSessions.push(observed);
       for (const message of messages) {
         const info = record(message.info) ?? message;
+        // Native Codex tool receipts contain timing/evidence, not separate model requests.
+        if (info.codexToolReceipt === true) continue;
         const time = record(info.time) ?? record(message.time);
         if (time !== undefined && number(time.completed) === undefined) continue;
         const completed = number(time?.completed);
@@ -380,8 +384,10 @@ export async function collectRunMetrics(
           cost: 0,
           costAvailable: true,
           steps: 0,
+          stepsAvailable: true,
         };
         role.steps += 1;
+        if (info.usageGranularity === "native-turn") { stepsAvailable = false; role.stepsAvailable = false; }
         roleMetrics.set(agent, role);
         for (const usage of fresh) {
           const tokens = messageTokens(usage.value);
@@ -399,7 +405,9 @@ export async function collectRunMetrics(
             modelUsage.cacheReadTokens += tokens.cacheRead;
             modelUsage.cacheWriteTokens += tokens.cacheWrite;
             const requestInfo = record(usage.value.info) ?? usage.value;
-            const estimate = estimateModelUsageCost({ providerID: typeof provider === "string" ? provider : undefined,
+            const estimate = requestInfo.billingMode === "chatgpt" || info.billingMode === "chatgpt"
+              ? { status: "unpriced" as const }
+              : estimateModelUsageCost({ providerID: typeof provider === "string" ? provider : undefined,
               modelID: typeof model === "string" ? model : undefined, uncachedInputTokens: tokens.input,
               cacheReadTokens: tokens.cacheRead, cacheWriteTokens: tokens.cacheWrite, outputTokens: tokens.output,
               reasoningTokens: tokens.reasoning, serviceTier: typeof requestInfo.serviceTier === "string" ? requestInfo.serviceTier : undefined });
@@ -459,7 +467,7 @@ export async function collectRunMetrics(
     cacheReadTokens: hierarchyComplete && messagesComplete && tokensAvailable ? cacheRead : undefined,
     cacheWriteTokens: hierarchyComplete && messagesComplete && tokensAvailable ? cacheWrite : undefined,
     cost: hierarchyComplete && messagesComplete && costAvailable ? cost : undefined,
-    steps: hierarchyComplete && messagesComplete ? steps : undefined,
+    steps: hierarchyComplete && messagesComplete && stepsAvailable ? steps : undefined,
     sessions: hierarchyComplete ? ids.length : undefined,
     cacheRatio: hierarchyComplete && messagesComplete && tokensAvailable && totalTokens > 0
       ? cacheRead / totalTokens : undefined,
@@ -472,7 +480,7 @@ export async function collectRunMetrics(
         cacheReadTokens: role.cacheReadTokens,
         cacheWriteTokens: role.cacheWriteTokens,
         cost: role.costAvailable ? role.cost : undefined,
-        steps: role.steps,
+        steps: role.stepsAvailable ? role.steps : undefined,
         cacheRatio: role.tokens > 0 ? role.cacheReadTokens / role.tokens : undefined,
       }]))
       : undefined,

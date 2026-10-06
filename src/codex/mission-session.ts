@@ -1,3 +1,4 @@
+import { codexUsageTotal, codexUsageInfo, codexNativeTime, emptyCodexUsage, type CodexUsageTotal, type CodexUsageObservation } from "./mission-telemetry.js";
 import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { CodexAppServerHost, createCodexAppServerTransport, type CodexDynamicTool, type CodexDynamicToolCall,
@@ -8,7 +9,7 @@ import { legacyToolArgs, toolSchema } from "../plugin/tool-schema.js";
 import { V010_RUNTIME_PROFILE as profile } from "../core/runtime-profile.js";
 import { runtimeAssets } from "../runtime-assets-v010.js";
 import { OperatorRuntime } from "../core/operator-runtime.js";
-import { OperatorMissionRuntime, type CodexMissionOwner, type CodexNotStartedProof, codexProcessOwner, codexOwnerGone } from "../core/operator-mission.js";
+import { OperatorMissionRuntime, type CodexMissionOwner, type CodexNotStartedProof, type CodexWorkerDispatch, codexProcessOwner, codexOwnerGone } from "../core/operator-mission.js";
 
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -21,6 +22,8 @@ interface NativeSession {
   host: CodexAppServerHost;
   history: JsonObject[];
   usage?: JsonObject;
+  usageBaseline?: CodexUsageTotal;
+  createdAt?: number;
 }
 export interface CodexMissionSessionOptions {
   readonly projectRoot: string;
@@ -42,6 +45,7 @@ export class CodexMissionSession {
   private readonly hosts = new Set<CodexAppServerHost>();
   private root?: string;
   private owner!: CodexMissionOwner;
+  private observations: CodexUsageObservation[] = [];
   private readonly ownedRoots = new Set<string>();
   private readonly toolQueues = new Map<string, Promise<unknown>>();
   private get sandboxPolicy(): JsonObject { return { type: "workspaceWrite", writableRoots: [this.directory], networkAccess: false }; }
@@ -53,7 +57,7 @@ export class CodexMissionSession {
     adapter.owner = await codexProcessOwner();
     const id = (request: { path: { id: string } }) => request.path.id;
     const info = (session: NativeSession) => ({ id: session.id, agent: session.agent, parentID: session.parentID,
-      outcome: session.outcome, model: session.model });
+      outcome: session.outcome, model: session.model, time: { created: session.createdAt } });
     adapter.hooks = await SortieDogsV010Plugin({ directory: adapter.directory, executionHost: "codex", returnReportTransport: "tool-result", reviewerCorrectionPermissions: true, client: { session: {
       get: async (request: { path: { id: string } }) => ({ data: info(adapter.required(id(request))) }),
       messages: async (request: { path: { id: string } }) => ({ data: adapter.required(id(request)).history }),
@@ -73,6 +77,7 @@ export class CodexMissionSession {
       if (active.length && !resume) throw new Error(`Select the existing Codex Mission with --resume: ${active.map(item => item.root).join(", ")}`);
       if (resume) {
         if (!missions.some(item => item.executionHost === "codex" && item.root === resume)) throw new Error("Codex Mission resume does not belong to this repository.");
+        this.observations = missions.find(item => item.root === resume)?.codexUsage ?? [];
         await this.restoreSession(resume, "dog-operator");
         this.root = resume;
         await this.claimOwner(resume);
@@ -157,6 +162,74 @@ export class CodexMissionSession {
     return false;
   }
 
+  private async bindWorkerDispatch(parent: NativeSession, child: NativeSession, call: CodexDynamicToolCall, messageID: string): Promise<void> {
+    if (child.agent !== "dog-worker-v010" || !object(call.arguments) || call.arguments.task_id) return;
+    const root = this.rootOf(parent), missions = new OperatorMissionRuntime(this.directory, profile);
+    await missions.update(root, state => {
+      const attempt = state.attempts?.find(item => item.callID === call.callId && item.childSessionID === child.id &&
+        item.runID === state.runID && ["implementation", "normal_remediation"].includes(item.kind));
+      if (!attempt) return;
+      if (state.codexOwner?.generation !== this.owner.generation || state.codexOwner.closed) throw new Error("codex-mission-dispatch-owner-stale");
+      attempt.codexDispatch = { missionID: state.id, runID: attempt.runID, unitID: attempt.unitID,
+        threadID: call.threadId, turnID: call.turnId, callID: call.callId,
+        inputHash: createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex"),
+        childThreadID: child.id, clientUserMessageID: messageID, ownerGeneration: this.owner.generation };
+    });
+  }
+
+  private async recoverCompletedWorker(host: CodexAppServerHost, threadID: string, parentTurn: JsonObject, item: JsonObject): Promise<JsonObject | undefined> {
+    if (item.tool !== "task" || !object(item.arguments) || item.arguments.task_id || item.arguments.subagent_type !== "dog-worker-v010" ||
+        typeof item.id !== "string" || typeof parentTurn.id !== "string" || !["completed", "interrupted", "failed"].includes(String(parentTurn.status))) return undefined;
+    const inputHash = createHash("sha256").update(JSON.stringify(item.arguments)).digest("hex");
+    const matches = (binding: CodexWorkerDispatch) => binding.threadID === threadID && binding.turnID === parentTurn.id &&
+      binding.callID === item.id && binding.inputHash === inputHash;
+    const missions = new OperatorMissionRuntime(this.directory, profile);
+    for (const state of (await missions.current()).filter(state => state.executionHost === "codex")) {
+      const saved = state.codexCompletedTasks?.find(proof => matches(proof.dispatch));
+      const attempt = state.attempts?.find(attempt => attempt.codexDispatch && matches(attempt.codexDispatch));
+      const binding = saved?.dispatch ?? attempt?.codexDispatch;
+      if (!binding || binding.childThreadID === threadID) continue;
+      if (!saved) {
+        if (state.id !== binding.missionID || state.runID !== binding.runID || state.codexOwner?.generation !== binding.ownerGeneration ||
+            !await codexOwnerGone(state.codexOwner)) continue;
+        const run = await new OperatorRuntime(this.directory, profile).read(state.root);
+        const unit = run?.units.find(unit => unit.unit.id === binding.unitID && unit.callID === binding.callID && unit.childSessionID === binding.childThreadID);
+        if (run?.runID !== binding.runID || (run.operatorSessionID ?? state.root) !== threadID || !unit ||
+            !new OperatorRuntime(this.directory, profile).matchesRecordedWorkerTask(run, unit.unit.id, item.arguments)) continue;
+      }
+      const child = await host.readThread(binding.childThreadID);
+      // Initial recovery supports a newly-created leaf Worker only. No later request or untracked native child can borrow its completion.
+      if (child.id !== binding.childThreadID || typeof child.cwd !== "string" || resolve(child.cwd) !== this.directory ||
+          !Array.isArray(child.turns) || child.turns.length !== 1 || !object(child.turns[0])) continue;
+      const turn = child.turns[0];
+      if (turn.status !== "completed" || turn.itemsView !== "full" || typeof turn.id !== "string" || !Array.isArray(turn.items) ||
+          saved && saved.childTurnID !== turn.id) continue;
+      const items = turn.items.filter(object);
+      const users = items.filter(entry => entry.type === "userMessage");
+      if (users.length !== 1 || users[0]!.clientId !== binding.clientUserMessageID) continue;
+      if (items.length !== turn.items.length || items.some(entry => {
+        if (["userMessage", "agentMessage", "reasoning", "plan"].includes(String(entry.type))) return false;
+        if (entry.type === "dynamicToolCall") return entry.status !== "completed" || entry.tool === "task";
+        if (["commandExecution", "fileChange", "mcpToolCall"].includes(String(entry.type)))
+          return !["completed", "failed", "declined"].includes(String(entry.status));
+        return true;
+      })) continue;
+      const final = items.filter(entry => entry.type === "agentMessage" && (entry.phase == null || entry.phase === "final_answer")).at(-1);
+      if (!saved) await missions.codexRecovery(state.root, async current => {
+        if (current.id !== binding.missionID || current.runID !== binding.runID || current.codexOwner?.generation !== binding.ownerGeneration ||
+            !await codexOwnerGone(current.codexOwner) || !current.attempts?.some(attempt =>
+              attempt.codexDispatch && JSON.stringify(attempt.codexDispatch) === JSON.stringify(binding)))
+          throw new Error("codex-mission-recovery-generation-stale");
+        if (!current.codexCompletedTasks?.some(proof => matches(proof.dispatch))) await missions.update(current.root, value => {
+          (value.codexCompletedTasks ??= []).push({ dispatch: binding, childTurnID: String(turn.id) });
+        });
+      });
+      return { output: typeof final?.text === "string" ? final.text : "", metadata: {
+        sessionId: binding.childThreadID, status: "completed", codex_completed_turn: turn.id } };
+    }
+    return undefined;
+  }
+
   private required(id: string): NativeSession {
     const session = this.sessions.get(id);
     if (!session) throw new Error(`Unknown native Codex session: ${id}`);
@@ -205,7 +278,7 @@ export class CodexMissionSession {
           "Native shell and file operations outside these functions do not provide Mission validation evidence.",
         dynamicTools: this.tools(content), config: { "features.shell_tool": false, "features.unified_exec": false } });
       if (this.closed) throw new Error("Codex Mission adapter is closed.");
-      const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [],
+      const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [], usageBaseline: emptyCodexUsage(), createdAt: Date.now(),
         model: { providerID: "openai", modelID: host.threadModel(thread) ?? model, ...(effort ? { variant: effort } : {}) } };
       this.sessions.set(thread, session);
       return session;
@@ -227,16 +300,24 @@ export class CodexMissionSession {
         for (const item of turn.items.filter(object)) {
           if (item.type !== "dynamicToolCall" || item.status === "completed" && (turn.status === "completed" || item.success === true)) continue;
           const unique = turns.flatMap(entry => Array.isArray(entry.items) ? entry.items.filter(object) : []).filter(entry => entry.id === item.id).length === 1;
-          if (!unique || !await this.recoverNotStarted(id, turn, item))
-            throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
-          Object.assign(item, { status: "completed", success: false, contentItems: [{ type: "inputText", text: JSON.stringify({
-            output: "Host reconciled this exact Task as not started; no native child was dispatched.", metadata: { status: "error", codex_not_started: true } }) }] });
+          if (!unique) throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
+          if (await this.recoverNotStarted(id, turn, item)) {
+            Object.assign(item, { status: "completed", success: false, contentItems: [{ type: "inputText", text: JSON.stringify({
+              output: "Host reconciled this exact Task as not started; no native child was dispatched.", metadata: { status: "error", codex_not_started: true } }) }] });
+          } else {
+            const recovered = await this.recoverCompletedWorker(host, id, turn, item);
+            if (!recovered) throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
+            Object.assign(item, { status: "completed", success: true, contentItems: [{ type: "inputText", text: JSON.stringify(recovered) }] });
+          }
         }
       }
       await host.resumeThread(id);
-      const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [],
+      const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [], createdAt: codexNativeTime(thread.createdAt),
         model: this.modelRoute(agent, { providerID: String(thread.modelProvider), modelID: typeof thread.model === "string" ? thread.model : "unknown",
           ...(typeof thread.reasoningEffort === "string" ? { variant: thread.reasoningEffort } : {}) }) };
+      const lastUsage = this.observations.find(item => item.threadID === id && item.turnID === turns.at(-1)?.id && item.terminal);
+      session.usageBaseline = codexUsageTotal(lastUsage?.total);
+      if (lastUsage?.total) session.usage = { total: lastUsage.total };
       this.sessions.set(id, session);
       for (const turn of turns) {
         for (const item of (turn.items as unknown[]).filter(object)) {
@@ -248,7 +329,9 @@ export class CodexMissionSession {
             let result: JsonObject | undefined;
             try { const value: unknown = JSON.parse(String(source?.text)); if (object(value)) result = value; } catch { /* A declined call has no completed native tool receipt. */ }
             const metadata = object(result?.metadata) ? result.metadata : {};
-            session.history.push({ info: { id: item.id, role: "assistant", sessionID: id }, parts: [{ type: "tool", tool: item.tool, callID: item.id,
+            session.history.push({ info: { id: item.id, role: "assistant", sessionID: id, codexToolReceipt: true,
+              codexControlReceipt: item.tool.startsWith("sortie_"),
+              ...(object(metadata.sortie_execution) ? { time: { created: metadata.sortie_execution.start, completed: metadata.sortie_execution.end } } : {}) }, parts: [{ type: "tool", tool: item.tool, callID: item.id,
               state: { status: item.success === true ? "completed" : "error", input: item.arguments, output: result?.output, metadata,
                 ...(object(metadata.sortie_execution) ? { time: metadata.sortie_execution } : {}) } }] });
             if (item.tool === "task" && typeof metadata.sessionId === "string" && typeof item.arguments.subagent_type === "string")
@@ -257,8 +340,11 @@ export class CodexMissionSession {
         }
         const final = (turn.items as unknown[]).filter(object).filter(item => item.type === "agentMessage" &&
           (item.phase == null || item.phase === "final_answer")).at(-1);
-        session.history.push({ info: { id: turn.id, role: "assistant", sessionID: id, finish: turn.status === "completed" ? "stop" : "error",
-          ...(turn.error ? { error: turn.error } : {}), time: { created: Number(turn.startedAt) * 1000, completed: Number(turn.completedAt) * 1000 } },
+        const observation = this.observations.find(item => item.threadID === id && item.turnID === turn.id && item.terminal);
+        session.history.push({ info: { ...(observation ? codexUsageInfo(observation) : { id: turn.id, role: "assistant", sessionID: id, agent,
+          providerID: session.model.providerID, modelID: session.model.modelID, billingMode: "chatgpt", usageGranularity: "native-turn" }),
+          finish: turn.status === "completed" ? "stop" : "error", ...(turn.error ? { error: turn.error } : {}),
+          time: { created: codexNativeTime(turn.startedAt) ?? observation?.startedAt, completed: codexNativeTime(turn.completedAt) ?? observation?.updatedAt } },
           parts: [{ type: "text", text: final?.text ?? "" }] });
       }
       return session;
@@ -281,7 +367,7 @@ export class CodexMissionSession {
     return tools;
   }
 
-  private async prompt(session: NativeSession, prompt: string, onDispatch?: () => void): Promise<CodexTurnResult> {
+  private async prompt(session: NativeSession, prompt: string, onDispatch?: (messageID: string) => Promise<void>): Promise<CodexTurnResult> {
     const startedAt = Date.now();
     const messageID = randomUUID();
     const message = { id: messageID, agent: session.agent, model: { ...session.model } };
@@ -291,17 +377,39 @@ export class CodexMissionSession {
     session.model = message.model;
     session.history.push({ info: { ...message, role: "user", sessionID: session.id }, parts });
     session.outcome = "running";
+    const observation: CodexUsageObservation = { threadID: session.id, turnID: messageID, startedAt, updatedAt: startedAt,
+      agent: session.agent, model: { ...session.model }, baseline: session.usageBaseline };
+    const accounting: JsonObject = { info: { ...codexUsageInfo(observation), time: { created: startedAt } }, parts: [] };
+    session.history.push(accounting);
     try {
-      onDispatch?.();
+      await onDispatch?.(messageID);
       const result = await session.host.runTurn(session.id, parts.map(part => part.text).join("\n"), { cwd: this.directory, clientUserMessageId: messageID,
         model: message.model.modelID === "unknown" ? undefined : message.model.modelID, effort: message.model.variant ?? this.options.effort, sandboxPolicy: this.sandboxPolicy,
-        onEvent: event => this.options.onEvent?.({ ...event, threadId: session.id }) });
+        onEvent: event => {
+          if (event.method === "thread/tokenUsage/updated" && object(event.params.tokenUsage)) {
+            observation.turnID = typeof event.params.turnId === "string" ? event.params.turnId : observation.turnID;
+            observation.total = codexUsageTotal(event.params.tokenUsage.total);
+            observation.updatedAt = Date.now();
+            accounting.info = codexUsageInfo(observation);
+          }
+          return this.options.onEvent?.({ ...event, threadId: session.id });
+        } });
       session.outcome = result.status === "completed" ? "succeeded" : result.status;
       session.usage = result.usage;
-      session.history.push({ info: { id: result.turnID, role: "assistant", sessionID: session.id,
-        finish: result.status === "completed" ? "stop" : "error", time: { created: startedAt, completed: Date.now() },
-        ...(result.status === "completed" ? {} : { error: { name: result.status } }) },
-        parts: [{ type: "text", text: result.finalResponse ?? "" }] });
+      observation.turnID = result.turnID;
+      observation.total = codexUsageTotal(result.usage?.total);
+      observation.updatedAt = Date.now(); observation.terminal = true;
+      session.usageBaseline = observation.total;
+      accounting.info = { ...codexUsageInfo(observation), finish: result.status === "completed" ? "stop" : "error",
+        ...(result.status === "completed" ? {} : { error: { name: result.status } }) };
+      accounting.parts = [{ type: "text", text: result.finalResponse ?? "" }];
+      session.history.splice(session.history.indexOf(accounting), 1); session.history.push(accounting);
+      this.observations = this.observations.filter(item => item.threadID !== session.id || item.turnID !== result.turnID);
+      this.observations.push(observation);
+      const root = this.rootOf(session), missions = new OperatorMissionRuntime(this.directory, profile);
+      if (await missions.read(root)) await missions.update(root, state => {
+        state.codexUsage = this.observations;
+      });
       return result;
     } catch (error) { session.outcome = "unknown"; throw error; }
   }
@@ -333,7 +441,10 @@ export class CodexMissionSession {
         ...(typeof args.model === "string" ? { model: args.model } : {}), ...(typeof args.variant === "string" ? { variant: args.variant } : {}) });
       await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args },
         { output: "", metadata: { sessionId: child.id, status: "running" } });
-      const result = await this.prompt(child, String(args.prompt), () => { dispatched = true; });
+      const result = await this.prompt(child, String(args.prompt), async messageID => {
+        await this.bindWorkerDispatch(session, child!, call, messageID);
+        dispatched = true;
+      });
       text = result.finalResponse ?? "";
       metadata = { sessionId: child.id, status: result.status };
     } else {
@@ -347,7 +458,7 @@ export class CodexMissionSession {
     }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id }, parts: [{ type: "tool", tool: call.tool,
+      session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id, codexToolReceipt: true }, parts: [{ type: "tool", tool: call.tool,
         callID: call.callId, state: { status: dispatched ? "running" : "error", input: args, error: reason,
           metadata: { status: dispatched ? "running" : "error", ...(child ? { sessionId: child.id } : {}) },
           time: { start, ...(dispatched ? {} : { end: Date.now() }) } } }] });
@@ -373,7 +484,8 @@ export class CodexMissionSession {
     }
     const time = { start, end: Date.now() };
     metadata.sortie_execution = time;
-    session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id }, parts: [{ type: "tool", tool: call.tool,
+    session.history.push({ info: { id: call.callId, role: "assistant", sessionID: session.id, codexToolReceipt: true,
+      time: { created: time.start, completed: time.end } }, parts: [{ type: "tool", tool: call.tool,
       callID: call.callId, state: { status: "completed", input: args, output: text, metadata, time } }] });
     const after = { output: text, metadata };
     await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args }, after);

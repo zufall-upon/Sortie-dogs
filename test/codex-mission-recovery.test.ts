@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,6 +19,8 @@ class ScriptedTransport implements CodexAppServerTransport {
   private ended = false;
   readonly failures = new Set<string>();
   readThread?: Json;
+  readThreads?: Record<string, Json>;
+  commandExecutions = 0;
   dropCommands = false;
   turnStarts = 0;
   readonly turns: Json[] = [];
@@ -49,7 +51,7 @@ class ScriptedTransport implements CodexAppServerTransport {
     if (this.failures.has(message.method)) { this.push({ id: message.id, error: { message: "fixture prelaunch failure" } }); return; }
     if (message.method === "initialize") this.push({ id: message.id, result: {} });
     else if (message.method === "account/read") this.push({ id: message.id, result: { account: { type: "chatgpt" } } });
-    else if (message.method === "thread/read") this.push({ id: message.id, result: { thread: this.readThread } });
+    else if (message.method === "thread/read") this.push({ id: message.id, result: { thread: this.readThreads?.[message.params.threadId] ?? this.readThread } });
     else if (message.method === "thread/resume") this.push({ id: message.id, result: { thread: { id: this.id } } });
     else if (message.method === "thread/start") {
       assert.equal(message.params.ephemeral, false);
@@ -71,6 +73,7 @@ class ScriptedTransport implements CodexAppServerTransport {
         this.push({ method: "turn/completed", params: { threadId: this.id, turn: { id: this.currentTurnID, status: "completed" } } });
       }).catch(error => this.push({ id: message.id, error: { message: String(error) } })));
     } else if (message.method === "command/exec") {
+      this.commandExecutions++;
       if (this.dropCommands) { void this.close(); return; }
       assert.deepEqual(message.params.sandboxPolicy, { type: "workspaceWrite", writableRoots: [message.params.cwd], networkAccess: false });
       const [command, ...args] = message.params.command;
@@ -249,3 +252,116 @@ test("closing during new child creation preserves exact not-started proof after 
     assert.equal(cold.turnStarts, 1);
   } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
 });
+
+
+async function completedWorkerWithoutParentReceipt(directory: string) {
+  await exec("git", ["init", "--quiet"], { cwd: directory });
+  await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+  await writeFile(join(directory, "result.txt"), "result");
+  const root = new ScriptedTransport("root", async host => {
+    const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate result"], unit: {
+      title: "Validate", objective: "Validate result", read: ["check.mjs", "result.txt"], write: ["result.txt"], validation: ["node check.mjs"] } });
+    await host.call("task", started.task);
+  });
+  let childFailure: unknown;
+  const child = new ScriptedTransport("worker", async host => {
+    try {
+      const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(state.attempts?.[0]?.codexDispatch?.clientUserMessageID, host.turnRequests[0].clientUserMessageId,
+        "exact binding is durable before the child turn starts");
+      assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+    } catch (error) { childFailure = error; }
+    return "Worker completed its foreground validation";
+  });
+  let created = 0;
+  const adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6.1-sol", transportFactory: () => created++ ? child : root });
+  const hooks = (adapter as any).hooks;
+  const originalAfter = hooks["tool.execute.after"];
+  hooks["tool.execute.after"] = async (request: Json, output: Json) => {
+    if (request.tool === "task" && output.metadata?.status === "completed") {
+      // Child native completion was persisted, but the parent receipt/after hook is lost.
+      await (adapter as any).stopHosts();
+      throw new Error("fixture lost parent Task receipt");
+    }
+    return originalAfter(request, output);
+  };
+  await assert.rejects(adapter.run("Validate result"), /closed/);
+  await adapter.close();
+  if (childFailure) throw childFailure;
+  assert.equal(child.commandExecutions, 1);
+  root.turns[0].status = "interrupted";
+  const threads: Record<string, Json> = Object.fromEntries([root, child].map(native => [native.id, {
+    id: native.id, cwd: directory, modelProvider: "openai", model: "gpt-6.1-sol", turns: structuredClone(native.turns) }]));
+  assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0].status, "running");
+  return { threads, child };
+}
+
+async function goalSettlements(directory: string): Promise<number> {
+  const location = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory);
+  const files = await readdir(location);
+  let count = 0;
+  for (const file of files.filter(file => file.endsWith(".json"))) {
+    const ledger = JSON.parse(await readFile(join(location, file), "utf8"));
+    count += ledger.goal_events.filter((entry: Json) => (entry.event ?? entry).kind === "unit.settled").length;
+  }
+  return count;
+}
+
+test("exact completed leaf Worker recovers lost parent receipt once without command replay or fabricated PASS", { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-completed-child-"));
+  let adapter: CodexMissionSession | undefined;
+  try {
+    const original = await completedWorkerWithoutParentReceipt(directory);
+    assert.equal(await goalSettlements(directory), 0);
+    for (let iteration = 0; iteration < 2; iteration++) {
+      const natives: ScriptedTransport[] = [];
+      adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
+        const id = natives.length ? "worker" : "root";
+        const native = new ScriptedTransport(id, async () => {
+          assert.equal(id, "root", "recovery never prompts the completed Worker");
+          const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+          assert.equal(run.units[0].status, "failed", "cold lifecycle settlement does not invent validation acceptance");
+          assert.equal(run.units[0].resultClass, "process-defect");
+          assert.equal(await goalSettlements(directory), 1, "host settles before requesting the next root turn");
+          return "Continue through normal Mission correction";
+        });
+        native.readThreads = structuredClone(original.threads);
+        natives.push(native);
+        return native;
+      } });
+      const result = await adapter.run("Continue");
+      assert.equal(result.accepted, false);
+      assert.equal(await goalSettlements(directory), 1);
+      assert.equal(natives.reduce((sum, native) => sum + native.commandExecutions, 0), 0);
+      assert.equal(natives.find(native => native.id === "worker")?.turnStarts, 0);
+      const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(mission.codexCompletedTasks?.length, 1);
+      await adapter.close();
+    }
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const defect of ["wrong-client-message", "wrong-child", "in-progress", "native-child", "duplicate-turn", "legacy", "live-owner"] as const)
+  test(`registered Worker recovery refuses ${defect}`, { timeout: 15000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-child-refusal-"));
+    let adapter: CodexMissionSession | undefined;
+    try {
+      const original = await completedWorkerWithoutParentReceipt(directory);
+      const child = original.threads.worker;
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      if (defect === "wrong-client-message") child.turns[0].items.find((item: Json) => item.type === "userMessage").clientId = "unrelated-message";
+      if (defect === "wrong-child") child.id = "another-worker";
+      if (defect === "in-progress") child.turns[0].status = "inProgress";
+      if (defect === "native-child") child.turns[0].items.push({ type: "collabAgentToolCall", status: "completed", receiverThreadIds: ["unobserved-child"] });
+      if (defect === "duplicate-turn") child.turns.push(structuredClone(child.turns[0]));
+      if (defect === "legacy") await missions.update("root", state => { delete state.attempts![0].codexDispatch; });
+      if (defect === "live-owner") await missions.update("root", state => { state.codexOwner!.closed = false; });
+      const native = new ScriptedTransport("root", async () => { throw new Error("must not send a model turn"); });
+      native.readThreads = original.threads;
+      adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native });
+      await assert.rejects(adapter.run("Continue"), /unresolved tool execution|invalid thread/);
+      assert.equal(native.turnStarts, 0);
+      assert.equal(await goalSettlements(directory), 0);
+      assert.equal((await missions.required("root")).codexCompletedTasks, undefined);
+    } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+  });

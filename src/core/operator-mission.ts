@@ -37,6 +37,13 @@ export interface MissionConsultation {
   outcome?: "completed" | "failed" | "unknown";
   result?: string;
 }
+export interface CodexWorkerDispatch {
+  missionID: string; runID: string; unitID: string; threadID: string; turnID: string; callID: string;
+  inputHash: string; childThreadID: string; clientUserMessageID: string; ownerGeneration: string;
+}
+export interface CodexCompletedTaskProof {
+  dispatch: CodexWorkerDispatch; childTurnID: string;
+}
 export interface MissionAttempt {
   attemptID: string;
   runID: string;
@@ -50,6 +57,8 @@ export interface MissionAttempt {
   callID?: string;
   childSessionID?: string;
   dispatchFingerprint?: string;
+  /** Exact native request binding written before this Worker turn is sent. */
+  codexDispatch?: CodexWorkerDispatch;
   nativeOutcome?: "completed" | "failed" | "unknown";
   terminal?: import("../plugin/runtime-bridge.js").MissionWorkerTerminalRecord;
   observedModel?: string;
@@ -103,6 +112,17 @@ export interface MissionSelfRecheck {
   unresolvedFindings: string[];
   residualMajor?: { reachable_path: string; consequence: string };
 }
+export interface CodexUsageTotal {
+  totalTokens: number; inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number;
+  outputTokens: number; reasoningOutputTokens: number;
+}
+export interface CodexUsageObservation {
+  threadID: string; turnID: string; startedAt: number; updatedAt: number;
+  agent: string; model: { providerID: string; modelID: string };
+  total?: CodexUsageTotal; baseline?: CodexUsageTotal;
+  /** Set only after a native terminal result; active snapshots cannot seed another turn. */
+  terminal?: boolean;
+}
 export interface CodexMissionOwner {
   pid: number; bootID?: string; startTicks?: string; generation: string; closed?: boolean;
 }
@@ -140,7 +160,11 @@ export interface OperatorMission {
   executionHost?: "codex";
   /** Adapter liveness only; unit execution/settlement remain in the existing run ledger. */
   codexOwner?: CodexMissionOwner;
+  /** Final native accounting observations; execution authority remains in attempts and the goal ledger. */
+  codexUsage?: CodexUsageObservation[];
   codexNotStarted?: CodexNotStartedProof[];
+  /** Missing parent receipts reconciled from exact completed native Worker turns. */
+  codexCompletedTasks?: CodexCompletedTaskProof[];
   version: "0.12";
   id: string;
   root: string;
@@ -300,7 +324,7 @@ export function missionConversationContext(messages: readonly Record<string, unk
 
 /** Durable user intent and dispatch ownership. Execution/evidence still belong to the v0.10 engine. */
 export class OperatorMissionRuntime {
-  private readonly writes = new Map<string, Promise<unknown>>();
+  private static readonly writes = new Map<string, Promise<unknown>>();
   constructor(readonly projectRoot: string, readonly profile: RuntimeProfile) {}
   private file(root: string, suffix = ""): string {
     return join(this.projectRoot, this.profile.stateDirectory, "missions", `${digest(root)}${suffix}.json`);
@@ -362,12 +386,13 @@ export class OperatorMissionRuntime {
     finally { await rm(temporary, { force: true }); }
   }
   private async serial<T>(root: string, operation: () => Promise<T>): Promise<T> {
-    const current = (this.writes.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
-    this.writes.set(root, current);
-    try { return await current; } finally { if (this.writes.get(root) === current) this.writes.delete(root); }
+    const key = this.file(root);
+    const current = (OperatorMissionRuntime.writes.get(key) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    OperatorMissionRuntime.writes.set(key, current);
+    try { return await current; } finally { if (OperatorMissionRuntime.writes.get(key) === current) OperatorMissionRuntime.writes.delete(key); }
   }
   async read(root: string): Promise<OperatorMission | undefined> {
-    await this.writes.get(root);
+    await OperatorMissionRuntime.writes.get(this.file(root));
     const state = await this.loadMission(root);
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
     return state;
@@ -481,6 +506,8 @@ export class OperatorMissionRuntime {
       const state: OperatorMission = { version: "0.12", id: `mission-${randomUUID()}`, root, requests: [request],
         kind: options.kind ?? "implementation", ...(options.executionHost ? { executionHost: options.executionHost } : {}),
         ...(previous?.codexNotStarted ? { codexNotStarted: previous.codexNotStarted } : {}),
+        ...(previous?.codexCompletedTasks ? { codexCompletedTasks: previous.codexCompletedTasks } : {}),
+        ...(previous?.codexUsage ? { codexUsage: previous.codexUsage } : {}),
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),

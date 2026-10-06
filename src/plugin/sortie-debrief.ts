@@ -108,6 +108,8 @@ export function observeDebriefSession(id: string, root: boolean, messages: reado
   const calls = new Set<string>();
   for (const message of messages) {
     const info = object(message.info) ?? message;
+    // Transport control receipts have no command interval; the native turn covers their elapsed time.
+    if (info.codexControlReceipt === true) continue;
     const time = info.time ?? message.time;
     // The root's in-flight terminal answer is intentionally outside pre-terminal accounting.
     if (root && object(time) !== undefined && timeValue(object(time)?.completed) === undefined) continue;

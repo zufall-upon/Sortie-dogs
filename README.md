@@ -110,6 +110,14 @@ the prior adapter is closed or its Linux process identity proves it is gone. The
 the existing Mission and reconciles the reservation before another model prompt; repeated recovery does
 not settle it again. Concurrent recovery claims are serialized.
 
+A newly created ordinary Worker also saves its exact dispatch binding before the child prompt is sent.
+If its parent Task result is lost, recovery can match that binding to the child's single, fully loaded,
+completed native turn. The initial recovery path supports leaf Workers only: later turns, nested Tasks,
+untracked native children, missing bindings and ambiguous identities remain unknown. Recovery restores
+execution completion for the existing settlement path; missing validation evidence is a process defect,
+not an invented PASS. It does not rerun the implementation. Continue with only the work or validation
+still needed for normal Operator acceptance.
+
 SIGINT/SIGTERM closes the adapter and exits 130/143. Bound children without an exact completed dispatch,
 and commands sent without a saved terminal receipt, remain unknown and are not resent. App-server exit
 does not prove an external command has stopped. Linux process-death checks do not prove external writer
@@ -117,6 +125,11 @@ quiescence either; other platforms require a clean adapter close for automatic p
 Inspect the original executor before recovery; do not delete Mission state to force a retry.
 Per-session usage is native thread cumulative usage (including earlier turns), not a Mission total;
 monetary cost is unavailable and reported as `null`.
+The existing Mission report uses observed per-turn token deltas and execution times. Cache and reasoning
+subtotals are counted once. Its pre-terminal snapshot excludes final-answer generation, while final JSON
+retains native thread totals. Terminal accounting observations survive cold reload in the existing Mission;
+missing baselines remain unavailable. Native turn aggregates do not establish model-request counts, API
+costs or remaining subscription allowance, so these values are not inferred.
 The CLI writes bounded progress records to stderr: tool start/completion, commands and exit codes,
 replan reasons, next actions, child identity, and public model commentary. Final JSON remains on stdout.
 
