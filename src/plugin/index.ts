@@ -484,6 +484,7 @@ interface HostGoalExecution {
   readonly callID: string;
   readonly tool: string;
   readonly command: readonly string[];
+  readonly directory: string;
   readonly owner: "worker" | "coordinator";
   readonly startedAt: string;
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
@@ -599,8 +600,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validationEnvironment(): ValidationEnvironment {
-  return { platform: process.platform, arch: process.arch, runtime: process.version };
+function validationEnvironment(directory?: string): ValidationEnvironment {
+  return { platform: process.platform, arch: process.arch, runtime: process.version,
+    ...(directory ? { directory } : {}) };
 }
 
 function validationCandidate(source: string, candidate: string): string {
@@ -1810,11 +1812,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
     const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
-    // A same-text check in another cwd is a diagnostic of other inputs, not proof
-    // of this correction's inherited Location-based recipe. Native execution stays allowed.
-    if (correcting && typeof args?.workdir === "string" && resolve(input.directory, args.workdir) !== resolve(input.directory)) return;
-    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand)
+    const directory = resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
+    // A check is proof only in its registered cwd. Snapshot the same admitted source
+    // recipe at actual native start; never retrofit it to older external-cwd history.
+    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, directory)
       : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    if (correcting && !members) return;
+    if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
+        toolInput.sessionID, members, directory) === false) return;
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
     const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
       authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
@@ -1864,7 +1869,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const owner = validationOwner(scope);
       const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
         source_snapshot: snapshot.source, candidate: validationCandidate(snapshot.source, snapshot.candidate),
-        command: [rawCommand], environment: validationEnvironment(), scope, owner,
+        command: [rawCommand], environment: validationEnvironment(directory), scope, owner,
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
         marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
@@ -1873,12 +1878,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const evidenceKey = validationEvidenceKey(request);
       const durable = goalSnapshot.records.flatMap(({ event }) =>
         event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : [])
-        .filter(entry => validGoalEvidence(entry, goal) && (entry.proof_scope !== "requested-full" || coordinatorOwned) &&
+        .filter(entry => directory === resolve(input.directory) && validGoalEvidence(entry, goal) && (entry.proof_scope !== "requested-full" || coordinatorOwned) &&
           entry.identity.source === snapshot.source && entry.identity.candidate === snapshot.candidate &&
           entry.execution.command.length === 1 && entry.execution.command[0] === rawCommand)
         .map(entry => ({ ...entry, execution: { ...entry.execution, units: [unitID] } }));
       const live = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
-        execution.sessionID === toolInput.sessionID && execution.endedAt !== undefined && execution.exitCode === 0 &&
+        execution.sessionID === toolInput.sessionID && execution.directory === directory && execution.endedAt !== undefined && execution.exitCode === 0 &&
         execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === snapshot.source && execution.candidate === snapshot.candidate &&
         execution.command.length === 1 && execution.command[0] === rawCommand)
@@ -1934,7 +1939,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await validatedSourceSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
-      callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], startedAt: new Date().toISOString(),
+      callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
@@ -1977,7 +1982,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
         : refreshed.source === execution.source);
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
-      child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command,
+      child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command, directory: execution.directory,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
       source: execution.source, candidate: execution.candidate });
     const generated = execution.validationInputs !== undefined && refreshed &&
@@ -1997,7 +2002,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (execution.correction) {
       await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
         dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
-        command: execution.correction.commands, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+        command: execution.correction.commands, directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
         binding: proofFresh && validationBinding && validatedSource ? validationBinding : execution.binding,
         source: observed?.source ?? execution.source, candidate: observed?.candidate ?? execution.candidate,
         fresh: proofFresh && outcome === "pass",
@@ -2934,6 +2939,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const command = [normalizeCommand(part.state.input.command)];
         const criteria = goal.acceptance_contract?.criteria.filter(criterion => criterion.validation_command === command[0] && criterion.expected_outcome === "pass") ?? [];
         if (!criteria.length) continue;
+        const directory = resolve(input.directory, typeof part.state.input.workdir === "string" ? part.state.input.workdir : ".");
+        const directoryMatches = await input.runtimeBridge?.missionValidationDirectoryMatches?.(
+          root, request.unitID, request.childSessionID, command, directory);
+        if (directoryMatches === false || directoryMatches === undefined && directory !== resolve(input.directory)) continue;
         const requestedFull = criteria.some(criterion => criterion.proof_scope === "requested-full");
         if (requestedFull && runtimeProfile.parallel) continue;
         const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
@@ -2941,20 +2950,24 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const owner = validationOwner(scope);
         const expected = [...new Set(criteria.flatMap(criterion => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${request.unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))];
-        const key = validationEvidenceKey({ run_id: goal.goal_id!, operation_id: part.callID, source_snapshot: current.source,
-          candidate: validationCandidate(current.source, current.candidate), command, environment: validationEnvironment(),
-           scope, owner, expected_evidence: expected,
+        const validationRequest: ValidationBudgetRequest = { run_id: goal.goal_id!, operation_id: part.callID, source_snapshot: current.source,
+          candidate: validationCandidate(current.source, current.candidate), command, environment: validationEnvironment(directory),
+            scope, owner, expected_evidence: expected,
           marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
-          reason: "acceptance" });
+          reason: "acceptance" };
+        const keys = [validationEvidenceKey(validationRequest)];
+        // Old admissions omitted cwd and can only prove their original Location.
+        // Never upgrade a historical external diagnostic to a registered check.
+        if (directory === resolve(input.directory)) keys.push(validationEvidenceKey({ ...validationRequest, environment: validationEnvironment() }));
         const admission = snapshot.records.map(record => record.event).find(event => event.kind === "validation.admission" &&
-          event.operation_id === part.callID && event.decision === "ALLOW" && event.evidence_key === key);
+          event.operation_id === part.callID && event.decision === "ALLOW" && keys.includes(event.evidence_key));
         if (admission?.kind !== "validation.admission") continue;
         const settled = snapshot.records.some(({ event }) => event.kind === "validation.settled" && event.reservation_id === admission.reservation_id &&
-          event.operation_id === part.callID && event.evidence_key === key && event.outcome === "passed" && event.exit_code === 0);
+          event.operation_id === part.callID && event.evidence_key === admission.evidence_key && event.outcome === "passed" && event.exit_code === 0);
         if (!settled) continue;
         seen.add(part.callID);
         const startedAt = new Date(timing.start).toISOString(), endedAt = new Date(timing.end).toISOString();
-        const immutableRef = goalFingerprint({ root, child_session_id: request.childSessionID, call_id: part.callID, command,
+        const immutableRef = goalFingerprint({ root, child_session_id: request.childSessionID, call_id: part.callID, command, directory,
           started_at: startedAt, ended_at: endedAt, exit_code: 0, outcome: "pass", source: current.source, candidate: current.candidate });
         evidence.push(...evidenceFromObservedExecution({ ...current, owner, command, immutableRef, startedAt, endedAt, exitCode: 0, outcome: "pass", fresh: true }, goal, request.unitID));
       }

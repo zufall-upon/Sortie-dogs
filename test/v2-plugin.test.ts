@@ -394,6 +394,8 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       return hooks;
     }).setup({ ...fixture.context, location: { directory },
       session: { ...fixture.context.session,
+        active: async () => ({}),
+        interrupt: async () => ({ interrupted: false }),
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
           .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
         get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
@@ -1129,6 +1131,7 @@ async function registeredHost(run: (host: { requests: URL[]; pid: number; repeat
     response.setHeader("content-type", "application/json");
     if (url.pathname === "/api/info") { response.end(JSON.stringify({ pid: host.pid, version: "2.0.18" })); return; }
     if (host.fail) { response.writeHead(503).end(JSON.stringify({ message: "unavailable" })); return; }
+    if (url.pathname === "/api/session/active") { response.end(JSON.stringify({ data: { ses_live: { type: "running" } } })); return; }
     if (host.malformed) { response.end(JSON.stringify({ data: [] })); return; }
     const parent = url.searchParams.get("parentID"), cursor = url.searchParams.get("cursor");
     const ids = parent !== "ses_coordinator" ? [] : cursor === null ? ["ses_worker"] : cursor === "page-2" ? ["ses_reviewer"] : [];
@@ -1178,6 +1181,24 @@ test("V2 plugin without session.list proves terminal lineage through its owning 
     host.malformed = false; host.fail = true;
     await assert.rejects(proof());
   } finally { cleanup?.(); }
+}));
+
+test("V2 activity fallback reads only the exact registered owning service", async () => registeredHost(async host => {
+  const fixture = contextFixture();
+  let client: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    assert.deepEqual(await client.session.active(), { data: { ses_live: { type: "running" } } });
+    assert.ok(host.requests.some(url => url.pathname === "/api/session/active"));
+  } finally { cleanup?.(); }
+  host.pid = process.pid + 1;
+  await host.register(host.pid);
+  const foreignCleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const before = host.requests.length;
+    await assert.rejects(client.session.active(), /v2-history-owning-service-unavailable/);
+    assert.ok(!host.requests.slice(before).some(url => url.pathname === "/api/session/active"));
+  } finally { foreignCleanup?.(); }
 }));
 
 test("V2 child history refuses missing or foreign service registrations", async () => registeredHost(async host => {

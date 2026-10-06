@@ -9,6 +9,11 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { missionCoordinatorContent, missionOperatorContent, missionWorkerContent } from "../dist/runtime-mission-assets.js";
 import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
+import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
+import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 
 async function fixture(run: (directory: string) => Promise<void>) {
   const area = resolve("_testenv");
@@ -19,6 +24,86 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+test("cwd-registered native admissions survive cold evidence recovery without retrofitting legacy external checks", async t => {
+  for (const mode of ["root-cwd", "legacy-root", "external-cwd", "legacy-external"] as const) await t.test(mode, async () => fixture(async area => {
+    const root = join(area, "project"), external = join(area, "external");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await mkdir(external);
+    await writeFile(join(root, "verify.mjs"), "// immutable oracle\n");
+    await writeFile(join(root, "result.txt"), "verified\n");
+    const manifestPath = join(root, "manifest.json"), command = "node verify.mjs";
+    const manifest = JSON.stringify({ version: "0.1.0", task_id: "unit", read: ["verify.mjs"], write: ["result.txt"], validation: [command] });
+    await writeFile(manifestPath, manifest);
+    const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+    const manifestHash = hash(manifest);
+    // Preserve the pre-existing native recovery oracle and its full legacy snapshot recipe.
+    const source = goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries: [
+      ["result.txt", "file", hash("verified\n")], ["verify.mjs", "file", hash("// immutable oracle\n")],
+    ] });
+    const candidate = goalFingerprint({ manifest_hash: `sha256:${manifestHash}`, entries: [["result.txt", "file", hash("verified\n")]] });
+    const directory = mode.includes("external") ? external : root;
+    const now = Date.now();
+    const input: { command: string; workdir?: string } = { command, ...(directory === root ? {} : { workdir: directory }) };
+    const nativeMessages = [{ info: { role: "assistant", sessionID: "child" }, parts: [{ type: "tool", tool: "bash", callID: "validate-call",
+      state: { status: "completed", input, metadata: { exit: 0 }, time: { start: now, end: now + 1 } } }] }];
+    let control: Parameters<NonNullable<RuntimeBridge["connected"]>>[0] | undefined;
+    const hooks = await CorePlugin({ directory: root, runtimeBridge: { profile: V010_RUNTIME_PROFILE,
+      assetVersion: V010_RUNTIME_ASSET_VERSION, connected: value => { control = value; },
+      missionValidationDirectoryMatches: async (_root, _task, _child, _commands, actual) => actual === directory,
+    }, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, parentID: path.id === "child" ? "root" : undefined,
+        agent: path.id === "child" ? "dog-worker" : "dog-coordinator" } }),
+      messages: async () => ({ data: nativeMessages }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "user-1", agent: "dog-coordinator", model: { providerID: "fixture", modelID: "model" } }, {
+      message: { agent: "dog-coordinator", model: { providerID: "fixture", modelID: "model" } }, parts: [{ type: "text", text: "Implement the approved unit." }],
+    });
+    const key = hash("v010\0root");
+    const ledger = await RunFlightLedger.openGoal(join(root, ".git/sortie-dogs/run-flight-v010", `${key}.json`));
+    const initial = (await ledger.readGoal()).state;
+    assert.ok(initial.goal_id);
+    const criteria = ["identity", "permissions", "preservation"].map(id => ({ criterion_id: id, target: id, entrypoint: "fixture", workload: "shared check",
+      oracle_coverage: [`oracle-${id}`], build_boundary: "not-applicable" as const, source: "source", candidate: "candidate",
+      source_binding: "current-protected" as const, candidate_binding: "current-protected" as const, validation_command: command,
+      fixture: "fixture", proof_scope: "requested-full" as const, expected_outcome: "pass" as const }));
+    const fp = `sha256:${hash(JSON.stringify(criteria.map(criterion => criterion.target)))}`, at = new Date(now).toISOString();
+    await ledger.appendGoal({ kind: "goal.revised", at, goal_id: initial.goal_id!, revision: 2, scope_epoch: 2,
+      acceptance_fingerprint: fp, origin_user_message_id: "user-1", session_id: "root", selected_agent: "dog-coordinator", delivery: "mvp-first",
+      budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" }, acceptance_contract: { criteria } });
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: initial.goal_id!, reservation_id: "dispatch", unit_id: "unit", session_id: "root", ticket_id: null });
+    const validation = { run_id: initial.goal_id!, operation_id: "validate-call", source_snapshot: source,
+      candidate: goalFingerprint({ source, candidate }), command: [command], scope: "full" as const, owner: "coordinator" as const,
+      environment: { platform: process.platform, arch: process.arch, runtime: process.version, ...(mode.startsWith("legacy") ? {} : { directory }) },
+      expected_evidence: [...new Set(criteria.flatMap(c => [c.criterion_id, ...c.oracle_coverage, "unit:unit", "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
+      marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null }, reason: "acceptance" as const };
+    const reservation = await ledger.reserveValidation(validation, 4);
+    assert.equal(reservation.decision, "ALLOW");
+    await ledger.settleValidation(reservation.reservation_id!, validation, "passed", 0);
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: initial.goal_id!, reservation_id: "dispatch", receipt_id: "old",
+      unit_id: "unit", disposition: "failed", result_class: "process-defect", progress_fingerprint: null, evidence: [], elapsed_ms: 1, cost_usd: null });
+    const request = { unitID: "unit", childSessionID: "child", manifestPath, manifestHash, goalFingerprint: fp };
+    const refuse = async () => {
+      await assert.rejects(control!.recoverUnitEvidence("root", request), /unavailable-or-stale/);
+      assert.deepEqual((await ledger.readGoal()).state.satisfied_criteria, []);
+      assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "unit.evidence-reconciled").length, 0);
+    };
+    if (mode === "legacy-external") { await refuse(); return; }
+    input.workdir = directory === root ? external : root;
+    await refuse(); // Same command and successful exit in another cwd are not this admission.
+    if (directory === root) delete input.workdir;
+    else input.workdir = directory;
+    await writeFile(join(root, "result.txt"), "changed after validation\n");
+    await refuse();
+    await writeFile(join(root, "result.txt"), "verified\n");
+    const evidence = await control!.recoverUnitEvidence("root", request);
+    assert.equal(evidence.length, 3);
+    assert.equal((await ledger.readGoal()).state.consumed_units, 1);
+    assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 1);
+    assert.deepEqual(await control!.recoverUnitEvidence("root", request), evidence);
+    assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "unit.evidence-reconciled").length, 1);
+  }));
+});
 
 test("public reproduction and shared-branch checks remain in the same mission Worker handoff", async t => fixture(async directory => {
   const operator = missionOperatorContent(V010_RUNTIME_PROFILE, "0.12.17");
@@ -767,6 +852,20 @@ function terminalHistory() {
 test("terminal mission proof accepts completed workers and settled prior consultations", async () => {
   const f = terminalHistory();
   assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
+});
+
+test("cancelled child proof is separate from native outcomes and still requires exact lineage and released reservations", async () => {
+  const f = terminalHistory();
+  delete f.sessions.prior!.outcome;
+  const host = { ...f.host, stopped: async (id: string) => id === "prior" };
+  assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, host), ["worker"]);
+  assert.equal(f.sessions.prior!.outcome, undefined);
+  f.sessions.prior!.outcome = "running";
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, host), /worker-not-terminal/);
+  delete f.sessions.prior!.outcome;
+  f.sessions.prior!.parentID = "foreign";
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, host), /worker-not-terminal/);
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 1 }, host), /reservations-pending/);
 });
 
 test("short follow-up inherits recent selected target without tool logs or new requirements", async () => fixture(async directory => {

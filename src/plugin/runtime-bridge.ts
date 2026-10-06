@@ -34,6 +34,8 @@ export interface ReviewerCorrectionCheck {
   readonly childSessionID: string;
   readonly callID: string;
   readonly command: readonly string[];
+  /** Observed at native start. Legacy checks have only Location-based applicability. */
+  readonly directory?: string;
   readonly startedAt: string;
   readonly endedAt: string;
   readonly exitCode: number | null;
@@ -83,7 +85,9 @@ export interface RuntimeBridge {
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
   /** Existing controller executing a declared unit itself; never a fictitious native Task. */
   directMissionExecution?(sessionID: string): Promise<{ root: string; taskID: string; callID: string; startedAt: string } | undefined>;
-  reviewerCorrectionValidationMembers?(childSessionID: string, command: string): Promise<string[] | undefined>;
+  reviewerCorrectionValidationMembers?(childSessionID: string, command: string, directory?: string): Promise<string[] | undefined>;
+  missionValidationDirectoryMatches?(rootSessionID: string, taskID: string, childSessionID: string,
+    commands: readonly string[], directory: string): Promise<boolean>;
   recordReviewerCorrectionCheck?(rootSessionID: string, taskID: string, check: ReviewerCorrectionCheck): Promise<void>;
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];

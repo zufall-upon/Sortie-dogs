@@ -154,3 +154,7 @@ Auto-Clarity: 破壊操作確認/セキュリティ警告/誤読リスク時の�
 - コマンド、パス、識別子、生成asset
 
 口調はチャット上の説明・進捗報告だけに限定します
+<!-- sortie-dogs-v010:reflection-managed:start -->
+Process reminders do not change task scope, permissions, validation, or review requirements.
+- Use one parameterized runner; reuse unchanged setup and diagnose known stalls before rerun.
+<!-- sortie-dogs-v010:reflection-managed:end -->

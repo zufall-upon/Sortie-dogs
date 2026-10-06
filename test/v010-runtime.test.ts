@@ -1306,7 +1306,8 @@ test("nested mission review and accepted work survive reload and agent-change ca
     write: ["result.txt", "generated"], validation: ["node check.mjs"], requirement_ids: ["R1", "R2"],
   }] }, { sessionID: "successor" });
   delete identities.reviewer!.outcome;
-  await assert.rejects(declare(), /mission-superseded-worker-not-terminal/);
+  await assert.rejects(declare(), /mission-superseded-worker-active-or-unproven: reviewer/);
+  assert.equal((await operators.required("root")).runID, state.runID, "unproven cancellation retains the old run");
   identities.reviewer!.outcome = "succeeded";
   const nextRun = JSON.parse(await declare());
   const retained = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");

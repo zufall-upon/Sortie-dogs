@@ -11,7 +11,7 @@ import { initializeProject } from "../dist/core/initialize.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
+for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settled-orphan"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
   const replaceActive = mode === "replace";
   await mkdir(resolve("_testenv"), { recursive: true });
   const area = await mkdtemp(resolve("_testenv/mission-operations-"));
@@ -36,8 +36,10 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
     };
     const aborted: string[] = [];
     let stopConfirmed = true;
+    const nativeActive: Record<string, { type: string }> = {};
     const history: Record<string, unknown[]> = {};
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
+      active: async () => ({ data: nativeActive }),
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => {
         if (replaceActive && ["root", "old", "oldWorker", "priorWorker"].includes(path.id)) throw new Error("v2-history-owning-service-unavailable");
@@ -150,6 +152,25 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
     assert.deepEqual(current.requirements.map((item: { text: string }) => item.text), ["Install newer release at both destinations"]);
     await before("root", "current-call", current.task);
     await chat("current", current.task.prompt);
+    if (mode === "settled-orphan") {
+      // An earlier child is no longer in the current units and has no native idle outcome.
+      // Cancellation already released the predecessor's reservations before this cold plan.
+      identities.stranded = { agent: "dog-worker-v010", parentID: "old" };
+      nativeActive.stranded = { type: "running" };
+      const declaration = { units: [{ title: "Install one", objective: "Install newer release", read: ["check.mjs"],
+        write: [join(external, "one")], validation: ["node check.mjs one"] }] };
+      const beforeRun = await runtime.required("root");
+      const beforeSpend = (await tool("operator_status", "root")).budget;
+      await assert.rejects(tool("plan_units", "current", declaration), /active-or-unproven/);
+      assert.ok(!aborted.includes("stranded"), "planning must not interrupt a live historical child");
+      assert.equal((await runtime.required("root")).runID, beforeRun.runID);
+      assert.deepEqual((await tool("operator_status", "root")).budget, beforeSpend);
+      delete nativeActive.stranded;
+      stopConfirmed = false;
+      await assert.rejects(tool("plan_units", "current", declaration), /stop-unconfirmed/);
+      assert.ok(!(await runtime.required("root")).stoppedChildren?.includes("stranded"));
+      stopConfirmed = true;
+    }
     const stopsBefore = aborted.length;
     await tool("operator_status", "root");
     await tool("operator_status", "root");
@@ -158,6 +179,13 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort"]) test(`
       title: `Install ${name}`, objective: `Write and verify destination ${name}`, read: ["check.mjs"],
       write: [join(external, name)], validation: [`node check.mjs ${name}`],
     })) });
+    if (mode === "settled-orphan") {
+      assert.equal(identities.stranded!.outcome, undefined, "cancellation reconciliation does not forge a native outcome");
+      assert.equal(aborted.filter(id => id === "stranded").length, 2, "retry only the previously unconfirmed acknowledgement");
+      const calls = aborted.length;
+      await tool("operator_status", "root");
+      assert.equal(aborted.length, calls, "reconciled planning/status does not repeat cancellation");
+    }
     runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
     for (const [index, id] of ["first", "second"].entries()) {
       if (index === 1) {

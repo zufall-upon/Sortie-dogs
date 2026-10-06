@@ -20,7 +20,7 @@ import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missio
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -125,18 +125,21 @@ function missionConsultationDetails(role: "advisor" | "scout", prompt: string) {
     ...(match === null ? {} : { trigger: match[1]!.slice(0, 128) }) };
 }
 
-/** Prove native V2 termination of the old dispatch, including earlier units and consultations. */
+/** Prove native termination or separately acknowledged cancellation, never successful work. */
 export async function terminalCancelledMissionChildren(profile: RuntimeProfile, root: string, previous: OperatorState,
   budget: { reserved_units: number } | null,
-  host: { get(id: string): Promise<unknown>; children(id: string): Promise<unknown> }): Promise<string[]> {
+  host: { get(id: string): Promise<unknown>; children(id: string): Promise<unknown>;
+    stopped?(id: string): Promise<boolean> }): Promise<string[]> {
   if (!budget || budget.reserved_units !== 0) throw new Error("mission-superseded-run-reservations-pending");
   const oldWorkers = previous.units.flatMap(unit => unit.directExecution || unit.childSessionID === null ? [] : [unit.childSessionID]);
   const terminal = (value: Record<string, unknown>) => ["succeeded", "failed", "interrupted"].includes(String(value.outcome));
+  const closed = async (value: Record<string, unknown>, id: string) => terminal(value) ||
+    (value.outcome === undefined && await host.stopped?.(id) === true);
   const coordinatorID = previous.operatorSessionID;
   if (coordinatorID !== null) {
     const coordinator = await host.get(coordinatorID);
     if (!record(coordinator) || coordinator.id !== coordinatorID || coordinator.parentID !== root ||
-        canonicalAgent(profile, coordinator.agent as string) !== "dog-operator" || !terminal(coordinator)) {
+        canonicalAgent(profile, coordinator.agent as string) !== "dog-operator" || !await closed(coordinator, coordinatorID)) {
       throw new Error("mission-superseded-coordinator-not-terminal");
     }
   }
@@ -153,7 +156,7 @@ export async function terminalCancelledMissionChildren(profile: RuntimeProfile, 
       : ["dog-worker", "dog-luna-worker", "dog-reviewer", "dog-scout", "dog-advisor"];
     if (!record(worker) || worker.id !== id || worker.parentID !== (coordinatorID ?? root) ||
         !roles.includes(canonicalAgent(profile, worker.agent as string) ?? "") ||
-        !terminal(worker) || !Array.isArray(descendants) || descendants.length !== 0) {
+        !await closed(worker, id) || !Array.isArray(descendants) || descendants.length !== 0) {
       throw new Error("mission-superseded-worker-not-terminal");
     }
   }
@@ -231,9 +234,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
+      const direct = await directExecution(child) ?? await reviewerCorrection(child);
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
         ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore,
-        notBefore === undefined ? undefined : input.directory);
+        notBefore === undefined ? undefined : input.directory,
+        direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
     }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
@@ -484,22 +489,35 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return direct && taskID && direct.unit.callID ? { root: direct.root, taskID, callID: direct.unit.callID,
           startedAt: direct.unit.directExecution!.startedAt } : undefined;
       },
-      reviewerCorrectionValidationMembers: async (child, command) => {
+      reviewerCorrectionValidationMembers: async (child, command, directory) => {
         const correction = await reviewerCorrection(child) ?? await directExecution(child);
         if (!correction) return undefined;
         const unit = correction.unit;
+        const directories = unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
         const progress = reviewerCorrectionValidation(unit.unit.validation, child, await messages(child),
-          Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt), undefined, input.directory);
-        return canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
+          Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt),
+          undefined, input.directory, directories, unit.directExecution?.validationRegisteredAt);
+        const members = canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
+        return members && validationDirectoryMatches(members, directory, input.directory, directories) ? members : undefined;
       },
       recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),
+      missionValidationDirectoryMatches: async (root, taskID, child, commands, directory) => {
+        const run = await operators.read(root);
+        // Recovery also compares failed units after their native Task has ended.
+        const unit = run?.units.find(item => item.childSessionID === child &&
+          /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
+        return !unit || validationDirectoryMatches(commands, directory, input.directory,
+          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd);
+      },
       reviewerCorrectionValidation: async (root, callID, child, startedAt) => {
         const run = await operators.read(root);
         const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child &&
           (item.reviewerCorrection?.author === child || item.directExecution?.actor === child));
         if (!unit) return undefined;
-        try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await messages(child), startedAt,
-          unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory); }
+        try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await messages(child),
+          startedAt,
+          unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory,
+          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.directExecution?.validationRegisteredAt); }
         catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
       },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
@@ -1124,7 +1142,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const reopenProposalScope = profileTool(profile, "sortie_reopen_operator_proposal_scope");
     const reconcileOrphan = profileTool(profile, "sortie_reconcile_orphaned_operator_dispatch");
     const reviseApprovedIntent = profileTool(profile, "sortie_revise_approved_operator_intent");
-    async function stopCancelledChildren(root: string, run: OperatorState): Promise<void> {
+    async function nativeChildInactive(id: string): Promise<boolean> {
+      const active = payload(await session("active", {}).catch(() => undefined));
+      // Absence is meaningful only in the owning service's complete native active snapshot.
+      return record(active) && Object.values(active).every(value => record(value) &&
+        ["running", "retry"].includes(String(value.type))) && !Object.hasOwn(active, id);
+    }
+    async function stopCancelledChildren(root: string, run: OperatorState, inactiveOnly = false): Promise<void> {
       if (run.phase !== "cancelled") return;
       const children = new Set(run.units.flatMap(unit => (!unit.directExecution || unit.reviewerCorrection) && unit.childSessionID ? [unit.childSessionID] : []));
       if (run.operatorSessionID) {
@@ -1138,12 +1162,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       for (const child of children) {
         if (run.stoppedChildren?.includes(child)) continue;
         const who = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }));
-        if (!record(who) || who.parentID !== (child === run.operatorSessionID ? root : run.operatorSessionID ?? root)) {
+        const roles = child === run.operatorSessionID ? ["dog-operator"]
+          : ["dog-worker", "dog-luna-worker", "dog-reviewer", "dog-scout", "dog-advisor"];
+        if (!record(who) || who.id !== child ||
+            who.parentID !== (child === run.operatorSessionID ? root : run.operatorSessionID ?? root) ||
+            !roles.includes(canonicalAgent(profile, who.agent as string) ?? "")) {
           throw new Error(`mission-cancellation-lineage-unavailable: ${child}`);
         }
         if (!["succeeded", "failed", "interrupted"].includes(String(who.outcome))) {
+          if (inactiveOnly && !await nativeChildInactive(child)) {
+            throw new Error(`mission-superseded-worker-active-or-unproven: ${child}`);
+          }
           const result = await session("abort", { path: { id: child }, query: { directory: input.directory } });
-          if (result === undefined || result === false || (record(result) && result.data === false)) {
+          const acknowledgement = payload(result);
+          if (acknowledgement !== true && (!record(acknowledgement) ||
+              typeof acknowledgement.interrupted !== "boolean") ||
+              inactiveOnly && !await nativeChildInactive(child)) {
             throw new Error(`mission-cancellation-stop-unconfirmed: ${child}`);
           }
         }
@@ -1817,7 +1851,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const missionUnitSchema = { type: "object", additionalProperties: false,
       properties: { title: { type: "string" }, objective: { type: "string", description: "Target or corrective delta, about 2000 characters. Do not copy the original request. Longer authored instructions are preserved separately without a retry gate." },
         read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
-        validation: stringList, requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } },
+        validation: stringList,
+        validation_cwd: { type: "object", additionalProperties: { type: "string" }, description: "Exact cwd per declared command; omitted commands use project_root. Registration-only correction of your active direct unit keeps the same admission and budget and requires new native checks, not historical proof." },
+        requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } },
       required: ["title", "objective", "write", "validation"] };
     tools[extendMissionBudget] = { description: "Root-only: after the user explicitly approves a cumulative Worker-unit increase, extend the same active Mission's host goal budget. max_units is the new cumulative total, not an increment. Preserve consumed/reserved units, requirements and execution; this does not dispatch a Worker or change the campaign cost cap. Read operator_status for the exact mission ID and counters, then resume its existing Coordinator.",
       args: { mission_id: stringSchema, max_units: { type: "integer", minimum: 1 } }, execute: async (args, context) => {
@@ -2079,6 +2115,26 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
+      const activeDirect = previous?.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor);
+      const registrationChanged = activeDirect && JSON.stringify(activeDirect.directExecution!.validationCwd ?? activeDirect.unit.validation_cwd ?? {}) !==
+        JSON.stringify(plan.units.find(unit => unit.id === activeDirect.unit.id)?.validation_cwd ?? {});
+      const registrationPlanHash = previous && activeDirect && createHash("sha256").update(JSON.stringify({ ...plan,
+        units: plan.units.map((unit, index) => {
+          const prior = previous!.units[index]?.unit;
+          if (prior?.validation_cwd) return { ...unit, validation_cwd: prior.validation_cwd };
+          const { validation_cwd: _cwd, ...rest } = unit;
+          return rest;
+        }) })).digest("hex");
+      if (previous && activeDirect && (registrationChanged || replanning && registrationPlanHash === previous.planHash)) {
+        if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the validation registration correction");
+        if (execution !== undefined && !emptyImplementationExecution) throw new Error("mission-validation-registration-operation-change-forbidden");
+        const corrected = await operators.correctDirectValidationRegistration(root, actor, previous.runID, plan);
+        const unit = corrected.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor)!;
+        return JSON.stringify({ status: "direct-unit-registration-corrected", run_id: corrected.runID, unit_id: unit.unit.id,
+          executor_session_id: actor, validation: unit.unit.validation, validation_cwd: unit.directExecution!.validationCwd,
+          registered_at: unit.directExecution!.validationRegisteredAt,
+          next_action: `Run the affected declared checks in their registered cwd here, then ${finishDirectUnit}. Old observations remain historical; no new Task, terminal, reservation or benchmark attempt was created.` });
+      }
       if (replanning && previous) {
         const previousRunID = previous.runID;
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the observed correction or write-scope extension");
@@ -2141,6 +2197,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await control!.reconcileAbortedOperatorOrphan(root);
         budget = await control!.currentBudget(root);
       }
+      if (cancelledPredecessor && previous && budget?.reserved_units === 0) {
+        // Settled/replanned runs can retain an earlier inactive child with no idle outcome.
+        // Reconcile it even when reservation recovery has nothing to do. Never resume it,
+        // interrupt live work here, or manufacture its native terminal/validation records.
+        await stopCancelledChildren(root, previous, true);
+      }
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
         `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
         "The current run is retained. Correct the plan within the remaining budget, or report a necessary cumulative extension to Operator.");
@@ -2153,10 +2215,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const terminalChildren = cancelledPredecessor && previous
         ? await terminalCancelledMissionChildren(profile, root, previous, budget, {
           get: async id => {
-            const value = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
-            const stopped = (await operators.required(root)).stoppedChildren?.includes(id);
-            return record(value) && stopped ? { ...value, outcome: "interrupted" } : value;
+            return payload(await session("get", { path: { id }, query: { directory: input.directory } }));
           },
+          stopped: async id => (await operators.required(root)).stoppedChildren?.includes(id) === true &&
+            await nativeChildInactive(id),
           children: async id => {
             try { return payload(await session("children", { path: { id }, query: { directory: input.directory } })); }
             catch {
@@ -2339,7 +2401,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             objective: `Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. ${REVIEWER_VALIDATION_WORKFLOW} Retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.`,
             read: [...new Set([...(mission.reviewScope?.read ?? []), ...run.units.flatMap(unit => unit.unit.read)])],
             write: [...new Set([...(mission.reviewScope?.write ?? []), ...run.units.flatMap(unit => unit.unit.write)])],
-            validation: run.units.flatMap(unit => unit.unit.validation) }], input.directory);
+            validation: run.units.flatMap(unit => unit.unit.validation),
+            validation_cwd: Object.assign({}, ...run.units.map(unit => unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ?? {})) }], input.directory);
           // Inherit fixed declaration budgets and Git authority, never infer fresh capacity.
           const goalPath = /^goal_declaration_path: (.+)$/mu.exec(run.units[0]!.task.prompt)?.[1];
           if (!goalPath) throw new Error("operator-declaration-path-invalid");
@@ -2462,7 +2525,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...observedMissionValidation(unit.unit.validation, unit.childSessionID,
                 unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : [],
                 unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) : undefined,
-                unit.reviewerCorrection ? input.directory : undefined),
+                unit.reviewerCorrection || unit.directExecution ? input.directory : undefined,
+                unit.directExecution?.validationCwd ?? unit.unit.validation_cwd),
           })));
           const task = risk.length === 0 && !correction ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
             ...(selfRecheck ? { task_id: correction!.author } : {}),
@@ -2513,7 +2577,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       for (const unit of run.units) {
         if (!unit.reviewerCorrection || !unit.childSessionID) continue;
         const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
-          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory);
+          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory, unit.unit.validation_cwd);
         if (!checked.ready) throw new Error(checked.reason);
       }
     }

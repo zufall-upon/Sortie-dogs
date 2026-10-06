@@ -27,6 +27,12 @@ export function owningServiceSessionList(): (input: SessionListInput) => Promise
   };
 }
 
+/** Native activity is also absent from some plugin contexts; retain exact service ownership. */
+export function owningServiceSessionActive(): () => Promise<unknown> {
+  const connect = owningServiceClient();
+  return async () => (await connect()).session.active({ signal: AbortSignal.timeout(10_000) });
+}
+
 /** Read-only paginated history for reviews older than V2's bounded session.context window. */
 export function owningServiceMessageList(): (input: MessageListInput) => Promise<unknown> {
   const connect = owningServiceClient();

@@ -2,7 +2,7 @@ import { toolSchema, legacyToolArgs } from "./tool-schema.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
-import { owningServiceMessageList, owningServiceSessionList } from "./v2-session-history.js";
+import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive } from "./v2-session-history.js";
 import { nativeContractReadSnapshot } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -67,6 +67,7 @@ export interface OpenCodeV2Context {
   };
   readonly session: {
     list?(input: JsonObject): Promise<unknown>;
+    active?(): Promise<unknown>;
     get(input: { sessionID: string }): Promise<unknown>;
     context(input: { sessionID: string }): Promise<unknown>;
     log?(input: { sessionID: string; follow: false }): AsyncIterable<JsonObject>;
@@ -208,8 +209,10 @@ async function nativePages(fetch: (cursor?: string) => Promise<unknown>): Promis
 function legacyClient(context: OpenCodeV2Context): JsonObject {
   const directory = context.location.directory;
   const list = owningServiceSessionList();
+  const active = owningServiceSessionActive();
   const reviewList = owningServiceMessageList();
   const session = {
+    active: async () => ({ data: await (context.session.active ? context.session.active() : active()) }),
     get: async (request: unknown) => {
       const id = sessionID(request);
       return { data: id === undefined ? undefined : await context.session.get({ sessionID: id }) };
