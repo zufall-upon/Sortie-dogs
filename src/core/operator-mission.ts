@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
+import { normalizeCommand } from "../plugin/gate.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -663,15 +664,28 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
       throw new Error(`mission-unit-${index + 1}: validation must contain exact commands; final command proves the unit`);
     }
     const validation = (value.validation as string[]).map(missionValidationCommand);
+    let validationCwd: Record<string, string> | undefined;
+    if (value.validation_cwd !== undefined) {
+      if (!projectRoot || !record(value.validation_cwd)) throw new Error(`mission-unit-${index + 1}: validation_cwd must map commands to directories`);
+      validationCwd = {};
+      for (const [command, directory] of Object.entries(value.validation_cwd)) {
+        const identity = normalizeCommand(missionValidationCommand(command));
+        if (!validation.map(normalizeCommand).includes(identity) || typeof directory !== "string" || !directory.trim() ||
+            Object.hasOwn(validationCwd, identity)) throw new Error(`mission-unit-${index + 1}: invalid validation_cwd entry`);
+        validationCwd[identity] = resolve(projectRoot, directory);
+      }
+    }
     return { id: `unit-${index + 1}`, title: line("title"), objective: line("objective"), read: paths("read"), write: paths("write"),
       validation,
+      ...(validationCwd ? { validation_cwd: validationCwd } : {}),
       acceptance_indices: [...new Set(ids.map(id => mission.requirements.findIndex(item => item.id === id)))] };
   });
   // The serial engine counts new proof milestones. Units sharing the same final suite are one
   // milestone, so coalesce them instead of making the model repair a bookkeeping rejection.
   const units: typeof declared = [];
   for (const unit of declared) {
-    const same = units.find(item => item.validation.at(-1) === unit.validation.at(-1));
+    const same = units.find(item => item.validation.at(-1) === unit.validation.at(-1) &&
+      JSON.stringify(item.validation_cwd ?? {}) === JSON.stringify(unit.validation_cwd ?? {}));
     if (!same) { units.push(unit); continue; }
     same.objective += `; ${unit.objective}`;
     same.read = [...new Set([...same.read, ...unit.read])];

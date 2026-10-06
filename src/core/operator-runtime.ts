@@ -51,6 +51,8 @@ export interface OperatorUnit {
   readonly read: readonly string[];
   readonly write: readonly string[];
   readonly validation: readonly string[];
+  /** Exact native cwd per command; omitted commands retain the project Location. */
+  readonly validation_cwd?: Readonly<Record<string, string>>;
   readonly acceptance_indices: readonly number[];
 }
 export interface OperatorGitLifecycle {
@@ -136,6 +138,8 @@ interface UnitState {
     startedAt: string;
     finishedAt?: string;
     checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
+    validationCwd?: Readonly<Record<string, string>>;
+    validationRegisteredAt?: Readonly<Record<string, string>>;
   };
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
@@ -394,10 +398,16 @@ export function parseOperatorPlan(value: unknown, scopeFormat: "repository" | "e
   const acceptanceCount = value.acceptance.length;
   const mappingDiagnostics: OperatorContractDiagnostic[] = [];
   for (const [unitIndex, unit] of value.units.entries()) {
-    if (!record(unit) || !exactKeys(unit, ["id", "title", "objective", "read", "write", "validation", "acceptance_indices"]) ||
+    if (!record(unit) || !exactKeys(unit, ["id", "title", "objective", "read", "write", "validation", "validation_cwd", "acceptance_indices"]) ||
         !identifier(unit.id) || ids.has(unit.id) || !text(unit.title) || typeof unit.objective !== "string" || !unit.objective.trim() ||
           !strings(unit.read) || !strings(unit.write) || !strings(unit.validation, true)) return planError(`/units/${unitIndex}`, "operator-unit-invalid", "operator-unit-shape");
     unit.validation.forEach((command, index) => rejectValidationAnnotation(command, `/units/${unitIndex}/validation/${index}`));
+    if (unit.validation_cwd !== undefined && (!record(unit.validation_cwd) ||
+        Object.entries(unit.validation_cwd).some(([command, directory]) =>
+          command !== normalizeCommand(command) || !(unit.validation as string[]).map(normalizeCommand).includes(command) ||
+          !text(directory) || !isAbsolute(directory)))) {
+      return planError(`/units/${unitIndex}/validation_cwd`, "operator-validation-cwd-invalid", "declared-command-absolute-cwd");
+    }
     ids.add(unit.id);
     if (!Array.isArray(unit.acceptance_indices) || unit.acceptance_indices.length === 0 ||
         unit.acceptance_indices.some(index => !Number.isSafeInteger(index) || index < 0 || index >= acceptanceCount ||
@@ -887,6 +897,42 @@ export class OperatorRuntime {
   replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID, context }));
   }
+  /** Correct only native-check registration in the SAME active direct admission. */
+  correctDirectValidationRegistration(root: string, actor: string, runID: string, plan: OperatorPlan): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const active = state.units.filter(unit => unit.status === "running");
+      const unit = active[0];
+      if (state.runID !== runID || state.phase !== "running" || active.length !== 1 || !unit?.directExecution ||
+          unit.directExecution.actor !== actor || unit.directExecution.finishedAt || unit.reviewerCorrection ||
+          plan.units.length !== state.units.length) throw new Error("mission-validation-registration-owner-mismatch");
+      const original = { ...plan, units: plan.units.map((next, i) => {
+        const prior = state.units[i]!.unit;
+        if (prior.validation_cwd) return { ...next, validation_cwd: prior.validation_cwd };
+        const { validation_cwd: _cwd, ...rest } = next;
+        return rest;
+      }) };
+      if (hash(JSON.stringify(original)) !== state.planHash || plan.units.some((next, i) =>
+          next.id !== unit.unit.id && JSON.stringify(next.validation_cwd) !== JSON.stringify(state.units[i]!.unit.validation_cwd))) {
+        throw new Error("mission-validation-registration-contract-mismatch");
+      }
+      const cwd = plan.units.find(next => next.id === unit.unit.id)!.validation_cwd ?? {};
+      const previousCwd = unit.directExecution.validationCwd ?? unit.unit.validation_cwd ?? {};
+      if (JSON.stringify(cwd) !== JSON.stringify(previousCwd)) {
+        // Keep old checks as history, never attach a new recipe to their old successes.
+        const registeredAt = { ...unit.directExecution.validationRegisteredAt }, now = new Date().toISOString();
+        for (const command of unit.unit.validation.map(normalizeCommand)) {
+          if (resolve(this.projectRoot, cwd[command] ?? ".") !== resolve(this.projectRoot, previousCwd[command] ?? ".")) {
+            registeredAt[command] = now;
+          }
+        }
+        unit.directExecution.validationCwd = cwd;
+        unit.directExecution.validationRegisteredAt = registeredAt;
+        await this.save(state);
+      }
+      return state;
+    });
+  }
   prepareReviewerCorrection(root: string, runID: string, raw: unknown, author: string, reviewIdentity: string, writeUnion: readonly string[],
     dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, {
@@ -965,6 +1011,8 @@ export class OperatorRuntime {
           previous.acceptance.some((text, i) => text !== plan.acceptance[i]) ||
           JSON.stringify(plan.acceptance_proof) !== JSON.stringify(previous.acceptanceProof) ||
           JSON.stringify(plan.units[0]!.validation) !== JSON.stringify(previous.units.flatMap(item => item.unit.validation)) ||
+          JSON.stringify(plan.units[0]!.validation_cwd ?? {}) !== JSON.stringify(Object.assign({},
+            ...previous.units.map(item => item.directExecution?.validationCwd ?? item.unit.validation_cwd ?? {}))) ||
           JSON.stringify(plan.source_refs) !== JSON.stringify(previous.sourceRefs) ||
           plan.units.some(unit => unit.write.some(path => !this.pathAuthorized(path, mission.reviewerCorrection!.writeUnion))))) {
         throw new Error("mission-review-correction-contract-mismatch");
@@ -1186,6 +1234,7 @@ export class OperatorRuntime {
         ...commitBoundary,
       ] : [...promptHeader, "acceptance:", ...plan.acceptance.map(value => `  - ${value}`),
         "validation:", ...unit.validation.map(value => `  - ${value}`),
+        ...(unit.validation_cwd ? [`validation_cwd: ${JSON.stringify(unit.validation_cwd)}`] : []),
         "Execute validation in its declared order. Earlier entries may be approved generator, build, formatter, or exact cleanup commands required before canonical criterion tests. Every persistent or transient generator output must be declared in unit.write. Cleanup may remove only declared unit.write outputs and must be an explicit ordered command after generation and before post-commit or canonical validation; never add an ignore rule or remove an undeclared path. If any necessary command, input, output, or cleanup is missing, do not run an undeclared command or variant and do not use resume evidence tooling to invent permission; return a contract-repair decision.",
         "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
         "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",

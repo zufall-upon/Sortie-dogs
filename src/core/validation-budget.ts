@@ -11,6 +11,7 @@ export interface ValidationEnvironment {
   readonly arch: string;
   readonly runtime: string;
   readonly toolchain?: string;
+  readonly directory?: string;
 }
 
 export interface ValidationBudgetRequest {

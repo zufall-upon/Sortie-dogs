@@ -31,14 +31,18 @@ async function currentGitDiff(git: (args: string[]) => Promise<string>, paths: s
   }
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
-const validationDirectoryMatches = (input: Record<string, unknown>, directory?: string): boolean =>
-  directory === undefined || typeof input.workdir !== "string" || resolve(directory, input.workdir) === resolve(directory);
+export const validationDirectoryMatches = (commands: readonly string[], actual: string | undefined, directory?: string,
+  directories?: Readonly<Record<string, string>>): boolean => directory === undefined || commands.every(command =>
+    resolve(directory, directories?.[normalizeCommand(command)] ?? ".") === resolve(directory, actual ?? "."));
 
 /** Reviewer-facing evidence preserves execution/coverage; the host retains the full snapshot recipe. */
 export function missionReviewValidation(run: OperatorState, statePath: string) {
   return run.units.map(unit => ({
     unit_id: unit.unit.id,
     command: unit.unit.validation,
+    ...(unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ? {
+      validation_cwd: unit.directExecution?.validationCwd ?? unit.unit.validation_cwd,
+    } : {}),
     evidence: unit.evidence.map(({ protected_binding, ...evidence }) => ({
       ...evidence,
       ...(protected_binding ? { protected_binding_ref: {
@@ -49,7 +53,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
     })),
     ...(unit.reviewerCorrection ? { correction_checks: (unit.reviewerCorrection.checks ?? []).map(check => ({
       call_id: check.callID, dispatch_call_id: check.dispatchCallID, child_session_id: check.childSessionID,
-      command: check.command, exit_code: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
+      command: check.command, directory: check.directory, exit_code: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
       source: check.source, candidate: check.candidate, fresh_when_observed: check.fresh,
       details_ref: { path: statePath, run_id: run.runID, unit_id: unit.unit.id, field: "units[].reviewerCorrection.checks" },
     })) } : {}),
@@ -60,8 +64,8 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
 
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
-  history: readonly Record<string, unknown>[], notBefore?: number, directory?: string): {
-    attempts: readonly { command: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
+  history: readonly Record<string, unknown>[], notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): {
+    attempts: readonly { command: string; directory?: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
   const declared = validation.map(normalizeCommand);
@@ -72,26 +76,29 @@ export function observedMissionValidation(validation: readonly string[], childSe
     return message.parts.flatMap(part => {
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
            !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
-          typeof part.state.input.command !== "string" || !validationDirectoryMatches(part.state.input, directory)) return [];
+           typeof part.state.input.command !== "string") return [];
       const command = normalizeCommand(part.state.input.command);
       const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
       const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
       if (notBefore !== undefined && (started === null || completed === null || started < notBefore || completed < started)) return [];
-      return [{ command, exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
+      return [{ command, directory: typeof part.state.input.workdir === "string" ? part.state.input.workdir : undefined,
+        exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
         started_ms: started, completed_ms: completed }];
     });
   });
   let occurrence = 0;
   const attempts = rawAttempts.sort((a, b) => (a.started_ms ?? 0) - (b.started_ms ?? 0) || (a.completed_ms ?? 0) - (b.completed_ms ?? 0)).flatMap(attempt => {
     const members = canonicalDeclaredValidationMembers(attempt.command, declared, occurrence);
-    if (!members) return [];
+    if (!members || !validationDirectoryMatches(members, attempt.directory, directory, directories)) return [];
     if (attempt.exit_code !== 0) occurrence = 0;
     else for (const command of members) {
       if (command !== declared[occurrence]) occurrence = 0;
       if (command === declared[occurrence]) occurrence = (occurrence + 1) % declared.length;
     }
-    return [{ ...attempt, ...(members.length > 1 ? { observed_members: members } : {}) }];
+    const { directory: actual, ...visible } = attempt;
+    return [{ ...visible, ...(directory && resolve(directory, actual ?? ".") !== resolve(directory)
+      ? { directory: resolve(directory, actual ?? ".") } : {}), ...(members.length > 1 ? { observed_members: members } : {}) }];
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
   const shown = attempts.length > 32 ? [...attempts.slice(0, 8), ...attempts.slice(-24)] : attempts;
@@ -101,14 +108,15 @@ export function observedMissionValidation(validation: readonly string[], childSe
 
 /** All inherited checks must have fresh real successful outcomes in this correction admission. */
 export function reviewerCorrectionValidation(validation: readonly string[], child: string,
-  history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[], directory?: string): {
+  history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[], directory?: string,
+  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
     matched?: readonly { callID: string; member: number; occurrence: number }[];
     nextOccurrence?: number;
   } {
   const declared = validation.map(normalizeCommand);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
-  const attempts: { callID: string; command: string; exit: number | null; started: number; completed: number }[] = [];
+  const attempts: { callID: string; command: string; directory?: string; exit: number | null; started: number; completed: number }[] = [];
   const seen = new Set<string>();
   let editedAt = notBefore;
   // Unlike the display excerpt, this acceptance comparison scans ALL native attempts.
@@ -123,7 +131,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       }
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
           !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
-          !record(part.state.input) || typeof part.state.input.command !== "string" || !validationDirectoryMatches(part.state.input, directory)) continue;
+           !record(part.state.input) || typeof part.state.input.command !== "string") continue;
       const callID = typeof part.callID === "string" ? part.callID : typeof part.id === "string" ? part.id : undefined;
       if (!callID || seen.has(callID)) continue;
       const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
@@ -134,7 +142,9 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       const rawExit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const exit = part.state.status === "completed" && Number.isSafeInteger(rawExit) ? rawExit as number : null;
       seen.add(callID);
-      attempts.push({ callID, command: part.state.input.command, exit, started: timing.started, completed: timing.completed });
+      attempts.push({ callID, command: part.state.input.command,
+        directory: typeof part.state.input.workdir === "string" ? part.state.input.workdir : undefined,
+        exit, started: timing.started, completed: timing.completed });
     }
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
@@ -145,7 +155,9 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     // report/cache write is not itself a source change. Unbound history stays conservative.
     if (!checks && attempt.started < editedAt) continue;
     const commands = canonicalDeclaredValidationMembers(attempt.command, declared, matched.length % declared.length);
-    if (!commands) continue; // Focused diagnostics are not formal proof.
+    if (!commands || !validationDirectoryMatches(commands, attempt.directory, directory, directories) ||
+        commands.some(command => registeredAt?.[command] !== undefined &&
+          (!Number.isFinite(Date.parse(registeredAt[command]!)) || attempt.started < Date.parse(registeredAt[command]!)))) continue;
     if (attempt.started < previousEnd) {
       complete = undefined; matched.length = 0; failed = undefined; overlap = true;
       previousEnd = Math.max(previousEnd, attempt.completed);
@@ -176,7 +188,10 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   for (const item of complete) {
     const command = declared[item.occurrence]!;
     const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
+    const attempt = attempts.find(attempt => attempt.callID === item.callID)!;
     if (checks && (!check || !check.fresh || check.exitCode !== 0 || check.command[item.member] !== command ||
+        !validationDirectoryMatches([command], check.directory, directory, directories) ||
+        directory !== undefined && resolve(directory, check.directory ?? ".") !== resolve(directory, attempt.directory ?? ".") ||
         !Number.isFinite(Date.parse(check.startedAt)) || !Number.isFinite(Date.parse(check.endedAt)) ||
         Date.parse(check.startedAt) < notBefore || Date.parse(check.endedAt) < Date.parse(check.startedAt))) {
       return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}` };
@@ -187,8 +202,9 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
 
 /** Refresh each actual run's saved recipe; never attach today's snapshot to historical native logs. */
 export async function reviewerCorrectionValidationFresh(validation: readonly string[], child: string,
-  history: readonly Record<string, unknown>[], notBefore: number, checks: readonly ReviewerCorrectionCheck[], projectRoot: string) {
-  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks, projectRoot);
+  history: readonly Record<string, unknown>[], notBefore: number, checks: readonly ReviewerCorrectionCheck[], projectRoot: string,
+  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>) {
+  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks, projectRoot, directories, registeredAt);
   if (!checked.ready) return checked;
   for (const callID of new Set(checked.matched?.map(item => item.callID))) {
     const check = checks.find(item => item.callID === callID)!;
@@ -203,19 +219,19 @@ export async function reviewerCorrectionValidationFresh(validation: readonly str
 
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
 export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
-  read?: () => Promise<unknown>, notBefore?: number, directory?: string): Promise<Record<string, unknown>> {
+  read?: () => Promise<unknown>, notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): Promise<Record<string, unknown>> {
   if (!read) throw new Error("native-worker-history-api-unavailable");
   const response = await read();
   if (record(response) && response.error !== undefined && response.error !== null) throw new Error("native-worker-history-api-error");
   const data = record(response) && "data" in response ? response.data : response;
   if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
-  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory);
-  const grouped = new Map<string, { command: string; exit_code: number | null; observed_attempts: number;
+  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory, directories);
+  const grouped = new Map<string, { command: string; directory?: string; exit_code: number | null; observed_attempts: number;
     latest_started_ms: number | null; latest_completed_ms: number | null }>();
   for (const attempt of observed.attempts) {
-    const key = JSON.stringify([attempt.command, attempt.exit_code]);
+    const key = JSON.stringify([attempt.command, attempt.directory, attempt.exit_code]);
     const previous = grouped.get(key);
-    grouped.set(key, { command: attempt.command, exit_code: attempt.exit_code,
+    grouped.set(key, { command: attempt.command, ...(attempt.directory ? { directory: attempt.directory } : {}), exit_code: attempt.exit_code,
       observed_attempts: (previous?.observed_attempts ?? 0) + 1,
       latest_started_ms: attempt.started_ms, latest_completed_ms: attempt.completed_ms });
   }

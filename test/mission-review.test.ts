@@ -65,6 +65,33 @@ test("later edits do not erase bound native outcomes; missing and failed binding
   }
 });
 
+test("external cwd requires its original native binding; registration keeps unaffected ordered checks", () => {
+  const root = resolve("_testenv/cwd-root"), external = resolve("_testenv/cwd-external"), child = "author";
+  const A = "node a.mjs", B = "node b.mjs", directories = { [B]: external };
+  const part = (command: string, callID: string, start: number, workdir = root) => ({ type: "tool", tool: "shell", callID,
+    state: { status: "completed", input: { command, workdir }, metadata: { exit: 0 }, time: { start, end: start + 10 } } });
+  const old = [part(A, "a", 110), part(B, "old-b", 130, external)];
+  const retry = part(B, "new-b", 210, external);
+  const history = (parts: unknown[]) => [{ info: { role: "assistant", sessionID: child }, parts }];
+  const checks = [...old, retry].map(item => ({ childSessionID: child, callID: item.callID,
+    command: [item.state.input.command], directory: item.state.input.workdir, fresh: true, exitCode: 0,
+    startedAt: new Date(item.state.time.start).toISOString(), endedAt: new Date(item.state.time.end).toISOString() })) as any;
+  const registered = { [B]: new Date(200).toISOString() };
+  const compare = (parts: unknown[], bindings = checks) => reviewerCorrectionValidation([A, B], child,
+    history(parts), 100, bindings, root, directories, registered);
+  assert.equal(compare(old).ready, false, "registration cannot attach a new cwd recipe to an old success");
+  assert.equal(compare([...old, retry]).ready, true, "unchanged root check is retained; only the affected external check is rerun");
+  assert.deepEqual(compare([...old, retry]).matched?.map(item => item.callID), ["a", "new-b"]);
+  assert.equal(compare([old[0], { ...retry, state: { ...retry.state, input: { command: B, workdir: root } } }]).ready, false);
+  assert.match(compare([...old, retry], checks.map((check: any) => ({ ...check, directory: undefined }))).reason!, /binding-unavailable/,
+    "legacy Location-only checks cannot gain external-cwd applicability");
+  assert.equal(reviewerCorrectionValidation([A, B], child, history([part(`${A} && ${B}`, "chain", 210, external)]),
+    100, undefined, root, directories).ready, false, "one cwd cannot prove a chain registered across two directories");
+  const observed = observedMissionValidation([B], child, history([retry]), 100, root, directories);
+  assert.equal(observed.attempts.length, 1);
+  assert.equal(observedMissionValidation([B], child, history([retry]), 100, root).attempts.length, 0);
+});
+
 test("a bound ordered retry recovers after an earlier overlap without a new admission", () => {
   const A = "node a.mjs", B = "node b.mjs", child = "author";
   const part = (command: string, callID: string, start: number, end: number) => ({ type: "tool", tool: "shell", callID,

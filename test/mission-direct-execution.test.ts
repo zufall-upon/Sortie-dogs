@@ -14,12 +14,14 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan"] as const) test(`${actor} direct execution: ${mode}`, async t => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration"] as const) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
+  const external = ["external-cwd", "registration"].includes(mode);
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
-  const product = nonGit ? join(directory, "product") : directory;
-  const resultPath = nonGit ? "product/result.txt" : "result.txt";
+  const externalDirectory = external ? await mkdtemp(join(tmpdir(), "mission-direct-external-")) : undefined;
+  const product = externalDirectory ?? (nonGit ? join(directory, "product") : directory);
+  const resultPath = externalDirectory ? join(externalDirectory, "result.txt") : nonGit ? "product/result.txt" : "result.txt";
   try {
     await mkdir(product, { recursive: true });
     await exec("git", ["init", "--quiet"], { cwd: product });
@@ -36,6 +38,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       syncBuiltinESMExports();
     }
     await writeFile(join(directory, "check.mjs"), `import {readFileSync} from "node:fs";\nif (readFileSync(${JSON.stringify(resultPath)},"utf8") !== "fixed\\n") process.exit(1);\n`);
+    if (externalDirectory) await writeFile(join(externalDirectory, "check.mjs"), await readFile(join(directory, "check.mjs")));
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator", outcome: "running" },
       coordinator: { agent: "dogs-coordinator", parentID: "root", outcome: "running" },
@@ -66,9 +69,12 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, task);
       await prompt(actor, task.args.prompt);
     }
-    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{ title: "Fix result",
-      objective: "Create result.txt accepted by check.mjs", read: ["check.mjs", ...(mode === "junction" ? ["profile/**"] : [])],
-       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])], validation: [mode.endsWith("replan") ? "node check.mjs (workdir: project root)" : "node check.mjs"] }] }, { sessionID: actor }));
+    const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
+      read: ["check.mjs", ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
+      write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
+      validation: [mode.endsWith("replan") ? "node check.mjs (workdir: project root)" : "node check.mjs"],
+      ...(mode === "external-cwd" ? { validation_cwd: { "node check.mjs": externalDirectory! } } : {}) };
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -92,18 +98,18 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     }
     let counter = 0;
     const write = async (content: string, path = resultPath) => {
-      const callID = `write-${++counter}`, args = { filePath: join(directory, path), content };
+      const callID = `write-${++counter}`, args = { filePath: resolve(directory, path), content };
       await hooks["tool.execute.before"]!({ tool: "write", sessionID: actor, callID }, { args });
       await writeFile(args.filePath, content);
       (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "write", callID,
         state: { status: "completed", input: args, time: { end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "write", sessionID: actor, callID, args }, { output: "written" });
     };
-    const check = async () => {
-      const callID = `check-${++counter}`, args = { command: "node check.mjs" }, start = Date.now();
+    const check = async (cwd = externalDirectory ?? directory) => {
+      const callID = `check-${++counter}`, args = { command: "node check.mjs", workdir: cwd }, start = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: actor, callID }, { args });
       let exit = 0;
-      try { await exec(process.execPath, ["check.mjs"], { cwd: directory }); } catch { exit = 1; }
+      try { await exec(process.execPath, ["check.mjs"], { cwd }); } catch { exit = 1; }
       (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: actor, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
@@ -183,13 +189,53 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     assert.equal((await readRun()).units[0]!.status, "running", "failure remains with the same author");
     hooks = await create();
     await write("fixed\n");
+    if (mode === "registration") {
+      assert.equal(await check(), 0);
+      const old = await readRun(), budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      assert.equal(old.units[0]!.directExecution!.checks.length, 0, "external diagnostic has no retroactive formal binding");
+      const missing = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
+      assert.equal(missing.status, "direct-unit-awaits-validation");
+      const corrected = { ...declaration, validation_cwd: { "node check.mjs": externalDirectory! } };
+      for (const delta of [{ objective: "Different work" },
+        { validation: ["node other.mjs"], validation_cwd: { "node other.mjs": externalDirectory! } }, { write: ["other.txt"] }]) {
+        await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "cwd registration", units: [{ ...corrected, ...delta }] },
+          { sessionID: actor }), /contract-mismatch/);
+      }
+      const registration = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "cwd registration", units: [corrected] }, { sessionID: actor }));
+      assert.equal(registration.status, "direct-unit-registration-corrected", JSON.stringify(registration));
+      assert.equal(registration.task, undefined);
+      const kept = await readRun();
+      assert.equal(kept.runID, old.runID);
+      assert.equal(kept.units[0]!.callID, old.units[0]!.callID);
+      assert.deepEqual(kept.units[0]!.hashes, old.units[0]!.hashes);
+      assert.equal(kept.units[0]!.directExecution!.startedAt, old.units[0]!.directExecution!.startedAt);
+      assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
+      assert.equal(JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor })).status,
+        "direct-unit-awaits-validation", "registration does not manufacture a check/terminal");
+      const register = async (unit: typeof corrected | typeof declaration) => JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({
+        executor: "self", reason: "cwd registration", units: [unit] }, { sessionID: actor }));
+      await register(corrected);
+      assert.deepEqual((await readRun()).units[0]!.directExecution!.validationRegisteredAt, kept.units[0]!.directExecution!.validationRegisteredAt,
+        "identical registration is idempotent");
+      assert.equal((await register(declaration)).status, "direct-unit-registration-corrected", "returning to original cwd is still an in-place correction");
+      assert.deepEqual((await readRun()).units[0]!.directExecution!.validationCwd, {});
+      assert.equal((await register(corrected)).status, "direct-unit-registration-corrected");
+      assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
+      hooks = await create();
+    }
     assert.equal(await check(), 0);
+    if (externalDirectory) {
+      const count = (await readRun()).units[0]!.directExecution!.checks.length;
+      assert.equal(await check(directory), 0, "same-text diagnostic also succeeds against a different cwd");
+      assert.equal((await readRun()).units[0]!.directExecution!.checks.length, count, "wrong cwd is not formal evidence");
+    }
     await write("stale\n");
     const stale = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
     assert.equal(stale.status, "direct-unit-awaits-validation");
     await write("fixed\n");
     assert.equal(await check(), 0); // Real native write history requires a check after this edit.
     const checked = (await readRun()).units[0]!.directExecution!.checks;
+    if (externalDirectory) assert.equal(checked.at(-1)!.directory, externalDirectory);
     if (mode === "non-git-root") {
       assert.equal(checked.at(-1)!.binding.validation_policy, undefined,
         "a whole-root grant without a concrete output inventory retains full-candidate freshness");
@@ -220,7 +266,8 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     if (actor === "coordinator") await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Direct correction validated and independently reviewed" }, { sessionID: actor });
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
-    assert.equal(await readFile(join(directory, resultPath), "utf8"), "fixed\n");
+    assert.equal(await readFile(resolve(directory, resultPath), "utf8"), "fixed\n");
     assert.equal((await readRun()).units[0]!.directExecution?.actor, actor, "recovery and acceptance retain the same author without a user turn");
-  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(directory, { recursive: true, force: true }); }
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(directory, { recursive: true, force: true });
+    if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
