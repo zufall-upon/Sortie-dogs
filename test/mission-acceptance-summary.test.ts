@@ -153,3 +153,45 @@ test("author self-recheck summary and packet never claim independent PASS; exact
     assert.equal(missionReviewAccepted({ ...mission.review, ...changed }), false);
   }
 }));
+
+test("stopped correction summary retains its saved validation directory instead of current actor admission", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u", text: "Correct the result and preserve actual failed checks" });
+  const mission = await missions.start("root", ["Correct the result"]);
+  const command = "node check.mjs", external = join(directory, "package");
+  const run = await operators.prepareMission("root", missionPlan(mission, [{ title: "Fix", objective: "Fix",
+    read: ["check.mjs"], write: ["result.txt"], validation: [command], validation_cwd: { [command]: external } }], directory));
+  mission.runID = run.runID;
+  run.phase = "awaiting-decision";
+  const unit = run.units[0]!;
+  unit.status = "failed";
+  unit.childSessionID = "author";
+  const start = Date.now();
+  unit.directExecution = { actor: "author", startedAt: new Date(start).toISOString(), finishedAt: new Date(start + 5).toISOString(), checks: [] };
+  const history = [{ info: { role: "assistant", sessionID: "author" }, parts: [
+    { type: "tool", tool: "bash", state: { status: "completed", input: { command, workdir: external },
+      metadata: { exit: 7 }, time: { start: start + 1, end: start + 2 } } },
+    { type: "tool", tool: "bash", state: { status: "completed", input: { command, workdir: directory },
+      metadata: { exit: 0 }, time: { start: start + 3, end: start + 4 } } },
+  ] }];
+  // The actor has no active admission after settlement. Use the exact saved run's
+  // recipe, including a registration override, for this read-only projection.
+  for (const mode of ["direct-declaration", "direct-registration", "reviewer-correction"] as const) {
+    if (mode === "direct-registration") {
+      unit.directExecution!.validationCwd = { [command]: external };
+      unit.unit = { ...unit.unit, validation_cwd: undefined };
+    } else if (mode === "reviewer-correction") {
+      unit.directExecution = undefined;
+      unit.unit = { ...unit.unit, validation_cwd: { [command]: external } };
+      unit.reviewerCorrection = { author: "author", admittedAt: new Date(start).toISOString() } as never;
+    }
+    const summary = await missionAcceptanceSummary(mission, run, operators, (commands, child, notBefore, directories) =>
+      observedMissionValidationSummary(commands, child!, async () => ({ data: history }), notBefore, directory, directories));
+    const native = summary.native_declared_validation as { observations: { commands: { exit_code: number; directory: string }[]; not_observed: string[] } }[];
+    assert.deepEqual(native[0]!.observations.not_observed, []);
+    assert.equal(native[0]!.observations.commands.length, 1);
+    assert.equal(native[0]!.observations.commands[0]!.exit_code, 7, "retain the actual failure, not an unrelated root diagnostic PASS");
+    assert.equal(native[0]!.observations.commands[0]!.directory, external);
+    assert.deepEqual(summary.formal_validation, [], "observations never manufacture acceptance evidence");
+  }
+}));

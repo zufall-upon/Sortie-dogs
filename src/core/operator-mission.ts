@@ -711,7 +711,8 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
 
 /** Compact provenance, not a new acceptance verdict or a substitute for original-request comparison. */
 export async function missionAcceptanceSummary(mission: OperatorMission, run: OperatorState | undefined,
-  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null, notBefore?: number) => Promise<unknown>): Promise<Record<string, unknown>> {
+  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null, notBefore?: number,
+    directories?: Readonly<Record<string, string>>) => Promise<unknown>): Promise<Record<string, unknown>> {
   const current = run?.runID === mission.runID ? run : undefined;
   const history = current ? await operators.acceptanceHistory(current, [...new Set((mission.attempts ?? []).map(item => item.runID))])
     : { status: "unavailable", runs: [], reason: "current-mission-run-unavailable" };
@@ -763,7 +764,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
         return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID,
           unit.directExecution ? Date.parse(unit.directExecution.startedAt) :
-            unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
+            unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined,
+          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd) };
       } catch (error) {
         return { ...provenance, status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
       }

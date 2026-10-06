@@ -232,13 +232,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
-    async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
+    async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number,
+      directories?: Readonly<Record<string, string>>) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
-      const direct = await directExecution(child) ?? await reviewerCorrection(child);
+      // Projection uses the selected persisted run, even after its actor admission has ended.
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
         ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore,
-        notBefore === undefined ? undefined : input.directory,
-        direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
+        notBefore === undefined && directories === undefined ? undefined : input.directory, directories);
     }
     async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
