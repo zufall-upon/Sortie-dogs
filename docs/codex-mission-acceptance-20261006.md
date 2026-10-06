@@ -15,9 +15,15 @@ of this work. Original and unrelated project checkouts are untouched.
 
 ## Acceptance status
 
+**Accepted on Ubuntu:** the same practical Mission completed implementation repair, formal validation,
+independent Review PASS and Operator acceptance. Its final root check used the user's explicitly
+approved parent-host executor; other operations retained native `:workspace` with network disabled.
+This does not claim the native subprocess EPERM was fixed. Final evidence is `acceptance-summary.json`
+under `_testenv/codex-practical/`, linked to implementation commit `753ea0a`.
+
 | Requirement | Implemented path and evidence | Remaining boundary |
 | --- | --- | --- |
-| Natural-language input and common ownership | `codex mission --prompt`, shared Sortie V010 plugin hooks, Mission/Operator state, native saved threads; no second execution ledger. Prior native direct Mission accepted. | A native execution environment must permit the requested work, or a parent host must supply its authorized executor. |
+| Natural-language input and common ownership | `codex mission --prompt`, shared Sortie V010 plugin hooks, Mission/Operator state, native saved threads; no second execution ledger. Prior native direct Mission accepted; the practical repair Mission is now accepted through the explicitly approved mixed execution path. | The native environment still rejects this Node subprocess capture; the specifically authorized parent check provides the actual validation result. |
 | Coordinator/Worker/Reviewer and root quality acceptance | Native roles use the same task hooks, reservations, corrections, protected validation and final Operator acceptance. `_testenv/codex-operator-return/summary.json` records controlled quality rejection and return to the same Coordinator, followed by correction and acceptance. | This is a controlled defect scenario, not a general autonomous-quality benchmark. |
 | Recovery without duplicate work | Exact unstarted Task recovery and bound, completed leaf Worker recovery feed existing settlement. `_testenv/codex-bound-child/summary.json` and `continued-result.json`: implementation count remained one, then normal corrective validation/review completed. | Missing bindings, nested/untracked children and unknown external execution cannot be inferred complete. |
 | Stop/resume | Linux signal handling, owner identity and shared recovery serialization; unknown external writers remain unknown. Same-thread cold resume confirmed again in `_testenv/codex-practical/summary.json`. | Adapter shutdown does not prove an external process stopped. Parent executor must reconcile its processes. |
@@ -127,11 +133,31 @@ then returned exit 1 from `execFileSync`/`spawnSync ... EPERM` in 75 ms. `finish
 that failure and returned `direct-unit-awaits-validation`; no review or final acceptance was fabricated.
 All protected hashes remained unchanged. The adapter's completed turn is not Mission completion.
 
-The next external decision is whether to authorize **only the unchanged root `node check.mjs`** through
-the existing parent-host executor in this same isolated repository, with no network use, installs,
-settings changes or test edits. All other commands can retain the native approved `:workspace` path.
-That different execution boundary has not been selected or executed. After an authoritative PASS,
-the same Mission can continue normal quality review and Operator acceptance without another replan.
+The user subsequently authorized **only the unchanged root `node check.mjs`** through the existing
+parent-host executor in the same isolated repository. This exact command ran once, returned
+`INTEGRATION PASS`, exit 0, in 43 ms. No test, implementation or AGENTS.md bytes changed during this
+continuation. All five Reviewer reads used the separate native `:workspace` route; no other command
+used the parent execution exception. No network use, installs or settings changes occurred.
+
+Final evidence (`parent-result.json`, `parent-boundaries.jsonl`, `parent-events.jsonl`,
+`parent-hashes.json`, `acceptance-summary.json`):
+
+- Same Mission: `mission-a2c6e9ba-0599-49bd-91c3-45c0140c21a2`.
+- Same root: `01a10fc8-df29-7eb0-979a-ae6f73e754e9`.
+- Corrected run: `operator-f1bbdc03-8f58-4d78-b7ad-95864b08b456`.
+- Independent Reviewer: `01a11001-0678-78f1-9e55-6685e4d69462`, actual terminal PASS.
+- `complete_mission`: succeeded; SDK `accepted: true`; Mission and Operator run both completed.
+- Original shared goal retained two consumed units, zero outstanding reservations, and a succeeded
+  receipt covering both attempt IDs. The adapter owner is closed; no scope lease file remains.
+- Subscription-native usage remains actual cumulative thread usage; final root 990,269 tokens,
+  Reviewer 47,311 tokens. Monetary cost is unavailable and is not fabricated. These are not counts
+  of unique prompt text or model requests.
+
+The original failed probe records remain available. No extra model run or full regression was added
+merely to reconfirm acceptance: the continuation changed no runtime source. Independent coverage
+review found no further concrete implementation defect required by the current completion standard.
+Native subprocess restrictions and conservative unknown-execution recovery remain explicit operating
+boundaries, not unresolved requirements of this accepted, authorized Mission.
 
 Final Linux regression: `replan-full-final.log`, 113 files passed, exit 0, 222.360 s.
 No push, release or global configuration change was performed.
