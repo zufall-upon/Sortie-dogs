@@ -250,3 +250,39 @@ assumption in the added packed-consumer fixture: `npm ci` had cached package tar
 registry metadata needed by a fresh offline install. The fixture now extracts the real local tarball
 and links already installed dependencies (junctions on Windows). No product runtime behavior, test
 assertion, credentials or registry access was added. The original failure is retained in CI history.
+
+## Ubuntu continuity follow-up from main f109bf0
+
+This follow-up uses an isolated worktree based on main
+`f109bf0c0d64de3be552288088dec965604f0d1c`, preserving the earlier checkout and the
+parallel Windows verification. Two concrete common-core defects were reproduced:
+
+- After a direct execution or Reviewer correction stops, the acceptance summary used
+  the actor's active admission to recover `validation_cwd`. That admission no longer
+  exists after settlement. A failed check in the declared package directory could
+  disappear while an unrelated same-text check in the project directory appeared as
+  successful. The summary now receives the selected persisted unit's cwd registration,
+  including direct-registration overrides. The regression reproduces package exit 7
+  versus unrelated root exit 0 and retains the actual failure after settlement.
+  This remains observational provenance, not new formal acceptance evidence.
+- Two units with identical commands and cwd mappings failed with
+  `operator-unit-needs-new-goal-milestone` when only JSON key order differed. The
+  coalescing comparison now compares command/directory pairs without changing the
+  stored map representation. This preserves existing plan hashes and Reviewer
+  correction contracts. Different cwd values still do not share one combined proof.
+
+Both fixes received independent review with no High/Medium finding. Related regressions
+passed 215 tests for the summary path and 54 for planning/direct execution. Local
+reproduction and full-run evidence are retained under `_testenv/continuity/`; no raw
+native conversation, auth material or live IDs are included in this follow-up.
+
+No model call, dependency install, permission expansion, global setting change, push,
+merge or release was needed. Existing Ubuntu Node 22.22.1, npm 10.9.4 and Codex 0.160.1
+with ChatGPT authentication were reused. These synthetic regressions address two
+specific continuity/visibility defects; they do not establish all-workload autonomous
+quality, cost optimality, Windows Desktop operation, or removal of the native
+subprocess restriction described above.
+
+Final Linux `npm run test:full`: 113 files completed, 1773 tests passed, 2 existing live tests skipped,
+zero failures, exit 0, 222.944 s (test phase). No extra live model turn was used to
+reconfirm these deterministic defects.

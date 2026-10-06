@@ -492,6 +492,20 @@ test("mission validation preserves repeated required occurrences and the final p
     { ...unit, requirement_ids: ["R2"], validation: ["node adjacent.mjs", "node check.mjs"] },
   ]);
   assert.equal(merged.units.length, 1, "coalescing a proof milestone does not create another execution unit");
+  const directories = { "node adjacent.mjs": resolve(directory, "package"), "node check.mjs": resolve(directory, "package") };
+  const reversed = Object.fromEntries(Object.entries(directories).reverse());
+  const declarations = [
+    { ...unit, requirement_ids: ["R1"], validation: ["node adjacent.mjs", "node check.mjs"], validation_cwd: reversed },
+    { ...unit, requirement_ids: ["R2"], validation: ["node adjacent.mjs", "node check.mjs"], validation_cwd: directories },
+  ];
+  const ordered = missionPlan(mission, declarations, directory);
+  assert.equal(ordered.units.length, 1, "JSON key ordering must not create a spurious milestone rejection");
+  assert.equal(JSON.stringify(ordered.units[0]!.validation_cwd), JSON.stringify(reversed),
+    "preserve stored map order for existing plan hashes and Reviewer correction contracts");
+  assert.throws(() => missionPlan(mission, [declarations[0], { ...declarations[1],
+    validation_cwd: { ...directories, "node check.mjs": resolve(directory, "other") } }], directory),
+    /operator-unit-needs-new-goal-milestone/, "different execution directories must not borrow one combined proof");
+
   assert.deepEqual(merged.units[0]!.validation, ["node adjacent.mjs", "node check.mjs", "node adjacent.mjs", "node check.mjs"],
     "coalescing preserves each original ordered validation occurrence too");
 }));

@@ -684,8 +684,11 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
   // milestone, so coalesce them instead of making the model repair a bookkeeping rejection.
   const units: typeof declared = [];
   for (const unit of declared) {
+    // Map insertion order is not a different execution recipe. Preserve the saved
+    // representation (and its plan hash); compare only the command/directory pairs.
     const same = units.find(item => item.validation.at(-1) === unit.validation.at(-1) &&
-      JSON.stringify(item.validation_cwd ?? {}) === JSON.stringify(unit.validation_cwd ?? {}));
+      Object.keys(item.validation_cwd ?? {}).length === Object.keys(unit.validation_cwd ?? {}).length &&
+      Object.entries(item.validation_cwd ?? {}).every(([command, directory]) => unit.validation_cwd?.[command] === directory));
     if (!same) { units.push(unit); continue; }
     same.objective += `; ${unit.objective}`;
     same.read = [...new Set([...same.read, ...unit.read])];
