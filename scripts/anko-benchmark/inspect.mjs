@@ -6,8 +6,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { ANKO_BASE, INSTRUCTION_SHA256, hashFile, packageReceiptPath, readJson, sha256,
   tarEntryFromTgz, versionRoot } from './core.mjs';
 import { readOwnedUsage } from './usage.mjs';
+import { nativeTurnTerminal, observeSessionTurn } from './observe.mjs';
 
 export function analyzeSavedTrial(history, events, usage, observation) {
+  const turns = new Map();
+  for (const event of events) observeSessionTurn(turns, event);
+  const nativeTurnsSettled = usage.sessions.length > 0 && usage.sessions.every(session => nativeTurnTerminal(session, turns));
   const exported = new Map(history.flatMap(session => session.messages.filter(item => ['assistant', 'compaction'].includes(item.type))
     .map(message => [message.id, message])));
   const failures = usage.records.filter(item => item.error_type === 'provider.transport').map(item => {
@@ -27,18 +31,23 @@ export function analyzeSavedTrial(history, events, usage, observation) {
   return { execution_elapsed_ms: observation.execution_elapsed_ms, stop_reason: observation.stop_reason,
     observer_stream_error: observation.native_event_stream?.error ?? null,
     provider_failures: failures, priced_subtotal_usd: usage.priced_usd,
-    estimated_total_usd: usage.estimated_total_usd, actual_billed_usd: null,
+    recorded_estimated_total_usd: usage.estimated_total_usd,
+    estimated_total_usd: nativeTurnsSettled ? usage.estimated_total_usd : null, actual_billed_usd: null,
+    latest_native_turns_settled: nativeTurnsSettled,
     usage_records: usage.records, owned_sessions: usage.sessions.map(item => ({ id: item.id,
       parent_id: item.parent_id, agent: item.agent, outcome: item.idle_outcome, time_idle: item.time_idle,
-      native_terminal_observed: item.native_terminal_observed })),
+      recorded_native_terminal_observed: item.native_terminal_observed,
+      native_terminal_observed: nativeTurnTerminal(item, turns),
+      latest_observed_turn: turns.get(item.id) ?? null })),
     db_assistant_records: usage.records.filter(item => item.message_type === 'assistant').length,
     export_assistant_records: [...exported.values()].filter(item => item.type === 'assistant').length,
     db_compaction_records: usage.records.filter(item => item.message_type === 'compaction').length,
     export_compaction_records: [...exported.values()].filter(item => item.type === 'compaction').length,
     db_records_absent_from_export: usage.records.filter(item => !exported.has(item.id)).map(item => item.id),
-    conclusion: 'provider-error-and-usage-absence-coobserved; cause-not-proven',
-    limitations: ['1006の切断元・ネットワーク経路・provider内部原因は保存履歴から不明。',
-      'usageはDBとexportで欠測。providerが未送信か、hostが未保存かは不明。',
+    conclusion: failures.length ? 'provider-error-and-usage-absence-coobserved; cause-not-proven' :
+      'no-provider-transport-failure-observed; stop-cause-requires-native-tool-analysis',
+    limitations: [...(failures.length ? ['1006の切断元・ネットワーク経路・provider内部原因は保存履歴から不明。'] : []),
+      'usage欠測の有無は各DB/export recordで判断する。欠測時にprovider未送信かhost未保存かは不明。',
       'retry予約は推論再実行の証拠ではない。interrupt ackやprocess停止はnative終端の証拠ではない。'] };
 }
 

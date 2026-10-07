@@ -347,7 +347,9 @@ Use the exposed read/search tools directly. Shell is unavailable during the init
 do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
 
 If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
-only when correction cannot continue here (for example an operation/read-only task or actual blocker).
+only when correction cannot continue here (for example no existing write scope or an actual blocker).
+An operation's existing source or record defects use the same correction lifecycle; preserve its
+execution observations rather than rerunning the operation or treating correction as operation success.
 During an admitted
 correction, finish after checks/commit with SELF_RECHECKED, then
 self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}

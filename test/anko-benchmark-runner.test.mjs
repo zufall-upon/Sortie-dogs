@@ -12,7 +12,8 @@ import {
   versionRoot, writeExclusive,
 } from '../scripts/anko-benchmark/core.mjs';
 import { eligibleReadPermission } from '../scripts/anko-benchmark/recovery.mjs';
-import { installObservationFiles, observeSessionState, observerPlugin, safeNativeEvent, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
+import { expectSessionTurn, installObservationFiles, nativeTurnTerminal, observeSessionState,
+  observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
 import { classifyUsage, nativeTerminal, readOwnedUsage, summarizeOwnedUsage, usageSafetyStopReason } from '../scripts/anko-benchmark/usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions, settleOwnedSessions } from '../scripts/anko-benchmark/settle.mjs';
 import { analyzeSavedTrial } from '../scripts/anko-benchmark/inspect.mjs';
@@ -61,6 +62,67 @@ const testModel = { providerID: 'openai', id: 'test', variant: 'max' };
 const pricedEstimate = input => ({ status: 'priced', usd: input.uncachedInputTokens / 1000, priceKey: 'test' });
 const activeSession = { id: 'root', parent_id: null, time_idle: null, idle_outcome: null };
 const endedSession = { ...activeSession, time_idle: 100, idle_outcome: 'interrupted' };
+
+test('Anko terminal events win over delayed starts without hiding another active call', () => {
+  for (const terminal of ['session.tool.failed', 'session.tool.success', 'plugin-hook-after']) {
+    const tools = new Map(), ended = new Set();
+    const send = (type, now) => observeToolEvent(tools, ended,
+      { session_id: 'worker', call_id: 'shell', tool: 'shell',
+        ...(type.startsWith('plugin-') ? { phase: type } : { type }) }, now);
+    send('session.tool.called', 1000);
+    send(terminal, 2000);
+    send('plugin-hook-before', 2500);
+    send('session.tool.input.started', 2600);
+    send('session.tool.progress', 2700);
+    assert.equal(tools.size, 0);
+    observeToolEvent(tools, ended, { type: 'session.tool.called', session_id: 'other', call_id: 'shell', tool: 'shell' }, 3000);
+    const live = tools.get('other/shell');
+    assert.equal(shouldStopForNoProgress({ now: 26_900, lastProgressAt: live.last_progress_at }), false);
+    assert.equal(shouldStopForNoProgress({ now: 183_000, lastProgressAt: live.last_progress_at }), true);
+    observeToolEvent(tools, ended, { type: 'session.tool.input.ended', session_id: 'other', call_id: 'shell' }, 184_000);
+    assert.equal(tools.size, 1, 'input end is not execution completion');
+  }
+});
+
+test('Anko a new execution cannot reuse a previous terminal even at the same timestamp', () => {
+  const turns = new Map();
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 10 });
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 100 });
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 100 });
+  assert.equal(nativeTurnTerminal(endedSession, turns), false);
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 100 });
+  assert.equal(nativeTurnTerminal(endedSession, turns), true);
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 200 });
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 100 });
+  assert.equal(nativeTurnTerminal(endedSession, turns), false);
+});
+
+test('Anko queued continuation acknowledgement cannot reuse the previous native turn', () => {
+  const turns = new Map();
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 10 });
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 100 });
+  expectSessionTurn(turns, 'root', 200);
+  observeSessionTurn(turns, { type: 'session.inbox.enqueued', session_id: 'root', created: 201 });
+  assert.equal(nativeTurnTerminal({ ...endedSession, time_idle: 202 }, turns), false);
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 250 });
+  assert.equal(nativeTurnTerminal(endedSession, turns), false);
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 250 });
+  assert.equal(nativeTurnTerminal({ ...endedSession, time_idle: 250 }, turns), true);
+});
+
+test('Anko offline inspection distinguishes saved estimates from an unconfirmed newer turn', () => {
+  const usage = summarizeOwnedUsage([endedSession], [{ id: 'm', session_id: 'root', type: 'assistant',
+    data: { model: testModel, time: { completed: 100 }, tokens: fullTokens } }], 'root', pricedEstimate);
+  const analysis = analyzeSavedTrial([{ messages: [{ id: 'm', type: 'assistant', tokens: fullTokens }] }],
+    [{ type: 'session.execution.started', session_id: 'root', created: 202 }], usage, {});
+  assert.equal(analysis.priced_subtotal_usd, 0.02);
+  assert.equal(analysis.recorded_estimated_total_usd, 0.02);
+  assert.equal(analysis.estimated_total_usd, null);
+  assert.equal(analysis.latest_native_turns_settled, false);
+  assert.equal(analysis.owned_sessions[0].recorded_native_terminal_observed, true);
+  assert.equal(analysis.owned_sessions[0].native_terminal_observed, false);
+  assert.equal(usage.estimated_total_usd, 0.02);
+});
 
 test('Anko missing terminal usage never reaches the price estimator or becomes zero cost', () => {
   const forbidden = () => assert.fail('incomplete counts were sent to the estimator');
@@ -221,6 +283,25 @@ function settlementFixture(readUsage, overrides = {}) {
     interrupt: async id => { interrupted.push(id); }, record: async snapshot => { snapshots.push(snapshot); },
     now: () => clock, wait: async ms => { clock += ms; }, budgetMs: 500, intervalMs: 100, ...overrides } };
 }
+
+test('Anko a newer execution invalidates stale idle in bounded settlement', async () => {
+  const turns = new Map();
+  observeSessionTurn(turns, { type: 'session.execution.started', session_id: 'root', created: 202 });
+  const isTerminal = session => nativeTurnTerminal(session, turns);
+  const stale = settlementFixture(() => ({ sessions: [endedSession], cost_estimate_complete: true }), {
+    isTerminal, observeSession: async () => ({ outcome: 'interrupted', time: { idle: 100 } }),
+  });
+  const unresolved = await settleOwnedSessions(stale.options);
+  assert.equal(unresolved.native_settled, false);
+  assert.equal(unresolved.status, 'deadline-unresolved');
+  assert.deepEqual(stale.interrupted, ['root']);
+  observeSessionTurn(turns, { type: 'session.execution.interrupted', session_id: 'root', created: 300 });
+  assert.equal(isTerminal({ ...endedSession, time_idle: 300, active: true }), false);
+  const fresh = settlementFixture(() => ({ sessions: [{ ...endedSession, time_idle: 300 }], cost_estimate_complete: true }), {
+    isTerminal, observeSession: async () => ({ outcome: 'interrupted', time: { idle: 300 } }),
+  });
+  assert.equal((await settleOwnedSessions(fresh.options)).native_settled, true);
+});
 
 test('Anko bounded drain recovers late usage and newly owned children without prompts or repeated interrupts', async () => {
   let reads = 0;

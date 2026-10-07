@@ -49,6 +49,7 @@ export async function recoverOwnedSessions({ exportSession, ...options }) {
 // Read-only drain after safety-stop. No prompt, resume, retry or replacement session API.
 export async function settleOwnedSessions({ readUsage, observeSession, listPermissions, activeTools,
   interrupt, requested = new Set(), record = async () => {}, now = Date.now,
+  isTerminal = nativeTerminal,
   wait = ms => new Promise(done => setTimeout(done, ms)), budgetMs = 10_000, intervalMs = 250,
   observationDeadline = createObservationDeadline({ now, budgetMs }) }) {
   const { started, deadline, remaining } = observationDeadline;
@@ -57,7 +58,7 @@ export async function settleOwnedSessions({ readUsage, observeSession, listPermi
   do {
     const usage = readUsage();
     // Re-read descendants each time; an ack does not prove native termination.
-    await Promise.all(usage.sessions.filter(item => !nativeTerminal(item) && !requested.has(item.id)).map(async item => {
+    await Promise.all(usage.sessions.filter(item => !isTerminal(item) && !requested.has(item.id)).map(async item => {
       if (!remaining()) return;
       requested.add(item.id);
       try {
@@ -75,10 +76,12 @@ export async function settleOwnedSessions({ readUsage, observeSession, listPermi
       const [state, permissions] = await Promise.all([
         query(signal => observeSession(item.id, signal)), query(signal => listPermissions(item.id, signal)),
       ]);
-      return { session_id: item.id, db_terminal: nativeTerminal(item),
+      const apiTerminal = state.status === 'observed' && isTerminal({ ...state.value, id: item.id });
+      const dbTerminal = isTerminal(item);
+      return { session_id: item.id, db_terminal: dbTerminal,
         db_outcome: item.idle_outcome ?? null, db_idle: item.time_idle ?? null,
-        api_status: state.status, api_terminal: state.status === 'observed' && nativeTerminal(state.value),
-        terminal_state_matches: state.status === 'observed' && nativeTerminal(item) && nativeTerminal(state.value) &&
+        api_status: state.status, api_terminal: apiTerminal,
+        terminal_state_matches: dbTerminal && apiTerminal &&
           state.value.outcome === item.idle_outcome && state.value.time.idle === item.time_idle,
         api_outcome: state.value?.outcome ?? null, api_idle: state.value?.time?.idle ?? null,
         permission_status: permissions.status,
