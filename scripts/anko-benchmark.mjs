@@ -1,19 +1,14 @@
-import { diagnoseVersion } from './anko-benchmark/diagnostic-owned.mjs';
 import { parseCommand } from './anko-benchmark/core.mjs';
-import { prepareCommand, showProfile } from './anko-benchmark/prepare.mjs';
-import { runVersion } from './anko-benchmark/run.mjs';
-import { verifyVersion } from './anko-benchmark/verify.mjs';
-import { inspectVersion } from './anko-benchmark/inspect.mjs';
 
 async function main(argv) {
-  const { command, version, packagePath } = parseCommand(argv);
+  const { command, version, packagePath, attempt = null, maxPricedUsd } = parseCommand(argv);
   switch (command) {
-    case 'prepare': return prepareCommand(version, packagePath);
-    case 'profile': return showProfile();
-    case 'diagnose': return diagnoseVersion(version);
-    case 'inspect': return inspectVersion(version);
-    case 'verify': return verifyVersion(version);
-    case 'run': return runVersion(version);
+    case 'prepare': return (await import('./anko-benchmark/prepare.mjs')).prepareCommand(version, packagePath);
+    case 'profile': return (await import('./anko-benchmark/prepare.mjs')).showProfile();
+    case 'diagnose': return (await import('./anko-benchmark/diagnostic-owned.mjs')).diagnoseVersion(version);
+    case 'inspect': return (await import('./anko-benchmark/inspect.mjs')).inspectVersion(version, { attempt });
+    case 'verify': return (await import('./anko-benchmark/verify.mjs')).verifyVersion(version, { attempt });
+    case 'run': return (await import('./anko-benchmark/run.mjs')).runVersion(version, { attempt, maxPricedUsd });
     default: throw new Error(`Unsupported command: ${command}`);
   }
 }

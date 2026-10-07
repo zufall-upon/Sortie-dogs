@@ -6,7 +6,10 @@ const emptyTokens = () => ({ input: 0, output: 0, reasoning: 0, cache_read: 0, c
 const routeOf = model => model?.providerID && model?.id
   ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}` : 'unidentified-model';
 const validCount = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-export const usageSafetyStopReason = usage => usage.unpriced_messages > 0 ? 'unpriced-usage-safety-stop' : null;
+// A missing provider usage receipt is an accounting gap, not a native retry gate.
+// Unsupported prices still stop; unknown totals never become zero or complete.
+export const usageSafetyStopReason = usage => usage.records.some(record => record.status === 'unpriced-usage')
+  ? 'unpriced-usage-safety-stop' : null;
 
 // Token completeness, price availability and actual billing are different facts.
 export function classifyUsage(message, session, estimate) {
@@ -14,8 +17,13 @@ export function classifyUsage(message, session, estimate) {
   const counts = { input: tokens?.input, output: tokens?.output, reasoning: tokens?.reasoning,
     cache_read: tokens?.cache?.read, cache_write: tokens?.cache?.write };
   const complete = Object.values(counts).every(validCount);
+  // V2 can retain a prior idle while a background child wakes the parent again.
+  // That older idle is not a terminal observation for the newer message.
+  const idle = session?.time_idle ?? session?.time?.idle;
+  const created = message.time?.created;
+  const currentIdle = nativeTerminal(session) && (!Number.isFinite(created) || idle >= created);
   const terminal = Number.isFinite(message.time?.completed) || Boolean(message.error) ||
-    ['completed', 'failed'].includes(message.status) || nativeTerminal(session);
+    ['completed', 'failed'].includes(message.status) || currentIdle;
   if (!complete) return { status: terminal ? 'missing-terminal-usage' : 'pending-usage',
     reason: 'missing-usage', usd: null, token_usage: counts };
   const result = estimate({ providerID: message.model?.providerID, modelID: message.model?.id,

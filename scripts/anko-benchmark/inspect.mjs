@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { ANKO_BASE, INSTRUCTION_SHA256, hashFile, packageReceiptPath, readJson, sha256,
-  tarEntryFromTgz, versionRoot } from './core.mjs';
+  runRecordRoot, tarEntryFromTgz } from './core.mjs';
 import { readOwnedUsage } from './usage.mjs';
 import { nativeTurnTerminal, observeSessionTurn } from './observe.mjs';
 
@@ -52,8 +52,8 @@ export function analyzeSavedTrial(history, events, usage, observation) {
 }
 
 // Offline only. No prepare, diagnose, server, credentials, prompt or receipt writes.
-export async function inspectVersion(version) {
-  const root = versionRoot(version);
+export async function inspectVersion(version, { attempt = null } = {}) {
+  const root = runRecordRoot(version, attempt);
   const lockPath = join(root, 'run-once.lock');
   const lock = await readJson(lockPath);
   assert.equal(lock.stage, 'arm-terminal');

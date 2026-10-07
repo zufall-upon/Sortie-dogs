@@ -1,30 +1,32 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { appendFile, chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { appendFile, chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { finished } from 'node:stream/promises';
 import { READ_STALL_MS, MONITOR_INTERVAL_MS, WALL_LIMIT_MS, COST_LIMIT_USD, INSTRUCTION_SHA256,
-  ANKO_BASE, CLI_SHA256, CLIENT_LOCK_SHA256, CLI_VERSION, HOST_DATABASE,
+  ANKO_BASE, CLI_VERSION, AGENT_ROUTES,
   ROOT_MODEL, WORKER_MODEL, noProgressStopReason, shouldStopForNoProgress, progressSignature } from './core.mjs';
 import { expectSessionTurn, nativeTurnTerminal, observeSessionTurn, observeToolEvent,
-  observerPlugin as nativeObserverPlugin, observeSessionState, safeNativeEvent } from './observe.mjs';
+  installObservationFiles, observeSessionState, safeNativeEvent, toolWaitObservations } from './observe.mjs';
 import { eligibleReadPermission } from './recovery.mjs';
 import { readOwnedUsage, usageSafetyStopReason } from './usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions } from './settle.mjs';
+import { comparablePath, loadClient, goToolchain, npmCommand } from './host.mjs';
 
 const runnerInvokedAt = Date.now();
-const { OpenCode } = await import(pathToFileURL(resolve('.sortie-env/node_modules/@opencode/client/dist/promise/index.js')).href);
 
 assert.equal(process.argv.length, 2, 'run this arm only through scripts/anko-benchmark.mjs run --version X.Y.Z');
 const packageVersion = process.env.ANKO_BENCHMARK_VERSION;
 const output = process.env.ANKO_BENCHMARK_TRIAL_DIRECTORY;
 const recordRoot = process.env.ANKO_BENCHMARK_RECORD_PATH;
 assert(packageVersion && output && recordRoot, 'reusable runner launch context is incomplete');
-const prepared = resolve('_testenv/anko-v0136-20261004');
+const profile = JSON.parse(await readFile(join(output, 'profile.json'), 'utf8'));
+const paths = profile.paths ?? (await import('./core.mjs')).HOST;
+const { OpenCode } = await loadClient(paths);
 const packageReceiptPath = process.env.ANKO_BENCHMARK_PACKAGE_RECEIPT;
 const packageReceipt = JSON.parse(await readFile(packageReceiptPath, 'utf8'));
 const candidatePackage = JSON.parse(await readFile(join(output, 'candidate-package.json'), 'utf8'));
@@ -35,9 +37,6 @@ assert.equal(packageReceipt.sha256, candidatePackage.sha256);
 assert(!existsSync(join(output, 'data/opencode/opencode.db')));
 assert(!existsSync(join(output, 'request.txt')));
 assert(!existsSync(join(output, 'project/.sortie-dogs-v010')));
-const priorContinuation = JSON.parse(await readFile(join(prepared, 'continuation/receipt.json'), 'utf8'));
-assert.equal(priorContinuation.root, null);
-assert.equal(priorContinuation.execution_stop_reason, 'setup-failure:model-routing-preflight');
 const attemptLockPath = join(output, 'run-attempt.lock');
 if (existsSync(join(output, 'receipt.json')) || !existsSync(attemptLockPath))
   throw new Error('trial does not hold its exclusive one-shot launch record');
@@ -55,15 +54,14 @@ process.env.TMP = join(output, 'tmp');
 process.env.TEMP = join(output, 'tmp');
 process.env.TMPDIR = join(output, 'tmp');
 const source = join(output, candidatePackage.archive_filename);
-const goArchive = join(prepared, 'go1.27.1.linux-amd64.tar.gz');
+const goArchive = paths.go_archive;
 const project = join(output, 'project');
 const control = join(project, '.opencode');
 const config = join(output, 'config');
-const official = 'M:/_work/_Sortie-dogs-artifacts/records/legacy-testenv-2026-09-30/deep-swe-lf/tasks/anko-typed-variable-bindings';
-const mirror = 'M:/_work/_Sortie-dogs-artifacts/records/legacy-testenv-2026-09-30/frontierharness-tools/anko.git';
-const nativeGoDirectory = join(prepared, 'tools/go');
-const wslGoDirectory = execFileSync('wsl.exe', ['-e', 'wslpath', '-a', nativeGoDirectory], { encoding: 'utf8' }).trim();
-const go = `${wslGoDirectory}/bin/go`;
+const official = output;
+const nativeGoDirectory = paths.go_directory;
+const toolchain = goToolchain(paths, project);
+const go = toolchain.executable;
 const base = '3f269a72ff69398b1250c584171f32d12c0d8085';
 const archiveSha = candidatePackage.sha256;
 const archiveShasum = candidatePackage.shasum;
@@ -72,15 +70,15 @@ const goArchiveSha = '63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590
 const instructionSha = '96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe';
 const marker = candidatePackage.runtime_marker;
 assert.equal(typeof marker, 'string', 'version-specific runtime marker is missing from package receipt');
-const cli = 'C:/Users/rozen/AppData/Roaming/ai.opencode.desktop/cli/2.0.18/opencode-cli.exe';
-const driverClientPackage = resolve('.sortie-env/node_modules/@opencode/client/package.json');
-const driverClientLockPath = resolve('.sortie-env/package-lock.json');
-const hostDatabase = HOST_DATABASE;
+const cli = profile.cli.path;
+const driverClientPackage = paths.client_package;
+const driverClientLockPath = paths.client_lock;
+const hostDatabase = paths.host_database;
 const cliDatabase = join(output, 'data/opencode/opencode.db');
 const usageSnapshot = join(output, 'usage/opencode.db');
 const hookLogPath = join(output, 'native-hook-events.jsonl');
-const cliSha = CLI_SHA256;
-const clientLockSha = CLIENT_LOCK_SHA256;
+const cliSha = profile.cli.sha256;
+const clientLockSha = await hashFile(join(output, 'driver-client-package-lock.json'));
 const expectedRootModel = ROOT_MODEL;
 const expectedWorkerModel = WORKER_MODEL;
 const cliVersion = CLI_VERSION;
@@ -107,25 +105,8 @@ const sha512Integrity = data => `sha512-${createHash('sha512').update(data).dige
 const modelRoute = model => model?.providerID && (model.id || model.model)
   ? `${model.providerID}/${model.id ?? model.model}${model.variant ? `#${model.variant}` : ''}` : null;
 
-const observerPlugin = `import { appendFile } from 'node:fs/promises';
-const log = process.env.ANKO_BENCHMARK_HOOK_LOG;
-const safe = (phase, input, output) => {
-  const args = input?.args ?? input?.input ?? {};
-  const tool = typeof input?.tool === 'string' ? input.tool : null;
-  const path = tool === 'read' ? (args.filePath ?? args.path ?? args.filepath ?? null) : null;
-  return { at: new Date().toISOString(), phase, tool, session_id: input?.sessionID ?? null,
-    call_id: input?.callID ?? input?.id ?? null, agent: input?.agent ?? null,
-    path: typeof path === 'string' ? path : null, status: output?.status ?? null };
-};
-const record = async value => { if (log) await appendFile(log, JSON.stringify(value) + '\\n'); };
-export default async () => ({
-  'tool.execute.before': async (input, output) => record(safe('plugin-hook-before', input, output)),
-  'tool.execute.after': async (input, output) => record(safe('plugin-hook-after', input, output)),
-});
-`;
-
 function normalizePath(value) {
-  return String(value ?? '').replaceAll('/', '\\').toLowerCase();
+  return comparablePath(value);
 }
 
 function sanitizedPermission(request) {
@@ -211,7 +192,10 @@ async function readHookEvents(path, offset) {
 function sourceProgressSignature(project) {
   const head = cmd('git', ['rev-parse', 'HEAD'], { cwd: project }).trim();
   const status = cmd('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: project });
-  return hash(`${head}\0${status}`);
+  const diff = cmd('git', ['diff', 'HEAD', '--binary'], { cwd: project });
+  const untracked = cmd('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: project })
+    .split('\0').filter(Boolean).map(path => [path, hash(readFileSync(join(project, path)))]);
+  return hash(JSON.stringify({ head, status, diff, untracked }));
 }
 
 async function readJsonLines(path) {
@@ -244,10 +228,7 @@ function findLoadedRuntime(value, visited = new Set()) {
 async function installObserverPlugin() {
   const control = join(project, '.opencode');
   const configPath = join(control, 'opencode.json');
-  const pluginDirectory = join(control, 'plugins/anko-benchmark-observer');
-  await mkdir(pluginDirectory, { recursive: true });
-  await writeFile(join(pluginDirectory, 'package.json'), '{"private":true,"type":"module","main":"./index.js"}\n', { flag: 'wx' });
-  await writeFile(join(pluginDirectory, 'index.js'), nativeObserverPlugin, { flag: 'wx' });
+  await installObservationFiles(project);
   const configValue = JSON.parse(await readFile(configPath, 'utf8'));
   configValue.plugins ??= [];
   if (!configValue.plugins.includes('./plugins/anko-benchmark-observer'))
@@ -266,6 +247,8 @@ let promptError = null;
 let promptPromise = null;
 const promptController = new AbortController();
 let terminal = false;
+let benchmarkAccepted = false;
+const reportedUsageGaps = new Set();
 let stopReason = null;
 let failure = null;
 let started = null;
@@ -316,18 +299,24 @@ let runnerSha = null;
 let auditSha = null;
 let provenanceSha = null;
 const wallMs = WALL_LIMIT_MS;
-const costCap = COST_LIMIT_USD;
+const costCap = Number(process.env.ANKO_BENCHMARK_COST_LIMIT_USD ?? COST_LIMIT_USD);
+assert(Number.isFinite(costCap) && costCap > 0 && costCap <= COST_LIMIT_USD);
 
 async function startPrivateServer(env, logPrefix) {
-  const password = randomBytes(24).toString('hex');
+  let password = randomBytes(24).toString('hex');
+  // Same lifecycle as release-cli: the plugin's public-history fallback must
+  // discover this exact private service, never the user's shared listener.
+  const state = join(output, `${logPrefix}-service-state`);
+  const registrationPath = join(state, 'opencode/service.json');
+  await mkdir(state, { recursive: true });
   rememberSensitiveValue(password);
   rememberSensitiveValue(Buffer.from(`opencode:${password}`).toString('base64'));
   const stdoutPath = join(output, `${logPrefix}-server-stdout.log`);
   const stderrPath = join(output, `${logPrefix}-server-stderr.log`);
   const out = createWriteStream(stdoutPath);
   const err = createWriteStream(stderrPath);
-  const child = spawn(cli, ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
-    cwd: project, env: { ...env, OPENCODE_SERVER_PASSWORD: password },
+  const child = spawn(cli, ['serve', '--service', '--hostname', '127.0.0.1', '--port', '0'], {
+    cwd: project, env: { ...env, XDG_STATE_HOME: state, OPENCODE_SERVER_PASSWORD: password },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   let log = '';
@@ -343,9 +332,7 @@ async function startPrivateServer(env, logPrefix) {
   const url = /http:\/\/127\.0\.0\.1:\d+/u.exec(log)?.[0];
   const handle = {
     child, url, get closed() { return closed; }, errors: () => errors, spawnError,
-    client: url ? OpenCode.make({ baseUrl: url, headers: {
-      Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`,
-    } }) : null,
+    client: null,
     async stop() {
       if (!closed) {
         const closedPromise = new Promise(done => child.once('close', done));
@@ -364,6 +351,11 @@ async function startPrivateServer(env, logPrefix) {
         const logText = await readFile(path, 'utf8');
         await writeFile(path, redactSensitiveText(logText));
       }
+      if (closed) {
+        await rm(registrationPath, { force: true });
+        // --service also persists its generated password in the isolated config.
+        await rm(join(config, 'service.json'), { force: true });
+      }
       return closed;
     },
   };
@@ -371,6 +363,26 @@ async function startPrivateServer(env, logPrefix) {
   if (!url) {
     await handle.stop();
     throw new Error(`V2 server ${logPrefix} startup failed: ${String(spawnError ?? errors)}`);
+  }
+  try {
+    const registration = JSON.parse(await readFile(registrationPath, 'utf8'));
+    assert.equal(registration.url, url, 'private service registration/listener mismatch');
+    assert.equal(registration.pid, child.pid, 'private service registration/PID mismatch');
+    // --service generates its own password; the registration is authoritative.
+    password = registration.password;
+    rememberSensitiveValue(password);
+    const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+    rememberSensitiveValue(authorization);
+    handle.client = OpenCode.make({ baseUrl: url, headers: { Authorization: authorization } });
+    const info = await handle.client.server.info({ signal: AbortSignal.timeout(10_000) });
+    assert.equal(info.pid, child.pid, 'private service info/PID mismatch');
+    await writeFile(join(output, `${logPrefix}-service-registration.json`), JSON.stringify({
+      pid: info.pid, version: info.version, url, registered: true, isolated_state: state,
+      password_retained: false, owning_history_endpoint: true,
+    }, null, 2));
+  } catch (error) {
+    await handle.stop();
+    throw error;
   }
   return handle;
 }
@@ -528,8 +540,8 @@ async function persistFinal() {
   const nativeReceipt = operator?.receipt ?? null;
   const executionElapsed = started === null || stoppedAt === null ? 0 : stoppedAt - started;
    const accepted = stopReason === 'accepted' && nativeReceipt?.status === 'succeeded' &&
-     nativeReceipt?.stop_reason === 'completed' && settlement?.native_settled === true &&
-     finalUsage?.cost_estimate_complete === true;
+     nativeReceipt?.stop_reason === 'completed' && settlement?.native_settled === true;
+   benchmarkAccepted = accepted;
   const eventTypes = Object.fromEntries([...new Set(nativeEventRecords.map(event => event.type))]
     .map(type => [type, nativeEventRecords.filter(event => event.type === type).length]));
   const readCalls = nativeEventRecords.filter(event => event.type === 'session.tool.called' && event.tool === 'read');
@@ -642,7 +654,7 @@ async function collectSettlement() {
 
 try {
   await mkdir(config);
-   const originalInstructionBytes = await readFile(join(prepared, 'instruction.md'));
+   const originalInstructionBytes = await readFile(paths.instruction);
    assert.deepEqual(await readFile(join(output, 'instruction.md')), originalInstructionBytes);
   runnerCommit = cmd('git', ['rev-parse', 'HEAD']).trim();
   runnerChanges = cmd('git', ['status', '--porcelain=v1']).split(/\r?\n/u).filter(Boolean);
@@ -665,13 +677,14 @@ try {
   assert.equal(pinned.package?.runtime_marker, marker, 'provenance runtime marker mismatch');
   assert.equal(pinned.opencode?.version, cliVersion, 'provenance CLI version mismatch');
   assert.equal(pinned.opencode?.cli_sha256, cliSha, 'provenance CLI hash mismatch');
-  assert.equal(process.version, pinned.toolchain?.windows_node_version, 'Windows Node version drift');
-  const windowsNpm = JSON.parse(await readFile(join(dirname(process.execPath), 'node_modules/npm/package.json'), 'utf8'));
-  assert.equal(windowsNpm.version, pinned.toolchain?.windows_npm_version, 'Windows npm version drift');
+  assert.equal(process.version, pinned.toolchain?.node_version, 'Node version drift');
+  const npm = npmCommand(['--version']);
+  const npmVersion = cmd(npm.file, npm.args).trim();
+  assert.equal(npmVersion, pinned.toolchain?.npm_version, 'npm version drift');
   assert.equal(process.platform, pinned.toolchain?.runner_platform, 'runner platform drift');
-  assert.equal(pinned.go?.version, 'go1.27.1', 'provenance Go version mismatch');
-  assert.equal(pinned.go?.archive_sha256, goArchiveSha, 'provenance Go archive hash mismatch');
-  assert.equal(pinned.toolchain?.wsl_node_minimum, '22.6.0', 'provenance WSL Node minimum mismatch');
+  assert.equal(pinned.go?.version, 'go version go1.27.1 linux/amd64', 'provenance Go version mismatch');
+  assert.equal(await hashFile(join(project, '.gopath/bin/goyacc')), pinned.go.generator.sha256);
+  assert.equal(await hashFile(goArchive), goArchiveSha, 'Go archive hash mismatch');
   const driverClient = JSON.parse(await readFile(driverClientPackage, 'utf8'));
   assert.equal(driverClient.version, '2.0.18', 'driver @opencode/client version mismatch');
   assert.equal(await hashFile(driverClientLockPath), pinned.driver_client?.package_lock_sha256,
@@ -701,15 +714,6 @@ try {
   const instruction = instructionBytes.toString('utf8');
     await writeFile(join(output, 'package-SHA256SUMS'), `${archiveSha}  ${candidatePackage.archive_filename}\n`);
 
-   const mirrorDefaultBranch = cmd('git', ['-C', mirror, 'symbolic-ref', '--short', 'HEAD']).trim();
-   const mirrorDefaultTip = cmd('git', ['-C', mirror, 'rev-parse', `refs/heads/${mirrorDefaultBranch}`]).trim();
-   assert.equal(mirrorDefaultBranch, pinned.source?.mirror_default_branch, 'Anko mirror default branch drift');
-   assert.equal(mirrorDefaultTip, pinned.source?.mirror_default_tip, 'Anko mirror default tip drift');
-   assert.equal(gitRefExists(mirror, 'refs/heads/main'), pinned.source?.main_ref_present,
-     'Anko mirror main branch presence drift');
-   assert.equal(cmd('git', ['-C', mirror, 'cat-file', '-e', `${base}^{commit}`]).trim(), '');
-   assert.equal(cmd('git', ['-C', mirror, 'merge-base', '--is-ancestor', base, `refs/heads/${mirrorDefaultBranch}`]).trim(), '');
-
    stage = 'reuse-prepared-clone';
    assert.equal(cmd('git', ['rev-parse', 'HEAD'], { cwd: project }).trim(), base);
    assert.equal(cmd('git', ['rev-parse', 'main'], { cwd: project }).trim(), base);
@@ -725,6 +729,11 @@ try {
     XDG_DATA_HOME: join(output, 'data'), XDG_CACHE_HOME: join(output, 'cache'), OPENCODE_DB: cliDatabase,
     ANKO_BENCHMARK_HOOK_LOG: hookLogPath,
     TMP: join(output, 'tmp'), TEMP: join(output, 'tmp'), TMPDIR: join(output, 'tmp') };
+  if (process.platform !== 'win32') {
+    Object.assign(env, toolchain.variables);
+    env.PATH = [dirname(cli), dirname(process.execPath), join(nativeGoDirectory, 'bin'),
+      join(project, '.gopath/bin'), env.PATH].join(':');
+  }
   await writeFile(env.OPENCODE_CONFIG, '{}\n');
   env.NPM_CONFIG_USERCONFIG = join(config, 'npmrc');
   env.NPM_CONFIG_GLOBALCONFIG = join(config, 'npm-globalrc');
@@ -745,27 +754,10 @@ try {
   estimateModelUsageCost = costModule.estimateModelUsageCost;
    assert.equal((await readFile(join(control, 'sortie-dogs-v010.version'), 'utf8')).trim(), marker);
     await cp(join(control, 'opencode.json'), join(output, 'isolated-opencode.json'), { force: false, errorOnExist: true });
-  const wslProject = cmd('wsl.exe', ['-e', 'wslpath', '-a', project]).trim();
   await Promise.all(['.gocache', '.gomodcache', '.gopath', '.tmp'].map(name =>
     mkdir(join(project, name), { recursive: true })));
     assert(existsSync(join(nativeGoDirectory, 'bin/go')), 'saved Go installation is missing');
-    const wslGoVersion = 'go version go1.27.1 linux/amd64';
-   const wslToolchain = cmd('wsl.exe', ['-e', 'bash', '-lc', 'node --version && npm --version && git --version'])
-     .trim().split(/\r?\n/u);
-   assert.equal(wslToolchain.length, 3, 'WSL Node/npm/Git preflight returned an unexpected result');
-    const wslNodeVersion = /^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/u.exec(wslToolchain[0]);
-    assert(wslNodeVersion && (Number(wslNodeVersion.groups.major) > 22 ||
-      (Number(wslNodeVersion.groups.major) === 22 && Number(wslNodeVersion.groups.minor) >= 6)),
-    'WSL Node must satisfy the approved Node >=22.6 toolchain');
-   assert.match(wslToolchain[1], /^\d+\.\d+\.\d+$/u, 'WSL npm version unavailable');
-   assert.match(wslToolchain[2], /^git version \d+\.\d+\.\d+$/u, 'WSL git version unavailable');
-  const isolatedGoEnv = [
-    `GOCACHE=${wslProject}/.gocache`, `GOMODCACHE=${wslProject}/.gomodcache`,
-    `GOPATH=${wslProject}/.gopath`, `TMPDIR=${wslProject}/.tmp`,
-    `TMP=${wslProject}/.tmp`, `TEMP=${wslProject}/.tmp`,
-  ];
-   goStdlibPackageCount = priorContinuation.go_stdlib_package_count;
-  assert(goStdlibPackageCount > 0, 'Go 1.27.1 standard-library package listing is empty');
+   goStdlibPackageCount = profile.go?.stdlib_package_count ?? null;
 
   stage = 'database-init';
   const preflight = await startPrivateServer(env, 'preflight');
@@ -822,29 +814,12 @@ try {
       { signal: AbortSignal.timeout(30_000) })).data ?? [];
     configuredAgents = agentList.map(item => ({ id: item.id, mode: item.mode, configured_model: modelRoute(item.model) }));
     await writeFile(join(output, 'configured-agents.json'), JSON.stringify(configuredAgents, null, 2));
-    const requiredAgentRoutes = {
-      'dog-operator': expectedRootModel,
-      'dogs-coordinator': expectedRootModel,
-      'dog-reviewer-v010': expectedRootModel,
-      'dog-scout-v010': expectedRootModel,
-      'dog-advisor-v010': expectedRootModel,
-      'dog-worker-v010': expectedWorkerModel,
-      'dog-luna-worker-v010': expectedWorkerModel,
-    };
-    for (const [agentID, expectedRoute] of Object.entries(requiredAgentRoutes)) {
+     for (const [agentID, expectedRoute] of Object.entries(AGENT_ROUTES)) {
       const configured = configuredAgents.find(item => item.id === agentID);
       assert(configured, `required configured agent is unavailable: ${agentID}`);
       assert.equal(configured.configured_model, expectedRoute,
         `required configured model route mismatch for ${agentID}`);
     }
-    for (const item of configuredAgents) {
-     const workerRole = ['dog-worker-v010', 'dog-luna-worker-v010'].includes(item.id);
-     const solRole = ['dog-operator', 'dogs-coordinator', 'dog-reviewer-v010', 'dog-scout-v010'].includes(item.id);
-     if (item.configured_model && workerRole) assert.equal(item.configured_model, expectedWorkerModel,
-       `Luna Worker route mismatch for configured agent ${item.id}`);
-     if (item.configured_model && solRole) assert.equal(item.configured_model, expectedRootModel,
-       `SOL route mismatch for configured agent ${item.id}`);
-   }
 
   stage = 'session';
   started = Date.now();
@@ -861,8 +836,6 @@ try {
      instruction_sha256: hash(instruction), official_sha256: inputHashes, provenance_sha256: provenanceSha,
      host, marker, package_version: packageVersion, package_integrity: archiveIntegrity,
      model_discovery: modelDiscovery, configured_agents: configuredAgents,
-      mirror_default_branch: mirrorDefaultBranch, mirror_default_tip: mirrorDefaultTip,
-      mirror_main_ref_present: gitRefExists(mirror, 'refs/heads/main'),
       go_archive_sha256: goArchiveSha, at: new Date(started).toISOString(),
       max_attempts: 1, max_wall_minutes: 60, max_priced_usd: costCap, model_route: expectedRootModel,
       no_progress_timeout_ms: READ_STALL_MS, active_session_status_is_progress: false,
@@ -876,9 +849,9 @@ try {
      database_isolation: true, credential_seed: credentialSeed, preflight_session_count: preflightSessionCount,
      environment_sanitization: { sensitive_variable_names_removed: sensitiveEnvironmentKeys.length,
        home_and_user_config_isolated: true },
-      wsl_go_version: wslGoVersion, go_stdlib_package_count: goStdlibPackageCount,
-      wsl_node_version: wslToolchain[0], wsl_npm_version: wslToolchain[1], wsl_git_version: wslToolchain[2],
-      windows_node_version: process.version, windows_npm_version: windowsNpm.version,
+      go_version: pinned.go.version, go_stdlib_package_count: goStdlibPackageCount,
+      node_version: process.version, npm_version: npmVersion,
+      validation_command: toolchain.validation_command,
      go_path: go, npm_package_lock_sha256: npmPackageLockSha, package_path: installed, runner_commit: runnerCommit,
     runner_worktree_paths: runnerChanges, runner_sha256: runnerSha, audit_sha256: auditSha,
     branch: branchName, official_scoring: false };
@@ -893,10 +866,9 @@ try {
 
     stage = 'execution';
     const applicableAgentsText = await readFile(join(output, 'applicable-AGENTS.md'), 'utf8');
-    const profile = JSON.parse(await readFile(join(output, 'profile.json'), 'utf8'));
     assert.equal(hash(Buffer.from(applicableAgentsText)), profile.applicable_agents_sha256,
       'applicable AGENTS.md context differs from the fixed profile');
-    const prompt = `この一件のAnko typed-variable-bindings実装を、完了まで自律的に進めて。チャット・Task・引継ぎ・報告は日本語。開始時にsortie_v010_operator_statusで実loaded runtimeのmarker/hashを記録して。source mirrorの既定はmasterだが、比較条件で指定されたbase commit ${base} を固定し、新しい隔離branchを作成済み。必要な調査・実装・局所テスト・再修正・レビュー・commit・native Mission受理receiptまで進めて。品質未達ならOperatorは同じmissionとCoordinatorへ具体的に差し戻し、通常の作業継続をユーザーに要求しない。作業領域はこの隔離cloneだけ。公式hidden grader、公式採点、追加スコアリングを実行・参照・変更せず、rewardを推測で報告しない。Anko上流への変更・PR・push、Sortie-dogs変更・PR、公開・リリースは行わない。実行環境: Windows側にGoはなく、WSL UbuntuのGoは ${go}。生成物・依存cache・一時ファイルは隔離clone内だけに置く。継承した検証コマンドは wsl.exe --cd "${wslProject}" -e /usr/bin/env GOCACHE="${wslProject}/.gocache" GOMODCACHE="${wslProject}/.gomodcache" GOPATH="${wslProject}/.gopath" TMPDIR="${wslProject}/.tmp" TMP="${wslProject}/.tmp" TEMP="${wslProject}/.tmp" ${go} test ./... 。以下に実行runnerが事前読込したこのAnko作業に適用するAGENTS.mdをSHA-256 ${profile.applicable_agents_sha256} とともに示す。同一内容を再取得するためだけに祖先AGENTS.mdを再読しない。候補repo固有の別の適用指示が見つかった場合は通常どおり読む。\n\n--- 適用済みAGENTS.md ---\n${applicableAgentsText}\n--- AGENTS.mdここまで ---\n\nユーザーの課題文（以下、逐語）:\n\n${instruction}`;
+     const prompt = `この一件のAnko typed-variable-bindings実装を、完了まで自律的に進めて。チャット・Task・引継ぎ・報告は日本語。開始時にsortie_v010_operator_statusで実loaded runtimeのmarker/hashを記録して。base commit ${base} を固定し、新しい隔離branchを作成済み。必要な調査・実装・局所テスト・再修正・レビュー・commit・native Mission受理receiptまで進めて。品質未達なら同じMissionへ具体的に差し戻し、通常の要求内継続をユーザーに要求しない。作業repo root: ${project}。patchはこのroot基準の相対pathを使い、読取結果のpathを引き継いで別repoと取り違えない。公式hidden grader、公式採点、追加スコアリングは実行・参照・変更しない。Anko上流へのPR・push、Sortie-dogs変更、公開・リリースは課題外。実行環境: ${toolchain.environment_description}。正式検証コマンド: ${toolchain.validation_command}。以下は事前読込済みの適用AGENTS.md (SHA-256 ${profile.applicable_agents_sha256})。同じ内容を取得するだけの再readは不要。候補repo固有の適用指示は通常どおり読む。\n\n--- 適用済みAGENTS.md ---\n${applicableAgentsText}\n--- AGENTS.mdここまで ---\n\nユーザーの課題文（以下、逐語）:\n\n${instruction}`;
    await writeFile(join(output, 'request.txt'), prompt);
   promptSubmitted = true;
    promptPromise = client.session.prompt({ sessionID: root.id, text: prompt, delivery: 'queue', resume: true },
@@ -927,7 +899,16 @@ try {
       if (wrongSolRoute || wrongRootRoute) { stopReason = 'sol-model-mismatch'; break; }
       if (promptError) { failure = promptError; stopReason = 'session-prompt-error'; break; }
       if (lastUsage.priced_usd >= costCap) { stopReason = 'priced-cost-cap'; break; }
-       if (usageSafetyStopReason(lastUsage)) {
+        for (const gap of lastUsage.records.filter(record => record.status === 'missing-terminal-usage')) {
+          if (reportedUsageGaps.has(gap.id)) continue;
+          reportedUsageGaps.add(gap.id);
+          const warning = { phase: 'usage-accounting-gap', at: new Date().toISOString(), record: gap,
+            known_priced_subtotal_usd: lastUsage.priced_usd, estimated_total_usd: null,
+            action: 'retain unknown cost; leave native retry to the host; keep wall/no-progress/known-price limits' };
+          await appendFile(join(output, 'usage-gap-events.jsonl'), `${JSON.stringify(warning)}\n`);
+          console.log(JSON.stringify(warning));
+        }
+        if (usageSafetyStopReason(lastUsage)) {
          stopReason = usageSafetyStopReason(lastUsage);
          await writeFile(join(output, 'usage-safety-stop.json'), JSON.stringify({ at: new Date().toISOString(),
            elapsed_ms: Date.now() - started, stop_reason: stopReason, usage: lastUsage,
@@ -1042,6 +1023,7 @@ try {
           elapsed_ms: progress.elapsed_ms, priced_usd: progress.priced_usd, cap_usd: costCap,
           no_progress_ms: progress.no_progress_ms, no_progress_timeout_ms: READ_STALL_MS,
           active_native_tools: activeTools, pending_permission_requests: pendingPermissionList,
+          tool_wait_observations: toolWaitObservations(activeTools, hookEvents, pendingPermissionList, project),
           sessions: progress.owned_sessions, native_root_outcome: progress.native_root_outcome,
           native_root_idle: progress.native_root_idle, mission_phase: progress.mission_phase,
           review: progress.review, submission_status: progress.submission_status,
@@ -1068,6 +1050,7 @@ try {
           root_session: root.id, elapsed_ms: Date.now() - started, no_progress_ms: progress.no_progress_ms,
           no_progress_timeout_ms: READ_STALL_MS, stalled_tool: stalledTool ?? null,
           active_native_tools: activeTools, pending_permission_requests: pendingPermissionList,
+          tool_wait_observations: toolWaitObservations(activeTools, hookEvents, pendingPermissionList, project),
           native_event_count: native.state.events_seen, native_progress_event_count: native.state.progress_event_count,
           last_progress_source: native.state.last_progress_source, stream_error: native.state.stream_error,
           owned_sessions: progress.owned_sessions };
@@ -1177,7 +1160,7 @@ try {
 
 try {
   const retainedFiles = [
-      'run.mjs', 'run-arm.mjs', 'core.mjs', 'observe.mjs', 'usage.mjs', 'settle.mjs', 'recovery.mjs', 'execution-policy.json', 'prepare.mjs', 'setup.json', 'candidate-package.json', 'launch-management.patch',
+       'run.mjs', 'run-arm.mjs', 'core.mjs', 'host.mjs', 'observe.mjs', 'usage.mjs', 'settle.mjs', 'recovery.mjs', 'execution-policy.json', 'prepare.mjs', 'setup.json', 'candidate-package.json', 'launch-management.patch',
      'bootstrap-config.json', 'provenance.json', 'verify.mjs', 'verify-regression.mjs', 'frozen-inputs.json', 'preparation-usage.json', 'driver-client-package.json', 'driver-client-package-lock.json',
      candidatePackage.archive_filename, 'instruction.md', 'applicable-AGENTS.md', 'profile.json', 'package-SHA256SUMS',
      'isolated-opencode.json', 'model-discovery.json', 'configured-agents.json',
@@ -1188,7 +1171,8 @@ try {
     'native-history.json', 'request.txt', 'driver-error.txt',
     'preflight-server-stdout.log', 'preflight-server-stderr.log',
     'server-server-stdout.log', 'server-server-stderr.log',
-    'data/opencode/opencode.db', 'usage/opencode.db',
+    'data/opencode/opencode.db', 'usage/opencode.db', 'usage-gap-events.jsonl', 'goyacc.json',
+    'preflight-service-registration.json', 'server-service-registration.json',
   ];
   await mkdir(recordRoot, { recursive: true });
   for (const relative of retainedFiles) {
@@ -1222,4 +1206,4 @@ try {
   process.exitCode = 1;
 }
 
- if (failure || !root) process.exitCode = 1;
+ if (failure || !root || !benchmarkAccepted) process.exitCode = 1;

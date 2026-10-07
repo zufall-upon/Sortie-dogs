@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { comparablePath, hostPaths } from './host.mjs';
 
 export const ROOT = process.cwd();
 export const STATE_ROOT = join(ROOT, '_testenv/anko-reusable');
-export const ARTIFACT_ROOT = 'M:/_work/_Sortie-dogs-artifacts/records/anko-reusable';
-export const LEGACY_RUN = join(ROOT, '_testenv/anko-v0137-20261005');
-export const SOURCE_PROJECT = join(LEGACY_RUN, 'project');
-export const PREPARED_GO = join(ROOT, '_testenv/anko-v0136-20261004');
-export const CLI = 'C:/Users/rozen/AppData/Roaming/ai.opencode.desktop/cli/2.0.18/opencode-cli.exe';
-export const HOST_DATABASE = 'C:/Users/rozen/.local/share/opencode/opencode.db';
+export const HOST = hostPaths();
+export const ARTIFACT_ROOT = HOST.artifact_root;
+export const LEGACY_RUN = HOST.legacy_run;
+export const SOURCE_PROJECT = HOST.source_project;
+export const CLI = HOST.cli;
+export const HOST_DATABASE = HOST.host_database;
 export const INSTRUCTION_SHA256 = '96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe';
 export const ANKO_BASE = '3f269a72ff69398b1250c584171f32d12c0d8085';
 export const CLI_SHA256 = '78f454c0a1581b66ce4f264f42bfaee6207c887053d8e4b02c4c9cfb74e90668';
@@ -22,6 +23,13 @@ export const COST_LIMIT_USD = 15;
 export const ROOT_MODEL = 'openai/gpt-6.1-sol#xhigh';
 export const WORKER_MODEL = 'openai/gpt-6-luna-fast#max';
 export const CLI_VERSION = '2.0.18';
+
+export const AGENT_ROUTES = {
+  'dog-operator': ROOT_MODEL, 'dogs-coordinator': ROOT_MODEL,
+  'dog-reviewer-v010': ROOT_MODEL, 'dog-advisor-v010': ROOT_MODEL,
+  'dog-scout-v010': WORKER_MODEL,
+  'dog-worker-v010': WORKER_MODEL, 'dog-luna-worker-v010': WORKER_MODEL,
+};
 
 export function sha256(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -56,7 +64,7 @@ export function parseCommand(argv) {
   const options = {};
   for (let i = 0; i < rest.length; i += 1) {
     const key = rest[i];
-    if (!['--version', '--package'].includes(key) || options[key])
+    if (!['--version', '--package', '--attempt', '--max-priced-usd'].includes(key) || options[key])
       throw new Error(`Unexpected or repeated option: ${key}`);
     const value = rest[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${key}`);
@@ -65,12 +73,31 @@ export function parseCommand(argv) {
   if (command !== 'profile' && !options['--version']) throw new Error(`${command} requires --version X.Y.Z`);
   if (command === 'profile' && options['--version']) throw new Error('profile does not accept --version');
   if (command !== 'prepare' && options['--package']) throw new Error('--package is only accepted by prepare');
+  if (options['--attempt'] && !['run', 'verify', 'inspect'].includes(command))
+    throw new Error('--attempt is only accepted by run, verify or inspect');
+  if (options['--attempt']) parseAttempt(options['--attempt']);
+  if (options['--max-priced-usd'] && command !== 'run') throw new Error('--max-priced-usd is only accepted by run');
+  const cap = options['--max-priced-usd'] ? Number(options['--max-priced-usd']) : null;
+  if (cap !== null && (!Number.isFinite(cap) || cap <= 0 || cap > COST_LIMIT_USD))
+    throw new Error(`--max-priced-usd must be positive and within the existing $${COST_LIMIT_USD} limit`);
   return { command, version: options['--version'] ? parseVersion(options['--version']) : null,
-    packagePath: options['--package'] ?? null };
+    packagePath: options['--package'] ?? null, ...(options['--attempt'] ? { attempt: options['--attempt'] } : {}),
+    ...(cap !== null ? { maxPricedUsd: cap } : {}) };
+}
+
+export function parseAttempt(value) {
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(value))
+    throw new Error(`Invalid --attempt value: ${String(value)}`);
+  return value;
 }
 
 export function versionRoot(version) {
   return join(STATE_ROOT, `v${parseVersion(version)}`);
+}
+
+// An explicitly requested new run has its own records, never a reset old lock.
+export function runRecordRoot(version, attempt = null) {
+  return attempt ? join(versionRoot(version), 'attempts', parseAttempt(attempt)) : versionRoot(version);
 }
 
 export function packageRoot(version) {
@@ -156,7 +183,7 @@ export function noProgressStopReason({ pendingPermissionCount = 0, activeTool = 
 }
 
 function comparableObservedPath(value) {
-  return String(value ?? '').replaceAll('/', '\\').toLowerCase();
+  return comparablePath(value);
 }
 
 export function diagnosticReadObservations(events, hooks, targets) {
@@ -232,4 +259,13 @@ export async function copyExclusive(source, destination) {
 
 export async function exists(path) {
   try { await stat(path); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+}
+
+// Moving to the common runner must not reset a consumed retained Linux arm.
+export async function priorStandaloneAttempt(version, paths = HOST) {
+  if (paths.platform !== 'linux') return null;
+  const lock = join(paths.legacy_run, 'run-once.lock');
+  if (!await exists(lock)) return null;
+  const candidate = await readJson(join(paths.legacy_run, 'candidate.json'));
+  return candidate.version === version ? { lock, version, package_sha256: candidate.package_sha256 } : null;
 }

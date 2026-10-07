@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync } from 'node:zlib';
@@ -7,13 +9,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  ROOT, STATE_ROOT, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
+  ROOT, STATE_ROOT, READ_STALL_MS, AGENT_ROUTES, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
   diagnosticReadObservations, parseCommand, parseVersion, profilePath, progressSignature, shouldStopForNoProgress,
-  versionRoot, writeExclusive,
+  priorStandaloneAttempt, runRecordRoot, versionRoot, writeExclusive,
 } from '../scripts/anko-benchmark/core.mjs';
 import { eligibleReadPermission } from '../scripts/anko-benchmark/recovery.mjs';
 import { expectSessionTurn, installObservationFiles, nativeTurnTerminal, observeSessionState,
-  observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
+  observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, toolPaths, toolWaitObservations, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
+import { assertReusableDriver, comparablePath, hostPaths, goToolchain, npmCommand } from '../scripts/anko-benchmark/host.mjs';
 import { classifyUsage, nativeTerminal, readOwnedUsage, summarizeOwnedUsage, usageSafetyStopReason } from '../scripts/anko-benchmark/usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions, settleOwnedSessions } from '../scripts/anko-benchmark/settle.mjs';
 import { analyzeSavedTrial } from '../scripts/anko-benchmark/inspect.mjs';
@@ -55,6 +58,100 @@ test('Anko runner CLI keeps package, version and shared profile identities separ
   assert.equal(profile.stall_policy.no_progress_ms, 180_000);
   assert.equal(profile.stall_policy.active_session_status_is_progress, false);
   assert.equal(profile.stall_policy.contextual_recovery.max_prompts, 1);
+});
+
+test('Anko explicitly named requested runs keep the original version and attempt records separate', () => {
+  const options = parseCommand(['run', '--version', '0.13.9', '--attempt', 'pr168-01']);
+  assert.equal(options.attempt, 'pr168-01');
+  assert.equal(runRecordRoot('0.13.9', options.attempt), join(versionRoot('0.13.9'), 'attempts/pr168-01'));
+  assert.equal(runRecordRoot('0.13.9'), versionRoot('0.13.9'));
+  assert.throws(() => parseCommand(['run', '--version', '0.13.9', '--attempt', '../old']), /Invalid --attempt/u);
+  assert.throws(() => parseCommand(['prepare', '--version', '0.13.9', '--attempt', 'new']), /only accepted/u);
+});
+
+test('Anko preflight uses the real V2 Scout Luna route instead of blocking before inference', () => {
+  assert.equal(AGENT_ROUTES['dog-scout-v010'], 'openai/gpt-6-luna-fast#max');
+  assert.equal(AGENT_ROUTES['dog-worker-v010'], 'openai/gpt-6-luna-fast#max');
+  assert.equal(AGENT_ROUTES['dog-advisor-v010'], 'openai/gpt-6.1-sol#xhigh');
+  const adapter = readFileSync(join(ROOT, 'src/plugin/v2.ts'), 'utf8');
+  assert.match(adapter, /\["dog-scout-v010", "gpt-6-luna-fast", "max"\]/u);
+  const arm = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(arm, /Object.entries\(AGENT_ROUTES\)/u);
+  assert(!arm.includes('const solRole'));
+});
+
+test('Anko a follow-up arm receives the remaining priced budget, never a reset limit', () => {
+  assert.equal(parseCommand(['run', '--version', '0.13.9', '--max-priced-usd', '14.8']).maxPricedUsd, 14.8);
+  for (const value of ['0', '-1', '16', 'NaN', 'Infinity'])
+    assert.throws(() => parseCommand(['run', '--version', '0.13.9', '--max-priced-usd', value]), /existing \$15 limit/u);
+  assert.throws(() => parseCommand(['verify', '--version', '0.13.9', '--max-priced-usd', '14.8']), /only accepted/u);
+});
+
+test('Anko native root success without accepted Mission exits nonzero', () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  const terminal = source.slice(source.lastIndexOf('if (failure || !root'));
+  for (const accepted of [false, true]) {
+    const process = { exitCode: 0 };
+    vm.runInNewContext(terminal, { failure: null, root: { id: 'root' }, benchmarkAccepted: accepted, process });
+    assert.equal(process.exitCode, accepted ? 0 : 1);
+  }
+});
+
+test('Anko private service is registered for native history and uses its generated password', async () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  const fragment = source.slice(source.indexOf('async function startPrivateServer'), source.indexOf('async function seedOpenAICredential'));
+  const calls = [], writes = [], removed = [];
+  const handlers = {};
+  const child = { pid: 123, once: (name, fn) => { (handlers[name] ??= []).push(fn); },
+    kill: () => handlers.close.splice(0).forEach(fn => fn()), stdout: { on: (_, fn) => fn('server listening on http://127.0.0.1:1234') },
+    stderr: { on() {} } };
+  const context = { assert, join, Date, Buffer, AbortSignal, output: '/trial', config: '/trial/config', project: '/trial/project', cli: '/cli',
+    mkdir: async () => {}, randomBytes: () => Buffer.from('requested-password'), rememberSensitiveValue() {},
+    redactSensitiveText: text => text, createWriteStream: () => ({ write() {}, end() {} }),
+    readFile: async path => path.endsWith('/service.json') ? JSON.stringify({ pid: 123, url: 'http://127.0.0.1:1234', password: 'generated-secret' }) : '',
+    writeFile: async (path, text) => writes.push([path, text]), rm: async path => removed.push(path),
+    finished: async () => {}, delay: async () => {}, servers: [],
+    spawn: (file, args, options) => { calls.push({ file, args, options }); return child; },
+    OpenCode: { make: options => { calls.push(options); return { server: { info: async () => ({ pid: 123, version: '2.0.18' }) } }; } },
+  };
+  const server = await vm.runInNewContext(fragment + ';startPrivateServer({}, "run")', context);
+  assert(calls[0].args.includes('--service'));
+  assert.equal(calls[0].options.env.XDG_STATE_HOME, '/trial/run-service-state');
+  assert.equal(calls[1].headers.Authorization, `Basic ${Buffer.from('opencode:generated-secret').toString('base64')}`);
+  assert(!JSON.stringify(writes).includes('generated-secret'));
+  assert.equal(JSON.parse(writes[0][1]).owning_history_endpoint, true);
+  assert.equal(await server.stop(), true);
+  assert.deepEqual(removed, ['/trial/run-service-state/opencode/service.json', '/trial/config/service.json']);
+  // Retain the metadata under the prefixes actually used by the live runner.
+  const prefixes = [...source.matchAll(/startPrivateServer\(env, '([^']+)'\)/gu)].map(match => match[1]);
+  assert.deepEqual(prefixes, ['preflight', 'server']);
+  const retained = source.slice(source.indexOf('const retainedFiles = ['));
+  for (const prefix of prefixes) assert(retained.includes(`'${prefix}-service-registration.json'`));
+});
+
+test('Anko prepares and reuses the pinned goyacc rather than forcing a Worker to discover external tools', async () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/prepare.mjs'), 'utf8');
+  const fragment = source.slice(source.indexOf('export async function ensureGoGenerator'), source.indexOf('export async function showProfile'))
+    .replace('export async', 'async');
+  const files = new Map(), commands = [];
+  const context = { assert, join, Date, STATE_ROOT: '/state', HOST: {},
+    mkdir: async () => {}, fileExists: async path => files.has(path), readJson: async path => files.get(path),
+    hashFile: async () => 'generator-sha', writeJson: async (path, receipt) => files.set(path, receipt),
+    goToolchain: () => ({ variables: { GOPATH: '/state/common/toolchain-check/.gopath' },
+      invocation: args => ({ file: '/go/bin/go', args, env: {} }) }),
+    execFileSync: (file, args) => { commands.push([file, args]); files.set('/state/common/toolchain-check/.gopath/bin/goyacc', true);
+      return 'mod\tgolang.org/x/tools\tv0.42.0\n'; },
+  };
+  const first = await vm.runInNewContext(fragment + ';ensureGoGenerator()', context);
+  assert.equal(first.sha256, 'generator-sha');
+  assert.equal(commands[0][1][1], 'golang.org/x/tools/cmd/goyacc@v0.42.0');
+  const second = await vm.runInNewContext(fragment + ';ensureGoGenerator()', context);
+  assert.equal(second, first);
+  assert.equal(commands.length, 2);
+  const run = readFileSync(join(ROOT, 'scripts/anko-benchmark/run.mjs'), 'utf8');
+  assert.match(run, /copyExclusive\(generator.path, join\(project, '\.gopath\/bin\/goyacc'\)\)/u);
+  const native = goToolchain(hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {} }), '/candidate');
+  assert.match(native.environment_description, /prepared goyacc v0\.42\.0: \/candidate\/\.gopath\/bin\/goyacc/u);
 });
 
 const fullTokens = { input: 20, output: 10, reasoning: 0, cache: { read: 0, write: 0 } };
@@ -150,6 +247,44 @@ test('Anko missing terminal usage never reaches the price estimator or becomes z
   }
 });
 
+test('Anko resumed parent usage ignores the stale previous idle without hiding actual terminal missing usage', () => {
+  const stale = { ...endedSession, time_idle: 100 };
+  const rows = [{ id: 'new-step', session_id: 'root', type: 'assistant',
+    data: { model: testModel, time: { created: 200 } } }];
+  const pending = summarizeOwnedUsage([stale], rows, 'root', () => assert.fail('estimated incomplete usage'));
+  assert.equal(pending.pending_messages, 1);
+  assert.equal(pending.unpriced_messages, 0);
+  assert.equal(usageSafetyStopReason(pending), null);
+  const ended = summarizeOwnedUsage([{ ...stale, time_idle: 201 }], rows, 'root', pricedEstimate);
+  assert.equal(ended.pending_messages, 0);
+  assert.equal(ended.unpriced_messages, 1);
+  assert.equal(usageSafetyStopReason(ended), null);
+  const errored = summarizeOwnedUsage([stale], [{ ...rows[0], data: { ...rows[0].data, error: { type: 'provider.transport' } } }], 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(errored), null);
+});
+
+test('Anko retains transport usage gaps while native retry proceeds, unsupported prices still stop', () => {
+  const rows = [
+    { id: 'closed', session_id: 'root', type: 'assistant', data: { model: testModel,
+      time: { created: 10, completed: 20 }, error: { type: 'provider.transport' }, retry: { attempt: 2, at: 30 } } },
+    { id: 'retry', session_id: 'root', type: 'assistant', data: { model: testModel, time: { created: 30 } } },
+  ];
+  const pending = summarizeOwnedUsage([activeSession], rows, 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(pending), null);
+  assert.equal(pending.missing_token_messages, 2);
+  assert.equal(pending.unpriced_messages, 1);
+  assert.equal(pending.pending_messages, 1);
+  assert.equal(pending.estimated_total_usd, null);
+  const recovered = summarizeOwnedUsage([endedSession], [rows[0], { ...rows[1], data: { ...rows[1].data, tokens: fullTokens } }], 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(recovered), null);
+  assert.equal(recovered.priced_usd, 0.02);
+  assert.equal(recovered.cost_estimate_complete, false);
+  assert.equal(recovered.estimated_total_usd, null);
+  const unknown = summarizeOwnedUsage([endedSession], [{ ...rows[1], data: { model: testModel, tokens: fullTokens } }],
+    'root', () => ({ status: 'unpriced', reason: 'unknown-model' }));
+  assert.equal(usageSafetyStopReason(unknown), 'unpriced-usage-safety-stop');
+});
+
 test('Anko opaque provider state preserves the previous string-only service tier contract', () => {
   const message = { model: { providerID: 'openai', id: 'gpt-6.1-sol' }, tokens: fullTokens };
   const expected = classifyUsage(message, endedSession, estimateModelUsageCost);
@@ -160,7 +295,7 @@ test('Anko opaque provider state preserves the previous string-only service tier
   }
 });
 
-test('Anko owned compaction usage contributes to the subtotal and missing compaction stops safely', async () => {
+test('Anko owned compaction usage contributes to the subtotal and missing compaction remains unknown', async () => {
   const parent = join(ROOT, '_testenv/anko-reusable');
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, 'usage-test-'));
@@ -192,7 +327,7 @@ test('Anko owned compaction usage contributes to the subtotal and missing compac
     assert.equal(missing.cost_estimate_complete, false);
     assert.equal(missing.estimated_total_usd, null);
     assert.equal(missing.actual_billed_usd, null);
-    assert.equal(usageSafetyStopReason(missing), 'unpriced-usage-safety-stop');
+     assert.equal(usageSafetyStopReason(missing), null);
     assert.equal(missing.records.find(item => item.id === 'compact').status, 'missing-terminal-usage');
     const correlation = analyzeSavedTrial([{ messages: [{ id: 'compact', type: 'compaction', status: 'failed',
       error: { type: 'provider.transport' } }] }], [], missing, {});
@@ -232,7 +367,7 @@ test('Anko read-only DB accounting includes owned descendants, excludes stranger
     assert.equal(usage.missing_token_messages, 2);
     assert.equal(usage.estimated_total_usd, null);
     assert.equal(usage.actual_billed_usd, null);
-    assert.equal(usageSafetyStopReason(usage), 'unpriced-usage-safety-stop');
+     assert.equal(usageSafetyStopReason(usage), null);
     assert.deepEqual(usage.sessions.map(item => item.id), ['root', 'child', 'grandchild']);
     assert.equal(usage.records.find(item => item.id === 'missing').estimated_usd, null);
     assert.deepEqual(await readFile(path), before);
@@ -354,9 +489,185 @@ test('Anko missing usage and hanging observation retain the stop within a bounde
 });
 
 test('Anko runner modules parse without invoking an arm or setup', () => {
-  for (const file of ['scripts/anko-benchmark.mjs', ...['arm', 'run', 'core', 'usage', 'settle', 'inspect', 'observe']
+  for (const file of ['scripts/anko-benchmark.mjs', ...['arm', 'run', 'core', 'host', 'prepare', 'verify', 'diagnostic-owned', 'diagnose', 'usage', 'settle', 'inspect', 'observe']
     .map(name => `scripts/anko-benchmark/${name}.mjs`)])
     execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+});
+
+test('Anko Linux host uses existing native CLI, repository client and Go without WSL or Windows storage', () => {
+  const paths = hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {} });
+  assert.equal(paths.host_database, '/home/test/.local/share/opencode/opencode.db');
+  assert.equal(paths.client_package, '/workspace/node_modules/@opencode/client/package.json');
+  assert.equal(paths.release_root, '/workspace/_testenv/releases');
+  assert.equal(paths.artifact_root, '/workspace/_testenv/anko-records');
+  const toolchain = goToolchain(paths, '/workspace/candidate', () => assert.fail('Linux invoked WSL'));
+  assert.equal(toolchain.invocation(['test', './...']).file, `${paths.go_directory}/bin/go`);
+  assert.match(toolchain.validation_command, /GOCACHE=\/workspace\/candidate\/\.gocache/u);
+  assert(!toolchain.validation_command.includes('wsl.exe'));
+  assert.deepEqual(npmCommand(['--version'], { platform: 'linux' }), { file: 'npm', args: ['--version'] });
+});
+
+test('Anko Windows host retains CLI/client paths and WSL Go validation', () => {
+  const paths = hostPaths({ root: 'C:\\workspace', platform: 'win32', home: 'C:\\Users\\test', env: {} });
+  assert.match(paths.client_package, /\.sortie-env\\node_modules\\@opencode\\client/u);
+  assert(paths.cli.endsWith('2.0.18/opencode-cli.exe'));
+  const calls = [];
+  const toolchain = goToolchain(paths, 'C:\\workspace\\candidate', (file, args) => {
+    calls.push([file, args]); return args.at(-1) === paths.go_directory ? '/mnt/c/go\n' : '/mnt/c/candidate\n';
+  });
+  assert.equal(calls.length, 2);
+  assert(calls.every(([file]) => file === 'wsl.exe'));
+  assert.equal(toolchain.invocation(['test', './...']).file, 'wsl.exe');
+  assert.match(toolchain.validation_command, /\/mnt\/c\/go\/bin\/go/u);
+  assert.deepEqual(npmCommand(['install'], { platform: 'win32', execPath: 'C:\\node\\node.exe', npmExecPath: 'C:\\node\\npm.js' }),
+    { file: 'C:\\node\\node.exe', args: ['C:\\node\\npm.js', 'install'] });
+});
+
+test('Anko host overrides are preparation paths, not additional permission rules', () => {
+  const paths = hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {
+    ANKO_CLI: '/tools/opencode', ANKO_SOURCE_PROJECT: '/source/anko', ANKO_GO_DIRECTORY: '/tools/go',
+    ANKO_INSTRUCTION: '/inputs/instruction.md', ANKO_ARTIFACT_ROOT: '/records',
+  } });
+  assert.equal(paths.cli, '/tools/opencode');
+  assert.equal(paths.source_project, '/source/anko');
+  assert.equal(paths.instruction, '/inputs/instruction.md');
+  assert.equal(paths.artifact_root, '/records');
+  assert(!JSON.stringify(paths).includes('permissions'));
+  assert.equal(comparablePath('/source/Env.go') === comparablePath('/source/env.go'), false);
+  assert.equal(comparablePath('C:\\source\\Env.go'), comparablePath('c:/source/env.go'));
+});
+
+test('Anko Linux repository version bumps do not invalidate an unchanged driver, arm lock remains frozen', () => {
+  const saved = { version: '2.0.18', package_lock_sha256: 'sortie-0.13.9-lock' };
+  const current = { ...saved, package_lock_sha256: 'sortie-0.13.10-lock' };
+  assert.doesNotThrow(() => assertReusableDriver(saved, current, 'linux'));
+  assert.throws(() => assertReusableDriver(saved, { ...current, version: '2.0.20' }, 'linux'), /version changed/u);
+  assert.throws(() => assertReusableDriver(saved, current, 'win32'), /Windows driver lock changed/u);
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(source, /const clientLockSha = await hashFile\(join\(output, 'driver-client-package-lock.json'\)\)/u);
+  assert.match(source, /assert.equal\(await hashFile\(driverClientLockPath\), clientLockSha/u);
+});
+
+test('Anko CLI argument errors do not eagerly import a missing diagnostic client', () => {
+  let error;
+  try { execFileSync(process.execPath, ['scripts/anko-benchmark.mjs', 'run'], {
+    encoding: 'utf8', env: { ...process.env, ANKO_CLI: '/absent/opencode' }, stdio: 'pipe',
+  }); } catch (value) { error = value; }
+  assert.equal(error.status, 1);
+  assert.match(error.stderr, /run requires --version/u);
+  assert(!error.stderr.includes('ERR_MODULE_NOT_FOUND'));
+});
+
+test('Anko run admits one arm without a paid diagnostic or historical-attempt gate', async () => {
+  const source = await readFile(join(ROOT, 'scripts/anko-benchmark/run.mjs'), 'utf8');
+  const calls = [], written = new Map();
+  const context = { assert, join, console: { log() {} }, process: { exitCode: null }, Date,
+    versionRoot: () => '/version', runRecordRoot: (_, attempt) => attempt ? `/version/attempts/${attempt}` : '/version',
+    profilePath: () => '/profile', packageReceiptPath: () => '/package',
+    exists: async () => false, prepareVersion: async () => calls.push('prepare'),
+    priorStandaloneAttempt: async () => null,
+    verifyVersion: async (_, options) => { assert.equal(options.includeDiagnosis, false); return { status: 'preflight-ready', benchmark_accepted: false }; },
+    readJson: async path => path === '/package' ? { sha256: 'package' } : { stall_policy: { no_progress_ms: READ_STALL_MS } },
+    fixExecutionPolicy: async (_, __, diagnosis) => { assert.equal(diagnosis, null); return {}; },
+    writeExclusive: async (path, text) => { written.set(path, JSON.parse(text)); },
+    writeJson: async (path, value) => { written.set(path, value); },
+    hashFile: async () => 'digest', READ_STALL_MS, WALL_LIMIT_MS: 3_600_000, COST_LIMIT_USD: 15,
+    buildTrial: async (_, __, ___, diagnosis) => { assert.equal(diagnosis, null); return { trial_id: 'one', trial_directory: '/trial', record_path: '/record' }; },
+    runChild: async () => { calls.push('arm'); return { exit: 1, signal: null }; },
+  };
+  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9")', context);
+  assert.deepEqual(calls, ['prepare', 'arm']);
+  assert.equal(written.get('/version/run-once.lock').stage, 'arm-terminal');
+  assert.equal(written.get('/version/run-once.lock').benchmark_attempt, 1);
+  const original = JSON.stringify(written.get('/version/run-once.lock'));
+  context.priorStandaloneAttempt = async () => ({ lock: '/old/run-once.lock', version: '0.13.9' });
+  context.buildTrial = async (_, __, ___, ____, cap) => { assert.equal(cap, 14.8); return { trial_id: 'two', trial_directory: '/trial2', record_path: '/record2' }; };
+  context.runChild = async (_, __, ___, ____, cap) => { assert.equal(cap, 14.8); return { exit: 1, signal: null }; };
+  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9", { attempt: "requested-02", maxPricedUsd: 14.8 })', context);
+  assert.equal(JSON.stringify(written.get('/version/run-once.lock')), original);
+  const named = written.get('/version/attempts/requested-02/run-once.lock');
+  assert.equal(named.stage, 'arm-terminal');
+  assert.equal(named.attempt_id, 'requested-02');
+  assert.equal(named.prior_standalone_attempt.lock, '/old/run-once.lock');
+  assert.equal(named.max_priced_usd, 14.8);
+});
+
+test('Anko common runner does not reset the consumed retained Linux attempt', async () => {
+  const parent = join(ROOT, '_testenv/anko-reusable');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'prior-attempt-test-'));
+  try {
+    const paths = { platform: 'linux', legacy_run: directory };
+    await writeFile(join(directory, 'candidate.json'), '{"version":"0.13.9","package_sha256":"fixed"}\n');
+    assert.equal(await priorStandaloneAttempt('0.13.9', paths), null);
+    await writeFile(join(directory, 'run-once.lock'), '{"max_attempts":1}\n');
+    const before = await readFile(join(directory, 'run-once.lock'));
+    assert.equal((await priorStandaloneAttempt('0.13.9', paths)).package_sha256, 'fixed');
+    assert.equal(await priorStandaloneAttempt('0.13.10', paths), null);
+    assert.deepEqual(await readFile(join(directory, 'run-once.lock')), before);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('Anko pending patch preserves every file/rename target without retaining patch contents', () => {
+  const patchText = '*** Begin Patch\n*** Update File: /candidate/ast/stmt.go\n+SECRET BODY\n*** Add File: /wrong/env/env.go\n*** Move to: env/moved.go\n*** Delete File: old.go\n*** End Patch';
+  const expected = ['/candidate/ast/stmt.go', '/wrong/env/env.go', 'env/moved.go', 'old.go'];
+  assert.deepEqual(toolPaths('patch', { patchText }), expected);
+  const event = safeNativeEvent({ type: 'session.tool.called', data: {
+    sessionID: 'worker', id: 'patch-1', name: 'patch', input: { patchText },
+  } });
+  assert.deepEqual(event.paths, expected);
+  assert(!JSON.stringify(event).includes('SECRET BODY'));
+  const tools = new Map();
+  observeToolEvent(tools, new Set(), event, 1000);
+  assert.deepEqual(tools.get('worker/patch-1').paths, expected);
+  assert.equal(noProgressStopReason({ activeTool: tools.get('worker/patch-1') }), 'native-tool-no-progress-timeout');
+  assert.equal(shouldStopForNoProgress({ now: 181000, lastProgressAt: tools.get('worker/patch-1').last_progress_at }), true);
+  assert.match(observerPlugin, /paths: toolPaths/u);
+  assert.match(tracedSortiePlugin, /paths: toolPaths/u);
+  const arm = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(arm, /await installObservationFiles\(project\)/u);
+});
+
+test('Anko tool wait distinguishes native permission, unfinished Sortie hook and unknown boundary without enforcement', () => {
+  const tool = { session_id: 'worker', call_id: 'patch', name: 'patch', paths: ['/candidate/code.go', '/wrong/env.go'] };
+  const hook = { session_id: 'worker', call_id: 'patch', phase: 'sortie-hook-start', domain: 'tool', hook: 'execute.before', at: '2026-10-07T00:00:00Z' };
+  const request = { id: 'permission', sessionID: 'worker', source: { id: 'patch' } };
+  const pending = toolWaitObservations([tool], [hook], [request], '/candidate')[0];
+  assert.equal(pending.observed_boundary, 'native-permission-pending');
+  assert.deepEqual(pending.paths_outside_project, ['/wrong/env.go']);
+  assert.deepEqual(pending.pending_permission_ids, ['permission']);
+  assert.equal(pending.root_cause_confirmed, false);
+  assert.equal(toolWaitObservations([tool], [hook], [], '/candidate')[0].observed_boundary, 'sortie-hook-start-without-end');
+  const ended = { ...hook, phase: 'sortie-hook-end', at: '2026-10-07T00:00:01Z' };
+  assert.equal(toolWaitObservations([tool], [hook, ended], [], '/candidate')[0].observed_boundary, 'native-tool-start-without-terminal');
+  assert.deepEqual(tool.paths, ['/candidate/code.go', '/wrong/env.go']);
+});
+
+test('Anko repeated edits of an already dirty source count as progress', async () => {
+  const parent = join(ROOT, '_testenv/anko-reusable');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'source-progress-test-'));
+  try {
+    const cmd = (file, args, options) => execFileSync(file, args, { encoding: 'utf8', ...options });
+    const git = args => cmd('git', args, { cwd: directory });
+    git(['init', '-q']);
+    git(['config', 'user.name', 'Anko test']); git(['config', 'user.email', 'anko@example.invalid']);
+    await writeFile(join(directory, 'code.go'), 'base\n');
+    git(['add', 'code.go']); git(['commit', '-qm', 'base']);
+    const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+    const fragment = source.slice(source.indexOf('function sourceProgressSignature'), source.indexOf('async function readJsonLines'));
+    const signature = () => vm.runInNewContext(fragment + ';sourceProgressSignature(project)', {
+      project: directory, cmd, join, readFileSync, hash: value => createHash('sha256').update(value).digest('hex'),
+    });
+    await writeFile(join(directory, 'code.go'), 'first change\n');
+    const status = git(['status', '--porcelain']); const first = signature();
+    await writeFile(join(directory, 'code.go'), 'second change\n');
+    assert.equal(git(['status', '--porcelain']), status);
+    assert.notEqual(signature(), first);
+    await writeFile(join(directory, 'new.go'), 'first\n'); const untracked = signature();
+    await writeFile(join(directory, 'new.go'), 'second\n');
+    assert.notEqual(signature(), untracked);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('Anko drain does not re-interrupt a previously requested session or query beyond a spent deadline', async () => {
@@ -453,7 +764,7 @@ test('Anko record integrity preserves unaccepted settlement results and the lega
   const legacy = { stop_reason: 'accepted', receipt: { status: 'succeeded', stop_reason: 'completed' }, accepted: true };
   for (const observation of [legacy,
     { ...legacy, accepted: false, settlement: { native_settled: false }, cost_estimate_complete: true },
-    { ...legacy, accepted: false, settlement: { native_settled: true }, cost_estimate_complete: false },
+    { ...legacy, settlement: { native_settled: true }, cost_estimate_complete: false },
     { ...legacy, settlement: { native_settled: true }, cost_estimate_complete: true },
   ]) vm.runInNewContext(check, { assert, observation });
 });
