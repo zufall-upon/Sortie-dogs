@@ -13,9 +13,12 @@
 [English README](../README.md) · [日本語](guide-ja.md) ·
 [测试](testing.md) · [CLI testing](cli-testing.md)
 
-**当前release：[v0.13.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.8)**
-（[发布说明](release-v0.13.8.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.8-native-binding-v1`。
+本页是OpenCode指南。Codex集成也已实现，并记录了Ubuntu／Windows真实Mission的完成与受理。
+Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对Codex使用OpenCode初始化步骤。
+
+**当前release：[v0.13.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.11)**
+（[发布说明](release-v0.13.11.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.11-operation-result-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -56,7 +59,14 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.8更新
+## v0.13.11更新
+
+修复Codex大文件write与运行中status观察、切换agent后已终止Mission返回造成的持续HTTP 500，
+并区分run-once结果收集与进程成功。保留真实失败exit；未启动、运行中及必需成功check仍阻止完成。
+[Windows Codex完成及评分记录](codex-write-status-anko-20261007.md)属于固定development package，
+不是已发布v0.13.11的新benchmark结果，也不证明native sandbox已修复。
+
+## v0.13.8更新（保留）
 
 整合PR #161：Windows directory junction的alias枚举失败时，从已解析且可读取的physical target
 捕获native验证binding。保留logical证据标签、link identity和完整target bytes；未改变的可读取
@@ -150,12 +160,12 @@ stable profile中的Luna fabric和parallel integration不在本profile开放。
   Worker为Luna Fast/max，Operator/Coordinator/Reviewer/Advisor为GPT-6.1 Sol/xhigh。
   8 slots、$2/instance、campaign总上限$46，20分钟检查进度、最长40分钟。
   已知推理费用 **$17.73**，未知usage hold **$1.98** 单独记录；推理约81分钟、官方评分7.2分钟。
-  [固定条件、中断run处理与详情](../README.md#v0131-dev23-2026-09-30)。
+  [固定条件、中断run处理与详情](benchmarks/swebench-lite-history.md#v0131-dev23-2026-09-30)。
 
-这些是历史固定candidate的结果，不是v0.13.8分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
+这些是历史固定candidate的结果，不是v0.13.11分数。版本、预算和条件不同，不能视为受控比较或一般成功率。
 推理完成、Sortie的`DONE`、Review `PASS`和官方解决结果分别记录；官方本地评测也不等于leaderboard注册或接受。
 SWE-bench按需单独执行，不是release必需gate。条件和限制保留在[测量契约](benchmark-completion-contract.md)、
-[结果历史](../README.md#swe-bench-evaluation)及[历史local case study](benchmark-reference.md)中。
+[结果历史](benchmarks/swebench-lite-history.md)及[历史local case study](benchmark-reference.md)中。
 
 ## Mission tools
 
@@ -304,7 +314,10 @@ npx sortie-dogs init . --profile stable
 不要使用默认package plugin entry，应通过project bridge加载：
 
 ```ts
-export { SortieDogsPlugin } from "sortie-dogs/plugin/stable";
+import { createSortieDogsV2Plugin } from "sortie-dogs/server";
+import { SortieDogsPlugin } from "sortie-dogs/plugin/stable";
+
+export default createSortieDogsV2Plugin(SortieDogsPlugin);
 ```
 
 Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
@@ -315,7 +328,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.8
+npm install --global sortie-dogs@0.13.11
 sortie-dogs init --global --profile v010
 ```
 
@@ -327,7 +340,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.8
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.11
 sortie-dogs init --global --profile v010
 ```
 
@@ -348,7 +361,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.8-native-binding-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.11-operation-result-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，
