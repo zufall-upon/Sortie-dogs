@@ -226,9 +226,31 @@ test('Anko resumed parent usage ignores the stale previous idle without hiding a
   const ended = summarizeOwnedUsage([{ ...stale, time_idle: 201 }], rows, 'root', pricedEstimate);
   assert.equal(ended.pending_messages, 0);
   assert.equal(ended.unpriced_messages, 1);
-  assert.equal(usageSafetyStopReason(ended), 'unpriced-usage-safety-stop');
+  assert.equal(usageSafetyStopReason(ended), null);
   const errored = summarizeOwnedUsage([stale], [{ ...rows[0], data: { ...rows[0].data, error: { type: 'provider.transport' } } }], 'root', pricedEstimate);
-  assert.equal(usageSafetyStopReason(errored), 'unpriced-usage-safety-stop');
+  assert.equal(usageSafetyStopReason(errored), null);
+});
+
+test('Anko retains transport usage gaps while native retry proceeds, unsupported prices still stop', () => {
+  const rows = [
+    { id: 'closed', session_id: 'root', type: 'assistant', data: { model: testModel,
+      time: { created: 10, completed: 20 }, error: { type: 'provider.transport' }, retry: { attempt: 2, at: 30 } } },
+    { id: 'retry', session_id: 'root', type: 'assistant', data: { model: testModel, time: { created: 30 } } },
+  ];
+  const pending = summarizeOwnedUsage([activeSession], rows, 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(pending), null);
+  assert.equal(pending.missing_token_messages, 2);
+  assert.equal(pending.unpriced_messages, 1);
+  assert.equal(pending.pending_messages, 1);
+  assert.equal(pending.estimated_total_usd, null);
+  const recovered = summarizeOwnedUsage([endedSession], [rows[0], { ...rows[1], data: { ...rows[1].data, tokens: fullTokens } }], 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(recovered), null);
+  assert.equal(recovered.priced_usd, 0.02);
+  assert.equal(recovered.cost_estimate_complete, false);
+  assert.equal(recovered.estimated_total_usd, null);
+  const unknown = summarizeOwnedUsage([endedSession], [{ ...rows[1], data: { model: testModel, tokens: fullTokens } }],
+    'root', () => ({ status: 'unpriced', reason: 'unknown-model' }));
+  assert.equal(usageSafetyStopReason(unknown), 'unpriced-usage-safety-stop');
 });
 
 test('Anko opaque provider state preserves the previous string-only service tier contract', () => {
@@ -241,7 +263,7 @@ test('Anko opaque provider state preserves the previous string-only service tier
   }
 });
 
-test('Anko owned compaction usage contributes to the subtotal and missing compaction stops safely', async () => {
+test('Anko owned compaction usage contributes to the subtotal and missing compaction remains unknown', async () => {
   const parent = join(ROOT, '_testenv/anko-reusable');
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, 'usage-test-'));
@@ -273,7 +295,7 @@ test('Anko owned compaction usage contributes to the subtotal and missing compac
     assert.equal(missing.cost_estimate_complete, false);
     assert.equal(missing.estimated_total_usd, null);
     assert.equal(missing.actual_billed_usd, null);
-    assert.equal(usageSafetyStopReason(missing), 'unpriced-usage-safety-stop');
+     assert.equal(usageSafetyStopReason(missing), null);
     assert.equal(missing.records.find(item => item.id === 'compact').status, 'missing-terminal-usage');
     const correlation = analyzeSavedTrial([{ messages: [{ id: 'compact', type: 'compaction', status: 'failed',
       error: { type: 'provider.transport' } }] }], [], missing, {});
@@ -313,7 +335,7 @@ test('Anko read-only DB accounting includes owned descendants, excludes stranger
     assert.equal(usage.missing_token_messages, 2);
     assert.equal(usage.estimated_total_usd, null);
     assert.equal(usage.actual_billed_usd, null);
-    assert.equal(usageSafetyStopReason(usage), 'unpriced-usage-safety-stop');
+     assert.equal(usageSafetyStopReason(usage), null);
     assert.deepEqual(usage.sessions.map(item => item.id), ['root', 'child', 'grandchild']);
     assert.equal(usage.records.find(item => item.id === 'missing').estimated_usd, null);
     assert.deepEqual(await readFile(path), before);
@@ -710,7 +732,7 @@ test('Anko record integrity preserves unaccepted settlement results and the lega
   const legacy = { stop_reason: 'accepted', receipt: { status: 'succeeded', stop_reason: 'completed' }, accepted: true };
   for (const observation of [legacy,
     { ...legacy, accepted: false, settlement: { native_settled: false }, cost_estimate_complete: true },
-    { ...legacy, accepted: false, settlement: { native_settled: true }, cost_estimate_complete: false },
+    { ...legacy, settlement: { native_settled: true }, cost_estimate_complete: false },
     { ...legacy, settlement: { native_settled: true }, cost_estimate_complete: true },
   ]) vm.runInNewContext(check, { assert, observation });
 });

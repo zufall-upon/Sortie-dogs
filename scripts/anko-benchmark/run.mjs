@@ -112,9 +112,10 @@ async function buildTrial(version, receipt, profile, diagnosis, maxPricedUsd = C
   oldProvenance.verifier = { path: 'scripts/anko-benchmark/verify.mjs', sha256: await hashFile(verifySource) };
    oldProvenance.go.generator = generator;
    oldProvenance.limits = { max_attempts: 1, max_wall_minutes: 60, max_priced_usd: maxPricedUsd, grading: 'none' };
-  oldProvenance.reusable_runner = { entrypoint: 'scripts/anko-benchmark.mjs', version, package_sha256: receipt.sha256,
-    read_no_progress_ms: READ_STALL_MS, active_status_counts_as_progress: false,
-    permission_reply: 'none', prompt_replay_on_unknown_cause: false };
+   oldProvenance.reusable_runner = { entrypoint: 'scripts/anko-benchmark.mjs', version, package_sha256: receipt.sha256,
+     read_no_progress_ms: READ_STALL_MS, active_status_counts_as_progress: false,
+     permission_reply: 'none', prompt_replay_on_unknown_cause: false,
+     missing_usage: 'record unknown cost; do not preempt native retry or confuse accounting completeness with Mission acceptance' };
   await writeJson(join(trial, 'provenance.json'), oldProvenance, { flag: 'wx' });
   await writeJson(join(trial, 'setup.json'), { prepared_at: new Date().toISOString(),
     benchmark_roots_created: 0, version, package_sha256: receipt.sha256,

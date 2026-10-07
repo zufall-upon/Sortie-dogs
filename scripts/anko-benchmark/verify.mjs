@@ -209,7 +209,7 @@ async function verifyRun(version, profile, attempt = null) {
   assert.equal(observation.accepted, observation.stop_reason === 'accepted' &&
     observation.receipt?.status === 'succeeded' && observation.receipt?.stop_reason === 'completed' &&
     (!Object.hasOwn(observation, 'settlement') ||
-      observation.settlement?.native_settled === true && observation.cost_estimate_complete === true));
+      observation.settlement?.native_settled === true));
   assert.equal(await exists(launchRecord.record_path), true, 'persistent benchmark artifact record is missing');
   for (const relative of ['receipt.json', 'observation.json', 'launch.json', 'run-attempt.lock',
     'native-events.jsonl', 'permission-snapshots.jsonl', 'native-hook-events.jsonl', 'execution-policy.json', 'no-progress-stop.json',

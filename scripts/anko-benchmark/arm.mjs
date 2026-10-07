@@ -248,6 +248,7 @@ let promptPromise = null;
 const promptController = new AbortController();
 let terminal = false;
 let benchmarkAccepted = false;
+const reportedUsageGaps = new Set();
 let stopReason = null;
 let failure = null;
 let started = null;
@@ -511,8 +512,7 @@ async function persistFinal() {
   const nativeReceipt = operator?.receipt ?? null;
   const executionElapsed = started === null || stoppedAt === null ? 0 : stoppedAt - started;
    const accepted = stopReason === 'accepted' && nativeReceipt?.status === 'succeeded' &&
-     nativeReceipt?.stop_reason === 'completed' && settlement?.native_settled === true &&
-     finalUsage?.cost_estimate_complete === true;
+     nativeReceipt?.stop_reason === 'completed' && settlement?.native_settled === true;
    benchmarkAccepted = accepted;
   const eventTypes = Object.fromEntries([...new Set(nativeEventRecords.map(event => event.type))]
     .map(type => [type, nativeEventRecords.filter(event => event.type === type).length]));
@@ -871,7 +871,16 @@ try {
       if (wrongSolRoute || wrongRootRoute) { stopReason = 'sol-model-mismatch'; break; }
       if (promptError) { failure = promptError; stopReason = 'session-prompt-error'; break; }
       if (lastUsage.priced_usd >= costCap) { stopReason = 'priced-cost-cap'; break; }
-       if (usageSafetyStopReason(lastUsage)) {
+        for (const gap of lastUsage.records.filter(record => record.status === 'missing-terminal-usage')) {
+          if (reportedUsageGaps.has(gap.id)) continue;
+          reportedUsageGaps.add(gap.id);
+          const warning = { phase: 'usage-accounting-gap', at: new Date().toISOString(), record: gap,
+            known_priced_subtotal_usd: lastUsage.priced_usd, estimated_total_usd: null,
+            action: 'retain unknown cost; leave native retry to the host; keep wall/no-progress/known-price limits' };
+          await appendFile(join(output, 'usage-gap-events.jsonl'), `${JSON.stringify(warning)}\n`);
+          console.log(JSON.stringify(warning));
+        }
+        if (usageSafetyStopReason(lastUsage)) {
          stopReason = usageSafetyStopReason(lastUsage);
          await writeFile(join(output, 'usage-safety-stop.json'), JSON.stringify({ at: new Date().toISOString(),
            elapsed_ms: Date.now() - started, stop_reason: stopReason, usage: lastUsage,
@@ -1134,7 +1143,7 @@ try {
     'native-history.json', 'request.txt', 'driver-error.txt',
     'preflight-server-stdout.log', 'preflight-server-stderr.log',
     'server-server-stdout.log', 'server-server-stderr.log',
-    'data/opencode/opencode.db', 'usage/opencode.db',
+    'data/opencode/opencode.db', 'usage/opencode.db', 'usage-gap-events.jsonl', 'goyacc.json',
   ];
   await mkdir(recordRoot, { recursive: true });
   for (const relative of retainedFiles) {

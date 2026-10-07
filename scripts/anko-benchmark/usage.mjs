@@ -6,7 +6,10 @@ const emptyTokens = () => ({ input: 0, output: 0, reasoning: 0, cache_read: 0, c
 const routeOf = model => model?.providerID && model?.id
   ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}` : 'unidentified-model';
 const validCount = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
-export const usageSafetyStopReason = usage => usage.unpriced_messages > 0 ? 'unpriced-usage-safety-stop' : null;
+// A missing provider usage receipt is an accounting gap, not a native retry gate.
+// Unsupported prices still stop; unknown totals never become zero or complete.
+export const usageSafetyStopReason = usage => usage.records.some(record => record.status === 'unpriced-usage')
+  ? 'unpriced-usage-safety-stop' : null;
 
 // Token completeness, price availability and actual billing are different facts.
 export function classifyUsage(message, session, estimate) {

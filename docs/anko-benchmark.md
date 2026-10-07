@@ -79,13 +79,13 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 ## usage欠測と停止後回収
 
 - 未完了streamの`pending-usage`、終了/error後の`missing-terminal-usage`、完全tokensでも価格不明の`unpriced-usage`を分離する。欠落fieldを0で補わない。完全な実測tokensが明示的に全0の場合だけ価格0があり得る。
-- owned assistantだけでなく、usageを持つcompactionも集計する。completed/failedの欠測は安全停止、runningの欠測はpending。assistant件数とcompaction件数は分離し、欠測compactionを総額から消さない。Worker/SOL roleの実model照合はassistantだけを対象とし、独立compaction modelとは混ぜない。opaque providerStateのserviceTierは従来どおりstringだけを価格推定へ渡す。
+- owned assistantだけでなく、usageを持つcompactionも集計する。runningの欠測はpending。旧idleより新しいmessageは旧終端で判定しない。completed/failedの欠測は費用不明として警告・保存し、native retryをrunnerが先回りして停止しない。assistant件数とcompaction件数は分離し、欠測compactionを総額から消さない。Worker/SOL roleの実model照合はassistantだけを対象とし、独立compaction modelとは混ぜない。opaque providerStateのserviceTierは従来どおりstringだけを価格推定へ渡す。
 - `priced_usd`は既知価格小計。欠測/価格不明/pendingが残れば`estimated_total_usd=null`。`actual_billed_usd`は常にunknown/nullで、token推定やnative `cost:0`を実請求へ転用しない。
-- `unpriced-usage-safety-stop`は維持。停止判断時に最大10秒か残り本体wall時間の短い方の共通期限を固定する。owned session interrupt各1回、DB/session.get/permission.list/native tool状態、native exportを同じ期限内で回収する。exportはdrainと並行し、未応答でもserver停止・credential除去を妨げない。prompt admission応答へ別の10秒待ちを加えず、未確認のlocal応答待ちは取消する。期限0なら追加API問い合わせなし。usage回収後も元の安全停止を成功や継続へ変更しない。
+- `unpriced-usage-safety-stop`は完全tokensでも価格を特定できない場合に維持。欠測そのものは`usage-gap-events.jsonl`へ保存し、時間・無進捗・既知価格小計上限は維持する。費用完全性とMission受理を分離し、実receipt成功＋native settlementで受理、欠測があれば総額nullのまま報告する。停止判断時に最大10秒か残り本体wall時間の短い方の共通期限を固定する。owned session interrupt各1回、DB/session.get/permission.list/native tool状態、native exportを同じ期限内で回収する。exportはdrainと並行し、未応答でもserver停止・credential除去を妨げない。prompt admission応答へ別の10秒待ちを加えず、未確認のlocal応答待ちは取消する。期限0なら追加API問い合わせなし。usage回収後も元の安全停止を成功や継続へ変更しない。
 - idle timestampとnative outcome、DBとAPIの照合、各子のpermission query成功・pending0、tool pending0を区別して保存する。ackだけ、片方だけのterminal、問い合わせ失敗ではsettledにしない。新しいowned子を再照合しても代替Workerは作らない。
 - exportの成功分は保持し、失敗分は`history_error`へ分離する。所有session/outcomeと子dispatch件数はDB観測から保存し、export欠落を子0件やnative成功へ転用しない。
 - `usage-safety-stop.json`、`settlement-snapshots.jsonl`/`settlement.json`、server停止・credential除去後の`post-cleanup-usage.json`を別観測として保存する。process停止からsession成功・native終端を推測しない。元停止時点と後観測の費用を重複加算しない。
-- 今回の検証はoffline保存履歴とmock/一時DBのみ。新しい通信方式、proxy、provider設定、retry回数は変更しない。修正後の本体効果は未測定。
+- 新しい通信方式、proxy、provider設定、retry回数は変更しない。2026-10-07の実セッションでは旧起動条件、生成ツール不足、旧idleによるusage誤判定、native retry前の過剰停止を確認し、共通runnerへ修正を反映。結果と未確認範囲は各試行のreceiptを参照する。
 
 通信・usageの切り分け結果と今回の限定回帰は[続行結果](benchmarks/anko-transport-usage-20261006.md)を参照。
 
