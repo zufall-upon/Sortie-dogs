@@ -194,6 +194,11 @@ host must reconcile any still-running process. Omission keeps native `command/ex
 executor never falls back to native execution after rejection or failure. Existing Mission before/after
 hooks, command identity and validation acceptance remain shared. CLI progress identifies the selected
 executor; the CLI itself does not attach a parent executor.
+File writes use a short argv referencing a temporary UTF-8 payload, so large files and literal quotes,
+newlines or NUL characters do not overflow Windows command-line limits. Staging does not write the
+project file; the same configured executor performs that write, and the payload is removed afterward.
+Status observations (without `confirmed_conditions`) can return during an active child Task. Condition
+registration and other modifying tools remain serialized; status does not imply Task completion.
 The bash tool accepts `workdir` (absolute or relative to the project root). The shared hooks and both
 executors use that directory; progress and receipts include the effective cwd. A successful command in
 another directory does not satisfy a validation declared for the project root.

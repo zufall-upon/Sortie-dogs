@@ -11,6 +11,7 @@ import { runtimeAssets } from "../runtime-assets-v010.js";
 import { OperatorRuntime } from "../core/operator-runtime.js";
 import { OperatorMissionRuntime, type CodexMissionOwner, type CodexNotStartedProof, type CodexWorkerDispatch, codexProcessOwner, codexOwnerGone } from "../core/operator-mission.js";
 import { resolveCodexMissionShell, type CodexMissionShell } from "./mission-shell.js";
+import { prepareCodexWrite } from "./mission-write.js";
 
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -74,6 +75,7 @@ export class CodexMissionSession {
   private observations: CodexUsageObservation[] = [];
   private readonly ownedRoots = new Set<string>();
   private readonly toolQueues = new Map<string, Promise<unknown>>();
+  private readonly observationsInFlight = new Set<Promise<unknown>>();
   readonly directory: string;
   private constructor(private readonly options: CodexMissionSessionOptions, private readonly shell: CodexMissionShell) { this.directory = resolve(options.projectRoot); }
 
@@ -128,7 +130,7 @@ export class CodexMissionSession {
 
   async close(): Promise<void> {
     await this.stopHosts();
-    await Promise.allSettled([...this.toolQueues.values()]);
+    await Promise.allSettled([...this.toolQueues.values(), ...this.observationsInFlight]);
     const missions = new OperatorMissionRuntime(this.directory, profile);
     for (const root of this.ownedRoots) await missions.codexRecovery(root, async state => {
       if (state.codexOwner?.generation === this.owner.generation) await missions.update(root, current => {
@@ -288,6 +290,15 @@ export class CodexMissionSession {
         return await this.options.permissionsApproval?.(request) ?? { permissions: {}, scope: "turn" };
       },
       dynamicTool: call => {
+        // Observations must remain available while a Task awaits its child. Status
+        // with confirmed_conditions writes launch conditions and stays serialized.
+        if (call.tool === `${profile.toolPrefix}operator_status` && object(call.arguments) &&
+            legacyToolArgs(call.arguments, this.hooks.tool?.[call.tool]?.args ?? {}).confirmed_conditions === undefined) {
+          const observation = this.execute(call);
+          this.observationsInFlight.add(observation);
+          void observation.finally(() => this.observationsInFlight.delete(observation)).catch(() => undefined);
+          return observation;
+        }
         const execution = (this.toolQueues.get(call.threadId) ?? Promise.resolve()).catch(() => undefined).then(() => this.execute(call));
         this.toolQueues.set(call.threadId, execution);
         return execution;
@@ -522,6 +533,7 @@ export class CodexMissionSession {
     let dispatched = false;
     let child: NativeSession | undefined;
     let metadata: JsonObject;
+    let payload: Awaited<ReturnType<typeof prepareCodexWrite>> | undefined;
     try {
     if (call.tool === "task") {
       child = typeof args.task_id === "string" && args.task_id ? this.required(args.task_id) : undefined;
@@ -537,9 +549,10 @@ export class CodexMissionSession {
       text = result.finalResponse ?? "";
       metadata = { sessionId: child.id, status: result.status };
     } else {
+      if (call.tool === "write") payload = await prepareCodexWrite(resolve(this.directory, String(args.filePath)), String(args.content));
       const command = call.tool === "bash" ? this.shell.command(String(args.command))
         : call.tool === "read" ? [process.execPath, "-e", "const fs=require('node:fs'),p=process.argv[1];process.stdout.write(fs.statSync(p).isDirectory()?fs.readdirSync(p,{withFileTypes:true}).map(e=>e.name+(e.isDirectory()?'/':'')).sort().join('\\n')+'\\n':fs.readFileSync(p,'utf8'))", resolve(this.directory, String(args.filePath))]
-        : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
+        : payload!.command;
       const executor = this.options.executeCommand ? "host" : "native";
       await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,
         params: { turnId: call.turnId, callId: call.callId, tool: call.tool, executor, cwd, status: "started" } });
@@ -592,6 +605,12 @@ export class CodexMissionSession {
       // Stop the whole adapter so the model cannot resend that unknown operation.
       if (dispatched) await this.stopHosts().catch(() => undefined);
       throw error;
+    } finally {
+      if (payload) await payload.dispose().catch(async error => {
+        try { await this.options.onEvent?.({ method: "sortie/payloadCleanup", threadId: session.id,
+          params: { callId: call.callId, status: "failed", reason: String(error) } }); }
+        catch { /* Cleanup reporting cannot replace the authoritative command outcome. */ }
+      });
     }
     const time = { start, end: Date.now() };
     metadata.sortie_execution = time;
