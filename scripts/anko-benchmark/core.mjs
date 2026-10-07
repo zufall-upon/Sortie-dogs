@@ -24,6 +24,13 @@ export const ROOT_MODEL = 'openai/gpt-6.1-sol#xhigh';
 export const WORKER_MODEL = 'openai/gpt-6-luna-fast#max';
 export const CLI_VERSION = '2.0.18';
 
+export const AGENT_ROUTES = {
+  'dog-operator': ROOT_MODEL, 'dogs-coordinator': ROOT_MODEL,
+  'dog-reviewer-v010': ROOT_MODEL, 'dog-advisor-v010': ROOT_MODEL,
+  'dog-scout-v010': WORKER_MODEL,
+  'dog-worker-v010': WORKER_MODEL, 'dog-luna-worker-v010': WORKER_MODEL,
+};
+
 export function sha256(data) {
   return createHash('sha256').update(data).digest('hex');
 }

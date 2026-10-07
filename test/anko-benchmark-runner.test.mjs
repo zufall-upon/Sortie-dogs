@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  ROOT, STATE_ROOT, READ_STALL_MS, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
+  ROOT, STATE_ROOT, READ_STALL_MS, AGENT_ROUTES, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
   diagnosticReadObservations, parseCommand, parseVersion, profilePath, progressSignature, shouldStopForNoProgress,
   priorStandaloneAttempt, runRecordRoot, versionRoot, writeExclusive,
 } from '../scripts/anko-benchmark/core.mjs';
@@ -67,6 +67,17 @@ test('Anko explicitly named requested runs keep the original version and attempt
   assert.equal(runRecordRoot('0.13.9'), versionRoot('0.13.9'));
   assert.throws(() => parseCommand(['run', '--version', '0.13.9', '--attempt', '../old']), /Invalid --attempt/u);
   assert.throws(() => parseCommand(['prepare', '--version', '0.13.9', '--attempt', 'new']), /only accepted/u);
+});
+
+test('Anko preflight uses the real V2 Scout Luna route instead of blocking before inference', () => {
+  assert.equal(AGENT_ROUTES['dog-scout-v010'], 'openai/gpt-6-luna-fast#max');
+  assert.equal(AGENT_ROUTES['dog-worker-v010'], 'openai/gpt-6-luna-fast#max');
+  assert.equal(AGENT_ROUTES['dog-advisor-v010'], 'openai/gpt-6.1-sol#xhigh');
+  const adapter = readFileSync(join(ROOT, 'src/plugin/v2.ts'), 'utf8');
+  assert.match(adapter, /\["dog-scout-v010", "gpt-6-luna-fast", "max"\]/u);
+  const arm = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(arm, /Object.entries\(AGENT_ROUTES\)/u);
+  assert(!arm.includes('const solRole'));
 });
 
 const fullTokens = { input: 20, output: 10, reasoning: 0, cache: { read: 0, write: 0 } };

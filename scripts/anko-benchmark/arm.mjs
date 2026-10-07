@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { finished } from 'node:stream/promises';
 import { READ_STALL_MS, MONITOR_INTERVAL_MS, WALL_LIMIT_MS, COST_LIMIT_USD, INSTRUCTION_SHA256,
-  ANKO_BASE, CLI_VERSION,
+  ANKO_BASE, CLI_VERSION, AGENT_ROUTES,
   ROOT_MODEL, WORKER_MODEL, noProgressStopReason, shouldStopForNoProgress, progressSignature } from './core.mjs';
 import { expectSessionTurn, nativeTurnTerminal, observeSessionTurn, observeToolEvent,
   installObservationFiles, observeSessionState, safeNativeEvent, toolWaitObservations } from './observe.mjs';
@@ -782,29 +782,12 @@ try {
       { signal: AbortSignal.timeout(30_000) })).data ?? [];
     configuredAgents = agentList.map(item => ({ id: item.id, mode: item.mode, configured_model: modelRoute(item.model) }));
     await writeFile(join(output, 'configured-agents.json'), JSON.stringify(configuredAgents, null, 2));
-    const requiredAgentRoutes = {
-      'dog-operator': expectedRootModel,
-      'dogs-coordinator': expectedRootModel,
-      'dog-reviewer-v010': expectedRootModel,
-      'dog-scout-v010': expectedRootModel,
-      'dog-advisor-v010': expectedRootModel,
-      'dog-worker-v010': expectedWorkerModel,
-      'dog-luna-worker-v010': expectedWorkerModel,
-    };
-    for (const [agentID, expectedRoute] of Object.entries(requiredAgentRoutes)) {
+     for (const [agentID, expectedRoute] of Object.entries(AGENT_ROUTES)) {
       const configured = configuredAgents.find(item => item.id === agentID);
       assert(configured, `required configured agent is unavailable: ${agentID}`);
       assert.equal(configured.configured_model, expectedRoute,
         `required configured model route mismatch for ${agentID}`);
     }
-    for (const item of configuredAgents) {
-     const workerRole = ['dog-worker-v010', 'dog-luna-worker-v010'].includes(item.id);
-     const solRole = ['dog-operator', 'dogs-coordinator', 'dog-reviewer-v010', 'dog-scout-v010'].includes(item.id);
-     if (item.configured_model && workerRole) assert.equal(item.configured_model, expectedWorkerModel,
-       `Luna Worker route mismatch for configured agent ${item.id}`);
-     if (item.configured_model && solRole) assert.equal(item.configured_model, expectedRootModel,
-       `SOL route mismatch for configured agent ${item.id}`);
-   }
 
   stage = 'session';
   started = Date.now();
