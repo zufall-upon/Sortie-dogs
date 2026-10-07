@@ -692,6 +692,58 @@ test("V2 interrupted Coordinator Task reconciles its native error despite a live
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
+for (const phase of ["cancelled", "completed"] as const) for (const reload of [false, true]) {
+  test(`V2 ${phase} background Coordinator completion leaves Build usable${reload ? " after reload" : ""}`, async () => {
+    await mkdir(resolve("_testenv"), { recursive: true });
+    const directory = await mkdtemp(resolve("_testenv/mission-terminal-background-"));
+    const fixture = contextFixture();
+    const history: Record<string, Record<string, unknown>[]> = { root: [], coordinator: [] };
+    let rootAgent = "dog-operator";
+    const interrupted: string[] = [];
+    const context: OpenCodeV2Context = { ...fixture.context, location: { directory },
+      session: { ...fixture.context.session,
+        get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "root" ? rootAgent : "dogs-coordinator",
+          ...(sessionID === "root" ? {} : { parentID: "root" }), model: { providerID: "openai", id: "gpt-6-sol" } }),
+        context: async ({ sessionID }) => history[sessionID] ?? [],
+        interrupt: async ({ sessionID }) => { interrupted.push(sessionID); return { interrupted: true }; },
+      } };
+    let cleanup = await V2Plugin.setup(context);
+    try {
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_original",
+        prompt: { text: "Complete the original request" } });
+      const mission = await missions.start("root", ["Complete the original request"]);
+      const task = missions.task(mission);
+      const dispatch = { sessionID: "root", agent: "dog-operator", tool: "subagent", id: "call_background",
+        input: { agent: task.subagent_type, description: task.description, prompt: task.prompt, background: true } };
+      await fixture.toolHooks.get("execute.before")!(dispatch);
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "coordinator", messageID: "msg_child",
+        prompt: { text: task.prompt } });
+      history.coordinator!.push({ id: "msg_child", type: "user" });
+      await fixture.toolHooks.get("execute.after")!({ ...dispatch, status: "completed",
+        result: { content: "Job running", metadata: { sessionID: "coordinator", status: "running" } } });
+      if (phase === "completed") await missions.update("root", state => { state.phase = "completed"; state.dispatchOpen = false; });
+      rootAgent = "build";
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_build",
+        prompt: { text: "Continue independently in Build" } });
+      const terminal = await missions.required("root");
+      assert.equal(terminal.phase, phase);
+      if (phase === "cancelled") assert.ok(interrupted.includes("coordinator"));
+      history.coordinator!.push({ id: "msg_terminal", type: "assistant", error: { message: "Interrupted" } });
+      if (reload) { cleanup?.(); cleanup = await V2Plugin.setup(context); }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await fixture.sessionHooks.get("context")!({ sessionID: "root", agent: "build", system: [], tools: {} });
+        await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: `msg_followup_${attempt}`,
+          prompt: { text: "Recovery check only" } });
+      }
+      const saved = await context.storage!.get("v2-background-dispatches:root") as { settled?: boolean; terminal?: string }[];
+      assert.equal(saved[0]!.settled, true, "the historical native completion must not retry at every prompt");
+      assert.equal(saved[0]!.terminal, "failed", "settlement must not turn interruption into success");
+      assert.deepEqual(await missions.required("root"), terminal, "late completion cannot revive or rewrite a terminal Mission");
+    } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 test("V2 aborted Worker Task exposes the native error and interrupt acknowledgement to recovery", async () => {
   const fixture = contextFixture();
   const interrupted: string[] = [];
