@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
-import { appendFile, chmod, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -303,15 +303,20 @@ const costCap = Number(process.env.ANKO_BENCHMARK_COST_LIMIT_USD ?? COST_LIMIT_U
 assert(Number.isFinite(costCap) && costCap > 0 && costCap <= COST_LIMIT_USD);
 
 async function startPrivateServer(env, logPrefix) {
-  const password = randomBytes(24).toString('hex');
+  let password = randomBytes(24).toString('hex');
+  // Same lifecycle as release-cli: the plugin's public-history fallback must
+  // discover this exact private service, never the user's shared listener.
+  const state = join(output, `${logPrefix}-service-state`);
+  const registrationPath = join(state, 'opencode/service.json');
+  await mkdir(state, { recursive: true });
   rememberSensitiveValue(password);
   rememberSensitiveValue(Buffer.from(`opencode:${password}`).toString('base64'));
   const stdoutPath = join(output, `${logPrefix}-server-stdout.log`);
   const stderrPath = join(output, `${logPrefix}-server-stderr.log`);
   const out = createWriteStream(stdoutPath);
   const err = createWriteStream(stderrPath);
-  const child = spawn(cli, ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
-    cwd: project, env: { ...env, OPENCODE_SERVER_PASSWORD: password },
+  const child = spawn(cli, ['serve', '--service', '--hostname', '127.0.0.1', '--port', '0'], {
+    cwd: project, env: { ...env, XDG_STATE_HOME: state, OPENCODE_SERVER_PASSWORD: password },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   let log = '';
@@ -327,9 +332,7 @@ async function startPrivateServer(env, logPrefix) {
   const url = /http:\/\/127\.0\.0\.1:\d+/u.exec(log)?.[0];
   const handle = {
     child, url, get closed() { return closed; }, errors: () => errors, spawnError,
-    client: url ? OpenCode.make({ baseUrl: url, headers: {
-      Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`,
-    } }) : null,
+    client: null,
     async stop() {
       if (!closed) {
         const closedPromise = new Promise(done => child.once('close', done));
@@ -348,6 +351,7 @@ async function startPrivateServer(env, logPrefix) {
         const logText = await readFile(path, 'utf8');
         await writeFile(path, redactSensitiveText(logText));
       }
+      if (closed) await rm(registrationPath, { force: true });
       return closed;
     },
   };
@@ -355,6 +359,26 @@ async function startPrivateServer(env, logPrefix) {
   if (!url) {
     await handle.stop();
     throw new Error(`V2 server ${logPrefix} startup failed: ${String(spawnError ?? errors)}`);
+  }
+  try {
+    const registration = JSON.parse(await readFile(registrationPath, 'utf8'));
+    assert.equal(registration.url, url, 'private service registration/listener mismatch');
+    assert.equal(registration.pid, child.pid, 'private service registration/PID mismatch');
+    // --service generates its own password; the registration is authoritative.
+    password = registration.password;
+    rememberSensitiveValue(password);
+    const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
+    rememberSensitiveValue(authorization);
+    handle.client = OpenCode.make({ baseUrl: url, headers: { Authorization: authorization } });
+    const info = await handle.client.server.info({ signal: AbortSignal.timeout(10_000) });
+    assert.equal(info.pid, child.pid, 'private service info/PID mismatch');
+    await writeFile(join(output, `${logPrefix}-service-registration.json`), JSON.stringify({
+      pid: info.pid, version: info.version, url, registered: true, isolated_state: state,
+      password_retained: false, owning_history_endpoint: true,
+    }, null, 2));
+  } catch (error) {
+    await handle.stop();
+    throw error;
   }
   return handle;
 }
@@ -1144,6 +1168,7 @@ try {
     'preflight-server-stdout.log', 'preflight-server-stderr.log',
     'server-server-stdout.log', 'server-server-stderr.log',
     'data/opencode/opencode.db', 'usage/opencode.db', 'usage-gap-events.jsonl', 'goyacc.json',
+    'seed-service-registration.json', 'run-service-registration.json',
   ];
   await mkdir(recordRoot, { recursive: true });
   for (const relative of retainedFiles) {

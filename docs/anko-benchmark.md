@@ -41,6 +41,7 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - 保存場所が異なるhostでは`ANKO_CLI`、`ANKO_SOURCE_PROJECT`、`ANKO_INSTRUCTION`、`ANKO_GO_DIRECTORY`、`ANKO_GO_ARCHIVE`、`ANKO_HOST_DATABASE`、`ANKO_RELEASE_ROOT`、`ANKO_ARTIFACT_ROOT`を指定できる。新しい権限ルールではなく準備済み入力のpath指定。profileへ固定し、実行中に交換しない。
 - profileへ実CLI hash、client lock、hostとtoolchainを記録。版ごとに再install/initせず、未変更のinstallationを再利用。mirrorの可変tipや過去の失敗receiptは新規armの起動条件にしない。
 - Linuxのrepository lockにはSortie自体の版番号も含まれるため、共通driverの再利用判定にはclient版を用いる。root lockの実hashと内容は各armで固定・保存し、実行中のdriftを検出する。Sortieの版番号だけ変わっても未変更のdriverを再installしない。Windowsの専用driver lock固定は維持。
+- 隔離serverは`release-cli.mjs`と同じ`serve --service`方式で起動し、各server固有の`XDG_STATE_HOME`へ登録する。V2 plugin contextにない子一覧・activity・paginated historyを既存`Service.discover()`が同じPIDから取得できるようにする。認証はserviceが生成したregistrationを使用し、生passwordは保存せずserver終了後にregistrationを削除する。単なる`serve`は履歴取得機能を欠き、Worker成功後のReview・修正・受理を妨げる。
 
 ## 分離したidentityと保存先
 

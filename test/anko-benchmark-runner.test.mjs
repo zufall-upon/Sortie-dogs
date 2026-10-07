@@ -97,6 +97,33 @@ test('Anko native root success without accepted Mission exits nonzero', () => {
   }
 });
 
+test('Anko private service is registered for native history and uses its generated password', async () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  const fragment = source.slice(source.indexOf('async function startPrivateServer'), source.indexOf('async function seedOpenAICredential'));
+  const calls = [], writes = [], removed = [];
+  const handlers = {};
+  const child = { pid: 123, once: (name, fn) => { (handlers[name] ??= []).push(fn); },
+    kill: () => handlers.close.splice(0).forEach(fn => fn()), stdout: { on: (_, fn) => fn('server listening on http://127.0.0.1:1234') },
+    stderr: { on() {} } };
+  const context = { assert, join, Date, Buffer, AbortSignal, output: '/trial', project: '/trial/project', cli: '/cli',
+    mkdir: async () => {}, randomBytes: () => Buffer.from('requested-password'), rememberSensitiveValue() {},
+    redactSensitiveText: text => text, createWriteStream: () => ({ write() {}, end() {} }),
+    readFile: async path => path.endsWith('/service.json') ? JSON.stringify({ pid: 123, url: 'http://127.0.0.1:1234', password: 'generated-secret' }) : '',
+    writeFile: async (path, text) => writes.push([path, text]), rm: async path => removed.push(path),
+    finished: async () => {}, delay: async () => {}, servers: [],
+    spawn: (file, args, options) => { calls.push({ file, args, options }); return child; },
+    OpenCode: { make: options => { calls.push(options); return { server: { info: async () => ({ pid: 123, version: '2.0.18' }) } }; } },
+  };
+  const server = await vm.runInNewContext(fragment + ';startPrivateServer({}, "run")', context);
+  assert(calls[0].args.includes('--service'));
+  assert.equal(calls[0].options.env.XDG_STATE_HOME, '/trial/run-service-state');
+  assert.equal(calls[1].headers.Authorization, `Basic ${Buffer.from('opencode:generated-secret').toString('base64')}`);
+  assert(!JSON.stringify(writes).includes('generated-secret'));
+  assert.equal(JSON.parse(writes[0][1]).owning_history_endpoint, true);
+  assert.equal(await server.stop(), true);
+  assert.deepEqual(removed, ['/trial/run-service-state/opencode/service.json']);
+});
+
 test('Anko prepares and reuses the pinned goyacc rather than forcing a Worker to discover external tools', async () => {
   const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/prepare.mjs'), 'utf8');
   const fragment = source.slice(source.indexOf('export async function ensureGoGenerator'), source.indexOf('export async function showProfile'))
