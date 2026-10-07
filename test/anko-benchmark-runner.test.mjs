@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { gzipSync } from 'node:zlib';
@@ -7,13 +9,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
-  ROOT, STATE_ROOT, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
+  ROOT, STATE_ROOT, READ_STALL_MS, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
   diagnosticReadObservations, parseCommand, parseVersion, profilePath, progressSignature, shouldStopForNoProgress,
-  versionRoot, writeExclusive,
+  priorStandaloneAttempt, versionRoot, writeExclusive,
 } from '../scripts/anko-benchmark/core.mjs';
 import { eligibleReadPermission } from '../scripts/anko-benchmark/recovery.mjs';
 import { expectSessionTurn, installObservationFiles, nativeTurnTerminal, observeSessionState,
-  observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
+  observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, toolPaths, toolWaitObservations, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
+import { comparablePath, hostPaths, goToolchain, npmCommand } from '../scripts/anko-benchmark/host.mjs';
 import { classifyUsage, nativeTerminal, readOwnedUsage, summarizeOwnedUsage, usageSafetyStopReason } from '../scripts/anko-benchmark/usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions, settleOwnedSessions } from '../scripts/anko-benchmark/settle.mjs';
 import { analyzeSavedTrial } from '../scripts/anko-benchmark/inspect.mjs';
@@ -354,9 +357,162 @@ test('Anko missing usage and hanging observation retain the stop within a bounde
 });
 
 test('Anko runner modules parse without invoking an arm or setup', () => {
-  for (const file of ['scripts/anko-benchmark.mjs', ...['arm', 'run', 'core', 'usage', 'settle', 'inspect', 'observe']
+  for (const file of ['scripts/anko-benchmark.mjs', ...['arm', 'run', 'core', 'host', 'prepare', 'verify', 'diagnostic-owned', 'diagnose', 'usage', 'settle', 'inspect', 'observe']
     .map(name => `scripts/anko-benchmark/${name}.mjs`)])
     execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+});
+
+test('Anko Linux host uses existing native CLI, repository client and Go without WSL or Windows storage', () => {
+  const paths = hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {} });
+  assert.equal(paths.host_database, '/home/test/.local/share/opencode/opencode.db');
+  assert.equal(paths.client_package, '/workspace/node_modules/@opencode/client/package.json');
+  assert.equal(paths.release_root, '/workspace/_testenv/releases');
+  assert.equal(paths.artifact_root, '/workspace/_testenv/anko-records');
+  const toolchain = goToolchain(paths, '/workspace/candidate', () => assert.fail('Linux invoked WSL'));
+  assert.equal(toolchain.invocation(['test', './...']).file, `${paths.go_directory}/bin/go`);
+  assert.match(toolchain.validation_command, /GOCACHE=\/workspace\/candidate\/\.gocache/u);
+  assert(!toolchain.validation_command.includes('wsl.exe'));
+  assert.deepEqual(npmCommand(['--version'], { platform: 'linux' }), { file: 'npm', args: ['--version'] });
+});
+
+test('Anko Windows host retains CLI/client paths and WSL Go validation', () => {
+  const paths = hostPaths({ root: 'C:\\workspace', platform: 'win32', home: 'C:\\Users\\test', env: {} });
+  assert.match(paths.client_package, /\.sortie-env\\node_modules\\@opencode\\client/u);
+  assert(paths.cli.endsWith('2.0.18/opencode-cli.exe'));
+  const calls = [];
+  const toolchain = goToolchain(paths, 'C:\\workspace\\candidate', (file, args) => {
+    calls.push([file, args]); return args.at(-1) === paths.go_directory ? '/mnt/c/go\n' : '/mnt/c/candidate\n';
+  });
+  assert.equal(calls.length, 2);
+  assert(calls.every(([file]) => file === 'wsl.exe'));
+  assert.equal(toolchain.invocation(['test', './...']).file, 'wsl.exe');
+  assert.match(toolchain.validation_command, /\/mnt\/c\/go\/bin\/go/u);
+  assert.deepEqual(npmCommand(['install'], { platform: 'win32', execPath: 'C:\\node\\node.exe', npmExecPath: 'C:\\node\\npm.js' }),
+    { file: 'C:\\node\\node.exe', args: ['C:\\node\\npm.js', 'install'] });
+});
+
+test('Anko host overrides are preparation paths, not additional permission rules', () => {
+  const paths = hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {
+    ANKO_CLI: '/tools/opencode', ANKO_SOURCE_PROJECT: '/source/anko', ANKO_GO_DIRECTORY: '/tools/go',
+    ANKO_INSTRUCTION: '/inputs/instruction.md', ANKO_ARTIFACT_ROOT: '/records',
+  } });
+  assert.equal(paths.cli, '/tools/opencode');
+  assert.equal(paths.source_project, '/source/anko');
+  assert.equal(paths.instruction, '/inputs/instruction.md');
+  assert.equal(paths.artifact_root, '/records');
+  assert(!JSON.stringify(paths).includes('permissions'));
+  assert.equal(comparablePath('/source/Env.go') === comparablePath('/source/env.go'), false);
+  assert.equal(comparablePath('C:\\source\\Env.go'), comparablePath('c:/source/env.go'));
+});
+
+test('Anko CLI argument errors do not eagerly import a missing diagnostic client', () => {
+  let error;
+  try { execFileSync(process.execPath, ['scripts/anko-benchmark.mjs', 'run'], {
+    encoding: 'utf8', env: { ...process.env, ANKO_CLI: '/absent/opencode' }, stdio: 'pipe',
+  }); } catch (value) { error = value; }
+  assert.equal(error.status, 1);
+  assert.match(error.stderr, /run requires --version/u);
+  assert(!error.stderr.includes('ERR_MODULE_NOT_FOUND'));
+});
+
+test('Anko run admits one arm without a paid diagnostic or historical-attempt gate', async () => {
+  const source = await readFile(join(ROOT, 'scripts/anko-benchmark/run.mjs'), 'utf8');
+  const calls = [], written = new Map();
+  const context = { assert, join, console: { log() {} }, process: { exitCode: null }, Date,
+    versionRoot: () => '/version', profilePath: () => '/profile', packageReceiptPath: () => '/package',
+    exists: async () => false, prepareVersion: async () => calls.push('prepare'),
+    priorStandaloneAttempt: async () => null,
+    verifyVersion: async (_, options) => { assert.equal(options.includeDiagnosis, false); return { status: 'preflight-ready', benchmark_accepted: false }; },
+    readJson: async path => path === '/package' ? { sha256: 'package' } : { stall_policy: { no_progress_ms: READ_STALL_MS } },
+    fixExecutionPolicy: async (_, __, diagnosis) => { assert.equal(diagnosis, null); return {}; },
+    writeExclusive: async (path, text) => { written.set(path, JSON.parse(text)); },
+    writeJson: async (path, value) => { written.set(path, value); },
+    hashFile: async () => 'digest', READ_STALL_MS, WALL_LIMIT_MS: 3_600_000, COST_LIMIT_USD: 15,
+    buildTrial: async (_, __, ___, diagnosis) => { assert.equal(diagnosis, null); return { trial_id: 'one', trial_directory: '/trial', record_path: '/record' }; },
+    runChild: async () => { calls.push('arm'); return { exit: 1, signal: null }; },
+  };
+  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9")', context);
+  assert.deepEqual(calls, ['prepare', 'arm']);
+  assert.equal(written.get('/version/run-once.lock').stage, 'arm-terminal');
+  assert.equal(written.get('/version/run-once.lock').benchmark_attempt, 1);
+});
+
+test('Anko common runner does not reset the consumed retained Linux attempt', async () => {
+  const parent = join(ROOT, '_testenv/anko-reusable');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'prior-attempt-test-'));
+  try {
+    const paths = { platform: 'linux', legacy_run: directory };
+    await writeFile(join(directory, 'candidate.json'), '{"version":"0.13.9","package_sha256":"fixed"}\n');
+    assert.equal(await priorStandaloneAttempt('0.13.9', paths), null);
+    await writeFile(join(directory, 'run-once.lock'), '{"max_attempts":1}\n');
+    const before = await readFile(join(directory, 'run-once.lock'));
+    assert.equal((await priorStandaloneAttempt('0.13.9', paths)).package_sha256, 'fixed');
+    assert.equal(await priorStandaloneAttempt('0.13.10', paths), null);
+    assert.deepEqual(await readFile(join(directory, 'run-once.lock')), before);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('Anko pending patch preserves every file/rename target without retaining patch contents', () => {
+  const patchText = '*** Begin Patch\n*** Update File: /candidate/ast/stmt.go\n+SECRET BODY\n*** Add File: /wrong/env/env.go\n*** Move to: env/moved.go\n*** Delete File: old.go\n*** End Patch';
+  const expected = ['/candidate/ast/stmt.go', '/wrong/env/env.go', 'env/moved.go', 'old.go'];
+  assert.deepEqual(toolPaths('patch', { patchText }), expected);
+  const event = safeNativeEvent({ type: 'session.tool.called', data: {
+    sessionID: 'worker', id: 'patch-1', name: 'patch', input: { patchText },
+  } });
+  assert.deepEqual(event.paths, expected);
+  assert(!JSON.stringify(event).includes('SECRET BODY'));
+  const tools = new Map();
+  observeToolEvent(tools, new Set(), event, 1000);
+  assert.deepEqual(tools.get('worker/patch-1').paths, expected);
+  assert.equal(noProgressStopReason({ activeTool: tools.get('worker/patch-1') }), 'native-tool-no-progress-timeout');
+  assert.equal(shouldStopForNoProgress({ now: 181000, lastProgressAt: tools.get('worker/patch-1').last_progress_at }), true);
+  assert.match(observerPlugin, /paths: toolPaths/u);
+  assert.match(tracedSortiePlugin, /paths: toolPaths/u);
+  const arm = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(arm, /await installObservationFiles\(project\)/u);
+});
+
+test('Anko tool wait distinguishes native permission, unfinished Sortie hook and unknown boundary without enforcement', () => {
+  const tool = { session_id: 'worker', call_id: 'patch', name: 'patch', paths: ['/candidate/code.go', '/wrong/env.go'] };
+  const hook = { session_id: 'worker', call_id: 'patch', phase: 'sortie-hook-start', domain: 'tool', hook: 'execute.before', at: '2026-10-07T00:00:00Z' };
+  const request = { id: 'permission', sessionID: 'worker', source: { id: 'patch' } };
+  const pending = toolWaitObservations([tool], [hook], [request], '/candidate')[0];
+  assert.equal(pending.observed_boundary, 'native-permission-pending');
+  assert.deepEqual(pending.paths_outside_project, ['/wrong/env.go']);
+  assert.deepEqual(pending.pending_permission_ids, ['permission']);
+  assert.equal(pending.root_cause_confirmed, false);
+  assert.equal(toolWaitObservations([tool], [hook], [], '/candidate')[0].observed_boundary, 'sortie-hook-start-without-end');
+  const ended = { ...hook, phase: 'sortie-hook-end', at: '2026-10-07T00:00:01Z' };
+  assert.equal(toolWaitObservations([tool], [hook, ended], [], '/candidate')[0].observed_boundary, 'native-tool-start-without-terminal');
+  assert.deepEqual(tool.paths, ['/candidate/code.go', '/wrong/env.go']);
+});
+
+test('Anko repeated edits of an already dirty source count as progress', async () => {
+  const parent = join(ROOT, '_testenv/anko-reusable');
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(join(parent, 'source-progress-test-'));
+  try {
+    const cmd = (file, args, options) => execFileSync(file, args, { encoding: 'utf8', ...options });
+    const git = args => cmd('git', args, { cwd: directory });
+    git(['init', '-q']);
+    git(['config', 'user.name', 'Anko test']); git(['config', 'user.email', 'anko@example.invalid']);
+    await writeFile(join(directory, 'code.go'), 'base\n');
+    git(['add', 'code.go']); git(['commit', '-qm', 'base']);
+    const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+    const fragment = source.slice(source.indexOf('function sourceProgressSignature'), source.indexOf('async function readJsonLines'));
+    const signature = () => vm.runInNewContext(fragment + ';sourceProgressSignature(project)', {
+      project: directory, cmd, join, readFileSync, hash: value => createHash('sha256').update(value).digest('hex'),
+    });
+    await writeFile(join(directory, 'code.go'), 'first change\n');
+    const status = git(['status', '--porcelain']); const first = signature();
+    await writeFile(join(directory, 'code.go'), 'second change\n');
+    assert.equal(git(['status', '--porcelain']), status);
+    assert.notEqual(signature(), first);
+    await writeFile(join(directory, 'new.go'), 'first\n'); const untracked = signature();
+    await writeFile(join(directory, 'new.go'), 'second\n');
+    assert.notEqual(signature(), untracked);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('Anko drain does not re-interrupt a previously requested session or query beyond a spent deadline', async () => {

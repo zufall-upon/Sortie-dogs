@@ -1,6 +1,36 @@
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { nativeTerminal } from './usage.mjs';
+
+// Record path metadata only, not patch bodies or file contents. Includes renames.
+export function toolPaths(name, input = {}) {
+  if (name === 'patch' || name === 'apply_patch') return [...new Set(
+    [...String(input.patchText ?? '').matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/gmu)]
+      .map(match => (match[1] ?? match[2]).trim()))];
+  const path = input.filePath ?? input.path ?? input.filepath;
+  return typeof path === 'string' ? [path] : [];
+}
+
+export function toolWaitObservations(tools, hooks, permissions, project) {
+  return tools.map(tool => {
+    const related = hooks.filter(event => event.session_id === tool.session_id && event.call_id === tool.call_id);
+    const starts = related.filter(event => event.phase === 'sortie-hook-start');
+    const ends = related.filter(event => event.phase === 'sortie-hook-end');
+    const pending = starts.filter(start => !ends.some(end => end.domain === start.domain && end.hook === start.hook && end.at >= start.at));
+    const requests = permissions.filter(request => (request.session_id ?? request.sessionID) === tool.session_id && request.source?.id === tool.call_id);
+    const outside = (tool.paths ?? []).filter(path => {
+      const target = relative(project, resolve(project, path));
+      return target === '..' || target.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(target);
+    });
+    return { session_id: tool.session_id, call_id: tool.call_id, tool: tool.name,
+      paths: tool.paths ?? [], paths_outside_project: outside,
+      pending_permission_ids: requests.map(request => request.id),
+      unreturned_sortie_hooks: pending.map(event => ({ domain: event.domain, hook: event.hook, at: event.at })),
+      observed_boundary: requests.length ? 'native-permission-pending' : pending.length ? 'sortie-hook-start-without-end'
+        : 'native-tool-start-without-terminal',
+      root_cause_confirmed: false };
+  });
+}
 
 export function observeSessionTurn(turns, event) {
   if (!event.session_id || !Number.isFinite(event.created)) return;
@@ -47,10 +77,12 @@ export function observeToolEvent(tools, terminalTools, event, now = Date.now()) 
   if (['session.tool.called', 'session.tool.input.started', 'plugin-hook-before'].includes(type)) {
     tools.set(key, { session_id: event.session_id, call_id: event.call_id,
       name: event.tool ?? prior?.name ?? null, path: event.path ?? prior?.path ?? null,
+      paths: event.paths?.length ? event.paths : prior?.paths ?? [],
       started_at: prior?.started_at ?? now, last_progress_at: now,
       last_event_type: type, observed_at: event.observed_at ?? event.at });
   } else if (prior && ['session.tool.input.delta', 'session.tool.input.ended', 'session.tool.progress'].includes(type)) {
-    tools.set(key, { ...prior, last_progress_at: now, last_event_type: type,
+    tools.set(key, { ...prior, paths: event.paths?.length ? event.paths : prior.paths,
+      path: event.path ?? prior.path, last_progress_at: now, last_event_type: type,
       observed_at: event.observed_at ?? event.at });
   }
 }
@@ -59,12 +91,14 @@ export function safeNativeEvent(event, toolName = null) {
   const data = event?.data && typeof event.data === 'object' ? event.data : {};
   const input = data.input && typeof data.input === 'object' ? data.input : {};
   const name = toolName ?? data.name ?? null;
-  const toolPath = name === 'read' ? (input.filePath ?? input.path ?? input.filepath ?? data.path ?? null) : null;
+  const paths = toolPaths(name, input);
+  const toolPath = paths[0] ?? (typeof data.path === 'string' ? data.path : null);
   const tokens = data.tokens;
   const selected = { type: event?.type ?? null, id: event?.id ?? null, created: event?.created ?? null,
     session_id: data.sessionID ?? null, assistant_message_id: data.assistantMessageID ?? null,
     call_id: data.id ?? data.callID ?? data.requestID ?? null, tool: name,
     path: typeof toolPath === 'string' ? toolPath : undefined,
+    paths: paths.length ? paths : undefined,
     action: data.action ?? null, resources: Array.isArray(data.resources) ? data.resources.map(String) : undefined,
     reply: data.reply ?? undefined, executed: data.executed ?? undefined,
     delta_bytes: typeof data.delta === 'string' ? Buffer.byteLength(data.delta) : undefined,
@@ -101,12 +135,13 @@ export async function installObservationFiles(project) {
 
 // V2 hook observation only: never changes tool inputs, permission effects or model requests.
 export const observerPlugin = `import { appendFile } from 'node:fs/promises';
+const toolPaths = ${toolPaths.toString()};
 const log = process.env.ANKO_BENCHMARK_HOOK_LOG;
 const safe = (phase, event) => {
   const input = event.input ?? {};
   return { at: new Date().toISOString(), phase, tool: event.tool ?? null,
     session_id: event.sessionID ?? null, call_id: event.callID ?? event.id ?? null,
-    path: event.tool === 'read' ? (input.path ?? input.filePath ?? null) : null,
+    path: toolPaths(event.tool, input)[0] ?? null, paths: toolPaths(event.tool, input),
     action: event.action ?? null, resources: event.resources ?? null,
     effect: event.effect ?? null, status: event.status ?? null };
 };
@@ -121,12 +156,13 @@ export default { id: 'anko-benchmark-observer', async setup(ctx) {
 
 export const tracedSortiePlugin = `import plugin from 'sortie-dogs/server';
 import { appendFile } from 'node:fs/promises';
+const toolPaths = ${toolPaths.toString()};
 const log = process.env.ANKO_BENCHMARK_HOOK_LOG;
 const record = async (phase, domain, hook, event) => {
   if (!log) return;
   await appendFile(log, JSON.stringify({ at: new Date().toISOString(), phase, domain, hook,
     session_id: event?.sessionID ?? null, call_id: event?.callID ?? event?.id ?? null,
-    tool: event?.tool ?? null, action: event?.action ?? null,
+    tool: event?.tool ?? null, paths: toolPaths(event?.tool, event?.input), action: event?.action ?? null,
     resources: event?.resources ?? null, effect: event?.effect ?? null }) + '\\n');
 };
 export default { ...plugin, async setup(ctx) {

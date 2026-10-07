@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { comparablePath, hostPaths } from './host.mjs';
 
 export const ROOT = process.cwd();
 export const STATE_ROOT = join(ROOT, '_testenv/anko-reusable');
-export const ARTIFACT_ROOT = 'M:/_work/_Sortie-dogs-artifacts/records/anko-reusable';
-export const LEGACY_RUN = join(ROOT, '_testenv/anko-v0137-20261005');
-export const SOURCE_PROJECT = join(LEGACY_RUN, 'project');
-export const PREPARED_GO = join(ROOT, '_testenv/anko-v0136-20261004');
-export const CLI = 'C:/Users/rozen/AppData/Roaming/ai.opencode.desktop/cli/2.0.18/opencode-cli.exe';
-export const HOST_DATABASE = 'C:/Users/rozen/.local/share/opencode/opencode.db';
+export const HOST = hostPaths();
+export const ARTIFACT_ROOT = HOST.artifact_root;
+export const LEGACY_RUN = HOST.legacy_run;
+export const SOURCE_PROJECT = HOST.source_project;
+export const CLI = HOST.cli;
+export const HOST_DATABASE = HOST.host_database;
 export const INSTRUCTION_SHA256 = '96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe';
 export const ANKO_BASE = '3f269a72ff69398b1250c584171f32d12c0d8085';
 export const CLI_SHA256 = '78f454c0a1581b66ce4f264f42bfaee6207c887053d8e4b02c4c9cfb74e90668';
@@ -156,7 +157,7 @@ export function noProgressStopReason({ pendingPermissionCount = 0, activeTool = 
 }
 
 function comparableObservedPath(value) {
-  return String(value ?? '').replaceAll('/', '\\').toLowerCase();
+  return comparablePath(value);
 }
 
 export function diagnosticReadObservations(events, hooks, targets) {
@@ -232,4 +233,13 @@ export async function copyExclusive(source, destination) {
 
 export async function exists(path) {
   try { await stat(path); return true; } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+}
+
+// Moving to the common runner must not reset a consumed retained Linux arm.
+export async function priorStandaloneAttempt(version, paths = HOST) {
+  if (paths.platform !== 'linux') return null;
+  const lock = join(paths.legacy_run, 'run-once.lock');
+  if (!await exists(lock)) return null;
+  const candidate = await readJson(join(paths.legacy_run, 'candidate.json'));
+  return candidate.version === version ? { lock, version, package_sha256: candidate.package_sha256 } : null;
 }

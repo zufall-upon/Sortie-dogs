@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { exists, hashFile, readJson, versionRoot, writeJson } from './core.mjs';
+import { comparablePath } from './host.mjs';
 
-const pathKey = value => String(value ?? '').replaceAll('\\', '/').toLowerCase();
+const pathKey = comparablePath;
 
 // The caller proves native ownership and verifies the retained file hash before replying.
 export function eligibleReadPermission(request, tool, policy, ownedSessionIDs) {
@@ -17,14 +18,14 @@ export function eligibleReadPermission(request, tool, policy, ownedSessionIDs) {
     pathKey(resources[0]) === `${pathKey(dirname(policy.applicable_agents_path))}/*`;
 }
 
-export async function fixExecutionPolicy(version, profile, diagnosis) {
+export async function fixExecutionPolicy(version, profile, diagnosis = null) {
   const path = join(versionRoot(version), 'execution-policy.json');
   const policy = { schema_version: 1, no_progress_ms: profile.stall_policy.no_progress_ms,
     applicable_agents_path: join(profile.repo_root, 'AGENTS.md'),
     applicable_agents_sha256: profile.applicable_agents_sha256,
     known_read_permission_decision: 'once', other_permissions: 'observe-only; stop after no-progress timeout',
     prompt_replay: false, replacement_worker_on_stall: false,
-    diagnosis_record_path: diagnosis.record_path, diagnosis_stop_reason: diagnosis.stop_reason,
+    diagnosis_record_path: diagnosis?.record_path ?? null, diagnosis_stop_reason: diagnosis?.stop_reason ?? null,
     original_diagnostic_policy_unchanged: true };
   assert.equal(await hashFile(policy.applicable_agents_path), policy.applicable_agents_sha256);
   if (await exists(path)) {

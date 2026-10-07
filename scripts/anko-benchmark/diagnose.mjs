@@ -14,8 +14,8 @@ import {
   versionRoot, writeExclusive, writeJson,
 } from './core.mjs';
 import { installObservationFiles } from './observe.mjs';
+import { loadClient } from './host.mjs';
 
-const { OpenCode } = await import(pathToFileURL(join(process.cwd(), '.sortie-env/node_modules/@opencode/client/dist/promise/index.js')).href);
 const SENSITIVE_ENV = /(?:API[_-]?KEY|ACCESS[_-]?KEY|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|(?:^|_)TOKEN(?:_|$)|PASSWORD|SECRET|CREDENTIAL|COOKIE|AUTH|NODE_OPTIONS|NODE_PATH|GIT_ASKPASS|SSH_AUTH_SOCK|SSH_AGENT_PID)/iu;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const sha = data => createHash('sha256').update(data).digest('hex');
@@ -95,6 +95,7 @@ async function makeEnvironment(output, project, control) {
 }
 
 async function startServer(env, output, project) {
+  const { OpenCode } = await loadClient();
   const password = randomBytes(24).toString('hex');
   const secrets = [password, Buffer.from(`opencode:${password}`).toString('base64')];
   const stdoutPath = join(output, 'server-stdout.log');
@@ -334,7 +335,7 @@ async function reconcileSubmittedDiagnostic(version, prior, packageReceipt) {
       'permission-snapshots.jsonl'].map(name => writeFile(join(recovery, name), '', { flag: 'wx' })));
     await cp(sourceDatabase, envInfo.db, { force: false, errorOnExist: true });
     credentialSeed = await seedCredential(envInfo.db);
-    assert.equal(await hashFile(CLI), CLI_SHA256);
+    assert.equal(await hashFile(CLI), (await readJson(join(STATE_ROOT, 'common/profile.json'))).cli.sha256);
     const server = await startServer(envInfo.env, recovery, project);
     servers.push(server);
     const client = server.client;
@@ -643,7 +644,7 @@ export async function diagnoseVersion(version) {
     await pluginObserver(project);
     diagnosticStage = 'first-server-start';
     envInfo = await makeEnvironment(attempt, project, control);
-    assert.equal(await hashFile(CLI), CLI_SHA256);
+    assert.equal(await hashFile(CLI), (await readJson(join(STATE_ROOT, 'common/profile.json'))).cli.sha256);
     const server = await startServer(envInfo.env, attempt, project);
     servers.push(server);
     host = await server.client.server.info();

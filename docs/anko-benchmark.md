@@ -4,20 +4,20 @@
 
 repository rootのforeground shellで、同じスクリプトへ版だけ渡す。
 
-```powershell
-node scripts/anko-benchmark.mjs run --version 0.13.8
+```sh
+node scripts/anko-benchmark.mjs run --version X.Y.Z
 ```
 
-次回は`0.13.8`を対象版へ変えるだけ。`run`は未変更の準備を再利用し、局所診断・preflight・新規arm 1回・結果保存まで行う。`tee`、redirect、別wrapperは足さない。
+対象版だけ渡す。WindowsとLinuxで同じentrypoint・監視を使う。`run`は未変更の準備を再利用し、モデルを呼ばない保存整合性preflight・新規arm 1回・結果保存まで行う。**有料の局所read診断は起動の必須条件ではない**。`tee`、redirect、別wrapperは足さない。
 
-packageの既定保存先は`M:/_work/_Sortie-dogs-artifacts/releases/vX.Y.Z/sortie-dogs-X.Y.Z.tgz`。初回だけ別のlocal packageを選ぶ場合：
+packageの既定保存先はWindowsが`M:/_work/_Sortie-dogs-artifacts/releases/vX.Y.Z/sortie-dogs-X.Y.Z.tgz`、Linuxが`_testenv/releases/X.Y.Z/sortie-dogs-X.Y.Z.tgz`。初回だけ別のlocal packageを選ぶ場合：
 
 ```powershell
 node scripts/anko-benchmark.mjs prepare --version X.Y.Z --package <archive-path>
 node scripts/anko-benchmark.mjs run --version X.Y.Z
 ```
 
-既存v0.13.8は`_testenv/anko-v0137-20261005/sortie-dogs-0.13.8.tgz`を選択する。公開tarballではなく保存済みlocal候補。receipt固定後は同版の別packageへ交換しない。
+Windowsの既存v0.13.8は`_testenv/anko-v0137-20261005/sortie-dogs-0.13.8.tgz`を選択する。公開tarballではなく保存済みlocal候補。receipt固定後は同版の別packageへ交換しない。
 
 個別に確認したい場合もentrypointは同じ：
 
@@ -28,9 +28,18 @@ node scripts/anko-benchmark.mjs inspect --version X.Y.Z
 node scripts/anko-benchmark.mjs verify --version X.Y.Z
 ```
 
-`diagnose`前は`prepare`が必要。診断・回帰は本体試行ではない。`verify`は保存整合性/preflight検証であり、Anko成功・Review PASS・受入を意味しない。実行後も同じ`verify`で結果を照合する。
+`diagnose`は必要時に明示する有料の局所診断。事前に`prepare`が必要。保存済みの同じ診断は再利用し、過去の特定attempt番号を次の診断条件にしない。診断・回帰は本体試行ではない。`verify`は保存整合性/preflight検証であり、Anko成功・Review PASS・受入を意味しない。実行後も同じ`verify`で結果を照合する。
 
-**今回の続行は`inspect --version 0.13.8`のみ。消費済み本体を再開・延長・再試行しない。** `inspect`は保存済みlockが示すterminal trialをofflineで読む。準備、server起動、credential取得、providerリクエスト、prompt、再派遣、ファイル更新は行わない。package/元runnerのhash、local/永続copy、DBのcredential行0、検査前後の入力不変を照合し、provider transportとobserver購読、usage欠測と価格不明、DBとexportの差をJSONで出す。元試行結果は訂正・上書きしない。
+`inspect`は共通runnerの保存済みlockが示すterminal trialをofflineで読む。準備、server起動、credential取得、providerリクエスト、prompt、再派遣、ファイル更新は行わない。package/元runnerのhash、local/永続copy、DBのcredential行0、検査前後の入力不変を照合し、provider transportとobserver購読、usage欠測と価格不明、DBとexportの差をJSONで出す。元試行結果は訂正・上書きしない。旧Linux単独runnerのv0.13.9結果は`_testenv/anko-v0139-linux-20261007/run-1/diagnosis.json`を読む（共通trial形式へ上書き変換しない）。
+
+## Host準備
+
+`scripts/anko-benchmark/host.mjs`でhost依存pathと検証コマンドを分離する。task、base、model、費用・時間条件は共通。
+
+- Windows：既存CLI 2.0.18、`.sortie-env`のclient、保存済みGoをWSLで使用。
+- Linux：`npm ci`で導入済みrepository client 2.0.18、`_testenv/anko-linux-reusable/toolchains/`のCLI 2.0.18とGo 1.27.1をnativeで使用。source/taskは保存済み`_testenv/anko-v0139-linux-20261007/`から再利用。Windows pathや`wsl.exe`は呼ばない。
+- 保存場所が異なるhostでは`ANKO_CLI`、`ANKO_SOURCE_PROJECT`、`ANKO_INSTRUCTION`、`ANKO_GO_DIRECTORY`、`ANKO_GO_ARCHIVE`、`ANKO_HOST_DATABASE`、`ANKO_RELEASE_ROOT`、`ANKO_ARTIFACT_ROOT`を指定できる。新しい権限ルールではなく準備済み入力のpath指定。profileへ固定し、実行中に交換しない。
+- profileへ実CLI hash、client lock、hostとtoolchainを記録。版ごとに再install/initせず、未変更のinstallationを再利用。mirrorの可変tipや過去の失敗receiptは新規armの起動条件にしない。
 
 ## 分離したidentityと保存先
 
@@ -39,9 +48,9 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - 版ごとの制御installation・局所診断：`_testenv/anko-reusable/vX.Y.Z/`。
 - 本体条件：実行前に固定する`execution-policy.json`。診断条件を後から変更しない。
 - 本体試行：`vX.Y.Z/trials/<timestamp-uuid>/`。runnerのGit revision、変更有無、各module hashとpackage hashは別identity。
-- 永続記録：`M:/_work/_Sortie-dogs-artifacts/records/anko-reusable/vX.Y.Z/`。
+- 永続記録：Windowsは`M:/_work/_Sortie-dogs-artifacts/records/anko-reusable/vX.Y.Z/`、Linuxは`_testenv/anko-records/vX.Y.Z/`（同一diskの保持copyであり別disk backupとは主張しない）。
 
-同版`run-once.lock`は排他的な本体消費記録。terminal失敗も消さず再起動しない。旧trialをresume/延長せず、過去の費用・時間・試行数をresetしない。
+同版`run-once.lock`は排他的な本体消費記録。terminal失敗も消さず再起動しない。旧Linux単独runnerの消費済みlockも認識し、共通runnerへ移っただけで試行数をresetしない。v0.13.9は消費済み。`verify`は`retained-arm-consumed`と保存lockのpathを示す。
 
 ## 継承条件とread停滞処理
 
@@ -51,6 +60,8 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - 本体1回、60分、$15 token価格推定cutoff、grading `none`。請求額保証や既存campaign残額ではない。
 - 局所診断は正式read-only Workerでrepo内既存、不在AGENTS、repo外祖先AGENTSを比較。native event、permission.list、tool/Sortie hook前後を記録。
 - 本体の無進捗閾値180秒。Worker activeは進捗ではない。親subagent待機は子の実測進捗と区別する。
+- 既にdirtyの同じfileへ追加編集しても、diff/contentの変化を進捗として認識する。Go cacheやrunner制御fileはsourceの進捗へ混ぜない。
+- `read`だけでなく`patch`/rename全対象pathとSortie hook開始/終了を記録。`no-progress-stop.json`の`tool_wait_observations`はnative permission、未復帰hook、native開始のみの境界を区別する。repo外pathは観測のみで、新しい拒否・承認・path書換えは行わない。未確定の原因を確定扱いしない。
 - 指示の同内容再readを避けるため、hash固定済みAGENTSを初回promptへ添付する。
 - 本体の`once`返信はnative所有session、read tool call、固定済みAGENTSのexact path/hash、要求resourceが全部一致した場合だけ。shell/edit、別file、別sessionには返信しない。`always`や無条件allowは使わない。
 - 未知の権限待ち/tool停滞は状態を保存し、180秒後に所有active sessionへinterruptを1回要求。prompt再送・代替Workerで迂回しない。interrupt ackとnative terminalは別記録。
@@ -73,6 +84,8 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 
 ## 保護と結果解釈
 
-旧runner/lock/package/log/DB/比較結果、未commitの起動管理・検証登録修正、global設定は保護する。生log、DB、dataset、資格情報、tgzはGitへ入れない。隔離DBのcredential行を除去・検証してから永続保存する。release/publication/global適用、公式grading、無関係なベンチや全suiteは行わない。
+旧runner/lock/package/log/DB/比較結果、global設定は保護する。生log、DB、dataset、資格情報、tgzはGitへ入れない。隔離DBのcredential行を除去・検証してから永続保存する。runnerの修正はhostの既存権限を維持し、新しい承認、無条件allow、新しいscope拒否、製品gateの推測修正を足さない。
 
 今回の実結果・比較・未知項目は[結果文書](benchmarks/anko-read-recovery-20261005.md)へ記録。Root応答終了、shell exit0、低費用だけを課題成功と扱わない。
+
+Linux v0.13.9の反省と改善PRは[三要素の点検](benchmarks/anko-runner-autonomy-20261007.md)を参照。

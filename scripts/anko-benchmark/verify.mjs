@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { cp, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  ARTIFACT_ROOT, ANKO_BASE, CLI_SHA256, CLIENT_LOCK_SHA256, COST_LIMIT_USD, INSTRUCTION_SHA256,
+  ARTIFACT_ROOT, ANKO_BASE, CLI_SHA256, CLIENT_LOCK_SHA256, COST_LIMIT_USD, HOST, INSTRUCTION_SHA256,
   READ_STALL_MS, WALL_LIMIT_MS, WORKER_MODEL, exists, fixedProfile, hashFile, packageReceiptPath, profilePath,
-  readJson, sha256, versionRoot, writeJson,
+  priorStandaloneAttempt, readJson, sha256, versionRoot, writeJson,
 } from './core.mjs';
 
 function verifyNoCredentials(path) {
@@ -27,9 +28,11 @@ async function verifyProfile() {
   assert.equal(profile.stall_policy.no_progress_ms, READ_STALL_MS);
   assert.equal(profile.stall_policy.active_session_status_is_progress, false);
   assert.equal(profile.stall_policy.pending_permission_response, 'observe-only; never auto-allow, auto-reject or infer consent');
-  assert.equal(profile.cli.sha256, CLI_SHA256);
+  assert.equal(await hashFile(profile.cli.path), profile.cli.sha256);
+  if (process.platform === 'win32') assert.equal(profile.cli.sha256, CLI_SHA256);
   assert.equal(profile.driver_client.version, '2.0.18');
-  assert.equal(profile.driver_client.package_lock_sha256, CLIENT_LOCK_SHA256);
+  assert.equal(await hashFile(HOST.client_lock), profile.driver_client.package_lock_sha256);
+  if (process.platform === 'win32') assert.equal(profile.driver_client.package_lock_sha256, CLIENT_LOCK_SHA256);
   assert.equal(await hashFile(join(process.cwd(), 'AGENTS.md')), profile.applicable_agents_sha256,
     'current AGENTS.md differs from the execution profile');
   return profile;
@@ -60,7 +63,7 @@ async function verifyPackage(version, setup) {
   assert.equal(setup.package_receipt_sha256, receipt.sha256);
   const installed = JSON.parse(await readFile(join(control, 'node_modules/sortie-dogs/package.json'), 'utf8'));
   assert.equal(installed.version, version);
-  const assetVersion = await import(`${new URL(`file:///${join(control, 'node_modules/sortie-dogs/dist/asset-version.js').replaceAll('\\', '/')}`).href}?verify=${encodeURIComponent(version)}`);
+  const assetVersion = await import(`${pathToFileURL(join(control, 'node_modules/sortie-dogs/dist/asset-version.js')).href}?verify=${encodeURIComponent(version)}`);
   if (receipt.runtime_marker) assert.equal(assetVersion.V010_RUNTIME_ASSET_VERSION, receipt.runtime_marker);
   return { receipt, control, package_lock_sha256: setup.package_lock_sha256,
     loaded_asset_marker: assetVersion.V010_RUNTIME_ASSET_VERSION };
@@ -217,7 +220,7 @@ async function verifyRun(version, profile) {
   return { launch_record: launchRecord, receipt, observation, launch };
 }
 
-export async function verifyVersion(version) {
+export async function verifyVersion(version, { includeDiagnosis = true } = {}) {
   const root = versionRoot(version);
   const profile = await verifyProfile();
   const setup = await readJson(join(root, 'setup.json'));
@@ -226,15 +229,17 @@ export async function verifyVersion(version) {
   assert.equal(setup.template_base, ANKO_BASE);
   const frozenInputs = await verifyFrozenInputs(root, setup);
   const packageInfo = await verifyPackage(version, setup);
-  const diagnosis = await verifyDiagnosis(version, profile);
+  const hasDiagnosis = await exists(join(root, 'diagnosis/diagnosis-latest.json')) || await exists(join(root, 'diagnosis/diagnosis-terminal.json'));
+  const diagnosis = includeDiagnosis && hasDiagnosis ? await verifyDiagnosis(version, profile) : null;
   const hasRun = await exists(join(root, 'last-attempt.json'));
   const hasRunLock = await exists(join(root, 'run-once.lock'));
   assert.equal(hasRunLock && !hasRun, false, 'exclusive run lock exists without a terminal launch record');
   const run = hasRun ? await verifyRun(version, profile) : null;
+  const retainedAttempt = !hasRun ? await priorStandaloneAttempt(version) : null;
   const result = {
     schema_version: 1,
     checked_at: new Date().toISOString(),
-    status: run ? 'record-integrity-verified' : 'preflight-ready',
+    status: run ? 'record-integrity-verified' : retainedAttempt ? 'retained-arm-consumed' : 'preflight-ready',
     benchmark_accepted: run?.observation.accepted ?? false,
     version,
     profile_sha256: await hashFile(profilePath()),
@@ -242,12 +247,13 @@ export async function verifyVersion(version) {
       integrity: packageInfo.receipt.integrity, runtime_marker: packageInfo.loaded_asset_marker },
     fixed_conditions: profile.benchmark,
     no_progress_policy: profile.stall_policy,
-    diagnosis: { status: diagnosis.status, root_session: diagnosis.root_session,
+    diagnosis: diagnosis ? { status: diagnosis.status, root_session: diagnosis.root_session,
       stop_reason: diagnosis.stop_reason, no_progress_timeout_ms: diagnosis.no_progress_timeout_ms,
       permission_requests_observed: diagnosis.permission_observations.reduce((count, snapshot) => count + snapshot.requests.length, 0),
       read_tool_calls: diagnosis.native_tool_calls.filter(event => event.name === 'read').length,
-      hook_events: diagnosis.plugin_hook_observations.length, record_path: diagnosis.record_path },
+       hook_events: diagnosis.plugin_hook_observations.length, record_path: diagnosis.record_path } : { status: 'not-required', provider_requests_sent: 0 },
     frozen_input_count: frozenInputs,
+    retained_attempt: retainedAttempt,
     run: run ? { root: run.observation.root, stop_reason: run.observation.stop_reason,
       execution_elapsed_ms: run.observation.execution_elapsed_ms,
       estimated_cost_usd: run.observation.priced_usd, inner_dispatch_count: run.observation.inner_dispatch_count,
