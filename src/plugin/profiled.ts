@@ -17,7 +17,7 @@ import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand, canonicalDeclaredValidationMembers, extractWritePaths } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
-  missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
+  missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
    observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
@@ -908,6 +908,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       taskOwners.delete(mission.callID);
       return reconciled;
     }
+    function withMissionOperationOutcome(text: string, mission: OperatorMission | undefined): string {
+      if (!mission || missionExecutionStatus(mission) !== "execution-failed" || terminalRunOutcome(text) !== "DONE") return text;
+      const detail = "Operation result: execution-failed (result accepted; process did not succeed).";
+      return text.includes(detail) ? text : text.replace(/^((?:[ \t]*\r?\n)*[^\r\n]+)/u, `$1 ${detail}`);
+    }
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
@@ -930,7 +935,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Fast-lane: plan one useful Worker unit with the meaningful formal check known from user, project or task context and estimated scope, then dispatch its Task immediately. Investigation/edit/check/requested commit belong inside Worker before independent Review. Objective: target 2000 characters; original requests are supplied separately. Use Coordinator for an unknown check or real unit decomposition." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
-          run?.phase === "awaiting-acceptance" && mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
+          run?.phase === "awaiting-acceptance" && mission.kind === "operation" && !missionExecutionComplete(mission)) {
         return { ...packet, task: missions.task(mission),
           next_action: "Fast-lane operation is not executed. Dispatch this same mission's Coordinator Task to finish or report its actual blocker; a setup or validation success is not operation completion." };
       }
@@ -1327,6 +1332,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         budget_remaining_units: budget?.remaining_units ?? null,
         next_action: typeof packet.next_action === "string" ? packet.next_action : null,
         ...(record(packet.acceptance_summary) ? { observations: {
+          operation: packet.acceptance_summary.operation,
           formal_validation: packet.acceptance_summary.formal_validation,
           native_declared_validation: packet.acceptance_summary.native_declared_validation,
           worker_terminals: (mission.attempts ?? []).map(attempt => ({ run_id: attempt.runID, status: attempt.status, terminal: attempt.terminal ?? null })),
@@ -1501,7 +1507,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await requireRoot(context.sessionID);
         const state = await operators.required(context.sessionID);
         let mission = await missions.read(context.sessionID);
-        if (mission?.kind === "operation" && missionExecutionStatus(mission) !== "executed") return JSON.stringify({
+        if (mission?.kind === "operation" && !missionExecutionComplete(mission)) return JSON.stringify({
           status: "not-ready", operation_status: missionExecutionStatus(mission),
           next_action: "The requested operation has not completed. Preserve its real outcome; auxiliary checks and a bounded review do not complete it. Continue the declared operation or report its blocker.",
           packet: missionPacket(mission, state) });
@@ -1526,7 +1532,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const reviewGaps = missionReportReview(mission, state.runID) === "evidence-gaps"
             ? mission!.review!.result?.trim() || "独立Reviewの未解決証拠あり" : undefined;
           const gapSummary = reviewGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").slice(0, 500);
-          const text = `✅ **DONE** \`${state.runID}\` — declared checks passed; Operator accepted the result.\n\n` +
+          const text = withMissionOperationOutcome(`✅ **DONE** \`${state.runID}\` — declared checks passed; Operator accepted the result.`, mission) + `\n\n` +
             `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
             `**確認結果:** 宣言検証合格 — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
             (mission?.review ? `\nレビュー: ${mission.review.verdict === "self-rechecked" ? "修正著者の自己再確認（独立PASSではない）" : mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") +
@@ -1538,6 +1544,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (rendered) panel = returnReportPanel(rendered);
         }
         return JSON.stringify({ status: result.status, run_id: state.runID,
+          ...(mission?.kind === "operation" ? { operation: missionOperationSummary(mission) } : {}),
           acceptance_fingerprint: state.acceptanceFingerprint, receipt: result.receipt ?? null,
           ...(result.receipt?.status === "succeeded" && missionReportReview(mission, state.runID) === "evidence-gaps"
             ? { review_evidence_gaps: mission!.review!.result ?? null } : {}),
@@ -1868,9 +1875,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Read operator_status: if the Coordinator dispatch is active, continue it; otherwise dispatch the returned task to resume the same Coordinator. Retain requirements, spend and candidate; no new mission or plan approval." });
         });
       } };
-    tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, include unit NOW and dispatch its Worker directly; plan_units remains available after start. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
+    const missionExecutionSchema = { type: "object", properties: { commands: stringList, directory: { type: "string" } },
+      required: ["commands", "directory"], additionalProperties: false,
+      description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion separately from successful exits; no handwritten proof file is needed. For run-once/result collection, validate the collected result without rerunning the operation.", "x-sortie-optional": true };
+    tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, include unit NOW (and execution for an operation) and dispatch its Worker directly; plan_units remains available after start. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         unit: { ...missionUnitSchema, description: "When the meaningful check and single-unit scope are already known, include this unit now. Returns its configured Worker directly, combining start_mission and plan_units without another model round trip.", "x-sortie-optional": true } as never,
+        execution: missionExecutionSchema as never,
         confirmed_conditions: conditionsSchema as never,
         prohibited_write: { ...stringList, description: "Only explicit path prohibitions from the user or applicable instructions. Never infer a parent glob from project/repository names, semantic 'do not modify the product', or the complement of estimated unit.write. Preserve the authorized clone and exact prohibited paths; semantic constraints stay in requirements.", "x-sortie-optional": true } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
@@ -1947,10 +1958,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const baseline = await missionReviewBaseline(input.directory);
             if (baseline) mission = await missions.update(context.sessionID, state => { state.reviewBaseline = baseline; });
           }
-          if ((args as Record<string, unknown>).unit !== undefined && mission.runID === null && !mission.dispatchOpen && mission.kind !== "operation") {
+          if ((args as Record<string, unknown>).unit !== undefined && mission.runID === null && !mission.dispatchOpen &&
+              (mission.kind !== "operation" || (args as Record<string, unknown>).execution !== undefined || mission.execution)) {
             const planned = JSON.parse(await declareMissionUnits(context.sessionID, context.sessionID, mission,
-              [(args as Record<string, unknown>).unit]));
+              [(args as Record<string, unknown>).unit], undefined, (args as Record<string, unknown>).execution));
             return JSON.stringify({ ...locationObservation(context.sessionID), mission_id: mission.id, requirements: mission.requirements, ...planned });
+          }
+          if ((args as Record<string, unknown>).execution !== undefined && mission.runID === null && !mission.dispatchOpen) {
+            const operation = declaredMissionExecution(mission, (args as Record<string, unknown>).execution);
+            if (operation) mission = await missions.update(context.sessionID, state => { state.kind = "operation"; state.execution = operation; });
           }
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
@@ -2083,6 +2099,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           obligations: policy.proposal.obligations }, run_id: prepared.runID, unit_id: unitID,
           task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
       } };
+    function declaredMissionExecution(mission: OperatorMission, execution?: unknown): OperatorMission["execution"] {
+      const operation = mission.execution;
+      // Optional empty operation fields must not turn a normal edit into an operation.
+      if (execution === undefined || mission.kind === "implementation" && record(execution) &&
+          Array.isArray(execution.commands) && execution.commands.length === 0) return operation;
+      if (!record(execution) || typeof execution.directory !== "string" || !execution.directory.trim() ||
+          !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
+          !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
+      const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
+      return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
+    }
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
@@ -2096,20 +2123,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
           `with those exact requirements when they match the user's changed scope; no Worker can start before that decision.` });
       mission = await retainCancelledMissionAcceptance(root, mission, previous);
-      let operation = mission.execution;
+      const operation = declaredMissionExecution(mission, execution);
       // Models can serialize an optional operation field as an empty object for a normal edit.
       // Do not turn an implementation mission into an operation (or block its first Worker).
       const emptyImplementationExecution = mission.kind === "implementation" && record(execution) &&
         Array.isArray(execution.commands) && execution.commands.length === 0;
-      if (execution !== undefined && !emptyImplementationExecution) {
-        if (!record(execution) || typeof execution.directory !== "string" || !execution.directory.trim() ||
-          !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
-          !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
-        const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
-        const directory = resolve(input.directory, execution.directory);
-        // A corrected command is allowed on replan; retain prior observations for accounting.
-        operation = { commands, directory, observations: operation?.observations ?? [] };
-      }
       const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
@@ -2253,9 +2271,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Keep investigation/edit/check/requested commit with the same author before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Reviewer FINDINGS stay with the same Reviewer for correction, formal validation and self-recheck.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
-        execution: { type: "object", properties: { commands: stringList, directory: { type: "string" } },
-          required: ["commands", "directory"], additionalProperties: false,
-          description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion; no handwritten proof file is needed.", "x-sortie-optional": true } as never,
+        execution: missionExecutionSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
         executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here without a Worker handoff. Default worker retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
@@ -2621,7 +2637,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.status === "ready") {
-          if (mission.kind === "operation" && missionExecutionStatus(mission) !== "executed") {
+          if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
             return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
               next_action: missionExecutionStatus(mission) === "running"
                 ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
@@ -2638,7 +2654,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            ...missionPacket(updated, submittedRun),
            next_action: "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt." });
       } };
-    tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. Returns the measured 🐾 report on success; never treat Worker start, CORRECTION_READY or one passing check as completion.",
+    tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. A collected terminal failure can satisfy a run-once/report request, not a request for successful execution. Returns operation outcome separately from the measured 🐾 Mission receipt; never treat Worker start, CORRECTION_READY or one passing check as completion.",
       args: {}, execute: async (_args, context) => {
         await requireRoot(context.sessionID);
         await missions.required(context.sessionID);
@@ -2680,7 +2696,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (renderedParts.get(key) === goalFingerprint(part.text)) return;
         const run = await operators.read(sessionID);
         const mission = await missions.read(sessionID);
-        const text = await control!.renderReturnReport(sessionID, decoratePreviewHeadings(part.text), goalFingerprint(receipt),
+        const text = await control!.renderReturnReport(sessionID, withMissionOperationOutcome(decoratePreviewHeadings(part.text), mission), goalFingerprint(receipt),
           run ? missionReportReview(mission, run.runID) : undefined,
           run ? missionReportReviewGaps(mission, run.runID) : undefined);
         if (text === undefined) return;
@@ -3572,7 +3588,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "experimental.text.complete": async (request, output) => {
         const role = (await identity(request.sessionID)).role;
         if (role === "dog-operator" || !await rootFor(request.sessionID)) return;
-        const forwardedText = role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text;
+        let forwardedText = role === "dog-coordinator" ? forwardTerminalText(output.text) : output.text;
+        if (role === "dog-coordinator" && terminalRunOutcome(forwardedText) === "DONE" &&
+            (await control!.currentReceipt(request.sessionID))?.status === "succeeded") {
+          forwardedText = withMissionOperationOutcome(forwardedText, await missions.read(request.sessionID));
+        }
         // Ordinary Operator chat is not a request for a historical Mission return panel.
         if (role === "dog-coordinator" && terminalRunOutcome(forwardedText) === undefined) return;
         const mapped = { text: forwardedText };

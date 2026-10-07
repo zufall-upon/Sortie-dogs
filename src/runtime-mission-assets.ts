@@ -60,6 +60,11 @@ not its exit; it cannot complete the declared operation. This does not restrict 
 For a declared operation, do not append a tee pipeline, redirection or wrapper that was not declared. Save output separately
 when needed. Use that same run's terminal state and result for completion. If a run already started,
 inspect its progress and report a missing terminal observation instead of launching it again.
+Execution completion is not successful execution. For a run-once/result-collection request, preserve
+a terminal failure, validate the collected result and return it without a repair loop or another run.
+Successful execution requirements stay in meaningful formal validation and Operator's comparison
+with the original request. Mission acceptance must report the operation's exit/outcome separately;
+a succeeded Mission receipt never changes a failed benchmark into a successful benchmark.
 `;
 
 function controls(profile: RuntimeProfile, names: readonly string[]): string {
@@ -122,7 +127,8 @@ quality threshold and explicit model/budget choice. Follow AGENTS.md and use the
     ${profile.toolPrefix}start_mission with intent: "replace" and the saved requirements. The cancelled
     Mission is archived; cumulative spend is retained. Dispatch only the returned Coordinator Task.
   2. If a meaningful formal check is known from the user, project or task context and the work fits one unit,
-    include unit in start_mission to receive its Worker immediately in the same call. If already started,
+    include unit in start_mission to receive its Worker immediately in the same call. For a known operation,
+    include execution commands/directory alongside unit. If already started,
     call plan_units and dispatch its Worker. Source investigation, shell/environment checks,
     fix design and output inventory belong inside that Worker, not a routine Operator preflight.
     Use estimated read/write paths; native scope reconciliation and expand_unit cover actual outputs.

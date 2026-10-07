@@ -888,6 +888,40 @@ test("short follow-up inherits recent selected target without tool logs or new r
     { outcome: "executed", result: { status: "executed", attempts: 1, reward: 0 } });
 }));
 
+test("operation completion requires every declared command's terminal result, not successful exits", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "run", text: "Run both commands once and report their results; do not fix or retry." });
+  const mission = await missions.start("root", ["Run once and collect both results"], false, { kind: "operation" });
+  mission.runID = "run";
+  mission.review = { runID: "run", risk: [], source: "source", task: null, verdict: "skipped-low-risk" };
+  const observation = { command: "node one.mjs", directory, callID: "one", sessionID: "worker",
+    startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), exit: 1, status: "completed" as const,
+    ...missionCommandOutcome('{"status":"execution-failed","attempts":1}', 1, "completed") };
+  mission.execution = { commands: ["node one.mjs", "node two.mjs"], directory, observations: [observation] };
+  assert.equal(missionExecutionStatus(mission), "not-started", "one failure cannot hide an unstarted second command");
+  const second = { ...observation, command: "node two.mjs", callID: "two" };
+  mission.execution.observations.push({ ...second, completedAt: undefined });
+  assert.equal(missionExecutionStatus(mission), "running");
+  assert.equal((missionPacket(mission).review as { permits_submission: boolean }).permits_submission, false);
+  mission.execution.observations[1] = second;
+  assert.equal(missionExecutionStatus(mission), "execution-failed");
+  const packet = missionPacket(mission);
+  assert.equal((packet.review as { permits_submission: boolean }).permits_submission, true);
+  assert.doesNotMatch(String(packet.next_action), /Continue the actual operation/u);
+  mission.execution.observations[1] = { ...second, exit: 0, ...missionCommandOutcome('{"attempts":1,"reward":0}', 0, "completed") };
+  assert.equal(missionExecutionStatus(mission), "execution-failed", "mixed exits keep the failure visible while both commands are terminal");
+  mission.execution.observations[1] = { ...second, outcome: undefined };
+  assert.equal(missionExecutionStatus(mission), "not-started", "unclassified legacy metadata cannot become a collected result");
+  mission.execution.observations[1] = { ...second, directory: join(directory, "other") };
+  assert.equal(missionExecutionStatus(mission), "not-started", "a terminal command in another cwd is not the declared operation");
+  mission.execution.observations[1] = second;
+  mission.execution.observations.push({ ...second, callID: "no-start", ...missionCommandOutcome("NO_START", 0, "completed") });
+  assert.equal(missionExecutionStatus(mission), "not-started");
+  assert.equal((missionPacket(mission).review as { permits_submission: boolean }).permits_submission, false);
+  mission.execution.commands = [];
+  assert.equal(missionExecutionStatus(mission), "not-started", "empty declarations cannot vacuously count as complete");
+}));
+
 test("terminal proof for a root-dispatched Worker does not claim unrelated root sessions", async () => {
   const f = terminalHistory();
   f.sessions.worker!.parentID = "root";
