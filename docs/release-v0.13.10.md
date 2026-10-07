@@ -1,0 +1,16 @@
+# v0.13.10 — Windows Codex Missions and reusable Anko runner
+
+- Integrate PR #169: natural-language Windows Codex Missions use the existing Operator → Coordinator → Worker → Reviewer lifecycle and existing PowerShell 7, rather than substituting a single-task manifest workflow. Preserve literal arguments, failure exits and native command-envelope observations; POSIX bash is unchanged.
+- Map the shared Luna-fast Worker alias only inside the Codex adapter to native `gpt-6-luna`/max with the separate `priority` service tier. Preserve native model, effort and tier on same-root resume, including explicit native defaults. Sol 6.1/xhigh management roles and OpenCode routing remain unchanged.
+- List direct directory entries through the existing Codex read tool. Retain UTF-8 file contents, the native/explicit host-executor distinction and existing Mission hooks. Recover Windows owner locks only when their recorded Windows PID is absent; unknown native execution is not replayed.
+- Ship Codex skill v2 for natural-language Missions on both Windows and POSIX. No new login, native permission profile, automatic approval, metered API fallback or independent Mission ledger is introduced. The CLI's existing lack of an interactive native approval bridge remains an explicit limit.
+- Integrate PR #168: use one host-aware Anko runner, reuse unchanged client/toolchain/package setup, make paid diagnostics opt-in, and preserve previous attempts and cumulative known-price budgets. Observe host/tool boundaries, distinguish new requests from old idle state, retain missing usage as unknown, and register/clean up only owned private service credentials while retaining evidence.
+
+## Evidence and limits
+
+- PR #168 records a completed Ubuntu Anko Mission on the fixed published v0.13.9 package, with same-Reviewer correction/self-recheck and Operator acceptance. PR #169 records a completed Windows Codex Anko Mission on its fixed development package with an explicitly authorized parent host executor. Those are historical observations, not v0.13.10 benchmark results or proof that the Windows native sandbox setup failure is resolved.
+- Prior source hashes, failures, execution paths, costs and unpriced usage remain in [the Anko runner record](benchmarks/anko-runner-autonomy-20261007.md) and [the Windows Codex record](codex-windows-luna-fast-20261007.md). Self-recheck is not a second independent Reviewer PASS; native subscription usage is not a USD charge.
+- Fix the integrated release commit and one tarball before candidate preflight and the mandatory full Linux suite. Verify that commit's Windows CI and actual native OpenCode Worker startup/model identity. Use the same tarball for all global/config-local installs, GitHub Release and npm publication. Receipts remain under `_testenv/releases/0.13.10/`.
+- CLI qualification is Worker startup and actual model identity, not a completed Mission or a new official benchmark score. No additional SWE-bench or Anko campaign is part of this release.
+
+Compatibility names remain `v010`. Mission marker: `0.13.10-codex-windows-v1`; Codex skill marker: `0.13.10-codex-skill-v2`. Global application includes both existing npm-global prefixes and the OpenCode config-local bridge dependency. Completely restart OpenCode after application to verify the loaded version; installed bytes alone are not reload proof.
