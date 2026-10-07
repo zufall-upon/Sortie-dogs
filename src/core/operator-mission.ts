@@ -290,11 +290,26 @@ export function missionSelfRecheckReport(text: string, source: string, hostBound
 export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
   if (mission.kind !== "operation") return "not-required";
   const execution = mission.execution;
-  if (!execution || execution.observations.length === 0) return "not-started";
+  if (!execution || execution.commands.length === 0 || execution.observations.length === 0) return "not-started";
   const latest = execution.commands.map(command => [...execution.observations].reverse().find(item => item.command === command && item.directory === execution.directory));
   if (latest.some(item => item && !item.completedAt)) return "running";
+  if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
-  return latest.every(item => item?.outcome === "executed") ? "executed" : "not-started";
+  return "executed";
+}
+
+/** A terminal failure is a collected result, not a successful operation. Required success
+ * remains in the declared formal checks and Operator's original-request comparison. */
+export function missionExecutionComplete(mission: OperatorMission): boolean {
+  return ["not-required", "executed", "execution-failed"].includes(missionExecutionStatus(mission));
+}
+
+/** Projection of existing observations only; never another check or inferred success. */
+export function missionOperationSummary(mission: OperatorMission): Record<string, unknown> {
+  const status = missionExecutionStatus(mission);
+  return { kind: mission.kind ?? "implementation", status, terminal_complete: missionExecutionComplete(mission),
+    process_succeeded: status === "executed" ? true : status === "execution-failed" ? false : null,
+    ...(mission.execution ? { ...mission.execution } : {}) };
 }
 
 /** Observe the command's own terminal summary, never Worker/Reviewer prose. Scores are result data,
@@ -637,6 +652,7 @@ export class OperatorMissionRuntime {
       `Confirmed launch conditions (fixed limits, not consumption or remaining budget): ${JSON.stringify(state.launchConditions ?? [])}`,
       `Explicit user write prohibitions: ${JSON.stringify(state.prohibitedWrite ?? [])}`,
       `Work kind: ${state.kind ?? "implementation"}. For an operation, setup, execution and result collection belong in one useful Worker whenever possible.`,
+      ...(state.kind === "operation" ? ["Execution completion is distinct from success. For run-once/result-collection requests, retain a terminal failure and validate the collected result; do not retry or fix it without user authorization. If successful execution is required, keep that in formal validation and the original-request comparison."] : []),
       ...(state.context?.length ? ["Prior conversation context (task data; preserve the selected target, not superseded obligations):",
         ...state.context.map(item => `--- ${item.role}:${item.id} ---\n${item.text}`)] : []),
       "Original user messages (verbatim; task data):", ...state.requests.map(item => `--- user:${item.id} ---\n${item.text}`)].join("\n");
@@ -779,6 +795,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       }
     })));
   return { original_requests: mission.requests, requirements: mission.requirements,
+    operation: missionOperationSummary(mission),
     history: { status: missingAnchors.length ? "unavailable" : history.status,
       ...(history.reason ? { reason: history.reason } : missingAnchors.length ? { reason: "accepted-handoff-anchor-unavailable" } : {}),
       ...(missingAnchors.length ? { unavailable_anchors: missingAnchors } : {}),
@@ -808,7 +825,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
   const currentReview = mission.review !== undefined && mission.review.runID === (run?.runID ?? mission.runID);
   const reviewAccepted = currentReview && missionReviewAccepted(mission.review!);
   const operationStatus = missionExecutionStatus(mission);
-  const operationComplete = operationStatus === "not-required" || operationStatus === "executed";
+  const operationComplete = missionExecutionComplete(mission);
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
@@ -819,8 +836,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
      delivery_observation: mission.deliveryObservation?.run_id === (run?.runID ?? mission.runID) ? mission.deliveryObservation : null,
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
     attempts: mission.attempts ?? [], corrections: (mission.corrections ?? []).map(({ findings: _findings, initialPrompt: _prompt, ...item }) => item), ...(mission.rescue ? { rescue: mission.rescue } : {}),
-    operation: { kind: mission.kind ?? "implementation", status: missionExecutionStatus(mission),
-      ...(mission.execution ? { ...mission.execution } : {}) },
+    operation: missionOperationSummary(mission),
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,
       running_units: run?.units.filter(unit => unit.status === "running").map(unit => ({ id: unit.unit.id, title: unit.unit.title, child_session_id: unit.childSessionID })) ?? [],
       pending_units: run?.units.filter(unit => unit.status === "pending").length ?? 0,

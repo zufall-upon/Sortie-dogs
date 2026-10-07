@@ -13,25 +13,33 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["implementation", "executed", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
+for (const mode of ["implementation", "executed", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
+  const failure = ["execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation"].includes(mode);
+  const fast = mode === "fast-lane-failure" || mode === "registered-operation";
+  const dispatcher = fast ? "root" : "coordinator";
   try {
     await exec("git", ["init", "--quiet"], { cwd: root });
     await exec("git", ["config", "user.name", "test"], { cwd: root });
     await exec("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
     const validator = 'import { readFileSync, writeFileSync } from "node:fs";\n' +
-      (mode === "implementation" ? '' : 'writeFileSync("result.txt", "ready\\n");\n') +
+      (mode === "implementation" || failure ? '' : 'writeFileSync("result.txt", "ready\\n");\n') +
       'if (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n' +
+      (failure ? `const operation = JSON.parse(readFileSync("operation.json", "utf8"));\nif (operation.attempts !== 1 || operation.exit !== ${mode === "failed-result-validation" ? 0 : 1}) process.exit(1);\n` : '') +
       `console.log(JSON.stringify(${JSON.stringify({ status: mode, attempts: mode === "NO_START" ? 0 : 1, reward: 0 })}));\n`;
     const reference = "Public result contract: ready followed by a newline.\n";
     await writeFile(join(root, "reference.md"), reference);
     await writeFile(join(root, "check.mjs"), validator);
+    if (failure) await writeFile(join(root, "run.mjs"),
+      'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n' +
+      'const result = {status: "execution-failed", attempts: 1, reward: 0, exit: 1};\n' +
+      'writeFileSync("operation.json", JSON.stringify(result));\nconsole.log(JSON.stringify(result));\nprocess.exitCode = 1;\n');
     await exec("git", ["add", "check.mjs"], { cwd: root });
     await exec("git", ["commit", "--quiet", "-m", "validator"], { cwd: root });
     const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
-      worker: { agent: "dog-worker-v010", parentID: "coordinator" }, reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
+      worker: { agent: "dog-worker-v010", parentID: dispatcher }, reviewer: { agent: "dog-reviewer-v010", parentID: dispatcher },
     };
     let latestSession: Record<string, unknown>;
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: latestSession = {
@@ -45,24 +53,41 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
       message: { id: `${id}-user`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
       parts: [{ type: "text", text }],
     });
-    await chat("root", "Write and validate a ready result, then review and accept it.");
-    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Create a validated result"],
-      kind: mode === "implementation" ? "implementation" : "operation" }, { sessionID: "root" }));
+    await chat("root", mode === "failed-result-validation" ? "Run successfully once and validate the successful outcome. Do not accept a failed operation."
+      : failure ? "Run once and collect its result, even on failure. Do not retry or fix it. Validate collected evidence, then review and accept it."
+      : "Write and validate a ready result, then review and accept it.");
+    const plannedUnit = { title: "Validated result", objective: mode === "failed-result-validation" ? "Run once and validate successful exit; failure must remain unaccepted"
+      : failure ? "Run once and validate collected result; do not retry or fix the failed operation" : "Write result and validate it",
+      read: ["check.mjs", ".sortie-dogs-v010/missions", ...(failure ? ["run.mjs"] : [])], write: ["result.txt", ...(failure ? ["operation.json"] : [])], validation: ["node check.mjs"] };
+    const execution = { commands: mode === "implementation" ? [] : [failure ? "node run.mjs" : "node check.mjs"], directory: root };
+    const requirements = [mode === "failed-result-validation" ? "Run successfully and validate successful execution"
+      : failure ? "Run once and collect its result" : "Create a validated result"];
+    let started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements,
+      kind: mode === "implementation" ? "implementation" : "operation", ...(fast ? { execution,
+        ...(mode === "registered-operation" ? {} : { unit: plannedUnit }) } : {}) }, { sessionID: "root" }));
+    if (mode === "registered-operation") {
+      const registered = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      assert.deepEqual(registered.execution, { ...execution, observations: [] }, "execution without a unit is retained, not silently discarded");
+      const previous = started.mission_id;
+      started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements, unit: plannedUnit }, { sessionID: "root" }));
+      assert.equal(started.mission_id, previous, "a known unit reuses the already registered command in the same Mission");
+    }
     const baseline = (await exec("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewBaseline, baseline);
-    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
-    await chat("coordinator", started.task.prompt);
+    if (!fast) {
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+      await chat("coordinator", started.task.prompt);
+    } else assert.equal(started.task.subagent_type, profileAgent(V010_RUNTIME_PROFILE, "dog-worker"), "known operation and result check dispatch directly without a Coordinator");
     if (mode === "executed") await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [{
       title: "Incomplete operation", objective: "Run the operation", write: ["result.txt"], validation: ["node check.mjs"],
     }], execution: { commands: [], directory: root } }, { sessionID: "coordinator" }), /mission-operation-input/);
-    const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validated result", objective: "Write result and validate it",
-      read: ["check.mjs", ".sortie-dogs-v010/missions"], write: ["result.txt"], validation: ["node check.mjs"] }],
-      execution: { commands: mode === "implementation" ? [] : ["node check.mjs"], directory: root } }, { sessionID: "coordinator" }));
+    const next = fast ? started : JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], execution }, { sessionID: dispatcher }));
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewBaseline, baseline);
     if (mode === "implementation") assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).kind, "implementation");
-    assert.deepEqual((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewScope?.write, ["result.txt"]);
+    assert.deepEqual((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewScope?.write,
+      failure ? ["operation.json", "result.txt"] : ["result.txt"]);
     const worker = { args: structuredClone(next.task) };
-    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, worker);
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "worker-call" }, worker);
     await chat("worker", worker.args.prompt);
     const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE), state = await runtime.required("root");
     const unit = state.units[0]!;
@@ -106,22 +131,47 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
         "a decorated operation is corrected before it starts, without a second Worker or plan");
       await assert.rejects(readFile(join(root, "result.txt"), "utf8"), { code: "ENOENT" });
     }
+    if (failure) {
+      await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "operation" },
+        { args: { command: "node run.mjs", workdir: root } });
+      const failed = await exec(process.execPath, ["run.mjs"], { cwd: root }).then(() => assert.fail("operation must fail"),
+        error => error as { code: number; stdout: string });
+      assert.equal(failed.code, 1);
+      await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "operation" },
+        { output: failed.stdout, metadata: { exit: failed.code, status: "completed" } });
+    }
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { args: { command: "node check.mjs" } });
-    const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
-    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+    const checked = await exec(process.execPath, ["check.mjs"], { cwd: root }).catch(error => {
+      if (mode !== "failed-result-validation") throw error;
+      assert.equal(error.code, 1);
+      return { stdout: error.stdout };
+    });
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" },
+      { output: checked.stdout, metadata: { exit: mode === "failed-result-validation" ? 1 : 0, status: "completed" } });
     identities.worker!.outcome = "succeeded";
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "validated", metadata: { sessionId: "worker" } });
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: dispatcher, callID: "worker-call" }, { output: "validated", metadata: { sessionId: "worker" } });
+    if (mode === "failed-result-validation") {
+      assert.notEqual((await runtime.required("root")).units[0]!.status, "succeeded", "a terminal operation result never bypasses failed formal validation");
+      await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "collected failure" },
+        { sessionID: dispatcher }), /mission-units-incomplete/u);
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review-required-or-stale/u);
+      assert.equal((await runtime.required("root")).receipt, null);
+      const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(mission.execution!.observations.length, 1);
+      assert.equal(mission.execution!.observations[0]!.exit, 1);
+      return;
+    }
     const validatedUnits = structuredClone((await runtime.required("root")).units);
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
-      traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: "coordinator" }));
+      traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: dispatcher }));
     const reviewer = { args: structuredClone(review.task) };
-    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, reviewer);
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, reviewer);
     assert.match(reviewer.args.prompt, /deferred Operator checks/);
     assert.match(reviewer.args.prompt, /Public result contract: ready followed by a newline/u);
     assert.deepEqual((await runtime.required("root")).units, validatedUnits,
       "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");
     identities.reviewer!.outcome = "succeeded";
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
     if (mode === "NO_START") {
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
       await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 1; });
@@ -135,14 +185,30 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
       return;
     }
     await writeFile(join(root, "reference.md"), reference + "changed after review\n");
-    await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "ready" },
-      { sessionID: "coordinator" }), /mission-review-required-or-stale/);
+    if (!fast) await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "ready" },
+      { sessionID: dispatcher }), /mission-review-required-or-stale/);
     await writeFile(join(root, "reference.md"), reference);
-    assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
-    const submittedText = await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: "coordinator" });
+    assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).coordinator, fast ? null : "coordinator");
+    const submittedText = fast ? await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })
+      : await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: dispatcher });
+    assert.notEqual(JSON.parse(submittedText).status, "operation-incomplete", "a terminal failure can be submitted as a collected result");
     assert.equal(Object.keys(JSON.parse(submittedText))[0], "acceptance_summary", "summary precedes the full authority packet");
-    identities.coordinator!.outcome = "succeeded";
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
+    if (failure) {
+      const submitted = JSON.parse(submittedText);
+      if (fast) {
+        assert.equal(submitted.task, undefined, "a collected failure must not trigger an unnecessary Coordinator redispatch");
+        assert.match(submitted.next_action, /complete_mission/u);
+      }
+      const operation = submitted.acceptance_summary.operation;
+      assert.equal(operation.status, "execution-failed");
+      assert.equal(operation.terminal_complete, true);
+      assert.equal(operation.process_succeeded, false);
+      assert.equal(operation.observations[0].exit, 1);
+    }
+    if (!fast) {
+      identities.coordinator!.outcome = "succeeded";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
+    }
     const cold = await create();
     const status = async () => JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal((await status()).completion.ready, true);
@@ -174,7 +240,8 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
     assert.ok(blocked.completion.blockers[0].source_paths.includes("check.mjs"));
     const stale = await status();
     assert.deepEqual(stale.completion, blocked.completion);
-    assert.equal(stale.next_action, blocked.next_action, "status must not blindly send the root back to the same refused completion");
+    if (fast) assert.ok(stale.next_action.endsWith(blocked.next_action), "Fast-lane adds its direct source-reconciliation guidance");
+    else assert.equal(stale.next_action, blocked.next_action, "status must not blindly send the root back to the same refused completion");
     await writeFile(join(root, "check.mjs"), validator);
     if (mode === "implementation") {
       await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).update("root", mission => {
@@ -186,6 +253,17 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
     const completed = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
+    if (failure) {
+      assert.equal(completed.operation.status, "execution-failed", "Mission receipt success is not operation success");
+      assert.equal(completed.operation.process_succeeded, false);
+      assert.equal(completed.operation.observations[0].exit, 1);
+      assert.match(completed.return_report, /execution-failed/u);
+      assert.match(completed.return_report, /process did not succeed/u);
+      const visible = { text: "✅ **DONE** — collected operation result\n\n**次:** なし" };
+      await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final-failure", partID: "final-text" }, visible);
+      assert.match(visible.text, /execution-failed/u, "the final user-facing renderer must not imply operation success");
+      assert.match(visible.text, /process did not succeed/u);
+    }
     if (mode === "implementation") {
       assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
       assert.match(completed.return_report, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
@@ -207,6 +285,10 @@ for (const mode of ["implementation", "executed", "NO_START", "legacy-background
     }
     const final = await status();
     assert.equal(final.phase, "completed");
+    if (failure) {
+      assert.equal(final.operation.status, "execution-failed");
+      assert.equal(final.operation.observations.length, 1, "result collection never reruns the failed operation");
+    }
     assert.match(final.next_action, /no further dispatch or completion/);
     const key = createHash("sha256").update("v010\0root").digest("hex");
     const ledger = await (await RunFlightLedger.openGoal(join(root, ".git/sortie-dogs/run-flight-v010", `${key}.json`))).readGoal();

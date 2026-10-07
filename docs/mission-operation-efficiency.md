@@ -31,10 +31,22 @@ Two orchestration defects were reproduced independently of the model:
   executed operation. Reward/score zero is result data. Plain commands retain their
   native exit semantics. This is not a universal parser for arbitrary nested runner
   logs: declare the actual execution commands, not a successful preflight wrapper.
-- Ready submission and completion require the operation to have executed. A bounded
-  `EVIDENCE_GAPS` review disposition cannot satisfy this condition. Success displays
+- Ready submission and completion require a terminal result for every declared
+  operation command. A terminal failure is reportable for a run-once/result-collection
+  request; it is not successful execution. `NO_START`, missing commands and active
+  commands remain incomplete. A bounded `EVIDENCE_GAPS` review disposition cannot
+  satisfy this condition. Mission acceptance displays
   passed declared checks and explicit Operator acceptance, not a computed count of
   supposedly verified natural-language requirements.
+- `start_mission` accepts `execution` alongside a known single `unit`, avoiding an
+  otherwise unnecessary Coordinator round trip. The same native observations,
+  formal validation, Review and root acceptance apply. Status, acceptance summary
+  and completion expose `operation.status`, `terminal_complete`, `process_succeeded`
+  and the retained command exits. A failed operation remains visible in the return
+  report even when its collected result is accepted. Successful execution requirements
+  still belong in meaningful formal validation and the original-request comparison,
+  not a new success-policy switch or approval layer. See the
+  [2026-10-07 autonomy audit](benchmarks/operation-result-autonomy-20261007.md).
 - Multiple requirements need explicit related `requirement_ids`; omission only
   infers an unambiguous single requirement. Scheduling coverage is not semantic proof.
 - Keep foreground Worker/root lineage alive across cache expiry. Release a returned
