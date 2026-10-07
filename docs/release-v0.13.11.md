@@ -1,0 +1,14 @@
+# v0.13.11 — observable execution and terminal result collection
+
+- Integrate PR #171: transport large Codex file writes through a temporary UTF-8 payload instead of embedding file contents in Windows argv. The configured native/delegated executor and existing Mission hooks still perform the write; no new approval mechanism or permission profile. Read-only `operator_status` observations can return during active Tasks; modifying tools remain serialized and close drains outstanding observations.
+- Integrate PR #172: settle delayed native Coordinator returns for completed/cancelled Missions without recovering active Operator authority after an agent switch. Preserve the original terminal outcome, Mission/Operator ledgers, costs and historical dispatch ownership. This fixes the durable `operator-coordinator-required` HTTP 500 loop.
+- Integrate PR #173: distinguish collected operation results from successful execution. A run-once/report request can retain and accept a terminal failure through meaningful result validation, required Review and Operator comparison; the original operation exit and `execution-failed` outcome remain visible. NO_START, active operations, missing declared commands and success-required checks still block completion. Known single-unit operations can declare execution alongside `start_mission`, avoiding a redundant Coordinator round trip.
+- Fix release CLI observation: inspect real native Worker startup on a normal parent CLI exit before server teardown, as well as on the interval. Preserve earlier timeout/budget stops and failed parent exits. Record the observation point and CLI exit; startup is not provider generation or Mission completion.
+
+## Evidence and limits
+
+- PR #171's Windows Codex Anko completion used its fixed development package and the explicitly authorized host executor. PR #173's original one-run Anko attempt failed with `session-no-progress-timeout`; this release does not rerun it or retroactively accept it. Neither historical result is a v0.13.11 benchmark score or evidence that the native Windows sandbox is repaired.
+- See [Codex write/status evidence](codex-write-status-anko-20261007.md) and [operation-result autonomy evidence](benchmarks/operation-result-autonomy-20261007.md) for commands, scope, costs, unknown usage and remaining limits.
+- Fix one integrated `main` commit and tarball before candidate preflight, mandatory full Linux tests, fixed-commit Windows CI and native CLI Worker startup/model qualification. Reuse the same tarball for both existing npm-global prefixes, OpenCode's config-local dependency, GitHub Release and one npm publication. No additional SWE-bench or Anko run. Receipts: `_testenv/releases/0.13.11/`.
+
+Compatibility names remain `v010`. Mission marker: `0.13.11-operation-result-v1`; Codex skill marker: `0.13.11-codex-skill-v2`. Completely restart OpenCode after global application to confirm the loaded version; installed bytes alone are not reload proof.

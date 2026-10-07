@@ -58,7 +58,8 @@ export function v013StartupReceipt(result) {
   return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
     sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,
     operatorModel: operator.model, runtimeMarker: result.runtime_marker, canonicalExit: null,
-    terminal: 'worker-started', artifactMatch: true, priced_usd: result.priced_usd,
+    terminal: 'worker-started', stopObservation: result.stop_observation ?? null, cliExit: result.code ?? null,
+    artifactMatch: true, priced_usd: result.priced_usd,
     unpriced_requests: result.unpriced_requests };
 }
 export async function command(executable, args, cwd, env, timeoutMs = 600_000) {

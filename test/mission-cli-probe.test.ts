@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resolve } from "node:path";
-import { observationDirectories, statusProbeStopReason, workerStartWithinProbeLimit } from "../scripts/mission-cli-probe.mjs";
+import { cliCloseStopReason, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit } from "../scripts/mission-cli-probe.mjs";
 import { nativeCLI } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
@@ -50,4 +50,22 @@ test("the start-only Worker deadline does not invalidate a completed native rece
     "a release startup probe has its own deadline, not the benchmark's 60-second target");
   assert.equal(workerStartWithinProbeLimit("start", { started_ms: -1 }, undefined, 180_000), false);
   assert.equal(workerStartWithinProbeLimit("complete", worker), true);
+});
+
+test("normal CLI close observes an already-started Worker before teardown, not just the next interval", () => {
+  const observed = { models: [root, { agent: "dog-worker-v010", started_ms: 14_082,
+    model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }],
+    responses: [], tools: [], errors: [], priced_usd: 0.0523404 };
+  const options = { mode: "start", rootModel: expected, capUSD: 1, elapsedMs: 14_100, timeoutMs: 180_000 };
+  assert.equal(probeStopReason(observed, options), "worker-started");
+  assert.equal(cliCloseStopReason(0, false, observed, options), "worker-started");
+  assert.equal(cliCloseStopReason(1, false, observed, options), null, "a failed CLI exit is not silently accepted");
+  for (const prior of ["budget", "timeout", "model-mismatch"]) {
+    assert.equal(cliCloseStopReason(0, prior, observed, options), null, "an earlier stop remains authoritative");
+  }
+  assert.equal(cliCloseStopReason(0, false, { ...observed, models: [root] }, options), null,
+    "parent success alone is not native Worker startup");
+  assert.equal(cliCloseStopReason(0, false, { ...observed, priced_usd: 1 }, options), "budget");
+  assert.equal(cliCloseStopReason(0, false, observed, { ...options, mode: "complete" }), null,
+    "startup does not qualify a completion-mode probe");
 });
