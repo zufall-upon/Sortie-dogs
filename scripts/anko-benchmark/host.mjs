@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { dirname, join, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -6,6 +7,14 @@ import { pathToFileURL } from 'node:url';
 export function comparablePath(value) {
   const path = String(value ?? '').replaceAll('\\', '/');
   return /^[a-z]:\//iu.test(path) ? path.toLowerCase() : path;
+}
+
+export function assertReusableDriver(saved, current, platform = process.platform) {
+  assert.equal(current.version, saved.version, 'fixed @opencode/client version changed');
+  // The repository lock also carries the Sortie version. It is captured afresh
+  // for each arm, not a cross-version Linux driver installation identity.
+  if (platform === 'win32') assert.equal(current.package_lock_sha256, saved.package_lock_sha256,
+    'fixed Windows driver lock changed');
 }
 
 // Host preparation is separate from benchmark/task conditions. No permission rules.

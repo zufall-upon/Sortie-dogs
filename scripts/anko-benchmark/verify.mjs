@@ -8,6 +8,7 @@ import {
   READ_STALL_MS, WALL_LIMIT_MS, WORKER_MODEL, exists, fixedProfile, hashFile, packageReceiptPath, profilePath,
   priorStandaloneAttempt, readJson, sha256, versionRoot, writeJson,
 } from './core.mjs';
+import { assertReusableDriver } from './host.mjs';
 
 function verifyNoCredentials(path) {
   const db = new DatabaseSync(path, { readOnly: true });
@@ -31,7 +32,8 @@ async function verifyProfile() {
   assert.equal(await hashFile(profile.cli.path), profile.cli.sha256);
   if (process.platform === 'win32') assert.equal(profile.cli.sha256, CLI_SHA256);
   assert.equal(profile.driver_client.version, '2.0.18');
-  assert.equal(await hashFile(HOST.client_lock), profile.driver_client.package_lock_sha256);
+  assertReusableDriver(profile.driver_client, { version: (await readJson(HOST.client_package)).version,
+    package_lock_sha256: await hashFile(HOST.client_lock) });
   if (process.platform === 'win32') assert.equal(profile.driver_client.package_lock_sha256, CLIENT_LOCK_SHA256);
   assert.equal(await hashFile(join(process.cwd(), 'AGENTS.md')), profile.applicable_agents_sha256,
     'current AGENTS.md differs from the execution profile');

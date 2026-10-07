@@ -93,7 +93,8 @@ async function buildTrial(version, receipt, profile, diagnosis) {
     official_sha256: { 'instruction.md': INSTRUCTION_SHA256 }, source: {},
     opencode: { version: CLI_VERSION, cli_sha256: profile.cli.sha256 },
     toolchain: { node_version: profile.node.version, npm_version: profile.npm.version, runner_platform: profile.node.platform },
-    driver_client: profile.driver_client, go: profile.go ?? { version: 'go version go1.27.1 linux/amd64' } };
+    driver_client: { ...profile.driver_client, package_lock_sha256: await hashFile(HOST.client_lock) },
+    go: profile.go ?? { version: 'go version go1.27.1 linux/amd64' } };
   oldProvenance.package = { source_archive: receipt.archive_path, local_archive: join(trial, packageName),
     version, shasum: receipt.sha1, sha256: receipt.sha256, integrity: receipt.integrity,
     runtime_marker: receipt.runtime_marker, source_commit: receipt.source_commit, patch_sha256: receipt.patch_sha256 };

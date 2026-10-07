@@ -33,6 +33,7 @@ agent側の運用ミス:
 
 - 一つのparameterized runnerへWindowsとLinuxを接続。host path/client/Go commandを分離し、Linuxが旧監視へ戻る必要をなくす。
 - Linuxは既存toolchainとrepository clientを使用。Windowsは既存CLI/client/WSL Goを維持。
+- Linuxのroot lockはSortieの版番号でも変わるため、共通driver再利用の停止条件にはしない。client版は固定し、各armの実lockは実行前に保存・固定する。
 - Anko baseと課題原文のidentityを維持し、可変mirror tipや過去の失敗receiptへの依存を除く。
 - 既にdirtyのfileの追加編集とuntracked fileの内容変化を進捗として観測。cacheの変化は除外。
 - 今回の1回を別runnerへ移してresetしない。旧Linuxの消費済みlockも検出する。
@@ -47,11 +48,13 @@ agent側の運用ミス:
 ## 検証
 
 - `npm run test:targeted -- test/anko-benchmark-runner.test.mjs`: 41/41成功。build 7,475ms、test 782ms、exit 0。初回はmockのstall policy設定漏れで38/39、exit 1。mock修正と残り回帰をまとめて再検証した。
+- 最終lock再利用修正後の同限定回帰: 42/42成功、build 7,185ms、test 777ms、exit 0。LinuxのSortie版番号更新でもdriverを再利用し、実行中のlock固定は残ることを追加検証。
+- `npm run test:full`: 114 files、1,777成功・2skip・失敗0、exit 0。build 7,191ms、test 266,986ms。統合候補で1回実施。最後の変更は共通runner/その`.test.mjs`/文書のみで、このfull runnerが選択する`.test.ts`には影響しないため、限定回帰だけを追加してfullを重複実行しない。
 - `node scripts/anko-benchmark.mjs prepare --version 0.13.9`: Linuxで固定package導入・共通profile準備成功。新規arm・provider推論なし。
 - `node scripts/anko-benchmark.mjs verify --version 0.13.9`: `retained-arm-consumed`。既存Linux lockを認識し、package hash一致。
 - no-model preflight: CLI 2.0.18でSortieとobserverのactiveを確認。SOL/Luna設定を照合。native session 0、credential 0、1,079ms、exit 0。隔離server停止・DB credential行0。記録は`_testenv/anko-runner-autonomy-20261007/no-model-preflight.json`。
 
-準備/接続確認は改修後の実Worker起動・課題完遂を証明しない。Windowsの実機起動は未検証（host/WSL commandのmock回帰のみ）。本体の再試行、公式採点、release、global applyは実施しない。
+準備/接続確認は改修後の実Worker起動・課題完遂を証明しない。Windowsの実機起動は未検証（host/WSL commandのmock回帰のみ）。本体の再試行、公式採点、release、global applyは実施しない。今回検証の追加モデル推論費用$0。実行command・exit・所要時間・再検証理由は`_testenv/anko-runner-autonomy-20261007/implementation-receipt.json`へ保持する。
 
 ## 未解決と次の一手
 

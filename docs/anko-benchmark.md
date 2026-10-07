@@ -40,6 +40,7 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - Linux：`npm ci`で導入済みrepository client 2.0.18、`_testenv/anko-linux-reusable/toolchains/`のCLI 2.0.18とGo 1.27.1をnativeで使用。source/taskは保存済み`_testenv/anko-v0139-linux-20261007/`から再利用。Windows pathや`wsl.exe`は呼ばない。
 - 保存場所が異なるhostでは`ANKO_CLI`、`ANKO_SOURCE_PROJECT`、`ANKO_INSTRUCTION`、`ANKO_GO_DIRECTORY`、`ANKO_GO_ARCHIVE`、`ANKO_HOST_DATABASE`、`ANKO_RELEASE_ROOT`、`ANKO_ARTIFACT_ROOT`を指定できる。新しい権限ルールではなく準備済み入力のpath指定。profileへ固定し、実行中に交換しない。
 - profileへ実CLI hash、client lock、hostとtoolchainを記録。版ごとに再install/initせず、未変更のinstallationを再利用。mirrorの可変tipや過去の失敗receiptは新規armの起動条件にしない。
+- Linuxのrepository lockにはSortie自体の版番号も含まれるため、共通driverの再利用判定にはclient版を用いる。root lockの実hashと内容は各armで固定・保存し、実行中のdriftを検出する。Sortieの版番号だけ変わっても未変更のdriverを再installしない。Windowsの専用driver lock固定は維持。
 
 ## 分離したidentityと保存先
 

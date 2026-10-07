@@ -16,7 +16,7 @@ import {
 import { eligibleReadPermission } from '../scripts/anko-benchmark/recovery.mjs';
 import { expectSessionTurn, installObservationFiles, nativeTurnTerminal, observeSessionState,
   observeSessionTurn, observeToolEvent, observerPlugin, safeNativeEvent, toolPaths, toolWaitObservations, tracedSortiePlugin } from '../scripts/anko-benchmark/observe.mjs';
-import { comparablePath, hostPaths, goToolchain, npmCommand } from '../scripts/anko-benchmark/host.mjs';
+import { assertReusableDriver, comparablePath, hostPaths, goToolchain, npmCommand } from '../scripts/anko-benchmark/host.mjs';
 import { classifyUsage, nativeTerminal, readOwnedUsage, summarizeOwnedUsage, usageSafetyStopReason } from '../scripts/anko-benchmark/usage.mjs';
 import { createObservationDeadline, recoverOwnedSessions, settleOwnedSessions } from '../scripts/anko-benchmark/settle.mjs';
 import { analyzeSavedTrial } from '../scripts/anko-benchmark/inspect.mjs';
@@ -403,6 +403,17 @@ test('Anko host overrides are preparation paths, not additional permission rules
   assert(!JSON.stringify(paths).includes('permissions'));
   assert.equal(comparablePath('/source/Env.go') === comparablePath('/source/env.go'), false);
   assert.equal(comparablePath('C:\\source\\Env.go'), comparablePath('c:/source/env.go'));
+});
+
+test('Anko Linux repository version bumps do not invalidate an unchanged driver, arm lock remains frozen', () => {
+  const saved = { version: '2.0.18', package_lock_sha256: 'sortie-0.13.9-lock' };
+  const current = { ...saved, package_lock_sha256: 'sortie-0.13.10-lock' };
+  assert.doesNotThrow(() => assertReusableDriver(saved, current, 'linux'));
+  assert.throws(() => assertReusableDriver(saved, { ...current, version: '2.0.20' }, 'linux'), /version changed/u);
+  assert.throws(() => assertReusableDriver(saved, current, 'win32'), /Windows driver lock changed/u);
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  assert.match(source, /const clientLockSha = await hashFile\(join\(output, 'driver-client-package-lock.json'\)\)/u);
+  assert.match(source, /assert.equal\(await hashFile\(driverClientLockPath\), clientLockSha/u);
 });
 
 test('Anko CLI argument errors do not eagerly import a missing diagnostic client', () => {

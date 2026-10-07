@@ -9,7 +9,7 @@ import {
   SOURCE_PROJECT, STATE_ROOT, fixedProfile, hashFile, packageJsonFromTgz, packageReceiptPath,
    packageRoot, profilePath, readJson, sha256, tarEntryFromTgz, versionRoot, writeJson,
 } from './core.mjs';
-import { npmCommand, goToolchain } from './host.mjs';
+import { assertReusableDriver, npmCommand, goToolchain } from './host.mjs';
 
 const toUrl = path => pathToFileURL(path).href;
 const hex = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -62,7 +62,7 @@ async function ensureProfile() {
     assert.deepEqual(existing.benchmark, profile.benchmark, 'common benchmark conditions changed');
     assert.deepEqual(existing.stall_policy, profile.stall_policy, 'fixed no-progress policy changed');
     assert.equal(existing.cli.sha256, profile.cli.sha256);
-    assert.equal(existing.driver_client.package_lock_sha256, profile.driver_client.package_lock_sha256);
+    assertReusableDriver(existing.driver_client, profile.driver_client);
     if (existing.paths) assert.deepEqual(existing.paths, HOST, 'saved host preparation paths changed');
   } else {
     assert.equal(await hashFile(HOST.instruction), INSTRUCTION_SHA256, 'Anko task input changed');
