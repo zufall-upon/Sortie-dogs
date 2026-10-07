@@ -80,6 +80,48 @@ test('Anko preflight uses the real V2 Scout Luna route instead of blocking befor
   assert(!arm.includes('const solRole'));
 });
 
+test('Anko a follow-up arm receives the remaining priced budget, never a reset limit', () => {
+  assert.equal(parseCommand(['run', '--version', '0.13.9', '--max-priced-usd', '14.8']).maxPricedUsd, 14.8);
+  for (const value of ['0', '-1', '16', 'NaN', 'Infinity'])
+    assert.throws(() => parseCommand(['run', '--version', '0.13.9', '--max-priced-usd', value]), /existing \$15 limit/u);
+  assert.throws(() => parseCommand(['verify', '--version', '0.13.9', '--max-priced-usd', '14.8']), /only accepted/u);
+});
+
+test('Anko native root success without accepted Mission exits nonzero', () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
+  const terminal = source.slice(source.lastIndexOf('if (failure || !root'));
+  for (const accepted of [false, true]) {
+    const process = { exitCode: 0 };
+    vm.runInNewContext(terminal, { failure: null, root: { id: 'root' }, observation: { accepted }, process });
+    assert.equal(process.exitCode, accepted ? 0 : 1);
+  }
+});
+
+test('Anko prepares and reuses the pinned goyacc rather than forcing a Worker to discover external tools', async () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/prepare.mjs'), 'utf8');
+  const fragment = source.slice(source.indexOf('export async function ensureGoGenerator'), source.indexOf('export async function showProfile'))
+    .replace('export async', 'async');
+  const files = new Map(), commands = [];
+  const context = { assert, join, Date, STATE_ROOT: '/state', HOST: {},
+    mkdir: async () => {}, fileExists: async path => files.has(path), readJson: async path => files.get(path),
+    hashFile: async () => 'generator-sha', writeJson: async (path, receipt) => files.set(path, receipt),
+    goToolchain: () => ({ variables: { GOPATH: '/state/common/toolchain-check/.gopath' },
+      invocation: args => ({ file: '/go/bin/go', args, env: {} }) }),
+    execFileSync: (file, args) => { commands.push([file, args]); files.set('/state/common/toolchain-check/.gopath/bin/goyacc', true);
+      return 'mod\tgolang.org/x/tools\tv0.42.0\n'; },
+  };
+  const first = await vm.runInNewContext(fragment + ';ensureGoGenerator()', context);
+  assert.equal(first.sha256, 'generator-sha');
+  assert.equal(commands[0][1][1], 'golang.org/x/tools/cmd/goyacc@v0.42.0');
+  const second = await vm.runInNewContext(fragment + ';ensureGoGenerator()', context);
+  assert.equal(second, first);
+  assert.equal(commands.length, 2);
+  const run = readFileSync(join(ROOT, 'scripts/anko-benchmark/run.mjs'), 'utf8');
+  assert.match(run, /copyExclusive\(generator.path, join\(project, '\.gopath\/bin\/goyacc'\)\)/u);
+  const native = goToolchain(hostPaths({ root: '/workspace', platform: 'linux', home: '/home/test', env: {} }), '/candidate');
+  assert.match(native.environment_description, /prepared goyacc v0\.42\.0: \/candidate\/\.gopath\/bin\/goyacc/u);
+});
+
 const fullTokens = { input: 20, output: 10, reasoning: 0, cache: { read: 0, write: 0 } };
 const testModel = { providerID: 'openai', id: 'test', variant: 'max' };
 const pricedEstimate = input => ({ status: 'priced', usd: input.uncachedInputTokens / 1000, priceKey: 'test' });
@@ -469,12 +511,15 @@ test('Anko run admits one arm without a paid diagnostic or historical-attempt ga
   assert.equal(written.get('/version/run-once.lock').benchmark_attempt, 1);
   const original = JSON.stringify(written.get('/version/run-once.lock'));
   context.priorStandaloneAttempt = async () => ({ lock: '/old/run-once.lock', version: '0.13.9' });
-  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9", { attempt: "requested-02" })', context);
+  context.buildTrial = async (_, __, ___, ____, cap) => { assert.equal(cap, 14.8); return { trial_id: 'two', trial_directory: '/trial2', record_path: '/record2' }; };
+  context.runChild = async (_, __, ___, ____, cap) => { assert.equal(cap, 14.8); return { exit: 1, signal: null }; };
+  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9", { attempt: "requested-02", maxPricedUsd: 14.8 })', context);
   assert.equal(JSON.stringify(written.get('/version/run-once.lock')), original);
   const named = written.get('/version/attempts/requested-02/run-once.lock');
   assert.equal(named.stage, 'arm-terminal');
   assert.equal(named.attempt_id, 'requested-02');
   assert.equal(named.prior_standalone_attempt.lock, '/old/run-once.lock');
+  assert.equal(named.max_priced_usd, 14.8);
 });
 
 test('Anko common runner does not reset the consumed retained Linux attempt', async () => {

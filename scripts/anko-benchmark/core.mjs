@@ -64,7 +64,7 @@ export function parseCommand(argv) {
   const options = {};
   for (let i = 0; i < rest.length; i += 1) {
     const key = rest[i];
-    if (!['--version', '--package', '--attempt'].includes(key) || options[key])
+    if (!['--version', '--package', '--attempt', '--max-priced-usd'].includes(key) || options[key])
       throw new Error(`Unexpected or repeated option: ${key}`);
     const value = rest[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${key}`);
@@ -76,8 +76,13 @@ export function parseCommand(argv) {
   if (options['--attempt'] && !['run', 'verify', 'inspect'].includes(command))
     throw new Error('--attempt is only accepted by run, verify or inspect');
   if (options['--attempt']) parseAttempt(options['--attempt']);
+  if (options['--max-priced-usd'] && command !== 'run') throw new Error('--max-priced-usd is only accepted by run');
+  const cap = options['--max-priced-usd'] ? Number(options['--max-priced-usd']) : null;
+  if (cap !== null && (!Number.isFinite(cap) || cap <= 0 || cap > COST_LIMIT_USD))
+    throw new Error(`--max-priced-usd must be positive and within the existing $${COST_LIMIT_USD} limit`);
   return { command, version: options['--version'] ? parseVersion(options['--version']) : null,
-    packagePath: options['--package'] ?? null, ...(options['--attempt'] ? { attempt: options['--attempt'] } : {}) };
+    packagePath: options['--package'] ?? null, ...(options['--attempt'] ? { attempt: options['--attempt'] } : {}),
+    ...(cap !== null ? { maxPricedUsd: cap } : {}) };
 }
 
 export function parseAttempt(value) {

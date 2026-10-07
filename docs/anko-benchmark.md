@@ -55,6 +55,10 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 
 ユーザーが改修後の実行を新しく依頼した場合は、`run --version X.Y.Z --attempt <id>`で別の単一armを記録する。`verify`/`inspect`にも同じ`--attempt`を渡す。準備と固定packageは再利用し、lock/結果は`vX.Y.Z/attempts/<id>/`へ保存する。以前のlock・結果・費用は消さない。新しいIDは明示された実行の識別であり、自動retryや上限resetを意味しない。修正確認を反復する場合はcampaign累計費用と各candidateのcommit/hashを別途記録する。
 
+反復の残予算は`run ... --max-priced-usd <remaining>`でarmへ引き継ぐ。既定$15を超える拡張は行わない。見積り不完全なmessage・実請求不明は残予算記録にも明示する。
+
+`prepare`はGoだけでなく`golang.org/x/tools/cmd/goyacc@v0.42.0`を共通領域へ一度準備し、各候補の`.gopath/bin/goyacc`へコピーする。Linux WorkerのPATHへGo/gofmt/goyaccを渡し、Windowsでは既存WSL実行方式で同じbinaryを使う。module/version/hashを各armへ固定する。外部toolchain探索やpermission replyを起動条件の代用品にしない。
+
 ## 継承条件とread停滞処理
 
 - task原文1,825 bytes、SHA-256 `96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe`。

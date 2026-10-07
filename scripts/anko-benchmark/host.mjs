@@ -65,7 +65,9 @@ export function goToolchain(paths, project, execute = execFileSync) {
   const quote = value => `"${value.replaceAll('"', '\\"')}"`;
   return { executable, workspace, variables, invocation,
     validation_command: [test.file, ...test.args].map(quote).join(' '),
-    environment_description: native ? `Linux native Go: ${executable}` : `Windows host / WSL Ubuntu Go: ${executable}` };
+     environment_description: (native ? `Linux native Go: ${executable}; go/gofmt/goyacc are on PATH`
+       : `Windows host / WSL Ubuntu Go: ${executable}`) +
+       `; prepared goyacc v0.42.0: ${workspace}/.gopath/bin/goyacc (no install or external toolchain discovery needed)` };
 }
 
 export async function loadClient(paths = hostPaths()) {

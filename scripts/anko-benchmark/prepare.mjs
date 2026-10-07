@@ -142,6 +142,7 @@ async function ensureVersionControl(version, packageReceipt) {
 
 export async function prepareVersion(version, explicitPackagePath) {
   const profileResult = await ensureProfile();
+  const generator = await ensureGoGenerator();
   const retainedReceipt = await fileExists(packageReceiptPath(version)) ? await readJson(packageReceiptPath(version)) : null;
   const source = explicitPackagePath ?? retainedReceipt?.archive_path ?? await sourceArchive(version, null);
   const bytes = await readFile(source);
@@ -212,7 +213,29 @@ export async function prepareVersion(version, explicitPackagePath) {
   assert.equal(setup.frozen_inputs_sha256, await hashFile(frozenPath), 'frozen source evidence changed after setup');
   return { version, receipt_path: receiptPath, sha256, archive_path: destination,
     profile_path: profileResult.path, setup_path: setupPath, control_profile: control.path,
-    reused_control_profile: control.reused };
+    reused_control_profile: control.reused, generator };
+}
+
+export async function ensureGoGenerator() {
+  const directory = join(STATE_ROOT, 'common/toolchain-check');
+  await Promise.all(['.gocache', '.gomodcache', '.gopath', '.tmp'].map(name => mkdir(join(directory, name), { recursive: true })));
+  const binary = join(directory, '.gopath/bin/goyacc');
+  const receiptPath = join(directory, 'goyacc.json');
+  if (await fileExists(receiptPath) && await fileExists(binary)) {
+    const receipt = await readJson(receiptPath);
+    assert.equal(await hashFile(binary), receipt.sha256);
+    return receipt;
+  }
+  const go = goToolchain(HOST, directory);
+  const install = go.invocation(['install', 'golang.org/x/tools/cmd/goyacc@v0.42.0']);
+  execFileSync(install.file, install.args, { cwd: directory, env: install.env, stdio: 'inherit', windowsHide: true });
+  const check = go.invocation(['version', '-m', `${go.variables.GOPATH}/bin/goyacc`]);
+  const version = execFileSync(check.file, check.args, { cwd: directory, env: check.env, encoding: 'utf8', windowsHide: true });
+  assert.match(version, /golang.org\/x\/tools\s+v0\.42\.0/u);
+  const receipt = { path: binary, module: 'golang.org/x/tools/cmd/goyacc@v0.42.0',
+    sha256: await hashFile(binary), version, prepared_at: new Date().toISOString() };
+  await writeJson(receiptPath, receipt);
+  return receipt;
 }
 
 export async function showProfile() {

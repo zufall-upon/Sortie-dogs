@@ -29,7 +29,7 @@ function makeTrialID() {
   return `${new Date().toISOString().replaceAll(':', '').replaceAll('-', '').replaceAll('.', '')}-${randomUUID().slice(0, 8)}`;
 }
 
-async function buildTrial(version, receipt, profile, diagnosis) {
+async function buildTrial(version, receipt, profile, diagnosis, maxPricedUsd = COST_LIMIT_USD) {
   const root = versionRoot(version);
   const trialID = makeTrialID();
   const trial = join(root, 'trials', trialID);
@@ -62,6 +62,10 @@ async function buildTrial(version, receipt, profile, diagnosis) {
   assert.equal(git(['status', '--porcelain=v1'], project), '');
   await cp(join(root, 'template-project/.opencode'), join(project, '.opencode'),
     { recursive: true, force: false, errorOnExist: true });
+  const generator = await readJson(join(STATE_ROOT, 'common/toolchain-check/goyacc.json'));
+  await copyExclusive(generator.path, join(project, '.gopath/bin/goyacc'));
+  assert.equal(await hashFile(join(project, '.gopath/bin/goyacc')), generator.sha256);
+  await writeJson(join(trial, 'goyacc.json'), generator, { flag: 'wx' });
   await copyExclusive(receipt.archive_path, join(trial, packageName));
   await copyExclusive(HOST.instruction, join(trial, 'instruction.md'));
   await copyExclusive(join(root, 'frozen-inputs.json'), join(trial, 'frozen-inputs.json'));
@@ -106,7 +110,8 @@ async function buildTrial(version, receipt, profile, diagnosis) {
     ['core.mjs', 'host.mjs', 'observe.mjs', 'usage.mjs', 'settle.mjs', 'recovery.mjs'].map(async name =>
       [name, await hashFile(join(trial, name))])));
   oldProvenance.verifier = { path: 'scripts/anko-benchmark/verify.mjs', sha256: await hashFile(verifySource) };
-  oldProvenance.limits = { max_attempts: 1, max_wall_minutes: 60, max_priced_usd: COST_LIMIT_USD, grading: 'none' };
+   oldProvenance.go.generator = generator;
+   oldProvenance.limits = { max_attempts: 1, max_wall_minutes: 60, max_priced_usd: maxPricedUsd, grading: 'none' };
   oldProvenance.reusable_runner = { entrypoint: 'scripts/anko-benchmark.mjs', version, package_sha256: receipt.sha256,
     read_no_progress_ms: READ_STALL_MS, active_status_counts_as_progress: false,
     permission_reply: 'none', prompt_replay_on_unknown_cause: false };
@@ -134,7 +139,7 @@ async function buildTrial(version, receipt, profile, diagnosis) {
     package_name: packageName, runner_sha256: oldProvenance.runner.sha256 };
 }
 
-async function runChild(trial, version, receipt, diagnosis) {
+async function runChild(trial, version, receipt, diagnosis, maxPricedUsd = COST_LIMIT_USD) {
   const child = spawn(process.execPath, [join(trial.trial_directory, 'run-arm.mjs')], {
     cwd: ROOT,
     env: { ...process.env,
@@ -144,6 +149,7 @@ async function runChild(trial, version, receipt, diagnosis) {
       ANKO_BENCHMARK_PACKAGE_RECEIPT: packageReceiptPath(version),
       ANKO_BENCHMARK_PROFILE_PATH: profilePath(),
       ANKO_BENCHMARK_PACKAGE_SHA256: receipt.sha256,
+      ANKO_BENCHMARK_COST_LIMIT_USD: String(maxPricedUsd),
       ANKO_BENCHMARK_DIAGNOSIS_STATUS: diagnosis?.status ?? 'not-required',
     }, stdio: 'inherit', windowsHide: true,
   });
@@ -153,7 +159,7 @@ async function runChild(trial, version, receipt, diagnosis) {
   });
 }
 
-export async function runVersion(version, { attempt = null } = {}) {
+export async function runVersion(version, { attempt = null, maxPricedUsd = COST_LIMIT_USD } = {}) {
   const root = runRecordRoot(version, attempt);
   assert.equal(await exists(join(root, 'run-once.lock')), false,
     'this version already has an exclusive run record; never relaunch or reset it');
@@ -170,14 +176,16 @@ export async function runVersion(version, { attempt = null } = {}) {
   const executionPolicy = await fixExecutionPolicy(version, profile, diagnosis);
   const oneShotPath = join(root, 'run-once.lock');
   const oneShot = { one_shot: true, benchmark_attempt: 1, version, package_sha256: receipt.sha256,
+    max_priced_usd: maxPricedUsd,
     attempt_id: attempt, prior_standalone_attempt: previous,
     diagnostic_root_session: null, stage: 'trial-preparation',
     old_trials_resumed: false, at: new Date().toISOString() };
   await writeExclusive(oneShotPath, `${JSON.stringify(oneShot, null, 2)}\n`);
-  const trial = await buildTrial(version, receipt, profile, diagnosis);
+  const trial = await buildTrial(version, receipt, profile, diagnosis, maxPricedUsd);
   await writeJson(oneShotPath, { ...oneShot, stage: 'trial-prepared',
     trial_directory: trial.trial_directory, record_path: trial.record_path });
   const launch = { ...trial, version, benchmark_attempt: 1, package_sha256: receipt.sha256,
+    max_priced_usd: maxPricedUsd,
     attempt_id: attempt, prior_standalone_attempt: previous,
     profile_sha256: await hashFile(profilePath()), diagnosis_attempt: null,
     diagnosis_status: 'not-required',
@@ -189,14 +197,14 @@ export async function runVersion(version, { attempt = null } = {}) {
     started_at: launch.started_at });
   await writeJson(join(root, 'last-attempt.json'), launch);
   console.log(JSON.stringify({ phase: 'benchmark-arm-start', entrypoint: 'scripts/anko-benchmark.mjs',
-    command: `node scripts/anko-benchmark.mjs run --version ${version}${attempt ? ` --attempt ${attempt}` : ''}`, trial: trial.trial_id,
+    command: `node scripts/anko-benchmark.mjs run --version ${version}${attempt ? ` --attempt ${attempt}` : ''}${maxPricedUsd !== COST_LIMIT_USD ? ` --max-priced-usd ${maxPricedUsd}` : ''}`, trial: trial.trial_id,
     package_sha256: receipt.sha256, profile_sha256: launch.profile_sha256,
     no_progress_timeout_ms: launch.no_progress_timeout_ms, max_wall_ms: WALL_LIMIT_MS,
-    max_priced_usd: COST_LIMIT_USD, grading: 'none', record_path: trial.record_path }));
+    max_priced_usd: maxPricedUsd, grading: 'none', record_path: trial.record_path }));
   const started = Date.now();
   let result;
   let spawnError = null;
-  try { result = await runChild(trial, version, receipt, diagnosis); }
+  try { result = await runChild(trial, version, receipt, diagnosis, maxPricedUsd); }
   catch (error) { spawnError = String(error); result = { exit: 1, signal: null }; }
   const completed = new Date().toISOString();
   const terminal = { ...launch, completed_at: completed, shell_elapsed_ms: Date.now() - started,

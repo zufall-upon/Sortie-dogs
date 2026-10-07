@@ -297,7 +297,8 @@ let runnerSha = null;
 let auditSha = null;
 let provenanceSha = null;
 const wallMs = WALL_LIMIT_MS;
-const costCap = COST_LIMIT_USD;
+const costCap = Number(process.env.ANKO_BENCHMARK_COST_LIMIT_USD ?? COST_LIMIT_USD);
+assert(Number.isFinite(costCap) && costCap > 0 && costCap <= COST_LIMIT_USD);
 
 async function startPrivateServer(env, logPrefix) {
   const password = randomBytes(24).toString('hex');
@@ -652,6 +653,7 @@ try {
   assert.equal(npmVersion, pinned.toolchain?.npm_version, 'npm version drift');
   assert.equal(process.platform, pinned.toolchain?.runner_platform, 'runner platform drift');
   assert.equal(pinned.go?.version, 'go version go1.27.1 linux/amd64', 'provenance Go version mismatch');
+  assert.equal(await hashFile(join(project, '.gopath/bin/goyacc')), pinned.go.generator.sha256);
   assert.equal(await hashFile(goArchive), goArchiveSha, 'Go archive hash mismatch');
   const driverClient = JSON.parse(await readFile(driverClientPackage, 'utf8'));
   assert.equal(driverClient.version, '2.0.18', 'driver @opencode/client version mismatch');
@@ -1164,4 +1166,4 @@ try {
   process.exitCode = 1;
 }
 
- if (failure || !root) process.exitCode = 1;
+ if (failure || !root || !observation.accepted) process.exitCode = 1;

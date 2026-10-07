@@ -190,7 +190,8 @@ async function verifyRun(version, profile, attempt = null) {
   assert.equal(receipt.accepted, observation.accepted);
   assert.equal(launch.max_attempts, 1);
   assert.equal(launch.max_wall_minutes, 60);
-  assert.equal(launch.max_priced_usd, COST_LIMIT_USD);
+   assert.equal(launch.max_priced_usd, launchRecord.max_priced_usd ?? COST_LIMIT_USD);
+   assert(launch.max_priced_usd > 0 && launch.max_priced_usd <= COST_LIMIT_USD);
   assert.equal(launch.official_scoring, false);
   assert.equal(launch.host.version, '2.0.18');
   assert.equal(receipt.execution_elapsed_ms <= WALL_LIMIT_MS + 10_000, true,
