@@ -3264,7 +3264,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         if (ownership?.mission) {
           const current = await missions.required(ownership.root);
-          if (current.callID !== request.callID) { taskOwners.delete(request.callID!); return; }
+          // Native completion can arrive after cancellation/acceptance or an agent switch.
+          // Close its historical owner without reviving the Mission or requiring revoked root authority.
+          if (current.callID !== request.callID || ["completed", "cancelled"].includes(current.phase)) {
+            taskOwners.delete(request.callID!); return;
+          }
           const mission = await missions.update(ownership.root, state => { if (state.callID === request.callID) state.dispatchOpen = false; });
           output.output = JSON.stringify({ ...missionPacket(mission, await operators.read(ownership.root)),
             coordinator_report: output.output, budget: await control!.currentBudget(ownership.root) });
