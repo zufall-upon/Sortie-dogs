@@ -92,7 +92,7 @@ test('Anko native root success without accepted Mission exits nonzero', () => {
   const terminal = source.slice(source.lastIndexOf('if (failure || !root'));
   for (const accepted of [false, true]) {
     const process = { exitCode: 0 };
-    vm.runInNewContext(terminal, { failure: null, root: { id: 'root' }, observation: { accepted }, process });
+    vm.runInNewContext(terminal, { failure: null, root: { id: 'root' }, benchmarkAccepted: accepted, process });
     assert.equal(process.exitCode, accepted ? 0 : 1);
   }
 });
@@ -213,6 +213,22 @@ test('Anko missing terminal usage never reaches the price estimator or becomes z
     assert.equal(result.reason, reason);
     assert.equal(result.usd, null);
   }
+});
+
+test('Anko resumed parent usage ignores the stale previous idle without hiding actual terminal missing usage', () => {
+  const stale = { ...endedSession, time_idle: 100 };
+  const rows = [{ id: 'new-step', session_id: 'root', type: 'assistant',
+    data: { model: testModel, time: { created: 200 } } }];
+  const pending = summarizeOwnedUsage([stale], rows, 'root', () => assert.fail('estimated incomplete usage'));
+  assert.equal(pending.pending_messages, 1);
+  assert.equal(pending.unpriced_messages, 0);
+  assert.equal(usageSafetyStopReason(pending), null);
+  const ended = summarizeOwnedUsage([{ ...stale, time_idle: 201 }], rows, 'root', pricedEstimate);
+  assert.equal(ended.pending_messages, 0);
+  assert.equal(ended.unpriced_messages, 1);
+  assert.equal(usageSafetyStopReason(ended), 'unpriced-usage-safety-stop');
+  const errored = summarizeOwnedUsage([stale], [{ ...rows[0], data: { ...rows[0].data, error: { type: 'provider.transport' } } }], 'root', pricedEstimate);
+  assert.equal(usageSafetyStopReason(errored), 'unpriced-usage-safety-stop');
 });
 
 test('Anko opaque provider state preserves the previous string-only service tier contract', () => {

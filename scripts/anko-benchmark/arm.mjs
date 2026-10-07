@@ -247,6 +247,7 @@ let promptError = null;
 let promptPromise = null;
 const promptController = new AbortController();
 let terminal = false;
+let benchmarkAccepted = false;
 let stopReason = null;
 let failure = null;
 let started = null;
@@ -512,6 +513,7 @@ async function persistFinal() {
    const accepted = stopReason === 'accepted' && nativeReceipt?.status === 'succeeded' &&
      nativeReceipt?.stop_reason === 'completed' && settlement?.native_settled === true &&
      finalUsage?.cost_estimate_complete === true;
+   benchmarkAccepted = accepted;
   const eventTypes = Object.fromEntries([...new Set(nativeEventRecords.map(event => event.type))]
     .map(type => [type, nativeEventRecords.filter(event => event.type === type).length]));
   const readCalls = nativeEventRecords.filter(event => event.type === 'session.tool.called' && event.tool === 'read');
@@ -1166,4 +1168,4 @@ try {
   process.exitCode = 1;
 }
 
- if (failure || !root || !observation.accepted) process.exitCode = 1;
+ if (failure || !root || !benchmarkAccepted) process.exitCode = 1;

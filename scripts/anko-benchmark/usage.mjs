@@ -14,8 +14,13 @@ export function classifyUsage(message, session, estimate) {
   const counts = { input: tokens?.input, output: tokens?.output, reasoning: tokens?.reasoning,
     cache_read: tokens?.cache?.read, cache_write: tokens?.cache?.write };
   const complete = Object.values(counts).every(validCount);
+  // V2 can retain a prior idle while a background child wakes the parent again.
+  // That older idle is not a terminal observation for the newer message.
+  const idle = session?.time_idle ?? session?.time?.idle;
+  const created = message.time?.created;
+  const currentIdle = nativeTerminal(session) && (!Number.isFinite(created) || idle >= created);
   const terminal = Number.isFinite(message.time?.completed) || Boolean(message.error) ||
-    ['completed', 'failed'].includes(message.status) || nativeTerminal(session);
+    ['completed', 'failed'].includes(message.status) || currentIdle;
   if (!complete) return { status: terminal ? 'missing-terminal-usage' : 'pending-usage',
     reason: 'missing-usage', usd: null, token_usage: counts };
   const result = estimate({ providerID: message.model?.providerID, modelID: message.model?.id,
