@@ -65,6 +65,21 @@ export const workerStartWithinProbeLimit = (mode, worker, instance, deadlineMs) 
   mode !== 'start' || Number.isFinite(worker?.started_ms) && worker.started_ms >= 0 &&
     worker.started_ms <= (deadlineMs ?? (instance ? 180_000 : 60_000));
 
+export function probeStopReason(observed, { mode, rootModel, capUSD, elapsedMs, timeoutMs }) {
+  const statusReason = mode === 'status' ? statusProbeStopReason(observed, rootModel) : null;
+  if (observed.priced_usd >= capUSD) return 'budget';
+  if (statusReason) return statusReason;
+  if (mode === 'start' && observed.models.some(item => item.agent === 'dog-worker-v010')) return 'worker-started';
+  if (mode === 'build-start' && observed.responses.some(item => item.agent === 'build')) return 'build-responded';
+  if (mode === 'operator-response' && observed.responses.some(item => item.agent === 'dog-operator')) return 'operator-responded';
+  return elapsedMs > timeoutMs ? 'timeout' : null;
+}
+
+/** A normal parent exit can beat the interval even though its native Worker already started.
+ * Inspect before server teardown; never relabel a failed exit or an earlier stop. */
+export const cliCloseStopReason = (code, stopped, observed, options) =>
+  code === 0 && !stopped ? probeStopReason(observed, options) : null;
+
 async function updateBudget(file, update) {
   if (!file) return;
   const lock = `${file}.lock`;
@@ -122,27 +137,29 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const child = spawn(launch.executable, launch.args, {
     cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stdout = '', stderr = '', stopped = false, stopping, cutoff;
+  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation;
   child.stdout.on('data', bytes => { stdout += bytes; });
   child.stderr.on('data', bytes => { stderr += bytes; });
-  const stop = reason => {
+  const stop = (reason, observed, point) => {
     if (stopped) return;
-    cutoff = observeMissionCLI(project, since, rootAgent);
+    cutoff = observed;
     stopped = reason;
+    stopObservation = point;
     stopping = Promise.all([stopProcessGroup(child), server.stop()]);
   };
+  const stopOptions = () => ({ mode, rootModel, capUSD, elapsedMs: Date.now() - since, timeoutMs: timeoutSeconds * 1000 });
   const timer = setInterval(() => {
     const observed = observeMissionCLI(project, since, rootAgent);
-    const statusReason = statusOnly ? statusProbeStopReason(observed, rootModel) : null;
-    if (observed.priced_usd >= capUSD) stop('budget');
-    else if (statusReason) stop(statusReason);
-    else if (mode === 'start' && observed.models.some(item => item.agent === 'dog-worker-v010')) stop('worker-started');
-    else if (buildStart && observed.responses.some(item => item.agent === 'build')) stop('build-responded');
-    else if (operatorResponse && observed.responses.some(item => item.agent === 'dog-operator')) stop('operator-responded');
-    else if (Date.now() - since > timeoutSeconds * 1000) stop('timeout');
+    const reason = probeStopReason(observed, stopOptions());
+    if (reason) stop(reason, observed, 'interval');
   }, 250);
   let code;
-  try { code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done); }); }
+  try {
+    code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done); });
+    const observed = observeMissionCLI(project, since, rootAgent);
+    const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
+    if (reason) stop(reason, observed, 'cli-close');
+  }
   finally { clearInterval(timer); await stopping; await server.stop(); }
   const observed = observeMissionCLI(project, since, rootAgent);
   const state = async area => {
@@ -157,7 +174,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
       item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
     ...(cutoff ? { errors: cutoff.errors,
     cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
-    project, mode, stopped, code, elapsed_ms: Date.now() - since,
+    project, mode, stopped, stop_observation: stopObservation ?? null, code, elapsed_ms: Date.now() - since,
     package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
     mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
     review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
