@@ -1,0 +1,6 @@
+interface:
+  display_name: "Sortie-dogs"
+  short_description: "Run a verified Sortie Mission through Codex"
+  default_prompt: "Use $sortie-dogs to execute and verify this task through the existing Mission workflow."
+policy:
+  allow_implicit_invocation: false

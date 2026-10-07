@@ -46,12 +46,17 @@ const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v01
 This beta package defaults to the v010 profile.`;
 const CODEX_USAGE = `Natural-language Mission: sortie-dogs codex mission --prompt <text> (mission --help for options)
 
+Install the direct Codex skill: sortie-dogs codex init [project-root]
+
 Usage: sortie-dogs codex run --manifest <operation-manifest.json> --prompt <text>
   [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>]
   [--trusted-pwsh <absolute-pwsh.exe>] [--profile stable|v010]
 
 The operation manifest is required. This command reuses Sortie's goal ledger and
 scope leases; it does not import or modify OpenCode settings or sessions.`;
+const CODEX_INIT_USAGE = `Usage: sortie-dogs codex init [project-root]
+
+Installs the explicit $sortie-dogs skill under .agents/skills without modifying OpenCode settings.`;
 
 type OutputFormat = "text" | "json";
 
@@ -261,6 +266,20 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] === "codex") {
+    if (argv[1] === "init") {
+      if (argv[2] === "--help" && argv.length === 3) { process.stdout.write(`${CODEX_INIT_USAGE}\n`); return 0; }
+      if (argv.length > 3 || argv[2]?.startsWith("-")) { process.stderr.write(`${CODEX_INIT_USAGE}\n`); return 2; }
+      try {
+        const initialized = await initializer.initializeCodexSkill(argv[2]);
+        process.stdout.write(initialized.status === "installed"
+          ? `Installed the $sortie-dogs Codex skill (${initialized.version}).\n`
+          : `The $sortie-dogs Codex skill (${initialized.version}) is already installed.\n`);
+        return 0;
+      } catch (error) {
+        process.stderr.write(`${error instanceof Error ? error.message : "codex-skill-init-failed"}\n`);
+        return 1;
+      }
+    }
     if (argv[1] === "mission") return (await import("./codex-mission.js")).runCodexMissionCommand(argv.slice(2));
     if (argv.length === 3 && argv[1] === "run" && argv[2] === "--help") { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }
     if (argv[1] === "--help" && argv.length === 2) { process.stdout.write(`${CODEX_USAGE}\n`); return 0; }

@@ -15,6 +15,8 @@ const { runtimeAssets } = assets;
 const OPEN_CODE_DIRECTORY = ".opencode";
 const VERSION_MARKER = `${OPEN_CODE_DIRECTORY}/sortie-dogs.version`;
 const GLOBAL_VERSION_MARKER = "sortie-dogs.version";
+const CODEX_SKILL_DIRECTORY = ".agents/skills/sortie-dogs";
+const CODEX_SKILL_VERSION_MARKER = `${CODEX_SKILL_DIRECTORY}/sortie-dogs.version`;
 const LUNA_FABRIC_CONTROL_IGNORE = `${OPEN_CODE_DIRECTORY}/.gitignore`;
 const LUNA_FABRIC_CONTROL_FILE = "sortie-dogs-luna-fabric.json";
 
@@ -406,6 +408,15 @@ const GLOBAL_LAYOUT: InitializationLayout = {
   invalidRootMessage: "Global configuration root must be an existing non-symlink directory.",
 };
 
+const CODEX_SKILL_LAYOUT: InitializationLayout = {
+  assetPrefix: CODEX_SKILL_DIRECTORY,
+  markerPath: CODEX_SKILL_VERSION_MARKER,
+  preserveAllLegacy: false,
+  invalidRootMessage: "Project root must be an existing non-symlink directory.",
+  controlIgnore: false,
+  legacyAssets: [],
+};
+
 function layoutLegacyPath(asset: LegacyRuntimeAsset, layout: InitializationLayout): string {
   return layout.preserveAllLegacy
     ? asset.relativePath.slice(`${OPEN_CODE_DIRECTORY}/`.length)
@@ -663,6 +674,14 @@ async function profileInstallation(id: RuntimeProfileId, global: boolean): Promi
 export async function initializeProject(projectRoot: string = process.cwd(), profile: RuntimeProfileId = "stable"): Promise<InitializeProjectResult> {
   const install = await profileInstallation(profile, false);
   return initializeRoot(projectRoot, install.layout, install.assets);
+}
+
+/** Installs only the Codex skill entrypoint. OpenCode settings and assets remain untouched. */
+export async function initializeCodexSkill(projectRoot: string = process.cwd()): Promise<InitializeProjectResult> {
+  const module: typeof import("../codex/skill-assets.js") = await import(
+    `../codex/skill-assets.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`
+  );
+  return initializeRoot(projectRoot, CODEX_SKILL_LAYOUT, module.codexSkillAssets);
 }
 
 async function removeEmptyDirectories(paths: readonly string[]): Promise<unknown[]> {

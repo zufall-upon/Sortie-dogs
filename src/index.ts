@@ -76,6 +76,7 @@ export type {
   WorktreeSetupHook,
 } from "./core/worktree-lifecycle.js";
 export {
+  initializeCodexSkill,
   initializeProject,
   ProjectInitializationError,
 } from "./core/initialize.js";

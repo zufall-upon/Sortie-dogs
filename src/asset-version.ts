@@ -4,5 +4,9 @@
  */
 export const RUNTIME_ASSET_VERSION = "0.3.89-completion-proof-v1";
 export const V010_RUNTIME_ASSET_VERSION = "0.13.8-native-binding-v1";
+export const CODEX_SKILL_ASSET_VERSION = "0.13.8-codex-skill-v1";
 
-export type RuntimeAssetVersion = typeof RUNTIME_ASSET_VERSION | typeof V010_RUNTIME_ASSET_VERSION;
+export type RuntimeAssetVersion =
+  | typeof RUNTIME_ASSET_VERSION
+  | typeof V010_RUNTIME_ASSET_VERSION
+  | typeof CODEX_SKILL_ASSET_VERSION;

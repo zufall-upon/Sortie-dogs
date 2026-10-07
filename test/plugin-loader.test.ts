@@ -7,7 +7,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { RUNTIME_ASSET_VERSION, V010_RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
+import {
+  CODEX_SKILL_ASSET_VERSION,
+  RUNTIME_ASSET_VERSION,
+  V010_RUNTIME_ASSET_VERSION,
+} from "../src/asset-version.ts";
 import {
   DEDICATED_WORKER_MODEL,
   DEDICATED_WORKER_VARIANT,
@@ -105,6 +109,10 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.equal(packed.length, 1);
     assert.ok(packed[0].files);
     assert.equal(packed[0].files.some(({ path }) => /(?:^|\/)reflection\/seed\.(?:js|d\.ts)$/u.test(path)), false);
+    const packedFilePaths = new Set(packed[0].files.map(({ path }) => path));
+    assert.equal(packedFilePaths.has(".agents/skills/sortie-dogs/SKILL.md"), true);
+    assert.equal(packedFilePaths.has(".agents/skills/sortie-dogs/agents/openai.yaml"), true);
+    assert.equal(packedFilePaths.has(".agents/skills/sortie-dogs/sortie-dogs.version"), true);
     const tarball = join(fixture, packed[0].filename);
 
     const consumer = join(fixture, "consumer");
@@ -139,20 +147,37 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     );
 
-    for (const args of [["codex", "--help"], ["codex", "run", "--help"], ["codex", "mission", "--help"]]) {
+    for (const args of [["codex", "--help"], ["codex", "init", "--help"], ["codex", "run", "--help"], ["codex", "mission", "--help"]]) {
       const help = await execFileAsync(process.execPath, [join(consumer, "node_modules", "sortie-dogs", "dist", "cli", "main.js"), ...args], { cwd: consumer });
       assert.equal(help.stderr, "");
       assert.match(help.stdout, /Usage: sortie-dogs codex/);
     }
     const sdk = await execFileAsync(process.execPath, ["--input-type=module", "--eval", `
       import assert from 'node:assert/strict';
-      import {CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, runCodexMission} from 'sortie-dogs';
-      for (const value of [CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, runCodexMission]) assert.equal(typeof value, 'function');
+      import {CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, initializeCodexSkill, runCodexMission} from 'sortie-dogs';
+      for (const value of [CodexMissionSession, CodexAppServerHost, createCodexAppServerTransport, initializeCodexSkill, runCodexMission]) assert.equal(typeof value, 'function');
       const mission = await CodexMissionSession.create({projectRoot: process.cwd()});
       await mission.close();
       console.log('CODEX SDK PASS');
     `], { cwd: consumer });
     assert.equal(sdk.stdout.trim(), "CODEX SDK PASS");
+
+    const packedCodexProject = join(fixture, "packed-codex-project");
+    await mkdir(packedCodexProject);
+    await execFileAsync(process.execPath, [
+      join(consumer, "node_modules", "sortie-dogs", "dist", "cli", "main.js"),
+      "codex", "init", packedCodexProject,
+    ], { cwd: packedCodexProject });
+    const packedSkillRoot = join(packedCodexProject, ".agents", "skills", "sortie-dogs");
+    assert.equal(
+      await readFile(join(packedSkillRoot, "SKILL.md"), "utf8"),
+      await readFile(join(consumer, "node_modules", "sortie-dogs", ".agents", "skills", "sortie-dogs", "SKILL.md"), "utf8"),
+    );
+    assert.equal(
+      await readFile(join(packedSkillRoot, "sortie-dogs.version"), "utf8"),
+      `${CODEX_SKILL_ASSET_VERSION}\n`,
+    );
+    assert.equal(existsSync(join(packedCodexProject, ".opencode")), false);
 
     const packedProject = join(fixture, "packed-project");
     await mkdir(packedProject);
