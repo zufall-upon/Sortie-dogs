@@ -2,17 +2,19 @@ import type { CodexTurnEvent } from "../codex/app-server.js";
 import { CodexMissionSession } from "../codex/mission-session.js";
 
 export const CODEX_MISSION_USAGE = `Usage: sortie-dogs codex mission --prompt <text>
-  [--resume <root-thread-id>] [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>] [--permissions <native-profile>]
+  [--resume <root-thread-id>] [--project-root <path>] [--executable <codex>] [--model <model>] [--effort <effort>] [--permissions <native-profile>] [--trusted-pwsh <absolute-pwsh.exe>]
 
 Runs the existing Mission Operator, Coordinator, Worker and Reviewer through Codex.
 --model and --effort explicitly override all roles; otherwise packaged role defaults apply.
 --permissions explicitly selects an existing native profile; omission retains native defaults.
+Windows uses existing PowerShell 7; --trusted-pwsh pins its absolute executable path.
+The packaged Luna-fast worker maps to native gpt-6-luna with the priority (Fast) service tier.
 Uses existing ChatGPT authentication and native Codex permissions.`;
 
 export async function runCodexMissionCommand(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === "--help") { process.stdout.write(`${CODEX_MISSION_USAGE}\n`); return 0; }
   const values = new Map<string, string>();
-  const allowed = new Set(["--prompt", "--resume", "--project-root", "--executable", "--model", "--effort", "--permissions"]);
+  const allowed = new Set(["--prompt", "--resume", "--project-root", "--executable", "--model", "--effort", "--permissions", "--trusted-pwsh"]);
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index], value = argv[index + 1];
     if (!key || !allowed.has(key) || !value || value.startsWith("--") || values.has(key)) {
@@ -29,7 +31,8 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
   process.on("SIGTERM", onTerm); process.on("SIGINT", onInt);
   try {
     adapter = await CodexMissionSession.create({ projectRoot: values.get("--project-root") ?? process.cwd(),
-      resumeThreadID: values.get("--resume"), permissions: values.get("--permissions"), executable: values.get("--executable"), model: values.get("--model"), effort: values.get("--effort"), onEvent: event => {
+      resumeThreadID: values.get("--resume"), permissions: values.get("--permissions"), executable: values.get("--executable"), model: values.get("--model"), effort: values.get("--effort"),
+      trustedPowerShellExecutable: values.get("--trusted-pwsh"), onEvent: event => {
         const progress = codexMissionProgress(event);
         if (progress) process.stderr.write(`${JSON.stringify(progress)}\n`);
       } });
@@ -50,6 +53,9 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
 
 /** Bounded user-facing progress; do not dump control packets or hidden reasoning. */
 export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
+  if (event.method === "sortie/modelRoute")
+    return { thread_id: event.threadId, phase: "model-route", agent: event.params.agent, model: event.params.model,
+      effort: event.params.effort, service_tier: event.params.serviceTier };
   if (event.method === "sortie/permissions")
     return { thread_id: event.threadId, phase: "permissions", requested_profile: event.params.requestedProfile,
       effective_profile: event.params.profile, sandbox: event.params.sandbox, network_access: event.params.networkAccess,

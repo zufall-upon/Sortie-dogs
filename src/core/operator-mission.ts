@@ -126,6 +126,7 @@ export interface CodexUsageObservation {
 }
 export interface CodexMissionOwner {
   pid: number; bootID?: string; startTicks?: string; generation: string; closed?: boolean;
+  platform?: NodeJS.Platform;
 }
 
 async function codexProcessStart(pid: number): Promise<string> {
@@ -135,7 +136,7 @@ async function codexProcessStart(pid: number): Promise<string> {
   return ticks;
 }
 export async function codexProcessOwner(): Promise<CodexMissionOwner> {
-  const owner: CodexMissionOwner = { pid: process.pid, generation: randomUUID() };
+  const owner: CodexMissionOwner = { pid: process.pid, generation: randomUUID(), platform: process.platform };
   if (process.platform === "linux") {
     owner.bootID = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
     owner.startTicks = await codexProcessStart(process.pid);
@@ -145,7 +146,14 @@ export async function codexProcessOwner(): Promise<CodexMissionOwner> {
 export async function codexOwnerGone(owner: CodexMissionOwner | undefined): Promise<boolean> {
   if (!owner) return false;
   if (owner.closed) return true;
-  if (process.platform !== "linux" || !owner.bootID || !owner.startTicks || !Number.isSafeInteger(owner.pid) || owner.pid < 1) return false;
+  if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || owner.platform && owner.platform !== process.platform) return false;
+  if (process.platform === "win32" && owner.platform === "win32") {
+    // Windows has no /proc identity. Only an absent PID proves this owner gone;
+    // PID reuse, access denial and legacy/unidentified owners stay unresolved.
+    try { process.kill(owner.pid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  }
+  if (process.platform !== "linux" || !owner.bootID || !owner.startTicks) return false;
   try {
     if ((await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim() !== owner.bootID) return true;
     return await codexProcessStart(owner.pid) !== owner.startTicks;
@@ -402,7 +410,7 @@ export class OperatorMissionRuntime {
   async codexRecovery<T>(root: string, action: (state: OperatorMission) => Promise<T>): Promise<T> {
     const lock = `${this.file(root)}.codex-recovery.lock`;
     const owner = await codexProcessOwner();
-    const marker = `owner.${owner.pid}.${owner.bootID ?? "unknown"}.${owner.startTicks ?? "unknown"}.${owner.generation}`;
+    const marker = `owner.${owner.pid}.${owner.platform === "win32" ? "win32." : ""}${owner.bootID ?? "unknown"}.${owner.startTicks ?? "unknown"}.${owner.generation}`;
     for (let attempt = 0; attempt < 200; attempt++) {
       let acquired = false;
       const staging = `${lock}.${owner.generation}.tmp`;
@@ -421,8 +429,10 @@ export class OperatorMissionRuntime {
       await unlink(join(lock, marker)).catch(() => undefined);
       const names = await readdir(lock).catch(() => []);
       if (names.length === 1) {
-        const match = /^owner\.(\d+)\.([a-f0-9-]+)\.(\d+)\.([a-f0-9-]+)$/.exec(names[0]!);
-        if (match && await codexOwnerGone({ pid: Number(match[1]), bootID: match[2], startTicks: match[3], generation: match[4]! })) {
+        // Retain legacy Linux markers; old Windows "unknown" owners are not proof.
+        const match = /^owner\.(\d+)\.(?:(linux|win32)\.)?([a-f0-9-]+|unknown)\.(\d+|unknown)\.([a-f0-9-]+)$/.exec(names[0]!);
+        if (match && await codexOwnerGone({ pid: Number(match[1]), platform: match[2] as NodeJS.Platform | undefined,
+          bootID: match[3] === "unknown" ? undefined : match[3], startTicks: match[4] === "unknown" ? undefined : match[4], generation: match[5]! })) {
           // Remove only the dead owner's unique marker; never unlink a replacement owner's file.
           await unlink(join(lock, names[0]!)).catch(() => undefined);
         }

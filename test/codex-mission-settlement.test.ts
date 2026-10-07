@@ -159,6 +159,19 @@ test("Codex settlement rejects the right wrapper shape from an untrusted pwsh pa
   assert.equal(result.disposition, "failed");
 });
 
+for (const exitCode of [0, -1, 7]) test(`Codex 0.162 NoProfile envelope preserves native exit ${exitCode}`, async () => {
+  const state = target();
+  const wrapped = String.raw`"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command 'node verify.js'`;
+  let captured = false;
+  const result = await new CodexMissionSettlementBridge(state.target).settle({ ...request(turn({ items: [
+    { id: "cmd-no-profile", type: "commandExecution", command: wrapped, status: "completed", exitCode },
+  ] }), async () => { captured = true; return [evidence]; }), trustedPowerShellExecutable: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" });
+  assert.equal(result.disposition, exitCode === 0 ? "succeeded" : "failed");
+  assert.equal(captured, exitCode === 0);
+  assert.equal(state.observations[0][0].exitCode, exitCode);
+  assert.equal(state.observations[0][0].rawCommand, wrapped);
+});
+
 test("Codex settlement fails closed for expected-negative criteria until native negative evidence is supported", async () => {
   const state = target();
   const negative = { ...goalState.acceptance_contract!.criteria[0]!, criterion_id: "criterion-negative",

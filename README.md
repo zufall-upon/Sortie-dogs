@@ -87,9 +87,10 @@ $sortie-dogs Implement and verify the requested change
 `$sortie-dogs` is the current direct Skills syntax. Codex does not expose arbitrary custom commands
 as exact `/sortie-dogs` slash commands; `/skills` opens the skill picker. The skill is intentionally
 explicit-only so child Codex Mission turns cannot invoke another Sortie Mission recursively.
-On POSIX it selects the natural-language Mission route below. On Windows it derives a bounded
-operation manifest and uses `codex run`, which retains the documented post-execution observation
-boundary instead of claiming a pre-execution guard.
+On POSIX and Windows it selects the natural-language, multi-role Mission route below.
+Windows uses existing PowerShell 7; it does not route natural-language Missions through the
+single-task `codex run` manifest workflow. That workflow remains available when explicitly selected
+and retains its post-execution observation boundary, not a pre-execution guard.
 
 Sortie-dogs also exports a host adapter for the official Codex app-server stdio protocol. This is
 separate from selecting an OpenAI model through OpenCode: OpenCode model routing still uses the
@@ -123,7 +124,7 @@ server-initiated requests fail closed.
 For the existing Operator → Coordinator → Worker → Reviewer Mission workflow, use:
 
 ```sh
-npx --no-install sortie-dogs codex mission --prompt "Implement and review the requested change" --model gpt-6.1-sol --effort medium
+npx --no-install sortie-dogs codex mission --prompt "Implement and review the requested change"
 ```
 
 The equivalent public SDK entrypoint is:
@@ -133,8 +134,9 @@ import { CodexMissionSession } from "sortie-dogs";
 
 const mission = await CodexMissionSession.create({
   projectRoot: process.cwd(),
-  model: "gpt-6.1-sol", // Choose a model available to the existing signed-in account.
-  effort: "medium",
+  // Leave model/effort unset to preserve packaged role defaults.
+  // model: "gpt-6.1-sol", effort: "medium", // Explicit override for every role.
+  // trustedPowerShellExecutable: "C:/Program Files/PowerShell/7/pwsh.exe", // Windows, optional.
   // resumeThreadID: "saved-root-thread-id", // Continue the same Mission when needed.
 });
 try {
@@ -146,14 +148,26 @@ try {
 }
 ```
 
-This Linux-first route uses `CodexMissionSession` and the existing Mission tools, correction grants,
+This route uses `CodexMissionSession` and the existing Mission tools, correction grants,
 validation evidence, and final Operator acceptance. It runs saved native Codex threads with existing
 ChatGPT authentication; it does not import OpenCode settings or introduce a second Mission ledger.
-Commands run through `/bin/bash` using the native app-server's configured permissions. Sortie does not
+Commands run through `/bin/bash` on POSIX or existing `pwsh.exe -NoProfile -NonInteractive -Command`
+on Windows, using the native app-server's configured permissions. The compatibility tool remains
+named `bash`, but its Windows input must be PowerShell syntax. Windows callers can pin an absolute
+PowerShell 7 path with SDK `trustedPowerShellExecutable` or CLI `--trusted-pwsh`.
+Packaged roles retain Sol 6.1/xhigh for Operator, Coordinator and Reviewer. The shared Luna-fast/max
+Worker alias maps only in Codex to native `gpt-6-luna`/max plus `serviceTier: "priority"` (Fast).
+OpenCode routing is unchanged. Fast uses subscription limits faster than Standard; no metered API
+fallback is introduced. CLI progress exposes each role's native model, effort and separate service tier.
+Sortie does not
 replace them with a fixed repository-only or network-disabled policy, change host configuration, or select
 full access. Thread turns retain native thread permissions; standalone `command/exec` uses the server's
 configured policy, not a thread's temporary grants. A parent application's in-memory approval is not
 automatically transferred to a separately launched app-server.
+Windows recovery can reclaim a killed adapter only when its recorded Windows PID is absent.
+A live/reused PID, access denial, legacy owner without platform identity, or unresolved native
+execution remains unknown; no command is replayed. Sandbox startup errors must be resolved at the
+native host, not by silently widening Sortie's permissions or stopping unrelated Codex processes.
 SDK hosts can forward native command/file approval requests through `approval` and permission-subset
 requests through `permissionsApproval`. The native host remains responsible for deciding and enforcing
 the grant. The CLI reports approval requests but has no interactive approval bridge; without a connected

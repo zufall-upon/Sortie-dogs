@@ -24,7 +24,7 @@ Check the selected entrypoint with `<entrypoint> codex --help` before starting w
 
 ## Choose one route
 
-On a POSIX host with `/bin/bash`, use the natural-language Mission route:
+Use the natural-language Mission route on POSIX and Windows:
 
 ```text
 <entrypoint> codex mission --project-root <repository-root> --prompt <exact-user-request>
@@ -32,11 +32,17 @@ On a POSIX host with `/bin/bash`, use the natural-language Mission route:
 
 Forward `--model`, `--effort`, or `--permissions` only when the user selected those values. Never silently widen the native permission profile. If an existing Mission is reported, resume only its exact root with `--resume`; do not launch replacement work.
 
-On Windows, use the manifest-bound route until the full Mission shell path supports Windows natively:
+Leave `--model` unset to retain role-specific defaults: Sol 6.1 Operator/Coordinator/Reviewer and Luna-fast Worker. The Codex adapter maps the shared Luna-fast alias to native `gpt-6-luna` plus the `priority` (Fast) service tier; it does not alter OpenCode defaults. Fast consumes subscription limits faster than Standard; no metered API fallback is allowed.
+
+On Windows the same Mission command resolves existing PowerShell 7 automatically. Add `--trusted-pwsh <absolute-pwsh.exe>` only when an exact existing executable needs to be selected; do not add a separate shell preflight or approval step.
+
+The compatibility tool named `bash` executes PowerShell commands on Windows and POSIX bash on POSIX. Do not supply POSIX commands to the Windows shell. Shell and file commands still use the configured native permissions, or an explicitly integrated host executor. A sandbox startup failure is not a validation failure or success: preserve the failed execution and report the environment blocker; do not widen permissions or stop unrelated Codex processes.
+
+Use the manifest-bound `codex run` route only for an explicitly selected single-task manifest workflow. It is not the full multi-role Mission route:
 
 1. Read repository instructions and inspect only enough to identify bounded project-relative read scope, write scope, and meaningful validation commands.
 2. Create one temporary manifest under `.sortie-dogs/codex-skill/` with `version`, `task_id`, `read`, `write`, and non-empty `validation`. Reject external or uncertain write scope instead of broadening it.
-3. Resolve the exact PowerShell executable with `(Get-Command pwsh.exe -ErrorAction Stop).Source`. Invoke:
+3. On Windows the manifest workflow needs the exact PowerShell executable for command-envelope observation. Resolve it with `(Get-Command pwsh.exe -ErrorAction Stop).Source`, then invoke:
 
 ```text
 <entrypoint> codex run --project-root <repository-root> --manifest <temporary-manifest> --prompt <exact-user-request> --trusted-pwsh <resolved-pwsh.exe>

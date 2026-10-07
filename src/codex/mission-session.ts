@@ -10,13 +10,14 @@ import { V010_RUNTIME_PROFILE as profile } from "../core/runtime-profile.js";
 import { runtimeAssets } from "../runtime-assets-v010.js";
 import { OperatorRuntime } from "../core/operator-runtime.js";
 import { OperatorMissionRuntime, type CodexMissionOwner, type CodexNotStartedProof, type CodexWorkerDispatch, codexProcessOwner, codexOwnerGone } from "../core/operator-mission.js";
+import { resolveCodexMissionShell, type CodexMissionShell } from "./mission-shell.js";
 
 type JsonObject = Record<string, unknown>;
 const object = (value: unknown): value is JsonObject => value !== null && typeof value === "object" && !Array.isArray(value);
 interface NativeSession {
   id: string;
   agent: string;
-  model: { providerID: string; modelID: string; variant?: string };
+  model: { providerID: string; modelID: string; variant?: string; serviceTier?: string };
   parentID?: string;
   outcome: string;
   host: CodexAppServerHost;
@@ -51,6 +52,8 @@ export interface CodexMissionSessionOptions {
   readonly roleModels?: Readonly<Record<string, { model: string; effort?: string }>>;
   readonly effort?: string;
   readonly executable?: string;
+  /** Windows only: existing absolute PowerShell 7 executable; otherwise resolve pwsh.exe on PATH. */
+  readonly trustedPowerShellExecutable?: string;
   readonly transportFactory?: () => CodexAppServerTransport;
   /** Delegate exact post-hook commands to the parent host; omission retains native command/exec. */
   readonly executeCommand?: CodexMissionCommandExecutor;
@@ -72,10 +75,10 @@ export class CodexMissionSession {
   private readonly ownedRoots = new Set<string>();
   private readonly toolQueues = new Map<string, Promise<unknown>>();
   readonly directory: string;
-  private constructor(private readonly options: CodexMissionSessionOptions) { this.directory = resolve(options.projectRoot); }
+  private constructor(private readonly options: CodexMissionSessionOptions, private readonly shell: CodexMissionShell) { this.directory = resolve(options.projectRoot); }
 
   static async create(options: CodexMissionSessionOptions): Promise<CodexMissionSession> {
-    const adapter = new CodexMissionSession(options);
+    const adapter = new CodexMissionSession(options, await resolveCodexMissionShell(options.trustedPowerShellExecutable));
     adapter.owner = await codexProcessOwner();
     const id = (request: { path: { id: string } }) => request.path.id;
     const info = (session: NativeSession) => ({ id: session.id, agent: session.agent, parentID: session.parentID,
@@ -303,7 +306,13 @@ export class CodexMissionSession {
     if (!model || model.includes("/")) throw new Error(`Codex Mission requires an OpenAI model for ${agent}. Set model or roleModels explicitly.`);
     const effort = this.options.roleModels?.[agent]?.effort || this.options.effort || selection?.variant || embeddedEffort ||
       stored?.variant || /^variant: (.+)$/m.exec(header)?.[1];
-    return { providerID: "openai", modelID: model, ...(effort ? { variant: effort } : {}) };
+    // The shared OpenCode alias is not a native Codex model. Keep its speed
+    // selection separate, including after shared Task routing and cold resume.
+    const fast = model === "gpt-6-luna-fast";
+    // A model/effort override does not silently change the independent native speed setting.
+    const serviceTier = fast ? "priority" : stored?.serviceTier;
+    return { providerID: "openai", modelID: fast ? "gpt-6-luna" : model,
+      ...(effort ? { variant: effort } : {}), ...(serviceTier ? { serviceTier } : {}) };
   }
 
   private async reportPermissions(host: CodexAppServerHost, threadId: string): Promise<void> {
@@ -317,23 +326,26 @@ export class CodexMissionSession {
     const content = runtimeAssets.find(asset => asset.name === agent)?.content;
     if (!content) throw new Error(`Codex Mission role not supported: ${agent}`);
     const route = this.modelRoute(agent, undefined, selection);
-    const model = route.modelID, effort = route.variant;
+    const model = route.modelID;
     const host = this.createHost();
     try {
       const auth = await host.authenticationState();
       if (auth.type !== "chatgpt") throw new Error("Codex Mission requires existing ChatGPT authentication.");
-      const thread = await host.startThread({ cwd: this.directory, model, ephemeral: false, permissions: this.options.permissions,
+      const thread = await host.startThread({ cwd: this.directory, model, serviceTier: route.serviceTier, ephemeral: false, permissions: this.options.permissions,
         developerInstructions: content.replace(/^---\n[\s\S]*?\n---\n/, "") +
           "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
           "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
           "Native shell and file operations outside these functions do not provide Mission validation evidence. " +
+          `The bash function runs ${this.shell.description}; supply commands in that shell's syntax. ` +
           "Declare formal validation as exact executable shell commands from the project root, without prose annotations such as (workdir: ...). " +
           "Use a root-relative command or an explicit shell cd for a subdirectory formal check. bash workdir changes that invocation only; " +
           "a command run in another directory does not validate a root-directory entry.",
         dynamicTools: this.tools(content), config: { "features.shell_tool": false, "features.unified_exec": false } });
       if (this.closed) throw new Error("Codex Mission adapter is closed.");
+      const serviceTier = host.threadServiceTier(thread) ?? route.serviceTier;
       const session: NativeSession = { id: thread, agent, parentID, outcome: "idle", host, history: [], usageBaseline: emptyCodexUsage(), createdAt: Date.now(),
-        model: { providerID: "openai", modelID: host.threadModel(thread) ?? model, ...(effort ? { variant: effort } : {}) } };
+        model: { ...route, modelID: host.threadModel(thread) ?? model,
+          ...(serviceTier ? { serviceTier } : {}) } };
       this.sessions.set(thread, session);
       await this.reportPermissions(host, thread);
       return session;
@@ -373,9 +385,16 @@ export class CodexMissionSession {
       }
       await host.resumeThread(id, this.options.permissions);
       await this.reportPermissions(host, id);
+      const nativeModel = host.threadModel(id) ?? (typeof thread.model === "string" ? thread.model : undefined);
+      const observedTier = host.threadServiceTier(id), observedEffort = host.threadEffort(id);
+      // An observed native default is authoritative, not a missing value to fill
+      // from an older thread/read snapshot. Older hosts may omit these fields.
+      const nativeTier = observedTier === undefined ? (typeof thread.serviceTier === "string" ? thread.serviceTier : undefined) : observedTier;
+      const nativeEffort = observedEffort === undefined ? (typeof thread.reasoningEffort === "string" ? thread.reasoningEffort : undefined) : observedEffort;
       const session: NativeSession = { id, agent, parentID, outcome: turns.at(-1)?.status === "completed" ? "succeeded" : "interrupted", host, history: [], createdAt: codexNativeTime(thread.createdAt),
-        model: this.modelRoute(agent, { providerID: String(thread.modelProvider), modelID: typeof thread.model === "string" ? thread.model : "unknown",
-          ...(typeof thread.reasoningEffort === "string" ? { variant: thread.reasoningEffort } : {}) }) };
+        model: this.modelRoute(agent, nativeModel ? { providerID: String(thread.modelProvider), modelID: nativeModel,
+          ...(nativeTier ? { serviceTier: nativeTier } : {}),
+          ...(nativeEffort ? { variant: nativeEffort } : {}) } : undefined) };
       const lastUsage = this.observations.find(item => item.threadID === id && item.turnID === turns.at(-1)?.id && item.terminal);
       session.usageBaseline = codexUsageTotal(lastUsage?.total);
       if (lastUsage?.total) session.usage = { total: lastUsage.total };
@@ -419,7 +438,7 @@ export class CodexMissionSession {
     const define = (name: string, description: string, properties: JsonObject, required = Object.keys(properties)): CodexDynamicTool =>
       ({ type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } });
     const string = { type: "string" };
-    tools.push(define("bash", "Run a foreground command through the native Codex sandbox. Preserve formal validation commands exactly.",
+    tools.push(define("bash", `Run a foreground ${this.shell.description} command through the configured executor and native permissions. Preserve formal validation commands exactly.`,
       { command: string, workdir: string, timeout: { type: "integer", minimum: 1, maximum: 1200000 } }, ["command"]));
     tools.push(define("read", "Read a UTF-8 file through the native Codex sandbox.", { filePath: string }));
     tools.push(define("write", "Write a UTF-8 file through the native Codex sandbox.", { filePath: string, content: string }));
@@ -435,9 +454,9 @@ export class CodexMissionSession {
     const parts = [{ type: "text", text: prompt }];
     await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
     // Shared Task routing may select a model; explicit adapter overrides still govern every native turn.
-    if (this.options.model || this.options.effort || this.options.roleModels?.[session.agent])
-      message.model = this.modelRoute(session.agent, message.model);
     if (message.model.providerID !== "openai") throw new Error("Codex Mission cannot use a non-OpenAI model route.");
+    message.model = this.modelRoute(session.agent, { ...message.model,
+      serviceTier: message.model.serviceTier ?? session.model.serviceTier });
     session.model = message.model;
     session.history.push({ info: { ...message, role: "user", sessionID: session.id }, parts });
     session.outcome = "running";
@@ -446,9 +465,13 @@ export class CodexMissionSession {
     const accounting: JsonObject = { info: { ...codexUsageInfo(observation), time: { created: startedAt } }, parts: [] };
     session.history.push(accounting);
     try {
+      await this.options.onEvent?.({ method: "sortie/modelRoute", threadId: session.id,
+        params: { agent: session.agent, model: session.model.modelID, effort: session.model.variant ?? null,
+          serviceTier: session.model.serviceTier ?? null } });
       await onDispatch?.(messageID);
       const result = await session.host.runTurn(session.id, parts.map(part => part.text).join("\n"), { cwd: this.directory, clientUserMessageId: messageID,
         model: message.model.modelID === "unknown" ? undefined : message.model.modelID, effort: message.model.variant ?? this.options.effort,
+        serviceTier: message.model.serviceTier,
         onEvent: event => {
           if (event.method === "thread/tokenUsage/updated" && object(event.params.tokenUsage)) {
             observation.turnID = typeof event.params.turnId === "string" ? event.params.turnId : observation.turnID;
@@ -513,7 +536,7 @@ export class CodexMissionSession {
       text = result.finalResponse ?? "";
       metadata = { sessionId: child.id, status: result.status };
     } else {
-      const command = call.tool === "bash" ? ["/bin/bash", "-c", String(args.command)]
+      const command = call.tool === "bash" ? this.shell.command(String(args.command))
         : call.tool === "read" ? [process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", resolve(this.directory, String(args.filePath))]
         : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
       const executor = this.options.executeCommand ? "host" : "native";

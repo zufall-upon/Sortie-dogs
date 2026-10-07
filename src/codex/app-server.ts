@@ -93,6 +93,8 @@ export interface CodexTurnOptions {
   readonly approvalPolicy?: "untrusted" | "on-failure" | "on-request" | "never" | "unlessTrusted" | "onRequest";
   readonly model?: string;
   readonly effort?: string;
+  /** Native service tier, separate from the model slug (for example priority/Fast). */
+  readonly serviceTier?: string;
   readonly outputSchema?: JsonObject;
   readonly onEvent?: (event: CodexTurnEvent) => void | Promise<void>;
 }
@@ -168,6 +170,8 @@ export class CodexAppServerHost {
   private initialized = false;
   private readonly permissions = new Map<string, JsonObject>();
   private readonly models = new Map<string, string>();
+  private readonly serviceTiers = new Map<string, string | null>();
+  private readonly efforts = new Map<string, string | null>();
   private closed = false;
   private closing?: Promise<void>;
   private fault?: unknown;
@@ -192,22 +196,35 @@ export class CodexAppServerHost {
     this.initialized = true;
   }
 
-  async startThread(params: { cwd: string; model?: string; ephemeral?: boolean; permissions?: string; developerInstructions?: string; dynamicTools?: readonly CodexDynamicTool[]; config?: JsonObject } ): Promise<string> {
+  async startThread(params: { cwd: string; model?: string; serviceTier?: string; ephemeral?: boolean; permissions?: string; developerInstructions?: string; dynamicTools?: readonly CodexDynamicTool[]; config?: JsonObject } ): Promise<string> {
     await this.initialize();
     const result = await this.request("thread/start", { cwd: params.cwd, ...(params.model ? { model: params.model, allowProviderModelFallback: false } : {}),
       ...(params.ephemeral === undefined ? {} : { ephemeral: params.ephemeral }),
+      ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
       ...(params.permissions ? { permissions: params.permissions } : {}),
       ...(params.developerInstructions ? { developerInstructions: params.developerInstructions } : {}),
       ...(params.dynamicTools ? { dynamicTools: params.dynamicTools } : {}),
       ...(params.config ? { config: params.config } : {}) });
     const id = object(result) && object(result.thread) ? text(result.thread.id) : undefined;
     if (!id) throw new CodexHostError("protocol-invalid-response", "thread/start returned no thread id.");
-    if (object(result) && typeof result.model === "string") this.models.set(id, result.model);
+    this.captureModelSettings(id, result);
     this.capturePermissions(id, result);
     return id;
   }
 
   threadModel(threadID: string): string | undefined { return this.models.get(threadID); }
+  /** Null means the native default was observed; undefined means no observation. */
+  threadServiceTier(threadID: string): string | null | undefined { return this.serviceTiers.get(threadID); }
+  threadEffort(threadID: string): string | null | undefined { return this.efforts.get(threadID); }
+
+  private captureModelSettings(threadID: string, result: unknown): void {
+    if (!object(result)) return;
+    if (typeof result.model === "string") this.models.set(threadID, result.model);
+    if (typeof result.serviceTier === "string") this.serviceTiers.set(threadID, result.serviceTier);
+    else if (result.serviceTier === null) this.serviceTiers.set(threadID, null);
+    if (typeof result.reasoningEffort === "string") this.efforts.set(threadID, result.reasoningEffort);
+    else if (result.reasoningEffort === null) this.efforts.set(threadID, null);
+  }
 
   threadPermissions(threadID: string): JsonObject | undefined { return this.permissions.get(threadID); }
 
@@ -244,6 +261,7 @@ export class CodexAppServerHost {
     const result = await this.request("thread/resume", { threadId: threadID, ...(permissions ? { permissions } : {}) });
     const id = object(result) && object(result.thread) ? text(result.thread.id) : undefined;
     if (id !== threadID) throw new CodexHostError("protocol-invalid-response", "thread/resume returned a different thread id.");
+    this.captureModelSettings(id, result);
     this.capturePermissions(threadID, result);
   }
 
@@ -255,6 +273,7 @@ export class CodexAppServerHost {
       ...(options.sandboxPolicy ? { sandboxPolicy: options.sandboxPolicy } : {}),
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}),
+      ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
       ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}) });
     if (this.closed) throw new CodexHostError("server-closed", "Codex host was closed.");
     const turnID = object(started) && object(started.turn) ? text(started.turn.id) : undefined;
