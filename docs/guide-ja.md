@@ -15,10 +15,13 @@ model routingが必要なtaskだけSortieを起動する。
 [English README](../README.md) · [简体中文](guide-zh-CN.md) ·
 [テスト](testing.md) · [CLI testing](cli-testing.md)
 
-**現行release: [v0.13.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.8)**
-（[release notes](release-v0.13.8.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
+Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
+
+**現行release: [v0.13.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.11)**
+（[release notes](release-v0.13.11.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.8-native-binding-v1`。
+現行asset markerは`0.13.11-operation-result-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -61,7 +64,14 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.8の更新
+## v0.13.11の更新
+
+Codex大容量writeと実行中status観測、agent切替後の終了済みMission返却による継続HTTP 500、
+run-once結果回収と処理成功の混同を修正。操作の失敗exitは保持し、未起動・実行中・必須成功checkは
+完了扱いにしない。[Windows Codex完走・採点記録](codex-write-status-anko-20261007.md)は固定development
+packageの結果であり、公開v0.13.11の再ベンチやnative sandbox修復の証明ではない。
+
+## v0.13.8の更新（継承）
 
 PR #161を統合。Windows directory junctionのalias列挙が失敗しても、読取可能な解決済みphysical
 targetからnative検証bindingを取得する。logical証跡ラベル、link identity、target全bytesを保持し、
@@ -160,12 +170,12 @@ agent数ではなく、品質を維持しながら不要な高cost作業を減�
   WorkerはLuna Fast/max、Operator/Coordinator/Reviewer/AdvisorはGPT-6.1 Sol/xhigh。
   8 slots、$2/instance、campaign上限$46、20分進捗確認・最大40分。
   既知推論費用 **$17.73**、不明usage hold **$1.98** は別管理。推論約81分、公式採点7.2分。
-  [固定条件・中断runの扱い・詳細](../README.md#v0131-dev23-2026-09-30)。
+  [固定条件・中断runの扱い・詳細](benchmarks/swebench-lite-history.md#v0131-dev23-2026-09-30)。
 
-どちらも過去の固定candidateの結果で、v0.13.8のscoreではない。version、予算、条件が異なるため
+どちらも過去の固定candidateの結果で、v0.13.11のscoreではない。version、予算、条件が異なるため
 統制比較や一般成功率へ拡張しない。inference完了、Sortieの`DONE`、Review `PASS`、公式解決を区別する。
 公式local評価とleaderboard登録・承認も別扱い。SWE-benchは必要時の別計測で、release必須gateではない。
-[測定契約](benchmark-completion-contract.md)、[結果履歴](../README.md#swe-bench-evaluation)、
+[測定契約](benchmark-completion-contract.md)、[結果履歴](benchmarks/swebench-lite-history.md)、
 [旧local case study](benchmark-reference.md)に条件と制約を保持する。
 
 ## Mission tools
@@ -320,7 +330,10 @@ npx sortie-dogs init . --profile stable
 既定package plugin entryではなくproject bridgeから読み込む。
 
 ```ts
-export { SortieDogsPlugin } from "sortie-dogs/plugin/stable";
+import { createSortieDogsV2Plugin } from "sortie-dogs/server";
+import { SortieDogsPlugin } from "sortie-dogs/plugin/stable";
+
+export default createSortieDogsV2Plugin(SortieDogsPlugin);
 ```
 
 Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
@@ -332,7 +345,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.8
+npm install --global sortie-dogs@0.13.11
 sortie-dogs init --global --profile v010
 ```
 
@@ -344,7 +357,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.8
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.11
 sortie-dogs init --global --profile v010
 ```
 
@@ -365,7 +378,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.8-native-binding-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.11-operation-result-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
