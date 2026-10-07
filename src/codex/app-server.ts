@@ -186,7 +186,7 @@ export class CodexAppServerHost {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    await this.request("initialize", { clientInfo: { name: "sortie_dogs", title: "Sortie-dogs", version: this.options.clientVersion ?? "0.13.8" },
+    await this.request("initialize", { clientInfo: { name: "sortie_dogs", title: "Sortie-dogs", version: this.options.clientVersion ?? "0.13.9" },
       ...(this.options.dynamicTool || this.options.experimentalApi ? { capabilities: { experimentalApi: true } } : {}) });
     this.transport.send({ method: "initialized", params: {} });
     this.initialized = true;
