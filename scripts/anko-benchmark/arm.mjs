@@ -351,7 +351,11 @@ async function startPrivateServer(env, logPrefix) {
         const logText = await readFile(path, 'utf8');
         await writeFile(path, redactSensitiveText(logText));
       }
-      if (closed) await rm(registrationPath, { force: true });
+      if (closed) {
+        await rm(registrationPath, { force: true });
+        // --service also persists its generated password in the isolated config.
+        await rm(join(config, 'service.json'), { force: true });
+      }
       return closed;
     },
   };
@@ -1168,7 +1172,7 @@ try {
     'preflight-server-stdout.log', 'preflight-server-stderr.log',
     'server-server-stdout.log', 'server-server-stderr.log',
     'data/opencode/opencode.db', 'usage/opencode.db', 'usage-gap-events.jsonl', 'goyacc.json',
-    'seed-service-registration.json', 'run-service-registration.json',
+    'preflight-service-registration.json', 'server-service-registration.json',
   ];
   await mkdir(recordRoot, { recursive: true });
   for (const relative of retainedFiles) {

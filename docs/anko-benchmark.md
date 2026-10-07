@@ -41,7 +41,7 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - 保存場所が異なるhostでは`ANKO_CLI`、`ANKO_SOURCE_PROJECT`、`ANKO_INSTRUCTION`、`ANKO_GO_DIRECTORY`、`ANKO_GO_ARCHIVE`、`ANKO_HOST_DATABASE`、`ANKO_RELEASE_ROOT`、`ANKO_ARTIFACT_ROOT`を指定できる。新しい権限ルールではなく準備済み入力のpath指定。profileへ固定し、実行中に交換しない。
 - profileへ実CLI hash、client lock、hostとtoolchainを記録。版ごとに再install/initせず、未変更のinstallationを再利用。mirrorの可変tipや過去の失敗receiptは新規armの起動条件にしない。
 - Linuxのrepository lockにはSortie自体の版番号も含まれるため、共通driverの再利用判定にはclient版を用いる。root lockの実hashと内容は各armで固定・保存し、実行中のdriftを検出する。Sortieの版番号だけ変わっても未変更のdriverを再installしない。Windowsの専用driver lock固定は維持。
-- 隔離serverは`release-cli.mjs`と同じ`serve --service`方式で起動し、各server固有の`XDG_STATE_HOME`へ登録する。V2 plugin contextにない子一覧・activity・paginated historyを既存`Service.discover()`が同じPIDから取得できるようにする。認証はserviceが生成したregistrationを使用し、生passwordは保存せずserver終了後にregistrationを削除する。単なる`serve`は履歴取得機能を欠き、Worker成功後のReview・修正・受理を妨げる。
+- 隔離serverは`release-cli.mjs`と同じ`serve --service`方式で起動し、各server固有の`XDG_STATE_HOME`へ登録する。V2 plugin contextにない子一覧・activity・paginated historyを既存`Service.discover()`が同じPIDから取得できるようにする。認証はserviceが生成したregistrationを使用し、保持metadataには生passwordを含めない。server終了後にregistrationと隔離configの`service.json`（生成password）を削除する。単なる`serve`は履歴取得機能を欠き、Worker成功後のReview・修正・受理を妨げる。
 
 ## 分離したidentityと保存先
 
@@ -87,6 +87,8 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 - exportの成功分は保持し、失敗分は`history_error`へ分離する。所有session/outcomeと子dispatch件数はDB観測から保存し、export欠落を子0件やnative成功へ転用しない。
 - `usage-safety-stop.json`、`settlement-snapshots.jsonl`/`settlement.json`、server停止・credential除去後の`post-cleanup-usage.json`を別観測として保存する。process停止からsession成功・native終端を推測しない。元停止時点と後観測の費用を重複加算しない。
 - 新しい通信方式、proxy、provider設定、retry回数は変更しない。2026-10-07の実セッションでは旧起動条件、生成ツール不足、旧idleによるusage誤判定、native retry前の過剰停止を確認し、共通runnerへ修正を反映。結果と未確認範囲は各試行のreceiptを参照する。
+
+PR #168の実セッション修正確認では`pr168-live-20261007-07` / runner `403c35b`がLinuxで実装・正式検証・Review指摘修正・commit・native Mission受理まで完了した。修正後Reviewは著者self-recheckであり独立承認とは区別する。再現command、各失敗の根拠、費用、未確認範囲は[`anko-runner-autonomy-20261007.md`](benchmarks/anko-runner-autonomy-20261007.md)を参照。
 
 通信・usageの切り分け結果と今回の限定回帰は[続行結果](benchmarks/anko-transport-usage-20261006.md)を参照。
 
