@@ -100,6 +100,118 @@ class ScriptedTransport implements CodexAppServerTransport {
   async close(): Promise<void> { this.ended = true; this.waiting?.({ value: undefined, done: true }); }
 }
 
+for (const delegated of [false, true]) test(`large literal writes retain ${delegated ? "host" : "native"} execution and clean their transport payload`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex literal write 日本語 "));
+  const content = "日本語 ' \" $${notExpanded} \u0000\r\n".repeat(8000);
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  const requests: Json[] = [];
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+    const native = new ScriptedTransport("root", async host => {
+      try {
+        await host.call("sortie_v010_start_mission", { requirements: ["Write literal content"] });
+        await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Write", objective: "Write literal content",
+          read: ["check.mjs"], write: ["literal file.txt"], validation: ["node check.mjs"] }] });
+        const result = await host.call("write", { filePath: "literal file.txt", content });
+        assert.equal(result.metadata.exit, 0);
+        assert.equal(result.metadata.executor, delegated ? "host" : "native");
+      } catch (error) { failure = error; }
+    });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      ...(delegated ? { executeCommand: async (request: any) => {
+        requests.push(request);
+        assert.equal(request.tool, "write");
+        // Existing argv-only executors need no new capability or stdin implementation.
+        return { status: "completed" as const, exitCode: 0, ...await exec(request.command[0], request.command.slice(1), { cwd: request.cwd }) };
+      } } : {}) });
+    assert.equal((await adapter.run("Write literal content")).accepted, false, "a write alone is not Mission acceptance");
+    if (failure) throw failure;
+    assert.equal(await readFile(join(directory, "literal file.txt"), "utf8"), content);
+    const commands = delegated ? requests : native.commandRequests;
+    assert.equal(commands.length, 1);
+    assert(commands[0].command.every((arg: string) => arg.length < 1024), "file content never occupies argv");
+    await assert.rejects(readFile(commands[0].command.at(-1)), { code: "ENOENT" });
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const outcome of ["denied", "not-started", "unknown"] as const) test(`write payload is cleaned after host ${outcome} without writing or fallback`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex write receipt "));
+  let adapter: CodexMissionSession | undefined, failure: unknown, payloadPath = "";
+  let calls = 0;
+  const native = new ScriptedTransport("root", async host => {
+    try {
+      await host.call("sortie_v010_start_mission", { requirements: ["Write result"] });
+      await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Write", objective: "Write result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      await host.call("write", { filePath: "result.txt", content: "x".repeat(100000) }, false);
+    } catch (error) { failure = error; }
+  });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      executeCommand: async request => {
+        calls++;
+        payloadPath = request.command.at(-1)!;
+        assert.equal(await readFile(payloadPath, "utf8"), "x".repeat(100000));
+        await assert.rejects(readFile(join(directory, "result.txt")), { code: "ENOENT" });
+        return { status: outcome, reason: "fixture receipt" };
+      } });
+    if (outcome === "unknown") { await assert.rejects(adapter.run("Write result"), /closed/); await adapter.close(); }
+    else { assert.equal((await adapter.run("Write result")).accepted, false); if (failure) throw failure; }
+    assert.equal(calls, 1);
+    assert.equal(native.commandExecutions, 0);
+    await assert.rejects(readFile(payloadPath), { code: "ENOENT" });
+    await assert.rejects(readFile(join(directory, "result.txt")), { code: "ENOENT" });
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("status observations finish during an active Task while condition registration stays queued", { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex live status "));
+  let adapter: CodexMissionSession | undefined, failure: unknown, created = 0, registered = false;
+  let entered!: () => void, release!: () => void;
+  const childEntered = new Promise<void>(resolve => { entered = resolve; });
+  const childRelease = new Promise<void>(resolve => { release = resolve; });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
+      if (created++ !== 0) return new ScriptedTransport("worker", async () => { entered(); await childRelease; return "Unfinished fixture task"; });
+      return new ScriptedTransport("root", async host => {
+        try {
+          await host.call("sortie_v010_start_mission", { requirements: ["Observe active child"] });
+          const planned = await host.call("sortie_v010_plan_units", { units: [{ title: "Observe", objective: "Observe active child",
+            read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+          const task = host.call("task", planned.task);
+          await childEntered;
+          for (const args of [{}, { view: "full", confirmed_conditions: "" }, { view: "progress", confirmed_conditions: {} }]) {
+            const status = await host.call("sortie_v010_operator_status", args);
+            assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "running");
+            assert(status && !status.task, "observation cannot offer a replacement Task while the child is active");
+            assert.equal(registered, false);
+          }
+          const conditions = host.call("sortie_v010_operator_status", { confirmed_conditions: { source: "fixture" } });
+          await new Promise(resolve => setImmediate(resolve));
+          assert.equal(registered, false, "condition registration cannot overtake Task execution");
+          release();
+          await task;
+          await conditions;
+          assert.equal(registered, true);
+        } catch (error) { failure = error; release(); }
+      });
+    } });
+    const status = (adapter as any).hooks.tool.sortie_v010_operator_status;
+    const execute = status.execute;
+    status.execute = async (args: Json, context: Json) => {
+      if (args.confirmed_conditions !== undefined) { registered = true; return JSON.stringify({ registered }); }
+      return execute(args, context);
+    };
+    assert.equal((await adapter.run("Observe active child")).accepted, false);
+    if (failure) throw failure;
+  } finally { release(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("Codex transport reuses Mission failure correction and root acceptance", { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-mission-session-"));
   let adapter: CodexMissionSession | undefined;
