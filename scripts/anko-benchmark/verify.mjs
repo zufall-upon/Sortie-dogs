@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   ARTIFACT_ROOT, ANKO_BASE, CLI_SHA256, CLIENT_LOCK_SHA256, COST_LIMIT_USD, HOST, INSTRUCTION_SHA256,
   READ_STALL_MS, WALL_LIMIT_MS, WORKER_MODEL, exists, fixedProfile, hashFile, packageReceiptPath, profilePath,
-  priorStandaloneAttempt, readJson, sha256, versionRoot, writeJson,
+  priorStandaloneAttempt, readJson, runRecordRoot, sha256, versionRoot, writeJson,
 } from './core.mjs';
 import { assertReusableDriver } from './host.mjs';
 
@@ -156,8 +156,8 @@ async function verifyDiagnosis(version, profile) {
   return report;
 }
 
-async function verifyRun(version, profile) {
-  const root = versionRoot(version);
+async function verifyRun(version, profile, attempt = null) {
+  const root = runRecordRoot(version, attempt);
   const attemptLock = join(root, 'run-once.lock');
   assert.equal(await exists(attemptLock), true, 'benchmark launch has no exclusive lock');
   const exclusiveLaunch = await readJson(attemptLock);
@@ -176,7 +176,7 @@ async function verifyRun(version, profile) {
   const trial = launchRecord.trial_directory;
   const executionPolicyPath = join(trial, 'execution-policy.json');
   assert.equal(await hashFile(executionPolicyPath), launchRecord.execution_policy_sha256);
-  assert.equal(await hashFile(join(root, 'execution-policy.json')), launchRecord.execution_policy_sha256);
+  assert.equal(await hashFile(join(versionRoot(version), 'execution-policy.json')), launchRecord.execution_policy_sha256);
   const receipt = await readJson(join(trial, 'receipt.json'));
   const observation = await readJson(join(trial, 'observation.json'));
   const launch = await readJson(join(trial, 'launch.json'));
@@ -222,8 +222,9 @@ async function verifyRun(version, profile) {
   return { launch_record: launchRecord, receipt, observation, launch };
 }
 
-export async function verifyVersion(version, { includeDiagnosis = true } = {}) {
+export async function verifyVersion(version, { includeDiagnosis = true, attempt = null } = {}) {
   const root = versionRoot(version);
+  const recordRoot = runRecordRoot(version, attempt);
   const profile = await verifyProfile();
   const setup = await readJson(join(root, 'setup.json'));
   assert.equal(setup.profile_sha256, await hashFile(profilePath()));
@@ -233,17 +234,18 @@ export async function verifyVersion(version, { includeDiagnosis = true } = {}) {
   const packageInfo = await verifyPackage(version, setup);
   const hasDiagnosis = await exists(join(root, 'diagnosis/diagnosis-latest.json')) || await exists(join(root, 'diagnosis/diagnosis-terminal.json'));
   const diagnosis = includeDiagnosis && hasDiagnosis ? await verifyDiagnosis(version, profile) : null;
-  const hasRun = await exists(join(root, 'last-attempt.json'));
-  const hasRunLock = await exists(join(root, 'run-once.lock'));
+  const hasRun = await exists(join(recordRoot, 'last-attempt.json'));
+  const hasRunLock = await exists(join(recordRoot, 'run-once.lock'));
   assert.equal(hasRunLock && !hasRun, false, 'exclusive run lock exists without a terminal launch record');
-  const run = hasRun ? await verifyRun(version, profile) : null;
+  const run = hasRun ? await verifyRun(version, profile, attempt) : null;
   const retainedAttempt = !hasRun ? await priorStandaloneAttempt(version) : null;
   const result = {
     schema_version: 1,
     checked_at: new Date().toISOString(),
-    status: run ? 'record-integrity-verified' : retainedAttempt ? 'retained-arm-consumed' : 'preflight-ready',
+    status: run ? 'record-integrity-verified' : retainedAttempt && !attempt ? 'retained-arm-consumed' : 'preflight-ready',
     benchmark_accepted: run?.observation.accepted ?? false,
     version,
+    attempt_id: attempt,
     profile_sha256: await hashFile(profilePath()),
     package: { path: packageInfo.receipt.archive_path, sha256: packageInfo.receipt.sha256,
       integrity: packageInfo.receipt.integrity, runtime_marker: packageInfo.loaded_asset_marker },
@@ -265,7 +267,7 @@ export async function verifyVersion(version, { includeDiagnosis = true } = {}) {
   // Keep an existing terminal verification receipt stable. Native shell history
   // records each fresh check; rewriting only its timestamp invalidates unrelated
   // source-bound checks without changing the candidate or the observed result.
-  const verificationPath = join(root, 'verification.json');
+  const verificationPath = join(recordRoot, 'verification.json');
   const saved = await exists(verificationPath) ? await readJson(verificationPath) : null;
   if (!saved || saved.status !== result.status || saved.package.sha256 !== result.package.sha256)
     await writeJson(verificationPath, result);

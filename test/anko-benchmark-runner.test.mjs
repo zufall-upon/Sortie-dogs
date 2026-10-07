@@ -11,7 +11,7 @@ import vm from 'node:vm';
 import {
   ROOT, STATE_ROOT, READ_STALL_MS, fixedProfile, noProgressStopReason, packageJsonFromTgz, packageRoot,
   diagnosticReadObservations, parseCommand, parseVersion, profilePath, progressSignature, shouldStopForNoProgress,
-  priorStandaloneAttempt, versionRoot, writeExclusive,
+  priorStandaloneAttempt, runRecordRoot, versionRoot, writeExclusive,
 } from '../scripts/anko-benchmark/core.mjs';
 import { eligibleReadPermission } from '../scripts/anko-benchmark/recovery.mjs';
 import { expectSessionTurn, installObservationFiles, nativeTurnTerminal, observeSessionState,
@@ -58,6 +58,15 @@ test('Anko runner CLI keeps package, version and shared profile identities separ
   assert.equal(profile.stall_policy.no_progress_ms, 180_000);
   assert.equal(profile.stall_policy.active_session_status_is_progress, false);
   assert.equal(profile.stall_policy.contextual_recovery.max_prompts, 1);
+});
+
+test('Anko explicitly named requested runs keep the original version and attempt records separate', () => {
+  const options = parseCommand(['run', '--version', '0.13.9', '--attempt', 'pr168-01']);
+  assert.equal(options.attempt, 'pr168-01');
+  assert.equal(runRecordRoot('0.13.9', options.attempt), join(versionRoot('0.13.9'), 'attempts/pr168-01'));
+  assert.equal(runRecordRoot('0.13.9'), versionRoot('0.13.9'));
+  assert.throws(() => parseCommand(['run', '--version', '0.13.9', '--attempt', '../old']), /Invalid --attempt/u);
+  assert.throws(() => parseCommand(['prepare', '--version', '0.13.9', '--attempt', 'new']), /only accepted/u);
 });
 
 const fullTokens = { input: 20, output: 10, reasoning: 0, cache: { read: 0, write: 0 } };
@@ -430,7 +439,8 @@ test('Anko run admits one arm without a paid diagnostic or historical-attempt ga
   const source = await readFile(join(ROOT, 'scripts/anko-benchmark/run.mjs'), 'utf8');
   const calls = [], written = new Map();
   const context = { assert, join, console: { log() {} }, process: { exitCode: null }, Date,
-    versionRoot: () => '/version', profilePath: () => '/profile', packageReceiptPath: () => '/package',
+    versionRoot: () => '/version', runRecordRoot: (_, attempt) => attempt ? `/version/attempts/${attempt}` : '/version',
+    profilePath: () => '/profile', packageReceiptPath: () => '/package',
     exists: async () => false, prepareVersion: async () => calls.push('prepare'),
     priorStandaloneAttempt: async () => null,
     verifyVersion: async (_, options) => { assert.equal(options.includeDiagnosis, false); return { status: 'preflight-ready', benchmark_accepted: false }; },
@@ -446,6 +456,14 @@ test('Anko run admits one arm without a paid diagnostic or historical-attempt ga
   assert.deepEqual(calls, ['prepare', 'arm']);
   assert.equal(written.get('/version/run-once.lock').stage, 'arm-terminal');
   assert.equal(written.get('/version/run-once.lock').benchmark_attempt, 1);
+  const original = JSON.stringify(written.get('/version/run-once.lock'));
+  context.priorStandaloneAttempt = async () => ({ lock: '/old/run-once.lock', version: '0.13.9' });
+  await vm.runInNewContext(source.slice(source.indexOf('export async function runVersion')).replace('export async', 'async') + ';runVersion("0.13.9", { attempt: "requested-02" })', context);
+  assert.equal(JSON.stringify(written.get('/version/run-once.lock')), original);
+  const named = written.get('/version/attempts/requested-02/run-once.lock');
+  assert.equal(named.stage, 'arm-terminal');
+  assert.equal(named.attempt_id, 'requested-02');
+  assert.equal(named.prior_standalone_attempt.lock, '/old/run-once.lock');
 });
 
 test('Anko common runner does not reset the consumed retained Linux attempt', async () => {

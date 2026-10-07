@@ -57,7 +57,7 @@ export function parseCommand(argv) {
   const options = {};
   for (let i = 0; i < rest.length; i += 1) {
     const key = rest[i];
-    if (!['--version', '--package'].includes(key) || options[key])
+    if (!['--version', '--package', '--attempt'].includes(key) || options[key])
       throw new Error(`Unexpected or repeated option: ${key}`);
     const value = rest[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${key}`);
@@ -66,12 +66,26 @@ export function parseCommand(argv) {
   if (command !== 'profile' && !options['--version']) throw new Error(`${command} requires --version X.Y.Z`);
   if (command === 'profile' && options['--version']) throw new Error('profile does not accept --version');
   if (command !== 'prepare' && options['--package']) throw new Error('--package is only accepted by prepare');
+  if (options['--attempt'] && !['run', 'verify', 'inspect'].includes(command))
+    throw new Error('--attempt is only accepted by run, verify or inspect');
+  if (options['--attempt']) parseAttempt(options['--attempt']);
   return { command, version: options['--version'] ? parseVersion(options['--version']) : null,
-    packagePath: options['--package'] ?? null };
+    packagePath: options['--package'] ?? null, ...(options['--attempt'] ? { attempt: options['--attempt'] } : {}) };
+}
+
+export function parseAttempt(value) {
+  if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(value))
+    throw new Error(`Invalid --attempt value: ${String(value)}`);
+  return value;
 }
 
 export function versionRoot(version) {
   return join(STATE_ROOT, `v${parseVersion(version)}`);
+}
+
+// An explicitly requested new run has its own records, never a reset old lock.
+export function runRecordRoot(version, attempt = null) {
+  return attempt ? join(versionRoot(version), 'attempts', parseAttempt(attempt)) : versionRoot(version);
 }
 
 export function packageRoot(version) {

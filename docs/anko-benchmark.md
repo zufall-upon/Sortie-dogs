@@ -53,6 +53,8 @@ node scripts/anko-benchmark.mjs verify --version X.Y.Z
 
 同版`run-once.lock`は排他的な本体消費記録。terminal失敗も消さず再起動しない。旧Linux単独runnerの消費済みlockも認識し、共通runnerへ移っただけで試行数をresetしない。v0.13.9は消費済み。`verify`は`retained-arm-consumed`と保存lockのpathを示す。
 
+ユーザーが改修後の実行を新しく依頼した場合は、`run --version X.Y.Z --attempt <id>`で別の単一armを記録する。`verify`/`inspect`にも同じ`--attempt`を渡す。準備と固定packageは再利用し、lock/結果は`vX.Y.Z/attempts/<id>/`へ保存する。以前のlock・結果・費用は消さない。新しいIDは明示された実行の識別であり、自動retryや上限resetを意味しない。修正確認を反復する場合はcampaign累計費用と各candidateのcommit/hashを別途記録する。
+
 ## 継承条件とread停滞処理
 
 - task原文1,825 bytes、SHA-256 `96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe`。

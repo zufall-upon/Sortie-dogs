@@ -8,7 +8,7 @@ import {
   ARTIFACT_ROOT, ANKO_BASE, CLI, CLI_VERSION, COST_LIMIT_USD, INSTRUCTION_SHA256,
   HOST, READ_STALL_MS, ROOT, SOURCE_PROJECT, STATE_ROOT, WALL_LIMIT_MS,
   copyExclusive, exists, hashFile, packageReceiptPath, profilePath, readJson, sha256,
-  priorStandaloneAttempt, versionRoot, writeExclusive, writeJson,
+  priorStandaloneAttempt, runRecordRoot, versionRoot, writeExclusive, writeJson,
 } from './core.mjs';
 import { verifyVersion } from './verify.mjs';
 import { prepareVersion } from './prepare.mjs';
@@ -153,15 +153,15 @@ async function runChild(trial, version, receipt, diagnosis) {
   });
 }
 
-export async function runVersion(version) {
-  const root = versionRoot(version);
+export async function runVersion(version, { attempt = null } = {}) {
+  const root = runRecordRoot(version, attempt);
   assert.equal(await exists(join(root, 'run-once.lock')), false,
     'this version already has an exclusive run record; never relaunch or reset it');
   const previous = await priorStandaloneAttempt(version);
-  assert.equal(previous, null, `this version was consumed by the retained Linux arm: ${previous?.lock}; inspect its saved result, do not reset the attempt`);
+  if (!attempt) assert.equal(previous, null, `this version was consumed by the retained Linux arm: ${previous?.lock}; inspect its saved result, or name a newly requested run with --attempt; do not reset the old attempt`);
   await prepareVersion(version);
   // Read-only, paid model probes are opt-in via diagnose, not a launch gate.
-  const ready = await verifyVersion(version, { includeDiagnosis: false });
+  const ready = await verifyVersion(version, { includeDiagnosis: false, attempt });
   assert.equal(ready.status, 'preflight-ready', `benchmark preflight is not ready: ${ready.status}`);
   assert.equal(ready.benchmark_accepted, false, 'a new arm is not permitted after an already recorded accepted trial');
   const receipt = await readJson(packageReceiptPath(version));
@@ -170,6 +170,7 @@ export async function runVersion(version) {
   const executionPolicy = await fixExecutionPolicy(version, profile, diagnosis);
   const oneShotPath = join(root, 'run-once.lock');
   const oneShot = { one_shot: true, benchmark_attempt: 1, version, package_sha256: receipt.sha256,
+    attempt_id: attempt, prior_standalone_attempt: previous,
     diagnostic_root_session: null, stage: 'trial-preparation',
     old_trials_resumed: false, at: new Date().toISOString() };
   await writeExclusive(oneShotPath, `${JSON.stringify(oneShot, null, 2)}\n`);
@@ -177,17 +178,18 @@ export async function runVersion(version) {
   await writeJson(oneShotPath, { ...oneShot, stage: 'trial-prepared',
     trial_directory: trial.trial_directory, record_path: trial.record_path });
   const launch = { ...trial, version, benchmark_attempt: 1, package_sha256: receipt.sha256,
+    attempt_id: attempt, prior_standalone_attempt: previous,
     profile_sha256: await hashFile(profilePath()), diagnosis_attempt: null,
     diagnosis_status: 'not-required',
      no_progress_timeout_ms: profile.stall_policy.no_progress_ms,
-     execution_policy_sha256: await hashFile(join(root, 'execution-policy.json')), execution_policy: executionPolicy, launched: true,
+      execution_policy_sha256: await hashFile(join(versionRoot(version), 'execution-policy.json')), execution_policy: executionPolicy, launched: true,
     started_at: new Date().toISOString() };
   await writeJson(oneShotPath, { ...oneShot, stage: 'arm-launching', launched: true,
     trial_directory: trial.trial_directory, record_path: trial.record_path,
     started_at: launch.started_at });
   await writeJson(join(root, 'last-attempt.json'), launch);
   console.log(JSON.stringify({ phase: 'benchmark-arm-start', entrypoint: 'scripts/anko-benchmark.mjs',
-    command: `node scripts/anko-benchmark.mjs run --version ${version}`, trial: trial.trial_id,
+    command: `node scripts/anko-benchmark.mjs run --version ${version}${attempt ? ` --attempt ${attempt}` : ''}`, trial: trial.trial_id,
     package_sha256: receipt.sha256, profile_sha256: launch.profile_sha256,
     no_progress_timeout_ms: launch.no_progress_timeout_ms, max_wall_ms: WALL_LIMIT_MS,
     max_priced_usd: COST_LIMIT_USD, grading: 'none', record_path: trial.record_path }));
