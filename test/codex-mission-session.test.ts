@@ -9,6 +9,7 @@ import { CodexMissionSession } from "../dist/codex/mission-session.js";
 import type { CodexAppServerTransport } from "../dist/codex/app-server.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { resolveCodexMissionShell } from "../dist/codex/mission-shell.js";
 
 const exec = promisify(execFile);
 type Json = Record<string, any>;
@@ -18,6 +19,7 @@ class ScriptedTransport implements CodexAppServerTransport {
   private ended = false;
   readonly failures = new Set<string>();
   readThread?: Json;
+  resumeResult?: Json;
   dropCommands = false;
   commandExecutions = 0;
   turnStarts = 0;
@@ -52,7 +54,7 @@ class ScriptedTransport implements CodexAppServerTransport {
     if (message.method === "initialize") this.push({ id: message.id, result: {} });
     else if (message.method === "account/read") this.push({ id: message.id, result: { account: { type: "chatgpt" } } });
     else if (message.method === "thread/read") this.push({ id: message.id, result: { thread: this.readThread } });
-    else if (message.method === "thread/resume") this.push({ id: message.id, result: { thread: { id: this.id } } });
+    else if (message.method === "thread/resume") this.push({ id: message.id, result: { thread: { id: this.id }, ...this.resumeResult } });
     else if (message.method === "thread/start") {
       this.threadRequests.push(message.params);
       assert.equal(message.params.ephemeral, false);
@@ -136,6 +138,47 @@ test("Codex Mission CLI accepts natural-language input without exposing an unver
   assert.match(result.stdout, /codex mission --prompt/);
   await assert.rejects(exec(process.execPath, ["dist/cli/main.js", "codex", "mission", "--manifest", "unused.json"]),
     (error: any) => error.code === 2);
+});
+
+for (const delegated of [false, true]) test(`Codex read discovers directories without a shell (${delegated ? "host" : "native"} executor)`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-read-directory-"));
+  let adapter: CodexMissionSession | undefined;
+  let failure: unknown;
+  let hostCommands = 0;
+  const native = new ScriptedTransport("root", async host => {
+    try {
+      const listed = await host.call("read", { filePath: "source files" });
+      assert.equal(listed.metadata.exit, 0);
+      assert.equal(listed.output, "a note.txt\nsub/\nzulu.go\n名前.go\n");
+      const file = await host.call("read", { filePath: "source files/a note.txt" });
+      assert.equal(file.metadata.exit, 0);
+      assert.equal(file.output, "literal UTF-8 日本語\r\nsecond line\n");
+      assert.notEqual((await host.call("read", { filePath: "source files/missing.go" })).metadata.exit, 0);
+    } catch (error) { failure = error; }
+  });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "source files", "sub"), { recursive: true });
+    await writeFile(join(directory, "source files", "a note.txt"), "literal UTF-8 日本語\r\nsecond line\n");
+    await writeFile(join(directory, "source files", "zulu.go"), "package example\n");
+    await writeFile(join(directory, "source files", "名前.go"), "package example\n");
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      ...(delegated ? { executeCommand: async (request: any) => {
+        assert.equal(request.tool, "read");
+        hostCommands++;
+        const [command, ...args] = request.command;
+        try { return { status: "completed" as const, exitCode: 0, ...await exec(command, args, { cwd: request.cwd }) }; }
+        catch (error: any) { return { status: "completed" as const, exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
+      } } : {}) });
+    assert.equal((await adapter.run("Inspect the source directory using read; do not guess filenames.")).accepted, false);
+    if (failure) throw failure;
+    assert.equal(native.commandExecutions, delegated ? 0 : 3);
+    assert.equal(hostCommands, delegated ? 3 : 0);
+    const declaration = native.threadRequests[0].dynamicTools.find((tool: Json) => tool.name === "read");
+    assert.match(declaration.description, /list a directory/);
+    assert.equal(/Native apply_patch still uses the native sandbox/.test(native.threadRequests[0].developerInstructions), delegated);
+    assert.equal(await readFile(join(directory, "source files", "a note.txt"), "utf8"), "literal UTF-8 日本語\r\nsecond line\n");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 for (const cold of [false, true]) test(`Codex Reviewer repairs and self-rechecks before ${cold ? "cold" : "live"} root acceptance`, { timeout: 15000 }, async () => {
@@ -300,8 +343,86 @@ test("explicit Codex model and effort survive shared Task routing", { timeout: 1
       assert.equal(transport.threadRequests[0].model, "gpt-6.1-sol");
       assert.equal(transport.turnRequests[0].model, "gpt-6.1-sol");
       assert.equal(transport.turnRequests[0].effort, "low");
+      assert.equal(transport.threadRequests[0].serviceTier, undefined);
+      assert.equal(transport.turnRequests[0].serviceTier, undefined);
     }
   } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const unit of [false, true]) test(`packaged Codex ${unit ? "worker" : "coordinator"} route keeps native model and speed separate`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-native-role-"));
+  const transports: ScriptedTransport[] = [];
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
+      const root = transports.length === 0;
+      const native = new ScriptedTransport(root ? "root" : "child", async host => {
+        if (!root) return "Task returned";
+        try {
+          const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate result"],
+            ...(unit ? { unit: { title: "Validate", objective: "Validate result", read: ["result.txt"], write: ["result.txt"], validation: ["node check.mjs"] } } : {}) });
+          await host.call("task", started.task);
+        } catch (error) { failure = error; }
+      });
+      transports.push(native); return native;
+    } });
+    const result = await adapter.run("Validate result");
+    if (failure) throw failure;
+    assert.equal(transports.length, 2);
+    const child = transports[1];
+    assert.equal(transports[0].threadRequests[0].model, "gpt-6.1-sol");
+    assert.equal(transports[0].turnRequests[0].effort, "xhigh");
+    assert.equal(transports[0].turnRequests[0].serviceTier, undefined);
+    assert.equal(child.threadRequests[0].model, unit ? "gpt-6-luna" : "gpt-6.1-sol");
+    assert.equal(child.turnRequests[0].model, unit ? "gpt-6-luna" : "gpt-6.1-sol");
+    assert.equal(child.turnRequests[0].effort, unit ? "max" : "xhigh");
+    assert.equal(child.threadRequests[0].serviceTier, unit ? "priority" : undefined);
+    assert.equal(child.turnRequests[0].serviceTier, unit ? "priority" : undefined);
+    assert.equal((result.sessions[1].model as Json).serviceTier, unit ? "priority" : undefined);
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const override of [false, true]) test(`cold native resume ${override ? "keeps speed independent of a model override" : "preserves Luna Fast"}`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-native-speed-resume-"));
+  let adapter: CodexMissionSession | undefined, recovered: CodexMissionSession | undefined;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    const initial = new ScriptedTransport("root", async native => { await native.call("sortie_v010_start_mission", { requirements: ["Validate result"] }); });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6-luna-fast#max", transportFactory: () => initial });
+    await adapter.run("Validate result"); await adapter.close();
+    const cold = new ScriptedTransport("root", async () => "Continue same Mission");
+    // thread/read need not carry the model/tier; thread/resume is authoritative.
+    cold.readThread = { id: "root", cwd: directory, modelProvider: "openai", turns: initial.turns };
+    cold.resumeResult = { model: "gpt-6-luna", serviceTier: "priority", reasoningEffort: "max" };
+    recovered = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => cold,
+      ...(override ? { model: "gpt-6.1-sol", effort: "low" } : {}) });
+    await recovered.run("Continue");
+    assert.equal(cold.threadRequests.length, 0, "resume does not create replacement work");
+    assert.equal(cold.turnRequests[0].model, override ? "gpt-6.1-sol" : "gpt-6-luna");
+    assert.equal(cold.turnRequests[0].effort, override ? "low" : "max");
+    assert.equal(cold.turnRequests[0].serviceTier, "priority");
+  } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("cold native resume defaults do not resurrect stale thread/read speed or effort", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-native-default-resume-"));
+  let adapter: CodexMissionSession | undefined, recovered: CodexMissionSession | undefined;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    const initial = new ScriptedTransport("root", async native => { await native.call("sortie_v010_start_mission", { requirements: ["Validate result"] }); });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6-luna-fast#max", transportFactory: () => initial });
+    await adapter.run("Validate result"); await adapter.close();
+    const cold = new ScriptedTransport("root", async () => "Continue same Mission");
+    cold.readThread = { id: "root", cwd: directory, modelProvider: "openai", model: "gpt-6-luna",
+      serviceTier: "priority", reasoningEffort: "low", turns: initial.turns };
+    cold.resumeResult = { model: "gpt-6-luna", serviceTier: null, reasoningEffort: null };
+    recovered = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => cold });
+    await recovered.run("Continue");
+    assert.equal(cold.threadRequests.length, 0, "continue the exact root, without replacement work");
+    assert.equal(cold.turnRequests[0].serviceTier, undefined, "resume's native Standard overrides stale Fast history");
+    assert.equal(cold.turnRequests[0].effort, "xhigh", "use the packaged role default, not stale effort history");
+  } finally { await adapter?.close(); await recovered?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
 for (const item of [
@@ -366,7 +487,7 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
       onEvent: event => { events.push(event); }, executeCommand: async request => {
         dispatched++;
         try {
-        assert.deepEqual(request.command, ["/bin/bash", "-c", "node check.mjs"]);
+        assert.deepEqual(request.command, (await resolveCodexMissionShell()).command("node check.mjs"));
         assert.equal(request.cwd, directory);
         assert.equal(request.threadId, "root");
         assert.equal(request.tool, "bash");

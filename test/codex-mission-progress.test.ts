@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { codexMissionProgress } from "../dist/cli/codex-mission.js";
 
+test("native model route progress exposes role, model, effort and separate Fast tier", () => {
+  assert.deepEqual(codexMissionProgress({ method: "sortie/modelRoute", threadId: "worker", params: {
+    agent: "dog-luna-worker-v010", model: "gpt-6-luna", effort: "max", serviceTier: "priority",
+  } }), { thread_id: "worker", phase: "model-route", agent: "dog-luna-worker-v010", model: "gpt-6-luna", effort: "max", service_tier: "priority" });
+});
+
 test("Codex Mission progress exposes correction reasons and validation exit without full packets", () => {
   const progress = codexMissionProgress({ method: "item/completed", threadId: "root", params: { turnId: "turn", item: {
     type: "dynamicToolCall", tool: "sortie_v010_plan_units", status: "completed", success: true,

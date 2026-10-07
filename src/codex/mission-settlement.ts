@@ -56,10 +56,11 @@ const commandText = (item: JsonObject): string | undefined => {
 
 const powershellEnvelopePayload = (raw: string, trustedExecutable?: string): string | undefined => {
   if (!trustedExecutable) return undefined;
-  // Windows Codex 0.160 reports a quoted absolute pwsh.exe plus one single-quoted
+  // Windows Codex 0.160/0.162 reports a quoted absolute pwsh.exe plus one single-quoted
   // -Command payload. It may protocol-escape the boundary quotes/backslashes.
-  // Reject every other shell shape, nested quote, option, and trailing token.
-  const match = /^(?:"|\\")([A-Za-z]:[\\/](?:[^"'\r\n]|\\\\)+[\\/]pwsh\.exe)(?:"|\\") -Command '([^'`\r\n]*)'$/iu.exec(raw);
+  // Only the observed optional -NoProfile flag is admitted. Other options,
+  // nested quotes and trailing tokens remain rejected.
+  const match = /^(?:"|\\")([A-Za-z]:[\\/](?:[^"'\r\n]|\\\\)+[\\/]pwsh\.exe)(?:"|\\") (?:-NoProfile )?-Command '([^'`\r\n]*)'$/iu.exec(raw);
   if (!match) return undefined;
   const identity = (value: string) => value.replaceAll("\\\\", "\\").replaceAll("/", "\\").toLowerCase();
   return identity(match[1]!) === identity(trustedExecutable) ? match[2] : undefined;

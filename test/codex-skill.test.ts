@@ -92,7 +92,8 @@ test("Codex skill CLI installs explicitly and validates arguments", async () => 
   try {
     const run = async (args: readonly string[]) => execFileAsync(
       process.execPath,
-      ["--experimental-strip-types", ENTRY, ...args],
+      // Node 22.6-22.17 warns for type stripping; test CLI output, not the host's feature banner.
+      ["--disable-warning=ExperimentalWarning", "--experimental-strip-types", ENTRY, ...args],
       { cwd: process.cwd() },
     );
 

@@ -22,6 +22,34 @@ class FakeTransport implements CodexAppServerTransport {
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test("Codex native Fast tier is separate from the model and is retained on resume", async () => {
+  const transport = new FakeTransport();
+  const host = new CodexAppServerHost(transport);
+  try {
+    const initialize = host.initialize(); transport.push({ id: 1, result: {} }); await initialize;
+    const thread = host.startThread({ cwd: "/fixture", model: "gpt-6-luna", serviceTier: "priority" });
+    await tick();
+    assert.equal((transport.sent.at(-1)?.params as any).model, "gpt-6-luna");
+    assert.equal((transport.sent.at(-1)?.params as any).serviceTier, "priority");
+    assert.equal((transport.sent.at(-1)?.params as any).allowProviderModelFallback, false);
+    transport.push({ id: 2, result: { thread: { id: "luna" }, model: "gpt-6-luna", serviceTier: "priority" } }); await thread;
+    assert.equal(host.threadServiceTier("luna"), "priority");
+    const resume = host.resumeThread("luna"); await tick();
+    transport.push({ id: 3, result: { thread: { id: "luna" }, model: "gpt-6-luna", serviceTier: "priority", reasoningEffort: "max" } }); await resume;
+    assert.equal(host.threadModel("luna"), "gpt-6-luna");
+    assert.equal(host.threadEffort("luna"), "max");
+    const turn = host.runTurn("luna", "Check", { cwd: "/fixture", model: "gpt-6-luna", effort: "max", serviceTier: "priority" });
+    await tick();
+    assert.equal((transport.sent.at(-1)?.params as any).serviceTier, "priority");
+    transport.push({ id: 4, result: { turn: { id: "turn" } } }); await tick();
+    transport.push({ method: "turn/completed", params: { threadId: "luna", turn: { id: "turn", status: "completed" } } }); await turn;
+    const standard = host.resumeThread("luna"); await tick();
+    transport.push({ id: 5, result: { thread: { id: "luna" }, model: "gpt-6-luna", serviceTier: null, reasoningEffort: null } }); await standard;
+    assert.equal(host.threadServiceTier("luna"), null, "observed native Standard differs from a missing observation");
+    assert.equal(host.threadEffort("luna"), null);
+  } finally { await host.close(); }
+});
+
 test("Codex app-server host initializes, runs one turn, and preserves authoritative completed items", async () => {
   const transport = new FakeTransport();
   const host = new CodexAppServerHost(transport, { clientVersion: "test" });
