@@ -336,6 +336,7 @@ export class CodexMissionSession {
           "\nHost transport: use the supplied bash/read/write/task functions and sortie tools. They invoke the existing Mission hooks. " +
           "Use task to run or resume the returned native Task with its exact prompt and subagent_type. Tool failures are feedback for the same Mission. " +
           "Native shell and file operations outside these functions do not provide Mission validation evidence. " +
+          (this.options.executeCommand ? "Native apply_patch still uses the native sandbox, not the configured host executor; use the supplied write function for Mission edits. " : "") +
           `The bash function runs ${this.shell.description}; supply commands in that shell's syntax. ` +
           "Declare formal validation as exact executable shell commands from the project root, without prose annotations such as (workdir: ...). " +
           "Use a root-relative command or an explicit shell cd for a subdirectory formal check. bash workdir changes that invocation only; " +
@@ -438,10 +439,10 @@ export class CodexMissionSession {
     const define = (name: string, description: string, properties: JsonObject, required = Object.keys(properties)): CodexDynamicTool =>
       ({ type: "function", name, description, inputSchema: { type: "object", properties, required, additionalProperties: false } });
     const string = { type: "string" };
-    tools.push(define("bash", `Run a foreground ${this.shell.description} command through the configured executor and native permissions. Preserve formal validation commands exactly.`,
+    tools.push(define("bash", `Run a foreground ${this.shell.description} command through the configured executor. Preserve formal validation commands exactly.`,
       { command: string, workdir: string, timeout: { type: "integer", minimum: 1, maximum: 1200000 } }, ["command"]));
-    tools.push(define("read", "Read a UTF-8 file through the native Codex sandbox.", { filePath: string }));
-    tools.push(define("write", "Write a UTF-8 file through the native Codex sandbox.", { filePath: string, content: string }));
+    tools.push(define("read", "Read a UTF-8 file or list a directory's direct entries through the configured executor. Read directories to discover filenames instead of guessing them.", { filePath: string }));
+    tools.push(define("write", "Write a UTF-8 file through the configured executor and existing Mission hooks.", { filePath: string, content: string }));
     tools.push(define("task", "Run a returned Mission Task, or resume its existing task_id. Preserve the host's prompt and subagent_type.",
       { description: string, prompt: string, subagent_type: string, task_id: string, model: string, variant: string }, ["description", "prompt", "subagent_type"]));
     return tools;
@@ -537,7 +538,7 @@ export class CodexMissionSession {
       metadata = { sessionId: child.id, status: result.status };
     } else {
       const command = call.tool === "bash" ? this.shell.command(String(args.command))
-        : call.tool === "read" ? [process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", resolve(this.directory, String(args.filePath))]
+        : call.tool === "read" ? [process.execPath, "-e", "const fs=require('node:fs'),p=process.argv[1];process.stdout.write(fs.statSync(p).isDirectory()?fs.readdirSync(p,{withFileTypes:true}).map(e=>e.name+(e.isDirectory()?'/':'')).sort().join('\\n')+'\\n':fs.readFileSync(p,'utf8'))", resolve(this.directory, String(args.filePath))]
         : [process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],process.argv[2])", resolve(this.directory, String(args.filePath)), String(args.content)];
       const executor = this.options.executeCommand ? "host" : "native";
       await this.options.onEvent?.({ method: "sortie/commandExecution", threadId: session.id,

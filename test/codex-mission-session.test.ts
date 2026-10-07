@@ -140,6 +140,47 @@ test("Codex Mission CLI accepts natural-language input without exposing an unver
     (error: any) => error.code === 2);
 });
 
+for (const delegated of [false, true]) test(`Codex read discovers directories without a shell (${delegated ? "host" : "native"} executor)`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-read-directory-"));
+  let adapter: CodexMissionSession | undefined;
+  let failure: unknown;
+  let hostCommands = 0;
+  const native = new ScriptedTransport("root", async host => {
+    try {
+      const listed = await host.call("read", { filePath: "source files" });
+      assert.equal(listed.metadata.exit, 0);
+      assert.equal(listed.output, "a note.txt\nsub/\nzulu.go\n名前.go\n");
+      const file = await host.call("read", { filePath: "source files/a note.txt" });
+      assert.equal(file.metadata.exit, 0);
+      assert.equal(file.output, "literal UTF-8 日本語\r\nsecond line\n");
+      assert.notEqual((await host.call("read", { filePath: "source files/missing.go" })).metadata.exit, 0);
+    } catch (error) { failure = error; }
+  });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "source files", "sub"), { recursive: true });
+    await writeFile(join(directory, "source files", "a note.txt"), "literal UTF-8 日本語\r\nsecond line\n");
+    await writeFile(join(directory, "source files", "zulu.go"), "package example\n");
+    await writeFile(join(directory, "source files", "名前.go"), "package example\n");
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => native,
+      ...(delegated ? { executeCommand: async (request: any) => {
+        assert.equal(request.tool, "read");
+        hostCommands++;
+        const [command, ...args] = request.command;
+        try { return { status: "completed" as const, exitCode: 0, ...await exec(command, args, { cwd: request.cwd }) }; }
+        catch (error: any) { return { status: "completed" as const, exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
+      } } : {}) });
+    assert.equal((await adapter.run("Inspect the source directory using read; do not guess filenames.")).accepted, false);
+    if (failure) throw failure;
+    assert.equal(native.commandExecutions, delegated ? 0 : 3);
+    assert.equal(hostCommands, delegated ? 3 : 0);
+    const declaration = native.threadRequests[0].dynamicTools.find((tool: Json) => tool.name === "read");
+    assert.match(declaration.description, /list a directory/);
+    assert.equal(/Native apply_patch still uses the native sandbox/.test(native.threadRequests[0].developerInstructions), delegated);
+    assert.equal(await readFile(join(directory, "source files", "a note.txt"), "utf8"), "literal UTF-8 日本語\r\nsecond line\n");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const cold of [false, true]) test(`Codex Reviewer repairs and self-rechecks before ${cold ? "cold" : "live"} root acceptance`, { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-review-repair-"));
   let adapter: CodexMissionSession | undefined;
