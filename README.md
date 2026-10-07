@@ -35,10 +35,10 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-**Current release: [v0.13.9](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.9)**
-([release notes](docs/release-v0.13.9.md)). The default Mission runtime retains the `v010`
+**Current release: [v0.13.10](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.10)**
+([release notes](docs/release-v0.13.10.md)). The default Mission runtime retains the `v010`
 profile, command and configuration names for compatibility; these names do not mean v0.10 is installed.
-The current asset marker is `0.13.9-codex-operation-v1`.
+The current asset marker is `0.13.10-codex-windows-v1`.
 
 ## SWE-bench Lite: 170/300 (56.67%)
 
@@ -48,7 +48,7 @@ The fixed **Sortie-dogs v0.12.24** harness resolved **170 of 300 SWE-bench Lite 
 
 The single official 300-instance report and frozen predictions are hash-bound in the report. Confirmed inference expense was **$162.99**; a separate **$34.60** of usage has unknown pricing and is held against the campaign cap, **not** counted as known expense. Leaderboard registration and maintainer acceptance are separate from this official local evaluation.
 
-Historical scores below belong to their fixed candidates, not v0.13.9. SWE-bench is a separate,
+Historical scores below belong to their fixed candidates, not v0.13.10. SWE-bench is a separate,
 optional measurement rather than a mandatory release gate.
 
 > **Beta:** v0.13.x is still stabilizing. Runtime behavior,
@@ -63,11 +63,11 @@ Use Node.js 22.6 or newer and an existing Codex CLI with ChatGPT authentication.
 used Node.js 22.22.1 and Codex 0.160.1. Sortie neither installs Codex nor starts a login flow, copies
 credentials, or creates a second host configuration. Mission execution refuses non-ChatGPT auth.
 
-The Codex Mission adapter and explicit skill are included in v0.13.9. Install the release in the
+The Codex Mission adapter and explicit skill are included in v0.13.10. Install the release in the
 target project and inspect the entrypoint before running a prompt:
 
 ```sh
-npm install --save-dev sortie-dogs@0.13.9
+npm install --save-dev sortie-dogs@0.13.10
 npx --no-install sortie-dogs codex init .
 npx --no-install sortie-dogs codex mission --help
 ```
@@ -303,7 +303,19 @@ existing local bridge loads enforcement and model routing. OpenCode can reload w
 but replacing an installed dependency may require a full restart. A new chat session alone does not
 prove the newly installed plugin is loaded.
 
-## v0.13.9 runtime updates
+## v0.13.10 runtime updates
+
+PR #169 connects natural-language Windows Codex Missions to the same multi-role lifecycle using
+existing PowerShell 7, preserves command failure exits and native resume settings, and maps the
+Luna-fast Worker alias to native Luna/max with the separate priority tier. Directory reads list
+direct entries instead of requiring filename guesses. OpenCode model settings and native permission
+profiles remain unchanged. PR #168 provides one host-aware Anko runner, reuses unchanged setup,
+removes mandatory paid diagnostic probes, and preserves prior attempts, unknown usage and service
+evidence. Its recorded v0.13.9 Anko completion and PR #169's Windows Codex host-executor completion
+are historical fixed-candidate observations, not new v0.13.10 benchmark or native sandbox results.
+See [release notes](docs/release-v0.13.10.md).
+
+## v0.13.9 runtime updates (retained)
 
 PRs #163–#166 connect native Codex sessions to the existing Mission lifecycle, add the explicit
 `$sortie-dogs` skill and `codex init`, restore operation Reviewer correction within existing write
@@ -668,7 +680,7 @@ register stable and `v010` from the same package installation path in one host.
 Project-local installation is recommended. To expose the current Mission assets globally:
 
 ```sh
-npm install --global sortie-dogs@0.13.9
+npm install --global sortie-dogs@0.13.10
 sortie-dogs init --global --profile v010
 ```
 
@@ -680,7 +692,7 @@ can resolve a **separate dependency** under that config root. Updating npm-globa
 it. For that layout, also install the same release at the actual config root, then rerun global init:
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.9
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.10
 sortie-dogs init --global --profile v010
 ```
 
@@ -703,7 +715,7 @@ version, preserves user configuration, and stops safely on unknown ownership or
 conflicting files.
 
 Align any exact version pin or separate bridge dependency with the intended release too. An installed
-marker of `0.13.9-codex-operation-v1` identifies the assets; it does not prove an already-running
+marker of `0.13.10-codex-windows-v1` identifies the assets; it does not prove an already-running
 OpenCode process has reloaded the plugin.
 
 There is no supported uninstall command. Remove the npm dependency separately,
