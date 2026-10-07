@@ -35,10 +35,10 @@ implementation, validation, review, and model routing.
 Guides: [日本語](docs/guide-ja.md) · [简体中文](docs/guide-zh-CN.md) ·
 [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md)
 
-**Current release: [v0.13.8](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.8)**
-([release notes](docs/release-v0.13.8.md)). The default Mission runtime retains the `v010`
+**Current release: [v0.13.9](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.9)**
+([release notes](docs/release-v0.13.9.md)). The default Mission runtime retains the `v010`
 profile, command and configuration names for compatibility; these names do not mean v0.10 is installed.
-The current asset marker is `0.13.8-native-binding-v1`.
+The current asset marker is `0.13.9-codex-operation-v1`.
 
 ## SWE-bench Lite: 170/300 (56.67%)
 
@@ -48,7 +48,7 @@ The fixed **Sortie-dogs v0.12.24** harness resolved **170 of 300 SWE-bench Lite 
 
 The single official 300-instance report and frozen predictions are hash-bound in the report. Confirmed inference expense was **$162.99**; a separate **$34.60** of usage has unknown pricing and is held against the campaign cap, **not** counted as known expense. Leaderboard registration and maintainer acceptance are separate from this official local evaluation.
 
-Historical scores below belong to their fixed candidates, not v0.13.8. SWE-bench is a separate,
+Historical scores below belong to their fixed candidates, not v0.13.9. SWE-bench is a separate,
 optional measurement rather than a mandatory release gate.
 
 > **Beta:** v0.13.x is still stabilizing. Runtime behavior,
@@ -56,25 +56,25 @@ optional measurement rather than a mandatory release gate.
 
 ## Quick start
 
-### Codex host adapter (experimental, unreleased Mission additions)
+### Codex host adapter (experimental)
 
 Choose this route for Codex; OpenCode is not required and **do not run `sortie-dogs init` for it**.
 Use Node.js 22.6 or newer and an existing Codex CLI with ChatGPT authentication. Ubuntu validation
 used Node.js 22.22.1 and Codex 0.160.1. Sortie neither installs Codex nor starts a login flow, copies
 credentials, or creates a second host configuration. Mission execution refuses non-ChatGPT auth.
 
-The Mission additions below are development-branch changes, not a claim about npm's published
-`0.13.8` / `latest`. Given a reviewed local candidate tarball, install it in the target project and
-inspect the entrypoint before running a prompt:
+The Codex Mission adapter and explicit skill are included in v0.13.9. Install the release in the
+target project and inspect the entrypoint before running a prompt:
 
 ```sh
-npm install --save-dev /path/to/reviewed-sortie-dogs.tgz
+npm install --save-dev sortie-dogs@0.13.9
 npx --no-install sortie-dogs codex init .
 npx --no-install sortie-dogs codex mission --help
 ```
 
-A maintainer with checkout dependencies already present can produce that tarball with `npm pack`
-(build included). This does not publish it. Use the packed version for the CLI and SDK below.
+For an unpublished development candidate, a maintainer with checkout dependencies already present
+can produce a local tarball with `npm pack` (build included) and install that tarball instead.
+This does not publish it. Use the same installed version for the CLI and SDK below.
 `codex init` installs only `.agents/skills/sortie-dogs`; it does not create or edit `.opencode`.
 It refuses to overwrite a skill whose ownership cannot be established.
 
@@ -288,6 +288,16 @@ internal children and must not be selected as task entry points.
 existing local bridge loads enforcement and model routing. OpenCode can reload watched configuration,
 but replacing an installed dependency may require a full restart. A new chat session alone does not
 prove the newly installed plugin is loaded.
+
+## v0.13.9 runtime updates
+
+PRs #163–#166 connect native Codex sessions to the existing Mission lifecycle, add the explicit
+`$sortie-dogs` skill and `codex init`, restore operation Reviewer correction within existing write
+scope, and reconcile native terminal observations without reviving completed work from delayed events.
+Codex settings and authentication remain separate from OpenCode. Real Ubuntu Codex acceptance
+evidence and host-specific limits remain in [the acceptance record](docs/codex-mission-acceptance-20261006.md);
+they are not a new all-host or performance benchmark. Release CLI proof observes actual OpenCode
+Worker startup and model identity only, not Mission completion. See [release notes](docs/release-v0.13.9.md).
 
 ## v0.13.8 runtime updates
 
@@ -644,7 +654,7 @@ register stable and `v010` from the same package installation path in one host.
 Project-local installation is recommended. To expose the current Mission assets globally:
 
 ```sh
-npm install --global sortie-dogs@0.13.8
+npm install --global sortie-dogs@0.13.9
 sortie-dogs init --global --profile v010
 ```
 
@@ -656,7 +666,7 @@ can resolve a **separate dependency** under that config root. Updating npm-globa
 it. For that layout, also install the same release at the actual config root, then rerun global init:
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.8
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.9
 sortie-dogs init --global --profile v010
 ```
 
@@ -679,7 +689,7 @@ version, preserves user configuration, and stops safely on unknown ownership or
 conflicting files.
 
 Align any exact version pin or separate bridge dependency with the intended release too. An installed
-marker of `0.13.8-native-binding-v1` identifies the assets; it does not prove an already-running
+marker of `0.13.9-codex-operation-v1` identifies the assets; it does not prove an already-running
 OpenCode process has reloaded the plugin.
 
 There is no supported uninstall command. Remove the npm dependency separately,
