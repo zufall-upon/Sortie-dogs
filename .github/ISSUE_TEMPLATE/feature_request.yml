@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose a focused improvement with a concrete use case.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English and Japanese proposals are welcome. Check existing issues and [the documentation](https://github.com/zufall-upon/Sortie-dogs#documentation) first.
+        This is a public form. Do not include credentials, private prompts or repository content. Suspected vulnerabilities belong in [private reporting](https://github.com/zufall-upon/Sortie-dogs/security/advisories/new).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / 課題・用途
+      description: What task is difficult today? Include the relevant host/workflow, without private details.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 提案する動作
+      description: Describe the focused change and what a successful result would look like.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs / 代替案・トレードオフ
+      description: Optional current workaround, host limitations, compatibility, accessibility or cost considerations.

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security report
+    url: https://github.com/zufall-upon/Sortie-dogs/security/advisories/new
+    about: Report suspected vulnerabilities privately; do not post exploitable details in public issues.
+  - name: Documentation and contribution guide
+    url: https://github.com/zufall-upon/Sortie-dogs/blob/main/CONTRIBUTING.md
+    about: Find host setup, testing instructions and the contribution workflow.

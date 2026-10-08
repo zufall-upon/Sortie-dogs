@@ -1,0 +1,46 @@
+name: Bug report
+description: Report reproducible Sortie-dogs behavior (English or Japanese welcome).
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For suspected vulnerabilities, use [private reporting](https://github.com/zufall-upon/Sortie-dogs/security/advisories/new), not this public form.
+        Remove API keys, tokens, private prompts, repository content and identifying paths from evidence.
+        Check [the documentation](https://github.com/zufall-upon/Sortie-dogs#documentation) and existing issues first. Unknown versions are OK; do not repeat paid inference just to fill this form.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior / 期待結果・実際の結果
+      description: What were you trying to do, what should happen, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction / 再現手順
+      description: Minimal steps or commands, frequency, and whether the problem survives a host restart. Do not rerun work solely to answer this.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 実行環境
+      description: Host (OpenCode V2 or Codex) and version, Sortie-dogs version/runtime marker, OS, Node.js version, installation route and relevant configuration. Write unknown where necessary.
+      placeholder: |
+        Host + version:
+        Sortie-dogs version / runtime marker:
+        OS / WSL distro if used:
+        Node.js version:
+        Installation route (local/global/SDK):
+        Relevant redacted configuration:
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / 証跡
+      description: Optional redacted command exits, timing, error text and relevant logs. Distinguish observed results from assumptions; do not upload a whole private session database.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround or related issue / 回避策・関連Issue
+      description: Optional workaround, regression version or links to related public reports.

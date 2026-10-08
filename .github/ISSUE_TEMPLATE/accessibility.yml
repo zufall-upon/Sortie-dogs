@@ -1,0 +1,32 @@
+name: Accessibility barrier
+description: Report difficulty reading, navigating or using Sortie-dogs output or documentation.
+title: "[Accessibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English and Japanese reports are welcome. See [our accessibility policy](https://github.com/zufall-upon/Sortie-dogs/blob/main/ACCESSIBILITY.md) for current limits.
+        This report is public. Personal/medical information is not required. Redact private data; screenshots or video are optional.
+        If this form is inaccessible, use a [blank issue](https://github.com/zufall-upon/Sortie-dogs/issues/new) in any readable format.
+  - type: textarea
+    id: barrier
+    attributes:
+      label: Task and barrier / 操作・障壁
+      description: What were you trying to do, and what prevented or made it difficult to complete?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior or workaround / 期待動作・回避策
+      description: Describe an accessible result and any workaround you have found.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment / 関連する環境
+      description: Optional Sortie-dogs/host/OS versions, browser or terminal, assistive technology and relevant settings. Unknown is fine; no personal information is needed.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction or evidence / 再現・証跡
+      description: Optional steps, affected documentation link or redacted text output. Images are not required.

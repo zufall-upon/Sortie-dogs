@@ -230,4 +230,10 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
 - **Releases:** [v0.13.11](docs/release-v0.13.11.md) · [v0.13.10](docs/release-v0.13.10.md) ·
   [v0.13.9](docs/release-v0.13.9.md) · [All GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases).
 
+## Community
+
+[Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) ·
+[Security policy / private reports](SECURITY.md) · [Accessibility](ACCESSIBILITY.md) ·
+[Report a bug or propose a feature](https://github.com/zufall-upon/Sortie-dogs/issues/new/choose).
+
 Licensed under [MIT](LICENSE).
