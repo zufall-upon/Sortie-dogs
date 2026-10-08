@@ -1,7 +1,7 @@
 # テスト性能最適化計画
 
 > 以下はP0/P1策定時の性能改善計画です。300秒は本計画の性能目標・当時の計測条件であり、
-> 現行runner/controllerのtimeout設定ではありません。現在の実行手順と1790秒／1800秒の
+> 現行runner/controllerのtimeout設定ではありません。現在の実行手順と1790秒／2400秒の
 > 計時境界は[テスト実行ガイド](testing.md)を参照してください。5分以内の達成を意味しません。
 >
 > 現行の`_testenv/full-test-timings.json`はtest実行順だけのヒントです。test結果、候補artifact、
