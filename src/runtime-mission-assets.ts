@@ -41,7 +41,8 @@ Rerun affected checks and required broad checks when contract/freshness requires
 
 /** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
 export const REVIEWER_VALIDATION_WORKFLOW = `Run inherited formal commands in order as exact separate foreground native shell calls.
-Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.`;
+Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.
+If a formal recipe is misregistered (for example a valid diagnostic intentionally exits nonzero), the active correction author can call sortie_v010_repair_review with reason, validation and optional validation_cwd to correct the recipe HERE. Preserve all original requirements and behavioral assertions; never suppress a real failure or register unconditional success. Run the newly registered checks before finishing; old outcomes are not proof for a changed recipe. Do not cancel, replace the Task or ask the controller to redispatch merely to fix check registration.`;
 
 const OPERATION_GUIDE = `## Practical operation guide
 
