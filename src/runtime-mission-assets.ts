@@ -239,12 +239,16 @@ existing user authorization and project gates; npm publication remains manual.
 `;
 }
 
+/** Keep representation oracles consistent in direct execution, Worker and Review. */
+export const MISSION_REPRESENTATION_ORACLE = `Same-type representation, not name/visitor analogy; resolve conflicts.`;
+
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
 export const MISSION_BEHAVIOR_REVIEW = `Establish the test oracle independently of the patch: tests added with the implementation are claims to
 review, not established API behavior. For a changed failure path, compare a pre-existing analogous public
 test and its shared assertion helper, including default expected outputs, with the new case. A new test
 that asserts the implementation's current result can encode the defect rather than catch it. Preserve
 the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
+${MISSION_REPRESENTATION_ORACLE}
 Trace a concrete rejected input through the changed code back to the public caller, checking result,
 error and observable state together, including earlier results that can survive failure. Missing assertions
 alone are not defects; a concrete contradiction with the established contract is a finding even if tests pass.
@@ -446,6 +450,7 @@ existing analogous source/tests for the expected contract when available. Avoid 
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
 test when the existing checks already exercise that boundary.
+${MISSION_REPRESENTATION_ORACLE}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
@@ -558,7 +563,7 @@ Implement, test and requested commit in this Task.
 Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
 Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
 coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Denied: reason/remedy. No routine manifest/goal/status/bind.
 Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
 After compaction recover handoff; inspect diff/results before repeats.
@@ -568,15 +573,16 @@ no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle,
 Requested add/commit needs source paths, not .git/** scope.
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
+${MISSION_REPRESENTATION_ORACLE}
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: behavior/ordered checks/commit; never fabricate completion.
+Never fabricate completion.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.
-No unchanged denial retry. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+No repeated denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
 Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;
