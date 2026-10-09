@@ -10,6 +10,10 @@ import { nativeRunPending, waitForNativeSettlement } from './native-run-settleme
 
 const database = () => new DatabaseSync(join(homedir(), '.local/share/opencode/opencode.db'), { readOnly: true });
 export const observationDirectories = project => [project, project.replaceAll('\\', '/')];
+export const probeTaskIdentity = (request, instance, actualBaseCommit) => ({
+  task_sha256: createHash('sha256').update(request).digest('hex'),
+  instance: instance ? { instance_id: instance.instance_id, repo: instance.repo, base_commit: actualBaseCommit } : null,
+});
 export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator') {
   const db = database();
   try {
@@ -113,6 +117,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   await command('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], project, env);
   }
   if (setupFixture) await setupFixture(fixture);
+  const actualBaseCommit = (await command('git', ['rev-parse', 'HEAD'], project, env)).trim();
   await updateBudget(budgetFile, budget => {
     const probes = budget.probes ??= [];
     const charged = probes.reduce((sum, item) => sum + item.charged_usd, 0);
@@ -182,6 +187,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     ...(cutoff ? { errors: cutoff.errors,
     cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
     project, mode, stopped, stop_observation: stopObservation ?? null, code, elapsed_ms: Date.now() - since,
+    ...probeTaskIdentity(request, instance, actualBaseCommit),
     package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
     mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
     review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
