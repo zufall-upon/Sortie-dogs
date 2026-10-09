@@ -3499,11 +3499,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             await control!.finishOperatorContractRepairValidation(ownership.root, child);
           }
           const mission = await missions.read(ownership.root);
-          output.output = JSON.stringify(mission ? { ...missionPacket(mission, await operators.required(ownership.root)), worker_report: returnedOutput,
+          const settledRun = await operators.required(ownership.root);
+          const packet = mission ? missionDispatchPacket(mission, settledRun) : undefined;
+          // Native tool truncation can discard an entire single-line Mission packet,
+          // including the short Worker answer. Reuse the existing progress/evidence
+          // projection; full scopes and snapshot recipes remain in durable state.
+          output.output = JSON.stringify(mission && packet ? {
+            ...missionProgress(mission, settledRun, await control!.currentBudget(ownership.root), packet),
+            status: packet.status,
+            validation: missionReviewValidation(settledRun, operators.statePath(ownership.root)),
+            worker_report: returnedOutput,
             ...(state.units.some(unit => unit.callID === request.callID && unit.reviewerCorrection && unit.status === "succeeded")
               ? { correction_status: mission.review?.mode === "self-recheck" && mission.review.callID === request.callID
                 ? mission.review.verdict : "ready-pending-self-recheck" } : {}) }
-            : await operatorPacket(await operators.required(ownership.root)));
+            : await operatorPacket(settledRun), null, 2);
           taskOwners.delete(request.callID!);
         }
       },
