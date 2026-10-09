@@ -31,6 +31,11 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
       if ((!message.time?.completed && !message.error) ||
           (message.content ?? []).some(p => p.type === 'tool' && ['pending', 'running'].includes(p.state?.status))) return true;
       if (!session.time_idle && !session.idle_outcome) return true;
+      // Background completion can resume a root while its previous idle epoch
+      // remains persisted. A completed tool call (even Mission acceptance) is
+      // not the new turn's idle event; its final response/usage can still follow.
+      const lastMessageAt = message.time?.completed ?? message.time?.created;
+      if (lastMessageAt && (!session.time_idle || session.time_idle < lastMessageAt)) return true;
     }
     const missionPath = join(project, '.sortie-dogs-v010', 'missions', `${createHash('sha256').update(root).digest('hex')}.json`);
     if (existsSync(missionPath)) {

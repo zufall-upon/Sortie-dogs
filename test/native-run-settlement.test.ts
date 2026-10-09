@@ -55,3 +55,34 @@ test('shared settlement wait preserves caller-owned stop conditions and propagat
   assert.equal(calls, 1);
   await assert.rejects(waitForNativeSettlement({ pending: () => { throw Error('native read failed'); }, stopped: () => false }), /native read failed/);
 });
+
+test('a previous idle epoch cannot settle a resumed root between acceptance and its final response', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'native-resumed-settlement-'));
+  const path = join(project, 'native.db'), db = new DatabaseSync(path);
+  try {
+    db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+      CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+      CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+    // Retained pvlib-1072 ordering: background-review wait idled the root;
+    // review completion resumed it without clearing that prior idle timestamp.
+    db.prepare('INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?)')
+      .run('root', null, project, 100, 1791550254365, 'succeeded');
+    const update = db.prepare("UPDATE session_message SET data = ? WHERE session_id = 'root'");
+    db.prepare("INSERT INTO session_message VALUES ('root', 'assistant', 74, ?)").run(JSON.stringify({
+      time: { created: 1791550309428, completed: 1791550317769 }, finish: 'tool-calls',
+      content: [{ type: 'tool', name: 'sortie_v010_complete_mission', state: { status: 'completed' } }],
+    }));
+    const missions = join(project, '.sortie-dogs-v010', 'missions');
+    await mkdir(missions, { recursive: true });
+    await writeFile(join(missions, `${createHash('sha256').update('root').digest('hex')}.json`),
+      JSON.stringify({ phase: 'completed' }));
+    assert.equal(nativeRunPending(project, path, { since: 100 }), true,
+      'Mission acceptance plus an old successful idle epoch is not native settlement');
+    update.run(JSON.stringify({ time: { created: 1791550317833 }, content: [] }));
+    assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'final response usage is pending');
+    update.run(JSON.stringify({ time: { created: 1791550317833, completed: 1791550320000 }, finish: 'stop', content: [] }));
+    assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'message completion precedes the new idle epoch');
+    db.exec("UPDATE session_v2 SET time_idle = 1791550320000 WHERE id = 'root'");
+    assert.equal(nativeRunPending(project, path, { since: 100 }), false, 'current native idle settles without another model turn');
+  } finally { db.close(); await rm(project, { recursive: true, force: true }); }
+});
