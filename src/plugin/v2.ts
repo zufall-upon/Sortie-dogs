@@ -340,7 +340,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 
 const correctionAgent = (agent: unknown): boolean => typeof agent === "string" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent);
 const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "shell", "sortie_v010_bind_write_gate",
-  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_finish_direct_unit"]);
+  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit"]);
 
 // Order only the genuine, already-filtered native definitions. Initial read-only
 // tools remain a deterministic prefix when correction admits additional tools;
@@ -455,7 +455,7 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
       }
       if (start < 0) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
       const inherited = [...rules.slice(0, start), ...nativeReviewerRoleRules.filter(rule => !["edit", "shell"].includes(rule.action)),
-        ...["bind_write_gate", "release_write_gate", "operator_status"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
+        ...["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
         ...rules.slice(start + nativeReviewerRoleRules.length)];
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
@@ -699,10 +699,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         "dogs-coordinator": ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
         "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
-        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status", "repair_review", "finish_direct_unit"] : ["repair_review"], "dog-scout-v010": [], "dog-advisor-v010": [],
+        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit", "repair_review", "finish_direct_unit"] : ["repair_review"], "dog-scout-v010": [], "dog-advisor-v010": [],
       };
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
-      const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status", "repair_review", "finish_direct_unit"] : []) : visible[String(event.agent)];
+      const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit", "repair_review", "finish_direct_unit"] : []) : visible[String(event.agent)];
       for (const key of Object.keys(event.tools)) {
         if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && !correcting &&
             ["edit", "write", "patch", "shell"].includes(key)) { delete event.tools[key]; continue; }

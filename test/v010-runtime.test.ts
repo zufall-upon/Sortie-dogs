@@ -506,6 +506,16 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(coordinator, /Unit progress is displayed automatically without\nwaking Operator/);
 });
 
+test("Reviewer correction treats inherited write paths as estimates without a caller round trip", () => {
+  const reviewer = previewAssets.find(asset => asset.name === "dog-reviewer-v010")!.content;
+  assert.match(reviewer, /inherited write list is an estimate, not a user prohibition/);
+  assert.match(reviewer, /Concrete native edit paths are\s+reconciled automatically/);
+  assert.match(reviewer, /call sortie_v010_expand_unit\s+with the current unit_id, paths and reason/);
+  assert.match(reviewer, /continue this SAME correction Task and reservation/);
+  assert.match(reviewer, /Explicit user prohibitions and host permissions remain in force/);
+  assert.doesNotMatch(reviewer, /no existing write scope|use only its existing scoped write/);
+});
+
 test("operator control packet preserves Japanese user prose as language context", async () => fixture(async root => {
   const request = plan();
   request.acceptance = ["表示窓を確認する", "既存の検証を変更しない"];

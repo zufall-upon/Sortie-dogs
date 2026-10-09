@@ -2292,7 +2292,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Correct the reported field or control-storage problem and retry plan_units directly. Keep the original requirements and existing run; do not cancel or repeat passed work to repair the plan." });
         }
       } };
-    tools[expandUnit] = { description: "Owning Worker or Coordinator: correct an estimated write scope within the original request in this same active Task, unit and budget reservation. Concrete native paths are reconciled automatically; use this for shell outputs whose paths cannot be inferred. Explicit user prohibitions and host permissions remain in force. No approval, return or Worker restart is needed.",
+    tools[expandUnit] = { description: "Owning Worker, admitted Reviewer correction author or Coordinator: correct an estimated write scope within the original request in this same active Task, unit and budget reservation. Concrete native paths are reconciled automatically; use this for shell outputs whose paths cannot be inferred. Explicit user prohibitions and host permissions remain in force. No approval, return or Task restart is needed.",
       args: { unit_id: stringSchema, paths: stringList as never, reason: stringSchema }, execute: async (args, context) => {
         const root = await rootFor(context.sessionID);
         if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
