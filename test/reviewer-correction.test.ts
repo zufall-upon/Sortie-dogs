@@ -266,7 +266,7 @@ for (const operation of [false, true]) test(`initial Reviewer records findings, 
     const investigatedSystem = { sessionID: "author", agent: f.agents.author!.agent, tools: { read: {}, grep: {}, sortie_v010_repair_review: {} }, system: [], messages: [] };
     await f.context(investigatedSystem);
     const findings = "FINDINGS\nMedium: result.txt is wrong rather than ready; preserve result, checks and clean delivery.";
-    const begun = await f.tool("author", "repair_review", { findings });
+    const begun = await f.tool("author", "repair_review", { findings, reason: "", validation: [], validation_cwd: {} });
     assert.equal(begun.execution, "same-native-task");
     assert.match(begun.next_action, /Run inherited formal commands in order as exact separate foreground native shell calls/);
     assert.match(begun.next_action, /Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper/);
@@ -278,7 +278,7 @@ for (const operation of [false, true]) test(`initial Reviewer records findings, 
     const handoff = JSON.parse(await readFile(active.units[0]!.handoffPath, "utf8"));
     assert.equal(handoff.ext["sortie-dogs/mission-context"].correction_context.findings, findings);
     assert.equal(handoff.ext["sortie-dogs/mission-context"].correction_context.initialPrompt, undefined);
-    assert.equal((await f.tool("author", "repair_review", { findings })).status, "correction-running");
+    assert.equal((await f.tool("author", "repair_review", { findings, reason: "", validation: [], validation_cwd: {} })).status, "correction-running");
     assert.equal((await f.missions.required("root")).corrections!.length, 1);
     const available = ["read", "shell", "patch", "sortie_v010_repair_review", "sortie_v010_finish_direct_unit", "sortie_v010_bind_write_gate"];
     assert(available.every(name => !whollyDisabled(name === "patch" ? "edit" : name, f.registry()[f.agents.author!.agent]!.permissions)), "controls survive the real native snapshot");

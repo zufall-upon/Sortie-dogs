@@ -2365,14 +2365,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const run = await operators.required(root);
            const existing = mission.corrections?.find(item => item.runID === run.runID);
            let review = mission.review;
-           if (args.validation !== undefined || args.validation_cwd !== undefined) {
+           // Native models often serialize omitted optional fields as []/{}.
+           // Those are not a recipe change and must not intercept normal repair admission.
+           const validationRecipe = Array.isArray(args.validation) && args.validation.length === 0 ? undefined : args.validation;
+           const validationDirectories = record(args.validation_cwd) && Object.keys(args.validation_cwd).length === 0 ? undefined : args.validation_cwd;
+           if (validationRecipe !== undefined || validationDirectories !== undefined) {
              if (!reviewer || existing?.author !== context.sessionID || existing.status !== "running" ||
                  mission.runID !== run.runID) throw new Error("mission-validation-registration-owner-mismatch");
              if (typeof args.reason !== "string" || !args.reason.trim()) throw new Error("mission-replan-reason-required: name the validation registration correction");
              const unit = run.units.find(unit => unit.reviewerCorrection?.author === context.sessionID)!;
-             const validation = args.validation === undefined ? unit.unit.validation : args.validation;
+             const validation = validationRecipe === undefined ? unit.unit.validation : validationRecipe;
              if (!Array.isArray(validation) || validation.some(command => typeof command !== "string")) throw new Error("mission-validation-registration-invalid");
-             const directories = args.validation_cwd;
+             const directories = validationDirectories;
              if (directories !== undefined && (!record(directories) || Object.values(directories).some(value => typeof value !== "string"))) throw new Error("mission-validation-registration-invalid");
              const corrected = await operators.correctReviewerValidationRegistration(root, context.sessionID, run.runID,
                (validation as string[]).map(missionValidationCommand), directories as Record<string, string> | undefined);
