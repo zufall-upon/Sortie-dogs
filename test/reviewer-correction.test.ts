@@ -1593,8 +1593,19 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
             [...f.registry()[f.agents.author!.agent]!.permissions, ...(f.agents.author!.permissions ?? [])]))
         .map(name => [name, { description: name, input: {} }])), system: [] };
       await f.context(context);
-      assert.deepEqual(Object.keys(context.tools).sort(), ["patch", "read", "shell", "sortie_v010_bind_write_gate", "write"].sort());
+      assert.deepEqual(Object.keys(context.tools).sort(), ["patch", "read", "shell", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "write"].sort());
+      const scopeBefore = await f.tool("root", "operator_status");
+      assert.equal(evaluate("sortie_v010_expand_unit", "*", grants).effect, "allow",
+        "admitted correction exposes the same existing scope-repair control as Worker");
+      const expanded = await f.tool("author", "expand_unit", { unit_id: (await f.run()).units[0]!.unit.id,
+        paths: ["generated-regression.txt"], reason: "Necessary in-request regression output discovered during correction" });
+      assert.equal(expanded.status, "scope-updated");
+      assert.equal(expanded.child_session_id, "author", "scope update retains the original Reviewer session");
+      assert.deepEqual((await f.tool("root", "operator_status")).budget, scopeBefore.budget,
+        "scope correction neither redispatches nor reserves another unit");
       await f.missions.update("root", mission => { mission.prohibitedWrite = ["undeclared.txt"]; });
+      await assert.rejects(f.tool("author", "expand_unit", { unit_id: (await f.run()).units[0]!.unit.id,
+        paths: ["undeclared.txt"], reason: "Explicit prohibition is not an estimate" }), /mission-explicit-write-prohibition/);
       await assert.rejects(f.before("author", "patch", { patchText: "*** Begin Patch\n*** Add File: undeclared.txt\n+x\n*** End Patch" }), /mission-explicit-write-prohibition/);
        await assert.rejects(f.before("author", "shell", { command: "printf x > undeclared.txt" }), /mission-explicit-write-prohibition/);
        const knownWrite = await f.before("author", "shell", { command: "printf x > result.txt" });
@@ -1610,11 +1621,11 @@ for (const mode of ["foreground", "background-restart", "failure", "self-review"
       assert.deepEqual(f.agents.author!.permissions, undefined, "native session rules are never changed");
       assert.equal(f.agents.author!.agent, "dog-reviewer-v010", "terminal restores Reviewer immediately");
       assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
-       assert(Math.abs(status.budget.settled_cost_usd - 0.0052) < 1e-12, "initial Worker and seven correction requests are each priced exactly once");
+       assert(Math.abs(status.budget.settled_cost_usd - 0.0056) < 1e-12, "initial Worker and eight correction requests are each priced exactly once");
       const settled = (await f.ledger()).records.map(record => record.event).filter(event => event.kind === "unit.settled");
       assert.equal(settled.length, 2);
       const correctionSettlement = settled.find(event => event.native_session_id === "author")!;
-       assert(Math.abs(correctionSettlement.cost_usd! - 0.0028) < 1e-12, "same-child review history is excluded from correction spend");
+       assert(Math.abs(correctionSettlement.cost_usd! - 0.0032) < 1e-12, "same-child review history is excluded from correction spend; scope repair is priced once");
       assert(correctionSettlement.native_started_at);
       assert.equal(corrected.corrections![0]!.author, "author");
       assert.equal(corrected.corrections![0]!.status, mode === "failure" ? "failed" : "ready");

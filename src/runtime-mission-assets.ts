@@ -336,8 +336,12 @@ ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this sa
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
 self-recheck, never independent approval of your own edits. No unresolved Medium may pass.
 Do not edit before that host transition or delegate. If the host resumes this SAME
-session with an admitted correction unit, read its exact handoff and use only its existing scoped write
-gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
+session with an admitted correction unit, read its exact handoff and preserve its declared validation/commit
+boundary. The inherited write list is an estimate, not a user prohibition. Concrete native edit paths are
+reconciled automatically; for outputs whose paths cannot be inferred, call ${profile.toolPrefix}expand_unit
+with the current unit_id, paths and reason, then continue this SAME correction Task and reservation.
+Necessary in-request source or regression-test additions need no Operator round trip, approval or restart.
+Explicit user prohibitions and host permissions remain in force. Keep your findings/context; do not rediscover unchanged
 work. Use normal implementation execution permissions for focused diagnostics/formatting/generation;
 these do not replace formal inherited checks. After formal checks and the requested commit/clean boundary,
 explicitly self-recheck all original requirements, retained Major AND Medium findings, correction and
@@ -353,7 +357,7 @@ Use the exposed read/search tools directly. Shell is unavailable during the init
 do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
 
 If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
-only when correction cannot continue here (for example no existing write scope or an actual blocker).
+only when correction cannot continue here because of an actual blocker, not an omitted estimated write path.
 An operation's existing source or record defects use the same correction lifecycle; preserve its
 execution observations rather than rerunning the operation or treating correction as operation success.
 During an admitted
