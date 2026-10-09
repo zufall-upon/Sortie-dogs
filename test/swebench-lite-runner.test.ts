@@ -34,7 +34,7 @@ test("runner starts without a dist build, even after its script is moved to an i
   const root = await mkdtemp(join(tmpdir(), "swebench-runner-no-dist-"));
   try {
     for (const name of ["swebench-lite-runner.mjs", "swebench-model-cost.mjs", "swebench-lite-public-lock.json",
-      "release-cli.mjs", "release-process.mjs", "release-profiles.mjs"]) {
+      "release-cli.mjs", "release-process.mjs", "release-profiles.mjs", "native-run-settlement.mjs"]) {
       await writeFile(join(root, name), await readFile(join("scripts", name)));
     }
     const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "--eval",
@@ -189,6 +189,41 @@ async function fakeOpenCode(script: string) {
     startedAt: Date.now(), ...extra });
   return { root, options };
 }
+
+test("native background work survives CLI close until settlement, under the original limits", { skip: process.platform === "win32" }, async () => {
+  const { root, options } = await fakeOpenCode("exit 0");
+  try {
+    let reads = 0, stopped = false;
+    const completed = await runOpenCode(options({ timeoutSeconds: 8 }), {
+      ...fakeReadyServer,
+      startServer: async (_workspace: string, environment: Record<string, string>) => ({
+        url: "http://127.0.0.1:12345", env: environment, stop: async () => { stopped = true; },
+      }),
+      nativeRunPending: () => { assert.equal(stopped, false); return ++reads < 4; },
+      readUsage: () => reads < 4 ? { usd: 0.1, requests: 1, unpriced: ["pending-usage"] }
+        : { usd: 0.2, requests: 2, unpriced: [] },
+    });
+    assert.equal(completed.reason, "completed");
+    assert.equal(completed.usageComplete, true);
+    assert.equal(completed.usage.usd, 0.2);
+    assert.equal(stopped, true);
+    for (const [expected, limit] of [["timeout", 0.1], ["cost-limit", 2]] as const) {
+      const result = await runOpenCode(options({ timeoutSeconds: expected === "timeout" ? 1 : 3 }), { ...fakeReadyServer,
+        nativeRunPending: () => true,
+        readUsage: () => ({ usd: limit, requests: 1, unpriced: ["pending-usage"] }),
+      });
+      assert.equal(result.reason, expected, "close already occurred; limits must still settle and clean up");
+      assert.equal(result.usageComplete, false);
+      assert.equal(result.cleanupEstablished, true);
+    }
+    const failed = await runOpenCode(options({ timeoutSeconds: 8 }), { ...fakeReadyServer,
+      nativeRunPending: () => { throw Error("unreadable native state"); },
+      readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }),
+    });
+    assert.equal(failed.reason, "settlement-read-failed");
+    assert.equal(failed.exit, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("a transient terminal usage gap does not kill the run, but a persistent one does", { skip: process.platform === "win32" }, async () => {
   const { root, options } = await fakeOpenCode("sleep 3\nexit 0");

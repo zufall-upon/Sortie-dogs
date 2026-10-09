@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, command } from './release-cli.mjs';
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
+import { nativeRunPending, waitForNativeSettlement } from './native-run-settlement.mjs';
 
 const database = () => new DatabaseSync(join(homedir(), '.local/share/opencode/opencode.db'), { readOnly: true });
 export const observationDirectories = project => [project, project.replaceAll('\\', '/')];
@@ -159,6 +160,12 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     const observed = observeMissionCLI(project, since, rootAgent);
     const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
     if (reason) stop(reason, observed, 'cli-close');
+    if (mode === 'complete' && code === 0 && !stopped) {
+      await waitForNativeSettlement({
+        pending: () => nativeRunPending(project, join(homedir(), '.local/share/opencode/opencode.db'), { since, root: observed.root }),
+        stopped: () => stopped,
+      });
+    }
   }
   finally { clearInterval(timer); await stopping; await server.stop(); }
   const observed = observeMissionCLI(project, since, rootAgent);
