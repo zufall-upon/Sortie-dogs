@@ -496,7 +496,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const directories = unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
         const progress = reviewerCorrectionValidation(unit.unit.validation, child, await messages(child),
           Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt),
-          undefined, input.directory, directories, unit.directExecution?.validationRegisteredAt);
+          undefined, input.directory, directories, unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt);
         const members = canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
         return members && validationDirectoryMatches(members, directory, input.directory, directories) ? members : undefined;
       },
@@ -517,7 +517,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await messages(child),
           startedAt,
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory,
-          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.directExecution?.validationRegisteredAt); }
+          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt); }
         catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
       },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
@@ -2353,7 +2353,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         next_action: `Correct all retained defects here using your existing context and public test harness; no handoff read or new Task. ${REVIEWER_VALIDATION_WORKFLOW} Retain requested commit/clean delivery, then ${finishDirectUnit} and your explicit SELF_RECHECKED native terminal. Additional investigation may widen when useful; no reduced effort or acceptance of unresolved Medium.` });
     }
     tools[repairReview] = { description: "Reviewer: record your concrete Major/Medium findings and continue correction, inherited formal checks, commit and self-recheck HERE without ending this native Task. Controller: recover the ORIGINAL correction owner after a terminated review/correction. Host prepares/binds the existing authorized write scope and validation; no findings transcription, new approval or Worker rediscovery. Author self-recheck is not independent PASS. Operations retain their original execution observations; correction does not rerun the operation. Reviews without an existing write scope do not use this route.",
-      args: { findings: optionalStringSchema as never }, execute: async (args, context) => {
+      args: { findings: optionalStringSchema as never, reason: optionalStringSchema as never,
+        validation: { ...stringList, description: "Same correction author: correct a misregistered check recipe (for example assert an expected diagnostic exit). Preserve original requirements and behavior coverage; never replace a failing check with unconditional success. Requires fresh actual native checks, not historical proof.", optional: true } as never,
+        validation_cwd: { type: "object", additionalProperties: { type: "string" }, optional: true } as never }, execute: async (args, context) => {
         if (!input.reviewerCorrectionPermissions) throw new Error("native-reviewer-correction-permissions-unavailable");
         const reviewer = (await identity(context.sessionID)).role === "dog-reviewer";
         const root = reviewer ? await rootFor(context.sessionID) : (await missionAuthority(context.sessionID)).root;
@@ -2361,8 +2363,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return serializeDispatchTransition(root, async () => {
           let mission = await missions.required(root);
           const run = await operators.required(root);
-          const existing = mission.corrections?.find(item => item.runID === run.runID);
-          let review = mission.review;
+           const existing = mission.corrections?.find(item => item.runID === run.runID);
+           let review = mission.review;
+           if (args.validation !== undefined || args.validation_cwd !== undefined) {
+             if (!reviewer || existing?.author !== context.sessionID || existing.status !== "running" ||
+                 mission.runID !== run.runID) throw new Error("mission-validation-registration-owner-mismatch");
+             if (typeof args.reason !== "string" || !args.reason.trim()) throw new Error("mission-replan-reason-required: name the validation registration correction");
+             const unit = run.units.find(unit => unit.reviewerCorrection?.author === context.sessionID)!;
+             const validation = args.validation === undefined ? unit.unit.validation : args.validation;
+             if (!Array.isArray(validation) || validation.some(command => typeof command !== "string")) throw new Error("mission-validation-registration-invalid");
+             const directories = args.validation_cwd;
+             if (directories !== undefined && (!record(directories) || Object.values(directories).some(value => typeof value !== "string"))) throw new Error("mission-validation-registration-invalid");
+             const corrected = await operators.correctReviewerValidationRegistration(root, context.sessionID, run.runID,
+               (validation as string[]).map(missionValidationCommand), directories as Record<string, string> | undefined);
+             const current = corrected.units.find(unit => unit.reviewerCorrection?.author === context.sessionID)!;
+             return JSON.stringify({ status: "correction-registration-corrected", run_id: corrected.runID,
+               unit_id: current.unit.id, validation: current.unit.validation, validation_cwd: current.unit.validation_cwd,
+               next_action: `Continue this SAME native Task and original requirements. Run the registered checks now, then ${finishDirectUnit} and explicit SELF_RECHECKED. Historical outcomes remain historical; no new Task or reservation.` });
+           }
           if (reviewer && existing?.inlineReview && existing.author === context.sessionID &&
                ["prepared", "running"].includes(existing.status)) return startInlineReviewerCorrection(root, context.sessionID,
                  typeof args.findings === "string" ? args.findings : undefined);
@@ -2593,7 +2611,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       for (const unit of run.units) {
         if (!unit.reviewerCorrection || !unit.childSessionID) continue;
         const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
-          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory, unit.unit.validation_cwd);
+          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory,
+          unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.reviewerCorrection.validationRegisteredAt);
         if (!checked.ready) throw new Error(checked.reason);
       }
     }

@@ -210,6 +210,54 @@ async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readon
    return { original, dispatch, run: await f.run(), mission: await f.missions.required("root") };
 }
 
+for (const cold of [false, true]) test(`Reviewer repairs an expected-nonzero check recipe in the same correction admission: ${cold ? "cold" : "live"}`, async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
+    await f.tool("author", "repair_review", { findings: "Medium: preserve required behavior." });
+    await f.edit("author", "ready corrected\n");
+    await f.shell("author", "node required-test.mjs");
+    await f.shell("author", "node check.mjs");
+    const raw = 'node -e "process.exit(65)"';
+    await f.tool("author", "repair_review", { validation: ["node required-test.mjs", raw, "node check.mjs"], reason: "Register CLI reproduction." });
+    await f.shell("author", "node required-test.mjs");
+    await f.shell("author", raw);
+    const failed = await f.tool("author", "finish_direct_unit");
+    assert.equal(failed.status, "direct-unit-awaits-validation");
+    assert.match(failed.reason, /validation-failed/);
+    const before = await f.run(), missionBefore = await f.missions.required("root");
+    const recipe = 'node -e "process.exit(65)"; test $? -eq 65';
+    // Earlier success is not proof for a later recipe registration.
+    await f.shell("author", recipe);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await assert.rejects(f.tool("root", "repair_review", { validation: [recipe], reason: "expected diagnostic exit" }), /registration-owner/);
+    const corrected = await f.tool("author", "repair_review", {
+      validation: ["node required-test.mjs", recipe, "node check.mjs"], reason: "Assert expected diagnostic exit rather than require the raw command to exit zero." });
+    assert.equal(corrected.status, "correction-registration-corrected");
+    assert.equal(corrected.task, undefined);
+    const after = await f.run();
+    assert.equal(after.runID, before.runID);
+    assert.equal(after.units[0]!.callID, before.units[0]!.callID);
+    assert.equal(after.units[0]!.reviewerCorrection!.admittedAt, before.units[0]!.reviewerCorrection!.admittedAt);
+    assert.deepEqual(after.units[0]!.unit.write, before.units[0]!.unit.write);
+    assert.deepEqual(after.units[0]!.reviewerCorrection!.checks, before.units[0]!.reviewerCorrection!.checks);
+    assert.deepEqual(await f.missions.required("root"), missionBefore);
+    if (cold) await f.start();
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation");
+    await f.shell("author", "node required-test.mjs");
+    await f.shell("author", recipe);
+    await f.shell("author", "node check.mjs");
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+    if (cold) return; // Durable recipe/freshness survives reload; live branch checks native terminal acceptance.
+    const report = 'SELF_RECHECKED\nself_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}\nCompared retained findings, original behavior and expected diagnostic with fresh checks.';
+    const returned = JSON.parse(await f.finish(started.dispatch, "author", report));
+    assert.equal(returned.status, "review-correction-recorded", JSON.stringify(returned));
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
 for (const operation of [false, true]) test(`initial Reviewer records findings, corrects and validates in one native Task without a handoff reread: ${operation ? "operation" : "implementation"}`, async () => {
   const f = await fixture();
   try {
