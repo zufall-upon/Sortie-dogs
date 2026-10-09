@@ -167,8 +167,22 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     }
     agents.worker!.outcome = "succeeded";
     if (verdict === "PASS") assert.deepEqual((hooks.backgroundOwner!("worker-call")!.core as { calls: string[] }).calls, ["worker-call"], "validation retains parent Task ownership");
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
-      { output: "Validated result", metadata: { sessionId: "worker" } });
+    const workerReturn = { output: "Validated result", metadata: { sessionId: "worker" } };
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, workerReturn);
+    const returned = JSON.parse(workerReturn.output);
+    assert.equal(returned.worker_report, "Validated result", "native Worker answer stays visible in the return projection");
+    assert.equal(returned.view, "progress");
+    assert.equal(returned.mission_id, mission.id);
+    assert.equal(returned.completed_units, 1);
+    assert.match(returned.next_action, /review_mission/);
+    assert.equal(returned.requirements, undefined, "return does not repeat the already-delivered Mission contract");
+    assert.equal(returned.units, undefined, "full snapshots are not serialized into each native Worker return");
+    assert.equal(returned.validation[0].details_ref.path, new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root"));
+    const durable = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence;
+    assert.deepEqual(returned.validation[0].evidence.map(({ protected_binding_ref, ...evidence }: Record<string, unknown>) => evidence),
+      durable.map(({ protected_binding, ...evidence }) => evidence), "commands, exits, coverage and identities remain exact");
+    assert.ok(returned.validation[0].evidence.every((item: Record<string, unknown>) => !Object.hasOwn(item, "protected_binding")));
+    assert.ok(workerReturn.output.split("\n").length > 10, "native truncation can retain individual result lines");
     backgroundChild = undefined;
     const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(status.coordinator_session_id, null);
