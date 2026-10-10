@@ -17,6 +17,9 @@ import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFinger
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
 export const MAX_RUN_FLIGHT_EVENTS = 2048;
 export const MAX_RUN_FLIGHT_LEDGER_BYTES = 1024 * 1024;
+// Goal history embeds full protected path recipes across implementation/correction
+// receipts; unlike wave history, it is not just hash-referenced capsules.
+export const MAX_GOAL_FLIGHT_LEDGER_BYTES = 16 * 1024 * 1024;
 
 const HASH_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const MAX_TEXT = 256;
@@ -1133,7 +1136,7 @@ export class RunFlightLedger {
         throw error;
       }
       const body = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: next });
-      if (next.length > MAX_RUN_FLIGHT_EVENTS || Buffer.byteLength(body) > MAX_RUN_FLIGHT_LEDGER_BYTES) {
+      if (next.length > MAX_RUN_FLIGHT_EVENTS || Buffer.byteLength(body) > MAX_GOAL_FLIGHT_LEDGER_BYTES) {
         throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
       }
       const temporary = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`;
@@ -1159,7 +1162,7 @@ export class RunFlightLedger {
     let raw: string;
     try { raw = await readFile(this.#filePath, "utf8"); }
     catch (error) { if (isObject(error) && error.code === "ENOENT") return []; throw error; }
-    if (Buffer.byteLength(raw) > MAX_RUN_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+    if (Buffer.byteLength(raw) > MAX_GOAL_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
     let document: unknown;
     try { document = JSON.parse(raw); } catch { throw new RunFlightLedgerError("invalid", "Goal ledger is not valid JSON."); }
     if (!isObject(document) || !only(document, ["schema_version", "goal_events"]) ||
