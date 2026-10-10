@@ -101,7 +101,7 @@ skipがある場合は理由を記録します。過去runの件数を現在の�
 ### 時間上限
 
 - runner内部: **1790秒**。runner開始からの時間であり、pretest buildは含みません。
-- Windows controller: 既定で**1800秒**。controllerの`started_at`から測り、npm起動とbuildを含みます。
+- Windows controller: 既定で**2400秒**。controllerの`started_at`から測り、npm起動とbuildを含みます。
 - launcherの待機やTask Schedulerのqueue時間は、controllerのwall timeとは別です。
 
 計測や外部toolにもtimeoutがある場合は、意図したrunを途中で切らない実行経路を選びます。
@@ -121,7 +121,7 @@ $repository = (Get-Location).Path
 $runId = 'full-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
 
 pwsh -NoProfile -NonInteractive -File .\scripts\full-test-controller.ps1 `
-  -Mode Launch -RunId $runId -Repository $repository -OuterDeadlineSeconds 1800
+  -Mode Launch -RunId $runId -Repository $repository -OuterDeadlineSeconds 2400
 ```
 
 launcherはRunIdを出力して戻ります。**Launchのexit `0`は起動成功であり、test合格ではありません。**
