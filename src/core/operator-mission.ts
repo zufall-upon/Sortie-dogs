@@ -5,19 +5,13 @@ import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand } from "../plugin/gate.js";
+import { missionValidationCommand } from "./mission-validation-command.js";
+export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export const MISSION_REFERENCE = "SORTIE_MISSION_REF ";
 export const MISSION_REVIEW_REFERENCE = "SORTIE_MISSION_REVIEW_REF ";
-/** Preserve a common multiline Python reproduction without making the Coordinator repair a wire-format constraint. */
-export function missionValidationCommand(command: string): string {
-  if (!/[\r\n]/u.test(command)) return command;
-  const heredoc = /^([^\r\n]*\bpython(?:\d(?:\.\d+)?)?)\s+-\s+<<\s*(['"])([A-Za-z_]\w*)\2\r?\n([\s\S]*)\r?\n\3\s*$/u.exec(command);
-  if (!heredoc) throw new Error("mission-validation-command: use an exact one-line shell command or a quoted Python heredoc");
-  const expression = `exec(${JSON.stringify(heredoc[4])})`;
-  return `${heredoc[1]} -c '${expression.replaceAll("'", "'\\''")}'`;
-}
 export interface MissionRequest { id: string; text: string }
 export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
 export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
