@@ -10,6 +10,20 @@ import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 
+test('direct reproduction recipes use observed baseline context without another preparation lane', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /For direct work with an unknown reproduction recipe/);
+    assert.match(content, /resolve its flags, configuration and cwd with ordinary native diagnostics before formal registration/);
+    assert.match(content, /Reuse an already observed failing baseline; do not rerun it merely to plan/);
+    assert.match(content, /A command that never exercises the reported path is not a passing reproduction/);
+    assert.match(content, /Use existing project configuration within the original path constraints/);
+    assert.match(content, /Known recipes and Worker-owned investigation need no extra preparation or unit/);
+    assert.match(content, /this workflow adds no approval or denial/);
+  }
+  assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|NumPy|1978|extension-pkg|rcfile|capsys|caplog/);
+});
+
 test('dependency setup preserves original missing-only limits without disabling authorized repair', () => {
   for (const name of ['dog-operator', 'dogs-coordinator']) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
