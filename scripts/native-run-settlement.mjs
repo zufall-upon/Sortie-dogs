@@ -36,6 +36,17 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
       // not the new turn's idle event; its final response/usage can still follow.
       const lastMessageAt = message.time?.completed ?? message.time?.created;
       if (lastMessageAt && (!session.time_idle || session.time_idle < lastMessageAt)) return true;
+      // Child idle precedes admission of its background completion notification.
+      // The parent's earlier idle cannot settle in that gap. Only actual
+      // completed background handoffs require this final native parent delivery.
+      for (const row of db.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant'").all(session.id)) {
+        for (const part of JSON.parse(row.data).content ?? []) {
+          if (part.type !== 'tool' || part.name !== 'subagent' || part.state?.status !== 'completed' ||
+              (part.input ?? part.state?.input)?.background !== true) continue;
+          const child = sessions.find(s => s.id === part.state?.metadata?.sessionID && s.parent_id === session.id);
+          if (child?.time_idle && (!session.time_idle || session.time_idle < child.time_idle)) return true;
+        }
+      }
     }
     const missionPath = join(project, '.sortie-dogs-v010', 'missions', `${createHash('sha256').update(root).digest('hex')}.json`);
     if (existsSync(missionPath)) {
