@@ -10,6 +10,20 @@ import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 
+test('public reproduction planning keeps its entrypoint rather than a lower-level surrogate', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /carry its entrypoint and relevant input into the unit objective and formal reproduction check/);
+    assert.match(content, /Derive the shell recipe without substituting lower-level library calls/);
+    assert.match(content, /those checks may supplement, never replace, the public entrypoint/);
+    assert.match(content, /Reuse existing checks that already exercise it/);
+    assert.match(content, /If authorized setup cannot run it, retain useful work and report the verification gap, not a passing reproduction/);
+    assert.match(content, /literal command in the original request is not required/);
+    assert.match(content, /this workflow adds no approval or denial/);
+  }
+  assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|NumPy|1978|extension-pkg|rcfile|capsys|caplog/);
+});
+
 test('direct reproduction recipes use observed baseline context without another preparation lane', () => {
   for (const name of ['dog-operator', 'dogs-coordinator']) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
@@ -144,6 +158,11 @@ test('native CLI init installs the validation workflow in each active mission ro
       assert.match(installed, role === 'dog-worker-v010'
         ? /User missing-only: installed\/incompatible is not missing/
         : /an installed but incompatible package is not missing/);
+      if (role !== 'dog-worker-v010') {
+        assert.match(installed, /carry its entrypoint and relevant input into the unit objective and formal reproduction check/);
+        assert.match(installed, /those checks may supplement, never replace, the public entrypoint/);
+        assert.match(installed, /retain useful work and report the verification gap, not a passing reproduction/);
+      }
       if (role === 'dog-worker-v010') {
         assert.equal(installed, runtimeAssets.find(item => item.name === role)!.content);
         assert.match(installed, /check result\/error\/state/);
