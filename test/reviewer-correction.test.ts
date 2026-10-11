@@ -982,6 +982,48 @@ async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
 const inlineReport = (unresolved: string[] = [], residual: unknown = null, candidate = "current-validated") =>
   `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: unresolved, residual_major: residual })}\nCompared every original requirement, all retained findings, corrected source and relevant impact against actual fresh formal checks and clean commit.`;
 
+for (const mode of ["foreground", "background", "background-cold"] as const) {
+  test(`stale inline correction terminal cannot block subsequent native prompts: ${mode}`, async () => {
+    const f = await fixture();
+    try {
+      const background = mode !== "foreground";
+      const { dispatch } = await initial(f, { keepReviewOpen: true, backgroundReview: background });
+      if (background) await f.after(dispatch, "Native review Job running", { sessionID: "author", status: "running" });
+      await f.tool("author", "repair_review", { findings: "Medium: result.txt must contain ready output." });
+      await f.edit("author", "ready"); await f.shell("author", "node check.mjs");
+      await f.shell("author", "git add -- result.txt && git commit -m correction");
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+      const run = await f.run(), ledger = await f.ledger();
+      await writeFile(join(f.directory, "check.mjs"), (await readFile(join(f.directory, "check.mjs"), "utf8")) + "// changed after formal validation\n");
+      if (background) {
+        f.terminal("author", inlineReport());
+        if (mode === "background-cold") await f.start();
+      } else {
+        const returned = JSON.parse(await f.finish(dispatch, "author", inlineReport()));
+        assert.equal(returned.status, "review-correction-incomplete");
+        assert.match(returned.reason, /correction-validation-stale/);
+        assert.match(returned.next_action, /repair_review.*SAME author/);
+        assert.doesNotMatch(returned.next_action, /Formal correction validation remains current/);
+      }
+      await f.context({ sessionID: "root", agent: "dog-operator", system: [], messages: [], tools: {} });
+      await assert.rejects(f.tool("root", "complete_mission"), /correction-validation-stale/);
+      f.agents.root!.agent = "build";
+      await f.context({ sessionID: "root", agent: "build", system: [], messages: [], tools: {} });
+      await f.prompt("root", "Continue");
+      await f.context({ sessionID: "root", agent: "build", system: [], messages: [], tools: {} });
+      if (background) {
+        const dispatches = f.storage.get("v2-background-dispatches:root") as ObjectValue[];
+        assert.equal(dispatches.find(item => item.callID === dispatch.id)!.settled, true, "stale proof is not an accounting failure retried on every prompt");
+        await f.start();
+        await f.prompt("root", "Continue after reload");
+      }
+      assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+      assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, run.units[0]!.reviewerCorrection!.checks);
+      assert.deepEqual((await f.ledger()).records.filter(item => item.event.kind === "unit.settled"), ledger.records.filter(item => item.event.kind === "unit.settled"));
+    } finally { await f.dispose(); }
+  });
+}
+
 for (const mode of ["missing-add", "failed-commit"] as const) test(`failed native correction after actual add then commit failure cannot produce receipt: ${mode}`, async () => {
   const f = await fixture();
   try {
@@ -1170,7 +1212,8 @@ for (const mode of ["medium", "absent", "stale", "stale-report", "nonterminal", 
       if (mode === "cancelled") f.agents.author!.outcome = "interrupted";
       await f.after(self.dispatch, self.text, { sessionID: "author", status: mode });
     } else if (mode === "stale") {
-      await assert.rejects(f.finish(self.dispatch, "author", self.text), /mission-review-correction-validation-stale/);
+      await f.finish(self.dispatch, "author", self.text);
+      await f.context({ sessionID: "root", agent: "dog-operator", system: [], messages: [], tools: {} });
     } else await f.finish(self.dispatch, "author", mode === "absent" ? "CORRECTION_READY\nFixed" : mode === "stale-report" ? self.text.replace(self.candidate, "old-candidate") : self.text);
     const mission = await f.missions.required("root");
     assert.notEqual(mission.review!.verdict, "self-rechecked");

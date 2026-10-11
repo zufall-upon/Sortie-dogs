@@ -2647,14 +2647,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : { status: "skipped-low-risk" });
         });
       } };
-    async function assertCorrectionValidation(run: OperatorState) {
+    async function correctionValidationFailure(run: OperatorState): Promise<string | undefined> {
       for (const unit of run.units) {
         if (!unit.reviewerCorrection || !unit.childSessionID) continue;
         const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
           Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory,
           unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.reviewerCorrection.validationRegisteredAt);
-        if (!checked.ready) throw new Error(checked.reason);
+        if (!checked.ready) return checked.reason;
       }
+    }
+    async function assertCorrectionValidation(run: OperatorState) {
+      const reason = await correctionValidationFailure(run);
+      if (reason) throw new Error(reason);
     }
     /** Shared inline/fallback proof: the exact admitted native prompt's actual successful terminal. */
     async function observeNativeSelfRecheck(root: string, mission: OperatorMission, run: OperatorState, author: string,
@@ -2678,7 +2682,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const source = await missionReviewSource(input.directory, run, mission.review?.evidence, mission.reviewBaseline, mission.reviewScope);
       const checked = missionSelfRecheckReport(text, expectedSource ?? source.fingerprint, true);
       if (!checked) return undefined;
-      await assertCorrectionValidation(run);
+      // A stale/missing check is an incomplete self-recheck, not a native lifecycle
+      // accounting error. Settle the real terminal so later prompts can repair it.
+      // Explicit acceptance still requires assertCorrectionValidation.
+      if (await correctionValidationFailure(run)) return undefined;
       if (expectedSource !== undefined && source.fingerprint !== expectedSource) return undefined;
       return { runID: run.runID, source: source.fingerprint, candidateSource: source.candidateFingerprint,
         author, callID, promptID, messageID: info.id, nativeOutcome: "completed", result: text, ...checked };
@@ -3385,11 +3392,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   admittedAt: inline.inlineReview!.admittedAt, result: report.result, selfRecheck: report };
               });
               const latest = await missions.required(ownership.root);
+              const validationFailure = !report && inline.status === "ready" && settled.phase === "awaiting-acceptance"
+                ? await correctionValidationFailure(settled) : undefined;
               output.output = JSON.stringify({ status: report ? "review-correction-recorded" : "review-correction-incomplete",
                 reviewer_report: raw, independent: false,
+                ...(validationFailure ? { reason: validationFailure } : {}),
                 acceptance_summary: await missionAcceptanceSummary(latest, settled, operators, acceptanceValidationObservation),
                 next_action: report && !report.unresolvedFindings.length && !report.residualMajor
                   ? `Host already recorded source, formal checks, delivery and actual native author self-recheck. Compare the original request with this candidate, then ${current.coordinator ? submitMission : completeMission}; no routine operator_status, new review or validation Worker.`
+                  : validationFailure
+                    ? `No acceptance: ${validationFailure}. Call ${repairReview} to refresh affected checks in the SAME author/context. Preserve completed work and historical evidence; do not redo unchanged implementation/discovery or request another independent Reviewer.`
                   : !report && inline.status === "ready" && settled.phase === "awaiting-acceptance"
                     ? `Formal correction validation remains current, but the actual native author self-recheck is missing/failed. No acceptance. Call ${reviewMission} only for the missing read-only self-recheck in the SAME author/context, without rerunning successful checks or requesting another Reviewer.`
                   : `No acceptance. Continue the SAME author through ${repairReview} for actual defects; only a concrete residual Major risk after self-recheck calls for a different Reviewer.` });
