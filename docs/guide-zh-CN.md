@@ -16,9 +16,9 @@
 本页是OpenCode指南。Codex集成也已实现，并记录了Ubuntu／Windows真实Mission的完成与受理。
 Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对Codex使用OpenCode初始化步骤。
 
-**当前release：[v0.13.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.11)**
-（[发布说明](release-v0.13.11.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.11-operation-result-v1`。
+**当前release：[v0.13.12](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.12)**
+（[发布说明](release-v0.13.12.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.12-validation-paths-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -59,7 +59,14 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.11更新
+## v0.13.12更新
+
+整合PR #177〜#186的文档与Mission修复：Worker返回、native idle等待、Reviewer同一Task修正、
+验证recipe的真实path及Python heredoc匹配、symlink cycle快照和大型受保护path历史。
+同时整合Hermes自动开发runner，保留已有Session、委托指示、费用台账与真实发送receipt。
+过去单项结果不代表公开v0.13.12的新benchmark分数。
+
+## v0.13.11更新（保留）
 
 修复Codex大文件write与运行中status观察、切换agent后已终止Mission返回造成的持续HTTP 500，
 并区分run-once结果收集与进程成功。保留真实失败exit；未启动、运行中及必需成功check仍阻止完成。
@@ -328,7 +335,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.11
+npm install --global sortie-dogs@0.13.12
 sortie-dogs init --global --profile v010
 ```
 
@@ -340,7 +347,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.11
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.12
 sortie-dogs init --global --profile v010
 ```
 
@@ -361,7 +368,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.11-operation-result-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.12-validation-paths-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，
