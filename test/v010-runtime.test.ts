@@ -267,7 +267,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   for (const asset of previewAssets.filter(asset => asset.installPath.startsWith("agent/"))) {
     if (asset.name === "dog-worker-v010") {
-      assert.match(asset.content, /Treat cwd\/project_root and paths as opaque/u);
+      assert.match(asset.content, /cwd\/project_root\/paths: opaque/u);
       assert.match(asset.content, /never shorten or normalize (?:generated )?segments/u);
     } else {
       assert.match(asset.content, /Treat the current working directory and every project_root value as opaque/u);
@@ -319,7 +319,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(coordinator, /not a speculative route inventory\nor raw history to prove incidental process constraints/u);
   assert.match(coordinator, /Never plan a separate setup\nunit/u);
   const worker = previewAssets.find(asset => asset.name === "dog-worker-v010")!.content;
-  assert.match(worker, /Missing tooling: one documented bounded setup in \.sortie-env\//u);
+  assert.match(worker, /Use bounded documented setup in \.sortie-env\//u);
+  assert.match(worker, /User missing-only: installed\/incompatible is not missing/u);
   assert.match(worker, /reuse, never delete/u);
   assert.match(primary, /^model: openai\/gpt-6.1-sol$/m);
   assert.match(primary, /^variant: xhigh$/m);

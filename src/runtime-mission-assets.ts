@@ -5,6 +5,14 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+/** Task-specific environment limits qualify general dependency setup guidance. */
+export const MISSION_DEPENDENCY_WORKFLOW = `Honor original dependency limits in setup and unit objectives. If the user permits installs only for
+proven-missing packages, an installed but incompatible package is not missing: do not replace it or
+describe it as missing compatible tooling. General registry/compatible-version guidance does not widen
+that task-specific limit. Reuse a supplied environment; create one only when the original request permits.
+Otherwise carry out authorized dependency repair normally. If required behavior remains unverified under
+those limits, retain in-scope work and report the limitation, not successful verification.`;
+
 /** Ordinary requested Git delivery uses source scope, not repository control-storage scope. */
 export const MISSION_GIT_SCOPE = `Requested git add <paths> (with optional --) and git commit -m ... are normal source-scope Git operations;
 they do not require .git/** scope. Preserve explicit user ordering and host Git lifecycle; attempt supported
@@ -96,6 +104,8 @@ ${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish
 
 You are Operator, the user-facing strategic authority. Preserve every current requirement, prohibition,
 quality threshold and explicit model/budget choice. Follow AGENTS.md and use the user's language.
+
+${MISSION_DEPENDENCY_WORKFLOW}
 
 1. For an implementation or operation request, give at most three short lines, then call ${profile.toolPrefix}start_mission
    with a few concise one-line requirements including negative constraints. The host saves the original
@@ -476,8 +486,9 @@ Use absolute native paths for requested global installations or other external o
 a directory including a not-yet-created tree. These are execution/evidence scopes, not an additional
 permission grant: the host's native permissions still apply. Include the actual external input/output
 paths in read/write so validation and review observe them; do not substitute a repository symlink.
+${MISSION_DEPENDENCY_WORKFLOW}
 Keep all original requirements covered. Last validation command checks
-that unit. If your quick check shows repository-declared dependencies or the test runner are missing, keep
+that unit. If your quick check shows repository-declared dependencies or the test runner are missing and setup is allowed, keep
 setup inside the first unit: declare its checks through the repository-local tool environment ${TOOL_ENVIRONMENT}/
 (for Python, ${TOOL_ENVIRONMENT}/bin/python -m pytest ...) and let that Worker create it. Never plan a separate setup
 unit or put ${TOOL_ENVIRONMENT}/ in a write scope. Host generates IDs, proof mapping, handoff, manifest and Task references. Dispatch the returned
@@ -577,17 +588,18 @@ Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees
 Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, constraints/continuity,
 coverage. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
 Denied: reason/remedy. No routine manifest/goal/status/bind.
-Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
-Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
-After compaction recover handoff; inspect diff/results before repeats.
+${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
+cwd/project_root/paths: opaque; never shorten or normalize segments.
+After compaction recover handoff; inspect diff/results.
 Read/search: existing permissions. Fix unit.write/outputs/checks
-here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
+here via ${profile.toolPrefix}expand_unit/contract updates; host repair diagnostics;
 no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
 Pre-change oracles, not new tests; check result/error/state. Fallback: probe other unhandled errors from peer source/tests.
 No exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 ${MISSION_REPRESENTATION_ORACLE}
-Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
+Use bounded documented setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
+User missing-only: installed/incompatible is not missing.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}

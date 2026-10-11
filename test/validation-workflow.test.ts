@@ -10,6 +10,23 @@ import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 
+test('dependency setup preserves original missing-only limits without disabling authorized repair', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /Honor original dependency limits in setup and unit objectives/);
+    assert.match(content, /If the user permits installs only for\s+proven-missing packages/);
+    assert.match(content, /an installed but incompatible package is not missing/);
+    assert.match(content, /General registry\/compatible-version guidance does not widen\s+that task-specific limit/);
+    assert.match(content, /Reuse a supplied environment; create one only when the original request permits/);
+    assert.match(content, /Otherwise carry out authorized dependency repair normally/);
+    assert.match(content, /report the limitation, not successful verification/);
+    assert.doesNotMatch(content, /pvlib|NumPy|numpy|np\.Inf|pip install.*<2/);
+  }
+  const worker = runtimeAssets.find(asset => asset.name === 'dog-worker-v010')!.content;
+  assert.match(worker, /User missing-only: installed\/incompatible is not missing/);
+  assert.match(worker, /bounded documented setup in \.sortie-env\/; reuse, never delete/);
+});
+
 test('error fallback investigation distinguishes related failures from repeated same-error inputs', () => {
   const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
   const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
@@ -110,6 +127,9 @@ test('native CLI init installs the validation workflow in each active mission ro
       const installed = await readFile(join(root, '.opencode', 'agent', `${role}.md`), 'utf8');
       const policy = role === 'dog-worker-v010' ? WORKER_VALIDATION_WORKFLOW : VALIDATION_WORKFLOW;
       assert.equal(installed.split(policy).length, 2, role);
+      assert.match(installed, role === 'dog-worker-v010'
+        ? /User missing-only: installed\/incompatible is not missing/
+        : /an installed but incompatible package is not missing/);
       if (role === 'dog-worker-v010') {
         assert.equal(installed, runtimeAssets.find(item => item.name === role)!.content);
         assert.match(installed, /check result\/error\/state/);
