@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { acquireRunLock, releaseRunLock, writeAtomicJson } from "./swebench-lite-supervisor.mjs";
 import { estimateModelUsageCost } from "./swebench-model-cost.mjs";
+import { notification } from "./autodev-notifications.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 const json = async path => JSON.parse(await readFile(path, "utf8"));
@@ -52,6 +53,18 @@ export async function readState(config) {
   return state;
 }
 
+async function standingInstructions(config) {
+  const files = await Promise.all((config.autonomy?.instruction_files ?? []).map(async file => {
+    const path = resolve(config.state_root, file), text = await readFile(path, "utf8");
+    ensure(text.trim(), "standing-owner-instruction-empty");
+    return { path, sha256: sha(text), text };
+  }));
+  if (!files.length) return null;
+  return { sha256: sha(JSON.stringify(files.map(({ path, sha256 }) => ({ path, sha256 })))),
+    files: files.map(({ path, sha256 }) => ({ path, sha256 })),
+    text: files.map(file => `Recorded owner instruction: ${file.path}\n${file.text}`).join("\n\n") };
+}
+
 export function sourceCost(source, value) {
   if (!value) return { priced: source.priced_usd ?? 0, held: source.reservation_usd, unknown: 0, active: true };
   if (source.kind === "supervisor") {
@@ -59,9 +72,12 @@ export function sourceCost(source, value) {
       nonnegative(value.held_unknown_usd ?? 0), "invalid-supervisor-cost");
     const active = !["completed", "failed"].includes(value.status);
     const priced = Math.max(source.priced_usd ?? 0, value.spent_usd);
+    const release = !active && source.no_inference_release?.snapshot_sha256 === sha(JSON.stringify(value))
+      ? source.no_inference_release.usd : 0;
+    ensure(nonnegative(release) && release <= (value.held_unknown_usd ?? 0), "invalid-no-inference-release");
+    const unknown = (value.held_unknown_usd ?? 0) - release;
     return { priced, held: active ? Math.max(value.held_unknown_usd ?? 0,
-      source.reservation_usd - priced, value.reserved_usd) : value.held_unknown_usd ?? 0,
-    unknown: value.held_unknown_usd ?? 0, active };
+      source.reservation_usd - priced, value.reserved_usd) : unknown, unknown, active };
   }
   ensure(source.kind === "probe" && nonnegative(value.priced_usd) &&
     Number.isInteger(value.unpriced_requests) && value.unpriced_requests >= 0, "invalid-practical-session-cost");
@@ -130,7 +146,9 @@ export async function connect() {
 export async function observe(client, state) {
   const options = () => ({ signal: AbortSignal.timeout(15_000) });
   const root = await client.session.get({ sessionID: state.session_id }, options());
-  ensure(root.location.directory === state.directory, "native-session-directory-changed");
+  // The retained Session can legitimately move to a development worktree.
+  // Its ID remains the execution identity; directory is not an admission gate.
+  ensure(root.id === state.session_id, "native-session-identity-changed");
   const [all, active] = await Promise.all([
     pages(cursor => client.session.list({ project: root.projectID, cursor }, options())),
     client.session.active(options()),
@@ -158,11 +176,17 @@ export async function observe(client, state) {
   const final = turn.filter(item => item.type === "assistant" && item.time?.completed &&
     item.finish === "stop").at(-1);
   const text = final?.content.filter(item => item.type === "text").map(item => item.text).join("\n") ?? "";
+  const cost = nativeCost(sessions.flatMap(item => item.messages));
+  const currentUnknown = state.pending?.unknown_at_start
+    ? cost.unknown.filter(id => !state.pending.unknown_at_start.includes(id))
+    : nativeCost([...turn, ...sessions.filter(item => item.id !== root.id).flatMap(item => item.messages
+      .filter(message => !own.messages[userIndex]?.time?.created ||
+        message.time?.created >= own.messages[userIndex].time.created))]).unknown;
   return { root, sessions, acknowledged: userIndex >= 0 || queued,
     busy: sessions.some(item => item.running || item.inbox.length),
     needs_input: sessions.some(item => item.permissions.length || item.forms.length),
     settled: userIndex >= 0 && Boolean(final) && root.outcome === "succeeded",
-    text, cost: nativeCost(sessions.flatMap(item => item.messages)),
+    text, cost, current_unknown: currentUnknown,
     models: [...new Map(sessions.flatMap(item => item.messages.filter(message => message.type === "assistant")
       .map(message => { const model = { session_id: item.id, agent: message.agent, model: message.model };
         return [JSON.stringify(model), model]; }))).values()] };
@@ -182,16 +206,21 @@ export async function handoffEvidence(handoff) {
   const files = [];
   for (const path of handoff.evidence) files.push({ path, sha256: sha(await readFile(path)) });
   let waiting = false;
+  const progress = [];
   for (const wait of handoff.wait_for ?? []) {
     ensure(wait.kind === "supervisor" && isAbsolute(wait.path), "unsupported-wait: use blocked for user decisions");
     const state = await json(wait.path);
     if (!["completed", "failed"].includes(state.status)) waiting = true;
+    if (Array.isArray(state.instances)) progress.push({ total: state.instances.length,
+      finished: state.instances.filter(item => item.result).length, status: state.status });
   }
-  return { files, waiting, fingerprint: files.length ? sha(JSON.stringify(files)) : null };
+  return { files, waiting, progress, fingerprint: files.length ? sha(JSON.stringify(files)) : null };
 }
 
-export function nextAction(state, observation, proof = null) {
-  if (state.paused) return { action: "paused", reason: state.pause_reason ?? "operator-paused" };
+export function nextAction(state, observation, proof = null, config = {}) {
+  const delegated = config.autonomy?.reconsider_blocked_once === true && Boolean(state.standing_authority?.sha256);
+  if (state.paused && !(delegated && state.pause_origin === "runner"))
+    return { action: "paused", reason: state.pause_reason ?? "operator-paused" };
   if (!state.session_id) return { action: "dispatch", reason: "first-work-unit" };
   if (observation.needs_input) return { action: "needs-input", reason: "native permission or question pending; preserve host authority" };
   if (observation.busy) return { action: "running", reason: "owned session or descendant still active" };
@@ -200,6 +229,21 @@ export function nextAction(state, observation, proof = null) {
   if (!observation.settled) return { action: "blocked", reason: "native-turn-not-succeeded; inspect its actual error" };
   const handoff = parseHandoff(observation.text);
   if (!handoff) return { action: "blocked", reason: "missing-structured-handoff; no blind keep-going loop" };
+  if (handoff.status === "blocked" && delegated && proof?.fingerprint && !proof.waiting &&
+    handoff.local_work_exhausted !== true &&
+    !["budget", "auth", "permission", "acceptance", "no-resend"].includes(handoff.blocker_kind) &&
+    !/budget|予算|追加費用|認証|token_expired|provider\.auth|permission|権限要求|追加承認|承認してください|再送禁止/iu
+      .test(`${handoff.summary}\n${handoff.notification?.question ?? ""}`)) {
+    const work_id = typeof handoff.work_id === "string" && handoff.work_id.trim()
+      ? handoff.work_id : state.work_id ?? config.id;
+    if (typeof handoff.local_next_action === "string" && handoff.local_next_action.trim() &&
+      proof.fingerprint !== state.last_progress) return { action: "dispatch", reason: handoff.local_next_action, handoff,
+      continuation: { kind: "local-work", work_id, next_action: handoff.local_next_action } };
+    const key = sha(JSON.stringify({ work_id, authority: state.standing_authority.sha256 }));
+    if (!(state.autonomous_reconsiderations ?? []).some(item => item.key === key))
+      return { action: "dispatch", reason: "authorized-blocker-reconsideration", handoff,
+        continuation: { kind: "reconsider-blocker", key, work_id, authority_sha256: state.standing_authority.sha256 } };
+  }
   if (handoff.status === "blocked" || handoff.status === "complete")
     return { action: handoff.status, reason: handoff.summary, handoff };
   if (proof?.waiting) return { action: "waiting", reason: handoff.summary, handoff };
@@ -212,15 +256,26 @@ export function workPrompt(config, state, decision, budget) {
   return [
     "User-authorized continuous development. Principles: autonomous, efficient, visible.",
     config.objective, ...(config.instructions ?? []),
+    ...(state.standing_authority ? [`Retained standing owner instructions, applicable to EVERY work unit, not a new model/fee/Task allowance:\n${state.standing_authority.text}`] : []),
     ...(state.next_instruction ? [`New owner instruction (previous costs/attempts remain): ${state.next_instruction}`] : []),
     "Read the current AGENTS.md and canonical task contract. Keep existing host authority, user changes, acceptance and stop conditions. Do not add approval gates or duplicate verification/review.",
     `Runner: ${resolve(import.meta.dirname, "autodev-runner.mjs")}`,
     `Project config: ${config.config_path}; durable state: ${config.state_root}`,
+    `Canonical repository/accounting directory: ${config.directory}; existing Session working directory: ${state.native_directory ?? config.directory}. Preserve a legitimate worktree move; do not move the Session back just to satisfy the monitor.`,
     `Campaign accounting: ${JSON.stringify(budget)}`,
     "Before a separately billed benchmark or practical CLI session, reserve it through this runner's reserve command, using a unique id, its exact output state/observation path, and its full maximum exposure. Do not launch if reservation fails. Reservations and previous attempts survive restarts. Use the existing supervisor's own cost limit as well. Do not count unknown price as zero or claim an exact charge guarantee.",
     decision.handoff ? `Previous verified handoff: ${JSON.stringify(decision.handoff)}\nNext useful action: ${decision.reason}` : "Start with the current real task and existing evidence, not a toy smoke task or a new diagnostic framework.",
     "Make useful progress within the current task. When waiting for detached inference, return wait_for with kind=supervisor and its absolute state path. User decisions, unrecoverable errors and exhausted budgets are blocked, never automatically resumed.",
-    "End the turn with <autodev>{\"status\":\"continue|wait|blocked|complete\",\"summary\":\"observable outcome / blocker\",\"next_action\":\"concrete next operation\",\"evidence\":[\"absolute existing evidence path\"],\"wait_for\":[]}</autodev>. Evidence must reflect actual work or a terminal backend result, not just a newly written plan. complete means the requested development campaign is finished; never use it for an intermediate unit or a patch without acceptance.",
+    ...(config.autonomy?.reconsider_blocked_once ? [
+      `Existing stable work_id: ${decision.continuation?.work_id ?? state.work_id ?? "use the current canonical outcome card ID"}. Keep that exact identity until the full current card is completed and the live board selects the next card; do not rename it for a subunit or blocker.`,
+      "Standing-delegation scheduling: a deferred Windows/host/input/validation step does not stop available authorized product source work. Return continue with its concrete local next_action and deferred:[{reason,next_action}] for external steps. Use a stable work_id equal to the current full outcome card ID, not a subunit or changing prose. blocked means no authorized local product work remains, not merely that a later real-input/host gate is unavailable. Optional local_next_action identifies still-available authorized source work; local_work_exhausted:true records genuine exhaustion with concrete evidence. blocker_kind can distinguish host/input/implementation from budget/auth/permission/acceptance/no-resend. These are scheduling hints, not new approval or acceptance authority.",
+      ...(decision.continuation?.kind === "reconsider-blocker" ? [
+        "Hermes automatically requests ONE bounded reconsideration of this blocked work unit under the retained standing delegation. This is the same implementation Session, not a new reviewer or controller. Separate unavailable real-input execution from implementation still possible locally. Inspect the existing product path, implement its smallest meaningful unconnected step if authorized, and return continue with actual changed source evidence. Do not merely rename the blocker, add documentation/probes/scaffolding or repeat completed work. If genuinely no local work remains, return blocked with local_work_exhausted:true, the exact missing native input/host operation and evidence. Do not acquire new permissions, fees, models, receipts or product Task starts; do not replay consumed operations. The same work/authority will not be reconsidered again automatically.",
+      ] : []),
+    ] : []),
+    "ユーザーへの通知は必ず日本語で最大5行。handoffには notification:{outcome,blocker,next_action,question} を追加し、各値は日本語の短い1文（70字以内、改行なし）、不要なblocker/questionはnull。outcomeは今回の実成果、blocker/questionは今の停止理由・必要な判断、next_actionは次の操作。英語の引継ぎ原文、過去の予算停止、パス・ハッシュ・Session ID・ログを通知文に転載しない。詳細証跡は既存evidenceへ保持。通知形式のために追加モデルやレビューを呼ばない。",
+    "利用者の操作が必要ならquestionへ具体的な操作依頼を書き、next_actionで利用者の操作とこちらの操作を区別する。『次に受入します』だけで受入ボタン操作待ちを隠さない。最新の結果固有の承認を読む。同じ承認を再要求しない。送信成功は既読・認知の証拠ではない。",
+    "End the turn with <autodev>{\"status\":\"continue|wait|blocked|complete\",\"summary\":\"observable outcome / blocker\",\"next_action\":\"concrete next operation\",\"notification\":{\"outcome\":\"今回の実成果を日本語で短く要約\",\"blocker\":null,\"next_action\":\"次の操作を日本語で短く要約\",\"question\":null},\"evidence\":[\"absolute existing evidence path\"],\"wait_for\":[]}</autodev>. Evidence must reflect actual work or a terminal backend result, not just a newly written plan. complete means the requested development campaign is finished; never use it for an intermediate unit or a patch without acceptance.",
   ].join("\n\n");
 }
 
@@ -228,6 +283,7 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
   const lock = execute ? await acquireRunLock(config.state_root) : null;
   try {
     const state = await readState(config);
+    state.standing_authority = await standingInstructions(config);
     for (const path of config.required_commands ?? []) {
       if (!await present(path)) {
         const result = { project: config.id, action: "needs-host", reason: `required canonical command unavailable: ${path}` };
@@ -239,25 +295,35 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
       }
     }
     let client = supplied;
-    let observation = null, proof = null;
+    let observation = null, proof = null, handoff = null;
     if (state.session_id) {
       client ??= await connect();
       observation = await observe(client, state);
+      state.native_directory = observation.root.location.directory;
       state.native_priced_usd = Math.max(state.native_priced_usd, observation.cost.priced);
-      if (observation.busy && state.pending && !observation.cost.unknown.length)
+      if (state.pending && !state.accounted_dispatches.includes(state.pending.id))
         state.native_reservation_usd = Math.max(0, state.pending.reservation_usd -
           (state.native_priced_usd - state.pending.priced_at_start));
       if (!observation.busy && observation.acknowledged && state.pending &&
         !state.accounted_dispatches.includes(state.pending.id)) {
-        if (observation.cost.unknown.length) state.native_held_usd += state.native_reservation_usd;
+        if (observation.current_unknown.length) {
+          state.native_held_usd += state.native_reservation_usd;
+          (state.native_holds ??= []).push({ dispatch_id: state.pending.id,
+            held_usd: state.native_reservation_usd, unknown_message_ids: observation.current_unknown });
+        }
         state.native_reservation_usd = 0;
         state.accounted_dispatches.push(state.pending.id);
       }
-      const handoff = parseHandoff(observation.text);
-      if (handoff) proof = await handoffEvidence(handoff);
+      // New owner instructions supersede an old handoff, not native execution or
+      // accounting. Missing old temporary evidence must not prevent recovery.
+      handoff = state.next_instruction ? null : parseHandoff(observation.text);
+      if (typeof handoff?.work_id === "string" && handoff.work_id.trim()) state.work_id = handoff.work_id;
+      if (handoff && (!state.paused || (state.pause_origin === "runner" &&
+        config.autonomy?.reconsider_blocked_once === true && state.standing_authority)) && !observation.busy && !observation.needs_input &&
+        observation.acknowledged && observation.settled) proof = await handoffEvidence(handoff);
     }
     const budget = await accounting(state);
-    const decision = nextAction(state, observation, proof);
+    const decision = nextAction(state, observation, proof, config);
     // A fully reserved operation is admitted work, not exhausted measured usage.
     if (budget.limit_usd !== null && (budget.exposure_usd > budget.limit_usd + 1e-8 ||
       budget.spent_or_unknown_usd >= budget.limit_usd)) {
@@ -282,7 +348,13 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
         }
         const text = workPrompt(config, state, decision, budget);
         state.pending = { id: randomUUID(), sent_at: new Date().toISOString(), prompt_sha256: sha(text), status: "sending",
-          priced_at_start: state.native_priced_usd, reservation_usd: reserve };
+          priced_at_start: state.native_priced_usd, reservation_usd: reserve,
+          unknown_at_start: observation?.cost.unknown ?? [] };
+        if (decision.continuation?.kind === "reconsider-blocker") {
+          (state.autonomous_reconsiderations ??= []).push({ ...decision.continuation,
+            dispatch_id: state.pending.id, at: state.pending.sent_at });
+        }
+        state.paused = false; delete state.pause_reason; delete state.pause_origin;
         state.native_reservation_usd = reserve;
         state.last_progress = proof?.fingerprint ?? null;
         delete state.next_instruction;
@@ -302,16 +374,131 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
     }
     if (execute) {
       if (["blocked", "complete"].includes(decision.action)) {
-        state.paused = true; state.pause_reason = decision.reason;
+        state.paused = true; state.pause_reason = decision.reason; state.pause_origin = "runner";
       }
       state.updated_at = new Date().toISOString();
       state.last_action = { action: decision.action, reason: decision.reason };
       await writeAtomicJson(join(config.state_root, "state.json"), state);
     }
     const result = { project: config.id, ...decision, session_id: state.session_id,
-      budget: await accounting(state), observed_models: observation?.models ?? [], proof };
+      native_directory: state.native_directory ?? null,
+      budget: await accounting(state), observed_models: observation?.models ?? [], proof,
+      reconciliation: state.last_reconciliation ?? null,
+      handoff: decision.handoff ?? handoff,
+      inputs: observation?.sessions.filter(item => item.permissions.length || item.forms.length)
+        .map(item => ({ session_id: item.id, permissions: item.permissions, forms: item.forms })) ?? [] };
     if (execute) await appendFile(join(config.state_root, "events.jsonl"), `${JSON.stringify({ at: state.updated_at, ...result })}\n`);
     return result;
+  } finally { await releaseRunLock(lock); }
+}
+
+export async function runTick(config, options = {}, notificationOptions = {}) {
+  try {
+    const result = await tick(config, options);
+    return options.notify ? notification(config, result, { ...notificationOptions, execute: Boolean(options.execute) }) : result;
+  } catch (error) {
+    if (options.notify) {
+      const state = await readState(config);
+      const result = { project: config.id, action: "needs-host", reason: `runner-error:${error.message}`,
+        session_id: state.session_id, budget: await accounting(state), inputs: [] };
+      if (options.execute) {
+        const lock = await acquireRunLock(config.state_root);
+        try {
+          const current = await readState(config);
+          current.monitoring_error = { at: new Date().toISOString(), reason: error.message };
+          await writeAtomicJson(join(config.state_root, "state.json"), current);
+          await appendFile(join(config.state_root, "events.jsonl"), `${JSON.stringify({ at: current.monitoring_error.at, ...result })}\n`);
+        } finally { await releaseRunLock(lock); }
+      }
+      await notification(config, result, { ...notificationOptions, execute: Boolean(options.execute) });
+    }
+    throw error; // A delivered diagnostic must not turn an unsuccessful tick into success.
+  }
+}
+
+// Explicit repair of a retained ledger, never a new inference attempt or automatic resume.
+export async function reconcile(config, { execute = false, client: supplied } = {}) {
+  const lock = execute ? await acquireRunLock(config.state_root) : null;
+  try {
+    const state = await readState(config), beforeState = JSON.stringify(state);
+    ensure(state.session_id, "reconciliation-requires-existing-session");
+    const observation = await observe(supplied ?? await connect(), state);
+    ensure(!observation.busy, "reconciliation-waits-for-owned-work");
+    const before = await accounting(state);
+    const unknown = new Set(observation.cost.unknown), assignments = new Map();
+    const own = observation.sessions.find(item => item.id === state.session_id);
+    const dispatches = own.messages.filter(item => item.type === "user" && item.metadata?.autodev_dispatch);
+    ensure(state.accounted_dispatches.every(id => dispatches.some(item => item.metadata.autodev_dispatch === id)),
+      "settled-dispatch-history-incomplete");
+    const observedIds = new Set(observation.sessions.flatMap(item => item.messages.map(message => message.id)));
+    ensure((state.native_holds ?? []).every(item => item.unknown_message_ids.every(id => observedIds.has(id))),
+      "previous-unknown-message-unavailable");
+    let dispatch;
+    const assign = (message, id) => {
+      if (!unknown.has(message.id)) return;
+      ensure(id && state.accounted_dispatches.includes(id), "unknown-usage-without-settled-dispatch");
+      const ids = assignments.get(id) ?? [];
+      ids.push(message.id); assignments.set(id, ids); unknown.delete(message.id);
+    };
+    for (const message of own.messages) {
+      if (message.type === "user" && message.metadata?.autodev_dispatch) dispatch = message.metadata.autodev_dispatch;
+      assign(message, dispatch);
+    }
+    for (const session of observation.sessions.filter(item => item.id !== state.session_id)) {
+      for (const message of session.messages.filter(item => unknown.has(item.id))) {
+        ensure(message.time?.created && dispatches.every(item => item.time?.created), "unknown-descendant-time-unavailable");
+        assign(message, dispatches.filter(item => item.time.created <= message.time.created).at(-1)?.metadata.autodev_dispatch);
+      }
+    }
+    ensure(!unknown.size, "unattributed-native-unknown-usage");
+    state.native_priced_usd = Math.max(state.native_priced_usd, observation.cost.priced);
+    const existing = new Map((state.native_holds ?? []).map(item => [item.dispatch_id, item]));
+    state.native_holds = [...assignments].map(([dispatch_id, unknown_message_ids]) => ({ dispatch_id,
+      held_usd: existing.get(dispatch_id)?.held_usd ?? config.budget?.turn_reserve_usd ?? 0,
+      unknown_message_ids }));
+    state.native_held_usd = state.native_holds.reduce((sum, item) => sum + item.held_usd, 0);
+    const releases = [];
+    for (const source of state.sources.filter(item => item.kind === "supervisor" && !item.no_inference_release)) {
+      if (!await present(source.path)) continue;
+      const value = await json(source.path);
+      if (!["completed", "failed"].includes(value.status)) continue;
+      const proofs = [];
+      for (const item of value.instances ?? []) {
+        const result = item.result;
+        if (!item.held_unknown_usd || !result?.status?.startsWith("prepared-environment-image-missing:") ||
+          result.failure !== result.status || result.usage?.requests !== 0 || result.usage?.usd !== 0 ||
+          result.usage?.unpriced?.length !== 0 || result.watchdog_events !== 0 || result.exit_code !== null ||
+          !result.replay_artifact?.path) continue;
+        const replayBytes = await readFile(result.replay_artifact.path);
+        ensure(sha(replayBytes) === result.replay_artifact.sha256, "no-inference-replay-unconfirmed");
+        const artifact = JSON.parse(replayBytes);
+        ensure(artifact.failure === result.failure &&
+          artifact.execution?.command === null && artifact.execution?.exit_code === null &&
+          artifact.execution?.stdout_bytes === 0 && artifact.execution?.stderr_bytes === 0 && artifact.patch_bytes === 0,
+        "no-inference-replay-unconfirmed");
+        proofs.push({ instance_id: item.instance_id, usd: item.held_unknown_usd,
+          replay: result.replay_artifact.path, replay_sha256: result.replay_artifact.sha256, reason: result.failure });
+      }
+      if (proofs.length) {
+        source.no_inference_release = { snapshot_sha256: sha(JSON.stringify(value)),
+          usd: proofs.reduce((sum, item) => sum + item.usd, 0), proofs };
+        releases.push({ source_id: source.id, ...source.no_inference_release });
+      }
+    }
+    const after = await accounting(state), at = new Date().toISOString();
+    const receipt = { at, project: config.id, action: "reconciled", session_id: state.session_id,
+      original_state_sha256: sha(beforeState), original_state: JSON.parse(beforeState),
+      before, after, native_holds: state.native_holds, releases,
+      paused: state.paused, conditions_unchanged: true };
+    if (execute) {
+      const path = join(config.state_root, `reconciliation-${at.replaceAll(":", "-")}.json`);
+      await writeAtomicJson(path, receipt);
+      state.last_reconciliation = { path, at, sha256: sha(JSON.stringify(receipt)),
+        before_exposure_usd: before.exposure_usd, after_exposure_usd: after.exposure_usd };
+      await writeAtomicJson(join(config.state_root, "state.json"), state);
+      await appendFile(join(config.state_root, "events.jsonl"), `${JSON.stringify(receipt)}\n`);
+    }
+    return receipt;
   } finally { await releaseRunLock(lock); }
 }
 
@@ -409,14 +596,16 @@ export async function main(args = process.argv.slice(2)) {
   while (args.length) {
     const key = args.shift();
     ensure(key.startsWith("--"), "expected-option");
-    options[key.slice(2)] = ["execute", "quiet"].includes(key.slice(2)) ? true : args.shift();
+    options[key.slice(2)] = ["execute", "quiet", "notify"].includes(key.slice(2)) ? true : args.shift();
   }
   if (command === "verify-cycle") return verifyCycle(resolve(options.receipt));
   ensure(options.config, "--config is required");
   const config = await loadProject(options.config, options.directory ? { directory: options.directory } : {});
   if (command === "plan") return { project: config.id, directory: config.directory, workflow: config.workflow,
-    objective: config.objective, instructions: config.instructions, state_root: config.state_root, budget: config.budget };
+    objective: config.objective, instructions: config.instructions, state_root: config.state_root, budget: config.budget,
+    autonomy: config.autonomy ?? null };
   if (command === "status") return { project: config.id, state: await readState(config), budget: await accounting(await readState(config)) };
+  if (command === "reconcile") return reconcile(config, { execute: Boolean(options.execute) });
   if (command === "reserve") return reserveSource(config, { id: options.id, kind: options.kind,
     path: resolve(options.path), reservation_usd: Number(options.usd) });
   if (["pause", "resume"].includes(command)) {
@@ -424,19 +613,21 @@ export async function main(args = process.argv.slice(2)) {
     try {
       const state = await readState(config);
       state.paused = command === "pause";
-      if (command === "pause") state.pause_reason = options.reason ?? "owner-paused";
+      if (command === "pause") { state.pause_reason = options.reason ?? "owner-paused"; state.pause_origin = "owner"; }
       else {
         ensure(options.instruction, "resume requires a new explicit owner --instruction file; no automatic retry");
         state.next_instruction = await readFile(resolve(options.instruction), "utf8");
         ensure(state.next_instruction.trim(), "owner-instruction-empty");
         delete state.pause_reason;
+        delete state.pause_origin;
       }
       await writeAtomicJson(join(config.state_root, "state.json"), state);
       return { project: config.id, action: command === "pause" ? "paused" : "resumed", session_id: state.session_id };
     } finally { await releaseRunLock(lock); }
   }
-  ensure(command === "tick", "commands: plan, status, tick [--execute], reserve, verify-cycle, pause, resume");
-  const result = await tick(config, { execute: Boolean(options.execute) });
+  ensure(command === "tick", "commands: plan, status, tick [--execute], reconcile [--execute], reserve, verify-cycle, pause, resume");
+  const result = await runTick(config, { execute: Boolean(options.execute), notify: Boolean(options.notify) });
+  if (options.notify) return result;
   if (options.quiet && options.execute) {
     if (["running", "waiting", "paused"].includes(result.action)) return null;
     const notice = join(config.state_root, "last-output.json");
@@ -448,6 +639,6 @@ export async function main(args = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  try { const result = await main(); if (result) console.log(JSON.stringify(result, null, 2)); }
+  try { const result = await main(); if (result) console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2)); }
   catch (error) { console.error(JSON.stringify({ action: "error", reason: error.message })); process.exitCode = 1; }
 }
