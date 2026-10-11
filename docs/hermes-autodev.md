@@ -58,6 +58,25 @@ follow this configured delegation. Existing Task/model/fee/replay/acceptance lim
 and final Windows validation remain intact. Sortie has no automatic reconsideration
 policy; its campaign conditions remain unchanged except for explicit owner-authorized budget additions.
 
+### Native recovery is observation, not a failed-task retry
+
+Runner-origin observation stops (native failure, unknown admission, missing handoff or
+unchanged evidence) are re-evaluated on each tick. Previously `paused` returned before
+the live observation could matter, leaving a recovered Session permanently stopped.
+Owner/legacy pauses, real external gates and budget stops are still retained. An
+unresolved error makes no new request; only acknowledged native success with current
+evidence and sufficient budget can continue. Active native work or pending native input
+is reported without queueing another prompt. `last_recovery` binds the previous stop,
+original dispatch and actual terminal message; previous costs and unknown holds remain.
+
+The observer reads the latest assistant step after the latest user instruction, not
+the last historical successful message. A later error, unfinished step or unanswered
+native instruction invalidates an older successful handoff, even if the Session still
+reports its previous succeeded outcome. Notifications distinguish missing tool output,
+authentication and interruption without copying private provider response bodies.
+This does not repair the provider/OpenCode missing-tool-output error itself or authorize
+blind retries. It prevents that earlier error from hiding later genuine native recovery.
+
 The final worker message contains:
 
 ```text
@@ -67,6 +86,8 @@ The final worker message contains:
 For detached inference use `status: "wait"` and
 `wait_for: [{"kind":"supervisor","path":"/absolute/supervisor-state.json"}]`.
 While the supervisor runs, no continuation is sent even as its heartbeat changes.
+Its state hash participates in the evidence fingerprint, so a terminal backend result
+wakes the same retained handoff even when other source/evidence files did not change.
 `complete` ends the development campaign, not an intermediate unit/card.
 The handoff controls scheduling; its prose is **not proof of benchmark resolution or
 product acceptance**.
