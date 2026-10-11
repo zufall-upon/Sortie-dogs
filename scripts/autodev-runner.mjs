@@ -20,6 +20,16 @@ const present = async path => access(path).then(() => true, error => {
 const ensure = (ok, message) => { if (!ok) throw Error(message); };
 const nonnegative = value => Number.isFinite(value) && value >= 0;
 const exec = promisify(execFile);
+const observationPauseReasons = new Set([
+  "native-turn-not-succeeded; inspect its actual error",
+  "prompt-admission-unknown; inspect before any intentional resend",
+  "missing-structured-handoff; no blind keep-going loop",
+  "no-new-work-evidence; diagnose before continuing",
+]);
+// Re-observation is not a retry. A recovered native turn still has to satisfy
+// admission, latest-result, evidence and budget checks before any new work.
+const observePausedNative = state => state.paused && state.pause_origin === "runner" &&
+  observationPauseReasons.has(state.pause_reason);
 
 export async function loadProject(path, overrides = {}) {
   path = resolve(path);
@@ -173,8 +183,10 @@ export async function observe(client, state) {
   const userIndex = dispatch ? own.messages.findIndex(item => item.type === "user" && item.metadata?.autodev_dispatch === dispatch) : -1;
   const queued = Boolean(dispatch && own.inbox.some(item => item.payload?.metadata?.autodev_dispatch === dispatch));
   const turn = userIndex < 0 ? [] : own.messages.slice(userIndex + 1);
-  const final = turn.filter(item => item.type === "assistant" && item.time?.completed &&
-    item.finish === "stop").at(-1);
+  const latestUserIndex = own.messages.findLastIndex(item => item.type === "user");
+  const latest = userIndex < 0 ? null : own.messages.slice(Math.max(userIndex, latestUserIndex) + 1)
+    .filter(item => item.type === "assistant").at(-1);
+  const final = latest?.time?.completed && latest.finish === "stop" && !latest.error ? latest : null;
   const text = final?.content.filter(item => item.type === "text").map(item => item.text).join("\n") ?? "";
   const cost = nativeCost(sessions.flatMap(item => item.messages));
   const currentUnknown = state.pending?.unknown_at_start
@@ -187,6 +199,10 @@ export async function observe(client, state) {
     needs_input: sessions.some(item => item.permissions.length || item.forms.length),
     settled: userIndex >= 0 && Boolean(final) && root.outcome === "succeeded",
     text, cost, current_unknown: currentUnknown,
+    terminal: latest ? { message_id: latest.id, user_message_id: own.messages[latestUserIndex]?.id,
+      finish: latest.finish, completed_at: latest.time?.completed ?? null } : null,
+    native_failure: latest?.error ? { message_id: latest.id, type: latest.error.type,
+      message: latest.error.message?.slice(0, 500) } : null,
     models: [...new Map(sessions.flatMap(item => item.messages.filter(message => message.type === "assistant")
       .map(message => { const model = { session_id: item.id, agent: message.agent, model: message.model };
         return [JSON.stringify(model), model]; }))).values()] };
@@ -206,20 +222,22 @@ export async function handoffEvidence(handoff) {
   const files = [];
   for (const path of handoff.evidence) files.push({ path, sha256: sha(await readFile(path)) });
   let waiting = false;
-  const progress = [];
+  const progress = [], waits = [];
   for (const wait of handoff.wait_for ?? []) {
     ensure(wait.kind === "supervisor" && isAbsolute(wait.path), "unsupported-wait: use blocked for user decisions");
-    const state = await json(wait.path);
+    const bytes = await readFile(wait.path), state = JSON.parse(bytes);
+    if (!files.some(file => file.path === wait.path)) waits.push({ path: wait.path, sha256: sha(bytes) });
     if (!["completed", "failed"].includes(state.status)) waiting = true;
     if (Array.isArray(state.instances)) progress.push({ total: state.instances.length,
       finished: state.instances.filter(item => item.result).length, status: state.status });
   }
-  return { files, waiting, progress, fingerprint: files.length ? sha(JSON.stringify(files)) : null };
+  return { files, waits, waiting, progress,
+    fingerprint: files.length || waits.length ? sha(JSON.stringify([...files, ...waits])) : null };
 }
 
 export function nextAction(state, observation, proof = null, config = {}) {
   const delegated = config.autonomy?.reconsider_blocked_once === true && Boolean(state.standing_authority?.sha256);
-  if (state.paused && !(delegated && state.pause_origin === "runner"))
+  if (state.paused && !observePausedNative(state) && !(delegated && state.pause_origin === "runner"))
     return { action: "paused", reason: state.pause_reason ?? "operator-paused" };
   if (!state.session_id) return { action: "dispatch", reason: "first-work-unit" };
   if (observation.needs_input) return { action: "needs-input", reason: "native permission or question pending; preserve host authority" };
@@ -319,9 +337,12 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
       handoff = state.next_instruction ? null : parseHandoff(observation.text);
       if (typeof handoff?.work_id === "string" && handoff.work_id.trim()) state.work_id = handoff.work_id;
       if (handoff && (!state.paused || (state.pause_origin === "runner" &&
-        config.autonomy?.reconsider_blocked_once === true && state.standing_authority)) && !observation.busy && !observation.needs_input &&
+        config.autonomy?.reconsider_blocked_once === true && state.standing_authority) || observePausedNative(state)) &&
+        !observation.busy && !observation.needs_input &&
         observation.acknowledged && observation.settled) proof = await handoffEvidence(handoff);
     }
+    const previousPause = observePausedNative(state) ? { previous_reason: state.pause_reason,
+      dispatch_id: state.pending?.id, terminal_id: observation?.terminal?.message_id ?? null } : null;
     const budget = await accounting(state);
     const decision = nextAction(state, observation, proof, config);
     // A fully reserved operation is admitted work, not exhausted measured usage.
@@ -372,7 +393,13 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
         }
       }
     }
+    const recovery = previousPause && ["running", "needs-input", "waiting", "dispatched"].includes(decision.action)
+      ? { ...previousPause, at: new Date().toISOString(), action: decision.action } : null;
     if (execute) {
+      if (recovery) {
+        state.paused = false; delete state.pause_reason; delete state.pause_origin;
+        state.last_recovery = recovery;
+      }
       if (["blocked", "complete"].includes(decision.action)) {
         state.paused = true; state.pause_reason = decision.reason; state.pause_origin = "runner";
       }
@@ -383,6 +410,7 @@ export async function tick(config, { execute = false, client: supplied } = {}) {
     const result = { project: config.id, ...decision, session_id: state.session_id,
       native_directory: state.native_directory ?? null,
       budget: await accounting(state), observed_models: observation?.models ?? [], proof,
+      native_failure: observation?.native_failure ?? null, recovery,
       reconciliation: state.last_reconciliation ?? null,
       handoff: decision.handoff ?? handoff,
       inputs: observation?.sessions.filter(item => item.permissions.length || item.forms.length)

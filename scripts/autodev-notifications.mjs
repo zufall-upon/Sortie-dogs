@@ -121,6 +121,16 @@ export function formatNotification(config, result) {
     next = reconsidering ? "同じ開発セッションで、進められる製品作業を一度確認します。"
       : japaneseLine(result.continuation.next_action, "同じ開発セッションで製品実装を進めます。");
   }
+  if (blocked && result.reason === "native-turn-not-succeeded; inspect its actual error" && result.native_failure) {
+    const failure = result.native_failure;
+    blocker = failure.type === "provider.invalid-request" && /No tool output found for function call/u.test(failure.message ?? "")
+      ? "ツール結果の欠損でモデルAPIが拒否。自動再送しません。"
+      : failure.type === "provider.auth" ? "モデル認証が失敗。既存の認証画面で更新が必要です。"
+      : failure.type === "aborted" ? "実セッションが中断。自動再送しません。"
+      : "実セッションがエラー終了。自動再送しません。";
+    next = failure.type === "provider.auth" ? "既存の認証画面でサインインを更新してください。"
+      : "保存済み結果と実セッションの復旧状態を確認します。";
+  }
   const costs = !budget ? "費用：集計待ち。請求額ではありません。"
     : budget.limit_usd === null ? `費用換算：計上${money(budget.exposure_usd)}（予約込み・請求額ではない）`
     : `費用換算：計上${money(budget.exposure_usd)}／残り${money(budget.limit_usd - budget.exposure_usd)}（予約込み・請求額ではない）`;
@@ -172,7 +182,8 @@ export async function notification(config, result, { execute = false, now = Date
     const transport = direct ? "hermes-send" : "cron";
     const signature = JSON.stringify({ format: FORMAT_VERSION, transport, action: result.action, reason: result.reason,
       handoff: result.handoff, inputs: result.inputs, progress: result.proof?.progress,
-      reconciliation: result.reconciliation?.path, continuation: result.continuation });
+      reconciliation: result.reconciliation?.path, continuation: result.continuation,
+      native_failure: result.native_failure ?? undefined, recovery: result.recovery ?? undefined });
     const active = ["running", "waiting"].includes(result.action);
     const handoffSignature = JSON.stringify({ handoff: result.handoff, inputs: result.inputs });
     const lastSignature = state.last ? JSON.parse(state.last.signature) : null;

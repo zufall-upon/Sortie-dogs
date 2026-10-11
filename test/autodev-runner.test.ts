@@ -149,6 +149,37 @@ test("native message pagination passes cursor alone, preserving admission and ac
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("native observation never substitutes an older success for a newer error, pending answer or unfinished step", async () => {
+  const { root, config } = await fixture();
+  const fake = fakeClient(config);
+  try {
+    await tick(config, { execute: true, client: fake.client });
+    fake.finish({ status: "continue", summary: "older result", evidence: [] });
+    const newer: any = { id: "newer-error", type: "assistant", finish: "error", time: { completed: Date.now() },
+      error: { type: "provider.invalid-request", message: "No tool output found for function call private-call." }, content: [] };
+    fake.data.messages.push(newer);
+    let value = await observe(fake.client, await readState(config));
+    assert.equal(value.settled, false, "even an old succeeded Session outcome cannot hide the latest error");
+    assert.equal(value.text, "");
+    assert.equal(value.terminal.message_id, newer.id);
+    assert.deepEqual(value.native_failure, { message_id: newer.id, ...newer.error });
+    fake.data.messages.pop();
+    fake.data.messages.push({ id: "owner-correction", type: "user", text: "Continue on the released version" });
+    value = await observe(fake.client, await readState(config));
+    assert.equal(value.acknowledged, true);
+    assert.equal(value.settled, false, "a new native owner instruction needs its own result");
+    assert.equal(value.text, "");
+    fake.data.messages.push({ id: "unfinished", type: "assistant", time: { created: Date.now() }, content: [] });
+    value = await observe(fake.client, await readState(config));
+    assert.equal(value.settled, false);
+    fake.finish({ status: "continue", summary: "new result", evidence: [] });
+    value = await observe(fake.client, await readState(config));
+    assert.equal(value.settled, true);
+    assert.match(value.text, /new result/);
+    assert.equal(value.native_failure, null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a retained native Session follows its worktree without changing campaign identity or replaying work", async () => {
   const { root, config } = await fixture();
   const fake = fakeClient(config);
@@ -225,6 +256,105 @@ test("useful completion settles known usage and continues the same session once 
     assert.match(result.reason, /no-new-work-evidence/);
     assert.equal((await readState(config)).native_reservation_usd, 0);
     assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 2);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a runner failure pause observes real recovery, waits without resending, and continues once when its original backend finishes", async () => {
+  const { root, config } = await fixture();
+  const fake = fakeClient(config), evidence = join(root, "actual-result.json"), supervisor = join(root, "supervisor.json");
+  try {
+    await writeFile(evidence, "retained actual source work");
+    await writeAtomicJson(supervisor, { status: "running", instances: [{ instance_id: "original-attempt" }] });
+    await tick(config, { execute: true, client: fake.client });
+    fake.data.active = {}; fake.data.outcome = "failed";
+    fake.data.messages.push({ id: "api-error", type: "assistant", finish: "error", time: { completed: Date.now() },
+      error: { type: "provider.invalid-request", message: "No tool output found for function call private-call." }, content: [] });
+    assert.equal((await tick(config, { execute: true, client: fake.client })).action, "blocked");
+    const paused = await readState(config);
+    assert.equal(paused.pause_origin, "runner");
+    assert.equal(paused.native_held_usd, 5, "unknown failed usage remains held");
+    for (let i = 0; i < 2; i++) {
+      const stopped = await tick(config, { execute: true, client: fake.client });
+      assert.equal(stopped.action, "blocked");
+      assert.equal(stopped.native_failure.type, "provider.invalid-request");
+    }
+    assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 1);
+    fake.data.outcome = "succeeded";
+    fake.finish({ status: "wait", summary: "original detached attempt remains active", evidence: [evidence],
+      wait_for: [{ kind: "supervisor", path: supervisor }] });
+    const waiting = await tick(config, { execute: true, client: fake.client });
+    assert.equal(waiting.action, "waiting");
+    assert.equal(waiting.recovery.previous_reason, paused.pause_reason);
+    const recovered = await readState(config);
+    assert.equal(recovered.paused, false);
+    assert.equal(recovered.pause_reason, undefined);
+    assert.deepEqual(recovered.pending, paused.pending);
+    assert.equal(recovered.native_held_usd, paused.native_held_usd);
+    assert.equal(recovered.last_recovery.terminal_id, fake.data.messages.at(-1).id);
+    assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 1);
+    recovered.last_progress = waiting.proof.fingerprint;
+    await writeAtomicJson(join(config.state_root, "state.json"), recovered);
+    assert.equal((await tick(config, { execute: true, client: fake.client })).action, "waiting");
+    await writeAtomicJson(supervisor, { status: "completed", instances: [{ instance_id: "original-attempt", result: { accepted: true } }] });
+    const continuation = await tick(config, { execute: true, client: fake.client });
+    assert.equal(continuation.action, "dispatched", "terminal backend change wakes unchanged handoff evidence");
+    assert.notEqual(continuation.proof.fingerprint, waiting.proof.fingerprint);
+    assert.equal((await tick(config, { execute: true, client: fake.client })).action, "running");
+    assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 2);
+    assert.equal(fake.calls.filter(item => item[0] === "create").length, 1);
+    assert.equal((await readState(config)).native_held_usd, 5);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native recovery remains visible during activity and permission waits without queueing another prompt", async () => {
+  const { root, config } = await fixture();
+  const fake = fakeClient(config);
+  try {
+    await tick(config, { execute: true, client: fake.client });
+    const paused = await readState(config);
+    paused.paused = true; paused.pause_origin = "runner";
+    paused.pause_reason = "native-turn-not-succeeded; inspect its actual error";
+    for (const mode of ["running", "needs-input"]) {
+      await writeAtomicJson(join(config.state_root, "state.json"), paused);
+      fake.data.active = mode === "running" ? { [fake.data.id]: { type: "running" } } : {};
+      fake.data.permissions = mode === "needs-input" ? [{ id: "native-permission" }] : [];
+      const result = await tick(config, { execute: true, client: fake.client });
+      assert.equal(result.action, mode);
+      assert.equal((await readState(config)).paused, false);
+      assert.deepEqual((await readState(config)).pending, paused.pending);
+      assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 1);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovered native stops still preserve owner pauses, external gates, evidence and cumulative budget", async () => {
+  const { root, config } = await fixture();
+  const fake = fakeClient(config), evidence = join(root, "actual-result.json");
+  try {
+    await writeFile(evidence, "real result");
+    await tick(config, { execute: true, client: fake.client });
+    fake.finish({ status: "continue", summary: "recovered result", evidence: [evidence] });
+    const original = await readState(config);
+    const paused = { ...original, paused: true, pause_origin: "runner",
+      pause_reason: "native-turn-not-succeeded; inspect its actual error" };
+    for (const fields of [{ pause_origin: "owner" }, { pause_origin: undefined },
+      ...["campaign-budget-exhausted", "actual Windows-only gate", "acceptance decision pending", "session-creation-unconfirmed"]
+        .map(pause_reason => ({ pause_reason }))]) {
+      await writeAtomicJson(join(config.state_root, "state.json"), { ...paused, ...fields });
+      assert.equal((await tick(config, { execute: true, client: fake.client })).action, "paused");
+    }
+    await writeAtomicJson(join(config.state_root, "state.json"), { ...paused, last_progress:
+      createHash("sha256").update(JSON.stringify([{ path: evidence,
+        sha256: createHash("sha256").update("real result").digest("hex") }])).digest("hex") });
+    assert.equal((await tick(config, { execute: true, client: fake.client })).reason,
+      "no-new-work-evidence; diagnose before continuing");
+    await writeAtomicJson(join(config.state_root, "state.json"), { ...paused, native_priced_usd: 299 });
+    assert.equal((await tick(config, { execute: true, client: fake.client })).reason, "insufficient-remaining-campaign-budget");
+    assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 1);
+    await writeAtomicJson(join(config.state_root, "state.json"), paused);
+    await rm(evidence);
+    await assert.rejects(tick(config, { execute: true, client: fake.client }), /ENOENT/);
+    assert.equal(fake.calls.filter(item => item[0] === "prompt").length, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -611,6 +741,26 @@ test("recovery from a stop is immediate rather than hidden by the thirty-minute 
       { execute: true, now: 1_120_000, delivery }), /作業中/);
     assert.equal(await notification(config, { action: "running", reason: "復旧して実作業中" },
       { execute: true, now: 1_240_000, delivery }), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("API failure notices describe the actual missing tool result without copying private provider payloads", async () => {
+  const { root, config } = await fixture();
+  config.notifications = { job_id: "job" };
+  const delivery = async () => ({ current_execution_id: "cron-execution" });
+  const result = { action: "blocked", reason: "native-turn-not-succeeded; inspect its actual error",
+    native_failure: { message_id: "private-message", type: "provider.invalid-request",
+      message: "No tool output found for function call private-call." } };
+  try {
+    const text = await notification(config, result, { execute: true, now: 1_000_000, delivery });
+    assert.match(text, /ツール結果.*欠損/);
+    assert.match(text, /再送しません/);
+    assert.doesNotMatch(text, /private-call|private-message|No tool output|provider.invalid-request/);
+    assert.equal(text.split("\n").length, 5);
+    assert.equal(await notification(config, result, { execute: true, now: 1_120_000, delivery }), null);
+    assert.match(await notification(config, { ...result, native_failure: {
+      type: "provider.auth", message: "Private token text not for notification" } },
+    { execute: true, now: 1_240_000, delivery }), /認証/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
