@@ -7,14 +7,14 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import test from "node:test";
-import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { missionPacket, OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration"] as const) test(`${actor} direct execution: ${mode}`, async t => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source"] as const) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const external = ["external-cwd", "registration"].includes(mode);
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -25,6 +25,12 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
   try {
     await mkdir(product, { recursive: true });
     await exec("git", ["init", "--quiet"], { cwd: product });
+    if (mode === "large-source") {
+      await mkdir(join(product, "context"));
+      await Promise.all(Array.from({ length: 240 }, (_, i) => writeFile(join(product, "context", `protected-source-${i}.txt`), "protected source\n")));
+      await exec("git", ["add", "--", "context"], { cwd: product });
+      await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture protected inputs"], { cwd: product });
+    }
     if (mode === "junction") {
       const target = join(directory, "profile", "IE"), alias = join(directory, "profile", "Content.IE5");
       await mkdir(target, { recursive: true });
@@ -253,6 +259,35 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     assert.ok(done.units[0]!.evidence.length);
     assert.equal(done.units[0]!.directExecution!.checks.length, checked.length, "finish preserves observed validation without reruns");
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    if (mode === "large-source") {
+      const rawBytes = Buffer.byteLength(JSON.stringify(missionPacket(mission, done)));
+      const finishBytes = Buffer.byteLength(JSON.stringify(finished));
+      t.diagnostic(JSON.stringify({ raw_packet_bytes: rawBytes, finish_packet_bytes: finishBytes }));
+      assert.ok(rawBytes > 32_000, "tracked inputs reproduce a large one-line finish packet");
+      assert.ok(finishBytes < 16_000, "successful transition and next action fit without protected arrays");
+      assert.ok(rawBytes - finishBytes > 20_000);
+    }
+    assert.equal(finished.status, done.phase);
+    assert.equal(finished.units[0].status, "succeeded");
+    assert.equal(finished.execution_summary.accepted, false, "unit validation is not Mission acceptance");
+    assert.match(finished.next_action, /do not repeat passed checks or finish this settled unit again/);
+    assert.match(finished.next_action, /Independent Review and Operator final acceptance remain required/);
+    const full = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+    assert.deepEqual(full.units[0].evidence, done.units[0]!.evidence, "full diagnostics retain authoritative proof");
+    for (const [index, proof] of done.units[0]!.evidence.entries()) {
+      const { protected_binding, ...measured } = proof;
+      const compact = finished.units[0].evidence[index];
+      assert.deepEqual(compact, { ...measured, ...(protected_binding ? { protected_binding_ref: {
+        manifest_path: protected_binding.manifest_path, manifest_hash: protected_binding.manifest_hash,
+        source_policy: protected_binding.source_policy,
+      } } : {}) }, "finish keeps command, exit, timing, identity and proof scope without snapshot arrays");
+    }
+    assert.deepEqual(finished.units[0].evidence_details_ref, {
+      path: new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root"), run_id: done.runID,
+      unit_id: done.units[0]!.unit.id, field: "units[].evidence",
+      omitted: "host snapshot recipe: source/candidate paths and freshness environment",
+    });
+    assert.deepEqual((await readRun()).units[0]!.evidence, done.units[0]!.evidence, "response projection never rewrites saved validation");
     assert.equal(mission.id, started.mission_id);
     assert.equal(mission.attempts?.length, mode.endsWith("replan") ? 2 : 1);
     assert.equal(mission.attempts?.[0]?.kind, "direct_execution");
