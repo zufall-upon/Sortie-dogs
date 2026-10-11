@@ -923,6 +923,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const detail = "Operation result: execution-failed (result accepted; process did not succeed).";
       return text.includes(detail) ? text : text.replace(/^((?:[ \t]*\r?\n)*[^\r\n]+)/u, `$1 ${detail}`);
     }
+    function compactMissionEvidence(packet: Record<string, unknown>, run: import("../core/operator-runtime.js").OperatorState | undefined, root: string) {
+      if (run && run.runID === packet.run_id && Array.isArray(packet.units)) {
+        const validation = missionReviewValidation(run, operators.statePath(root));
+        packet.units = packet.units.map((unit, index) => ({ ...unit, evidence: validation[index]!.evidence,
+          evidence_details_ref: validation[index]!.details_ref }));
+      }
+      return packet;
+    }
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
@@ -1393,12 +1401,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              delete packet.coordinator_dispatch;
            }
            if (view === "progress") return JSON.stringify(missionProgress(mission, run, budget, packet));
-           if (view !== "full" && run?.runID === mission.runID && Array.isArray(packet.units)) {
-             const validation = missionReviewValidation(run, operators.statePath(root!));
-             packet.units = packet.units.map((unit, index) => ({ ...unit, evidence: validation[index]!.evidence,
-               evidence_details_ref: validation[index]!.details_ref }));
-           }
-           return JSON.stringify(packet);
+            return JSON.stringify(view === "full" ? packet : compactMissionEvidence(packet, run, root!));
         }
         if (root && context.sessionID !== root) {
           const owned = await operators.read(root);
@@ -1860,8 +1863,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (direct.unit.reviewerCorrection) return JSON.stringify({ status: "correction-validated",
             execution: "same-native-task", validation: direct.unit.unit.validation,
             next_action: 'Compare the original requirements, retained findings and affected public behavior in this same context, then finish THIS native Task with SELF_RECHECKED and self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. No handoff reread, second Task or Operator round trip. This is author self-recheck; only the actual successful native terminal can bind it, never this tool result.' });
-          return JSON.stringify({ ...missionPacket(await missions.required(root), await operators.required(root)),
-            next_action: `Continue remaining units, or call ${reviewMission} with actual risk tags. Independent Review and Operator final acceptance remain required.` });
+          const run = await operators.required(root);
+          // Full protected path arrays can make V2 truncate this one-line JSON to zero lines,
+          // hiding both the successful transition and the next action. Keep measured evidence
+          // and durable detail references, as default status already does; never rewrite proof.
+          return JSON.stringify({ ...compactMissionEvidence(missionPacket(await missions.required(root), run), run, root),
+            next_action: `This direct unit is validated; do not repeat passed checks or finish this settled unit again. Continue remaining units with ${startDirectUnit}, or call ${reviewMission} with actual risk tags. Independent Review and Operator final acceptance remain required.` });
         });
       } };
     const stringList = { type: "array", items: { type: "string" } };
