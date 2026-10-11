@@ -10,6 +10,21 @@ import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 
+test('error fallback investigation distinguishes related failures from repeated same-error inputs', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
+  assert.match(coordinator, /When changing an error fallback, inspect source-backed failures of that same operation/);
+  assert.match(coordinator, /Repeating the same error with another input is not distinct failure-path coverage/);
+  assert.match(coordinator, /Use analogous handlers\/tests to derive a relevant different failure and its expected result/);
+  assert.match(coordinator, /Reuse adequate checks; keep this with the current author, not another unit or review round/);
+  assert.match(worker, /Fallback: peer handlers show distinct errors, not same-error inputs/);
+  assert.match(worker, /Pre-change oracles, not new tests; check result\/error\/state/);
+  assert.match(worker, /No exhaustive matrix/);
+  for (const content of [coordinator, worker]) {
+    assert.doesNotMatch(content, /astroid-1866|Unknown format code|except \(IndexError, KeyError, TypeError, ValueError\)/);
+  }
+});
+
 test('direct implementation, Worker and Review share same-type representation oracle guidance without benchmark answers', () => {
   for (const name of ['dogs-coordinator', 'dog-worker-v010', 'dog-reviewer-v010']) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
@@ -63,11 +78,11 @@ test('planning and implementation share a staged validation workflow without new
   assert.match(operator, /preserving the authorized clone and exact prohibited paths/);
   assert.doesNotMatch(operator, /If the original request supplies a meaningful formal validation command/);
   assert.match(worker, /Read handoff_path in full first:/);
-  assert.match(worker, /pre-change test helpers as oracles, not new implementation\/tests\. Check\s+result\/error\/state together/);
+  assert.match(worker, /Pre-change oracles, not new tests; check result\/error\/state/);
   assert.doesNotMatch(worker, /Assert public return value|Check a\s+materially different failure input|uncaught failures/);
   assert.match(worker, /Implement, test and requested commit in this Task/);
   for (const boundary of [/(?:in this Task|here) via sortie_v010_expand_unit/, /\.git\/\*\* scope/, /formal evidence/,
-    /without a hypothetical exhaustive matrix/, /\.sortie-env\//, /Do not spawn nested subagents/,
+    /No exhaustive matrix/, /\.sortie-env\//, /Do not spawn nested subagents/,
     /PROCESS_DEFECT: local:/, /TRUE_BLOCKER: external:/, /host repair diagnostics/,
     /not before execution/, /foreground native shell calls/]) assert.match(worker, boundary);
   assert.ok(worker.length <= 3000, `complete generated Worker asset: ${worker.length}`);
@@ -95,7 +110,7 @@ test('native CLI init installs the validation workflow in each active mission ro
       assert.equal(installed.split(policy).length, 2, role);
       if (role === 'dog-worker-v010') {
         assert.equal(installed, runtimeAssets.find(item => item.name === role)!.content);
-        assert.match(installed, /Check\s+result\/error\/state together/);
+        assert.match(installed, /check result\/error\/state/);
         assert.match(installed, /independent Review after return/);
         assert.ok(installed.length <= 3000, `complete installed Worker asset: ${installed.length}`);
         t.diagnostic(JSON.stringify({ installed_worker_asset_chars: installed.length }));
