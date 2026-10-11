@@ -17,7 +17,7 @@ test('error fallback investigation distinguishes related failures from repeated 
   assert.match(coordinator, /Repeating the same error with another input is not distinct failure-path coverage/);
   assert.match(coordinator, /Use analogous handlers\/tests to derive a relevant different failure and its expected result/);
   assert.match(coordinator, /Reuse adequate checks; keep this with the current author, not another unit or review round/);
-  assert.match(worker, /Fallback: peer handlers show distinct errors, not same-error inputs/);
+  assert.match(worker, /Fallback: inspect peer handlers\/tests; verify distinct errors/);
   assert.match(worker, /Pre-change oracles, not new tests; check result\/error\/state/);
   assert.match(worker, /No exhaustive matrix/);
   for (const content of [coordinator, worker]) {

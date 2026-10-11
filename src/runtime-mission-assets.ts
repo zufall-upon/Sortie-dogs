@@ -582,7 +582,7 @@ Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
 no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
-Pre-change oracles, not new tests; check result/error/state. Fallback: peer handlers show distinct errors, not same-error inputs.
+Pre-change oracles, not new tests; check result/error/state. Fallback: inspect peer handlers/tests; verify distinct errors.
 No exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 ${MISSION_REPRESENTATION_ORACLE}
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
