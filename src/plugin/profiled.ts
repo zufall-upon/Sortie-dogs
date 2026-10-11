@@ -2710,7 +2710,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
          const submittedRun = await operators.read(root);
          return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
-           ...missionPacket(updated, submittedRun),
+            ...compactMissionEvidence(missionPacket(updated, submittedRun), submittedRun, root),
            next_action: "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt." });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. A collected terminal failure can satisfy a run-once/report request, not a request for successful execution. Returns operation outcome separately from the measured 🐾 Mission receipt; never treat Worker start, CORRECTION_READY or one passing check as completion.",
