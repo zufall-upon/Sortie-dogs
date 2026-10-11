@@ -2429,12 +2429,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
           const newFindings = review?.runID === run.runID && review.verdict === "findings" &&
             existing?.reviewIdentity !== missionReviewIdentity(mission);
-          const recovery = existing?.status === "failed" && run.phase === "awaiting-decision";
+          let validationRecovery = false;
+          if (existing?.status === "ready" && run.phase === "awaiting-acceptance") {
+            try { await assertCorrectionValidation(run); }
+            catch (error) {
+              if (!(error instanceof Error) || !error.message.startsWith("mission-review-correction-validation-stale:")) throw error;
+              // Read-only self-recheck cannot repair stale checks. Reuse the existing
+              // same-author correction admission, without blessing historical evidence.
+              validationRecovery = true;
+            }
+          }
+          const recovery = existing !== undefined && ((existing.status === "failed" && run.phase === "awaiting-decision") || validationRecovery);
           if (existing && ((!newFindings && !recovery) || ["prepared", "running"].includes(existing.status))) return JSON.stringify({ status: `correction-${existing.status}`,
             ...(run.phase === "prepared" ? { task: operators.nextWorkerTask(run) } : {}),
             next_action: "Continue only the existing correction Task. Ready requires explicit SAME-author native self-recheck; only residual concrete Major risk requires a different Reviewer. Failure retains the candidate and cumulative spend." });
           if (!run.units.some(unit => unit.unit.write.length) ||
-              (!recovery && (run.phase !== "awaiting-acceptance" || review?.runID !== run.runID)) || review?.verdict !== "findings" ||
+              (!recovery && (run.phase !== "awaiting-acceptance" || review?.runID !== run.runID)) || !review || (!validationRecovery && review.verdict !== "findings") ||
               !review.child || !review.initialPrompt || !review.result) throw new Error("mission-review-correction-unavailable");
           const original = mission.corrections?.at(-1);
           const authorID = original?.author ?? review.child;
@@ -2455,7 +2465,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (!budget || budget.reserved_units || budget.remaining_units < 1) throw new Error("mission-review-correction-budget-unavailable");
           const reviewIdentity = missionReviewIdentity(mission);
           const plan = missionPlan(mission, [{ title: `Correct ${run.units[0]!.unit.title}`,
-            objective: `Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. ${REVIEWER_VALIDATION_WORKFLOW} Retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.`,
+            objective: `${validationRecovery ? "The prior correction completed, but its inherited validation is now stale. Preserve completed implementation, reproduction, original findings and historical checks; refresh only affected checks in this SAME author context. If the check recipe needs repair, use repair_review here as its existing author. Do not redo unchanged implementation/discovery or request another independent Review. " : ""}Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. ${REVIEWER_VALIDATION_WORKFLOW} Retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.`,
             read: [...new Set([...(mission.reviewScope?.read ?? []), ...run.units.flatMap(unit => unit.unit.read)])],
             write: [...new Set([...(mission.reviewScope?.write ?? []), ...run.units.flatMap(unit => unit.unit.write)])],
             validation: run.units.flatMap(unit => unit.unit.validation),
