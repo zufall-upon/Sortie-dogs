@@ -115,13 +115,16 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
       const target = await realpath(physical).catch(() => undefined);
       if (target === undefined) return false;
       const relativeTarget = relative(canonicalRoot, target);
-      if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget) ||
-        ancestors.has(target)) return false;
+      if (relativeTarget === ".." || relativeTarget.startsWith("../") || isAbsolute(relativeTarget)) return false;
       const targetMetadata = await stat(target);
       const link = await readlink(physical);
       if (targetMetadata.isDirectory()) {
         // Keep the logical scope path and link target in the digest; do not follow external links or cycles.
         entries.push([scoped, `symlink:${link}`]);
+        // Repository fixtures can deliberately link back to an ancestor (e.g. ".").
+        // Its files are already traversed by this branch; pin the link itself and
+        // stop recursive re-entry, rather than losing all native validation proof.
+        if (ancestors.has(target)) return true;
         const next = new Set([...ancestors, target]);
         // Windows compatibility junctions can deny enumeration through the alias while
         // their resolved directory remains readable. Traverse the already resolved target.
@@ -135,8 +138,10 @@ async function protectedScopeDigest(projectRoot: string, paths: readonly string[
     }
     if (metadata.isDirectory()) {
       const real = await realpath(physical);
-      if (ancestors.has(real)) return false;
       entries.push([scoped, "directory"]);
+      // An ancestor link can lead back into this directory through ordinary
+      // children. The original traversal already pins its real contents.
+      if (ancestors.has(real)) return true;
       const next = new Set([...ancestors, real]);
       for (const child of (await readdir(physical)).sort()) if (!await visit(join(absolute, child), next, projectArtifacts, join(physical, child))) return false;
       return true;
