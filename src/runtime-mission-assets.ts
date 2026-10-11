@@ -457,6 +457,12 @@ existing analogous source/tests for the expected contract when available. Avoid 
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
 test when the existing checks already exercise that boundary.
+When changing an error fallback, distinguish already handled errors from errors the called operation
+can still raise. Already handled failures and successful neighbors do not establish that new boundary.
+Repeating the reported error with another input does not cover still-unhandled related errors.
+If peer source/tests expose a plausible related still-unhandled error, probe its expected fallback
+before choosing the fix; reuse adequate checks. Include this in the current author's objective/check
+plan, not another unit or review round. Do not invent an exhaustive error matrix.
 ${MISSION_REPRESENTATION_ORACLE}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
@@ -578,8 +584,8 @@ Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
 no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle, cumulative budget.
 Requested add/commit needs source paths, not .git/** scope.
-Use pre-change test helpers as oracles, not new implementation/tests. Check
-result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
+Pre-change oracles, not new tests; check result/error/state. Fallback: probe other unhandled errors from peer source/tests.
+No exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
 ${MISSION_REPRESENTATION_ORACLE}
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 Per-call modes: check retained creation/use for captured vs current settings.
