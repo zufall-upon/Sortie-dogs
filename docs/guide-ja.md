@@ -18,10 +18,10 @@ model routingが必要なtaskだけSortieを起動する。
 このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
 Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
 
-**現行release: [v0.13.11](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.11)**
-（[release notes](release-v0.13.11.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.12](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.12)**
+（[release notes](release-v0.13.12.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.11-operation-result-v1`。
+現行asset markerは`0.13.12-validation-paths-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -64,7 +64,14 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.11の更新
+## v0.13.12の更新
+
+PR #177〜#186の文書・Mission修正を統合。Worker返却とnative idle待機、Reviewerの同一Task修正、
+検証recipeの実path・Python heredoc照合、symlink cycleを含むsnapshotと大規模保護path履歴を改善。
+Hermes自動開発runnerも統合し、既存Session・委任指示・費用台帳・実送信receiptを保持する。
+過去の単件結果を公開v0.13.12の再ベンチ結果とは扱わない。
+
+## v0.13.11の更新（継承）
 
 Codex大容量writeと実行中status観測、agent切替後の終了済みMission返却による継続HTTP 500、
 run-once結果回収と処理成功の混同を修正。操作の失敗exitは保持し、未起動・実行中・必須成功checkは
@@ -345,7 +352,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.11
+npm install --global sortie-dogs@0.13.12
 sortie-dogs init --global --profile v010
 ```
 
@@ -357,7 +364,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.11
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.12
 sortie-dogs init --global --profile v010
 ```
 
@@ -378,7 +385,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.11-operation-result-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.12-validation-paths-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
