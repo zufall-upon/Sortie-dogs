@@ -229,6 +229,13 @@ recorded in `execution.prepared_environment`, and each result's `prepared_enviro
 Python version. Do not compare runs with and without it as the same condition. The images must already be present
 locally. Each environment uses 0.2–1.4 GB inside the workspace until the instance ends.
 
+The candidate runtime sets `TMPDIR` to a separately owned `sd-swe-*` directory under the host's OS temporary
+directory, rather than beneath a potentially long campaign path. This lets older Python multiprocessing tools
+(including parallel Black checks) create Unix sockets. Setup failure, preflight completion and live-run cleanup
+remove that directory; Python bytecode and pytest-cache policies are unchanged. The runtime evidence records
+`temporary_directory_policy: system-temp-mkdtemp-v1`; retain the runner hash and note this environment change
+when comparing with earlier runners.
+
 The images are also the scoring environment, so their drift limits the reachable score. On 2026-09-25 the gold
 patches resolved 15 of the 23 `dev` instances locally:
 

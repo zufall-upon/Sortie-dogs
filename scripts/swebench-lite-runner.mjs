@@ -2,8 +2,8 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { appendFile, chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { appendFile, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -788,12 +788,21 @@ async function requiredCommand(executable, args, options) {
   }
 }
 
+export async function cleanupCandidateRuntime(runtime, remove = rm) {
+  try {
+    if (typeof runtime?.runtimeRoot === "string") await remove(runtime.runtimeRoot, { recursive: true, force: true });
+  } finally {
+    if (typeof runtime?.temporaryRoot === "string") await remove(runtime.temporaryRoot, { recursive: true, force: true });
+  }
+}
+
 export async function prepareCandidateRuntime(candidate, packagePath, runRoot, dependencies = {}) {
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
   ensure(digest(packageBytes) === candidate.sha256, "candidate-package-sha256-mismatch");
   const candidateRoot = join(runRoot, "candidate-runtime");
+  let temporaryRoot;
   try {
   const configRoot = join(candidateRoot, "opencode");
   // V2 resolves global agents from XDG_CONFIG_HOME/opencode, including when an
@@ -802,13 +811,14 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const dataRoot = join(candidateRoot, "data");
   const cacheRoot = join(candidateRoot, "cache");
   const homeRoot = join(candidateRoot, "home");
-  const temporaryRoot = join(candidateRoot, "tmp");
+  // Older Python multiprocessing creates Unix sockets beneath TMPDIR. Campaign
+  // paths can exceed the socket limit before the socket's filename is appended.
+  temporaryRoot = await mkdtemp(join(tmpdir(), "sd-swe-"));
   await mkdir(configRoot, { recursive: true });
   await mkdir(join(xdgRoot, "opencode"), { recursive: true });
   await mkdir(join(dataRoot, "opencode"), { recursive: true });
   await mkdir(cacheRoot, { recursive: true });
   await mkdir(homeRoot, { recursive: true });
-  await mkdir(temporaryRoot, { recursive: true });
   const hostDataRoot = process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share");
   const hostAuth = join(hostDataRoot, "opencode", "auth.json");
   ensure(await exists(hostAuth), "candidate-opencode-auth-unavailable");
@@ -879,6 +889,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   return {
     environment,
     runtimeRoot: candidateRoot,
+    temporaryRoot,
     databasePath: join(dataRoot, "opencode", "opencode.db"),
     evidence: {
       package_sha256: candidate.sha256,
@@ -890,10 +901,11 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
       asset_count: Object.keys(assetHashes).length,
       assets_sha256: digest(JSON.stringify(assetHashes)),
       python_cache_policy: "no-bytecode-isolated-pytest-cache-v1",
+      temporary_directory_policy: "system-temp-mkdtemp-v1",
     },
   };
   } catch (error) {
-    await rm(candidateRoot, { recursive: true, force: true });
+    await cleanupCandidateRuntime({ runtimeRoot: candidateRoot, temporaryRoot });
     throw error;
   }
 }
@@ -1432,9 +1444,7 @@ export async function runLive(value, options, dependencies = {}) {
   const remove = dependencies.remove ?? rm;
   if (!record(candidateRuntime) || !record(candidateRuntime.environment) || !record(candidateRuntime.evidence) ||
       candidateRuntime.evidence.package_sha256 !== plan.candidate.sha256) {
-    if (record(candidateRuntime) && typeof candidateRuntime.runtimeRoot === "string") {
-      await remove(candidateRuntime.runtimeRoot, { recursive: true, force: true });
-    }
+    await cleanupCandidateRuntime(candidateRuntime, remove);
     throw new Error("candidate-runtime-evidence-invalid");
   }
   const candidateSha256 = plan.candidate.sha256;
@@ -1443,15 +1453,11 @@ export async function runLive(value, options, dependencies = {}) {
   const reportedCandidateHash = candidateRuntime.evidence.candidate_sha256 ?? candidateRuntime.evidence.candidate_hash;
   const reportedEnvironmentHash = candidateRuntime.evidence.environment_sha256 ?? candidateRuntime.evidence.environment_hash;
   if (reportedCandidateHash !== undefined && reportedCandidateHash !== candidateSha256) {
-    if (typeof candidateRuntime.runtimeRoot === "string") {
-      await remove(candidateRuntime.runtimeRoot, { recursive: true, force: true });
-    }
+    await cleanupCandidateRuntime(candidateRuntime, remove);
     throw replayFailure("replay-candidate-hash-mismatch");
   }
   if (reportedEnvironmentHash !== undefined && reportedEnvironmentHash !== environmentSha256) {
-    if (typeof candidateRuntime.runtimeRoot === "string") {
-      await remove(candidateRuntime.runtimeRoot, { recursive: true, force: true });
-    }
+    await cleanupCandidateRuntime(candidateRuntime, remove);
     throw replayFailure("replay-environment-hash-mismatch");
   }
   const gitCommand = dependencies.git ?? runGit;
@@ -1621,9 +1627,7 @@ export async function runLive(value, options, dependencies = {}) {
       usageDatabase = await retainUsageDatabase(candidateRuntime.databasePath, retained)
         .then(() => retained, error => ({ error: String(error?.message ?? error) }));
     }
-    if (typeof candidateRuntime.runtimeRoot === "string") {
-      await remove(candidateRuntime.runtimeRoot, { recursive: true, force: true });
-    }
+    await cleanupCandidateRuntime(candidateRuntime, remove);
   }
   const replayManifest = createReplayManifest({
     dataset: plan.dataset,
