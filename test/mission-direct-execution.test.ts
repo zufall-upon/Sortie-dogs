@@ -14,8 +14,9 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source"] as const) test(`${actor} direct execution: ${mode}`, async t => {
+for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision"] as const) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
+  const incomplete = mode === "blocked" || mode === "needs-decision";
   const external = ["external-cwd", "registration"].includes(mode);
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
@@ -44,6 +45,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       syncBuiltinESMExports();
     }
     await writeFile(join(directory, "check.mjs"), `import {readFileSync} from "node:fs";\nif (readFileSync(${JSON.stringify(resultPath)},"utf8") !== "fixed\\n") process.exit(1);\n`);
+    if (incomplete) await writeFile(join(directory, "check.mjs"), "process.exit(4);\n");
     if (externalDirectory) await writeFile(join(externalDirectory, "check.mjs"), await readFile(join(directory, "check.mjs")));
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator", outcome: "running" },
@@ -115,7 +117,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       const callID = `check-${++counter}`, args = { command: "node check.mjs", workdir: cwd }, start = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: actor, callID }, { args });
       let exit = 0;
-      try { await exec(process.execPath, ["check.mjs"], { cwd }); } catch { exit = 1; }
+      try { await exec(process.execPath, ["check.mjs"], { cwd }); } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
       (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: actor, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
@@ -189,11 +191,51 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       assert.equal(status.budget.reserved_units, 1);
     }
     await write("broken\n");
-    assert.equal(await check(), 1);
+    assert.equal(await check(), incomplete ? 4 : 1);
     const failed = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
     assert.equal(failed.status, "direct-unit-awaits-validation");
     assert.equal((await readRun()).units[0]!.status, "running", "failure remains with the same author");
     hooks = await create();
+    if (incomplete) {
+      const active = await readRun(), checks = active.units[0]!.directExecution!.checks;
+      const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      assert.equal(budget.reserved_units, 1);
+      const summary = "Original required native check exits 4; retain the patch and report incomplete, not success.";
+      await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary }, { sessionID: actor }), /mission-units-incomplete/);
+      const args = { filePath: join(directory, "check.mjs") }, callID = "active-read";
+      await hooks["tool.execute.before"]!({ tool: "read", sessionID: actor, callID }, { args });
+      await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: mode, summary }, { sessionID: actor }), /mission-direct-tools-running/);
+      assert.equal((await readRun()).units[0]!.status, "running", "submitted blocker cannot release an active native tool");
+      await hooks["tool.execute.after"]!({ tool: "read", sessionID: actor, callID, args }, { output: "process.exit(4);" });
+      const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: mode, summary }, { sessionID: actor }));
+      const stopped = await readRun();
+      assert.equal(submitted.phase, "submitted");
+      assert.deepEqual(submitted.submission, { status: mode, summary });
+      assert.equal(submitted.execution_summary.accepted, false);
+      assert.equal(stopped.phase, "awaiting-decision");
+      assert.equal(stopped.runID, active.runID);
+      assert.equal(stopped.units[0]!.callID, active.units[0]!.callID);
+      assert.equal(stopped.units[0]!.status, "failed");
+      assert.deepEqual(stopped.units[0]!.failure, { command: ["node check.mjs"], outcome: "fail", exitCode: 4 });
+      assert.ok(stopped.units[0]!.directExecution!.finishedAt);
+      assert.deepEqual(stopped.units[0]!.directExecution!.checks, checks, "failed native checks remain historical, never rerun or rewritten");
+      assert.deepEqual(stopped.units[0]!.evidence, [], "failed delivery contributes no successful evidence");
+      const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(mission.attempts?.length, 1);
+      assert.equal(mission.attempts?.[0]?.status, "failed");
+      assert.equal(mission.attempts?.[0]?.terminal, undefined, "stopping direct work never fabricates a native child terminal");
+      assert.equal(mission.review, undefined);
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
+      const settledBudget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      assert.equal(settledBudget.reserved_units, 0);
+      assert.equal(settledBudget.consumed_units, budget.consumed_units + 1);
+      await hooks.tool!.sortie_v010_submit_mission.execute({ status: mode, summary }, { sessionID: actor });
+      assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, settledBudget,
+        "repeated submission does not reserve or settle another unit");
+      assert.equal(await readFile(join(directory, resultPath), "utf8"), "broken\n");
+      assert.deepEqual(aborted, [], "failure disposition does not interrupt its controller or dispatch a replacement");
+      return;
+    }
     await write("fixed\n");
     if (mode === "registration") {
       assert.equal(await check(), 0);
@@ -311,8 +353,10 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
         assert.deepEqual(submitted.acceptance_summary.requirements, mission.requirements);
         assert.equal(submitted.acceptance_summary.independent_review.verdict, "PASS");
         assert.equal(submitted.acceptance_summary.independent_review.independent, true);
-        assert.match(submitted.next_action, /Compare the original requests with the candidate and actual evidence/);
-        assert.match(submitted.next_action, /complete_mission receipt/);
+        if (status === "ready") {
+          assert.match(submitted.next_action, /Compare the original requests with the candidate and actual evidence/);
+          assert.match(submitted.next_action, /complete_mission receipt/);
+        } else assert.match(submitted.next_action, /incomplete delivery, not acceptance/);
         if (mode === "large-source") {
           const rawText = JSON.stringify({ acceptance_summary: submitted.acceptance_summary,
             ...missionPacket(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), done),

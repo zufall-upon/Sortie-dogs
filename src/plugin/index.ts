@@ -8572,6 +8572,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     failDirectUnit: async (root, actor) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
       if (!direct || direct.root !== root) throw new Error("mission-direct-grant-stale");
+      if (activeSessions.get(actor)?.inFlightCalls.size) throw new Error("mission-direct-tools-running");
       // Cold terminal recovery can happen before the actor's next tool/context hook.
       if (!goalReservations.has(direct.callID)) {
         const snapshot = await (await goalLedger(root)).readGoal();
@@ -8581,8 +8582,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
         } else throw new Error("mission-direct-reservation-unavailable");
       }
-      await settleGoalDispatch(direct.callID, { status: "error",
-        output: "Actual native Reviewer ended before its direct correction was validated.",
+      // Empty successful evidence forces a failed disposition. Reuse the saved
+      // validation observation (including a cold recovered exit) without claiming
+      // a failed native child terminal for this still-active controller.
+      await settleGoalDispatch(direct.callID, {
+        output: "Direct unit stopped incomplete; no successful validation or Mission acceptance.",
         metadata: { sessionId: actor } }, undefined, []);
       await releaseWriteGate(actor);
       releaseSessionEnforcement(actor);

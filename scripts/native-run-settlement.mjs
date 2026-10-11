@@ -40,7 +40,10 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
     const missionPath = join(project, '.sortie-dogs-v010', 'missions', `${createHash('sha256').update(root).digest('hex')}.json`);
     if (existsSync(missionPath)) {
       const mission = JSON.parse(readFileSync(missionPath, 'utf8'));
-      if (!['completed', 'cancelled'].includes(mission.phase)) return true;
+      // A delivered blocker/decision is a stopped attempt, not acceptance. Native
+      // writers, queued continuations and fresh idle epochs were checked above.
+      const incompleteDelivery = mission.phase === 'submitted' && ['blocked', 'needs-decision'].includes(mission.submission?.status);
+      if (!['completed', 'cancelled'].includes(mission.phase) && !incompleteDelivery) return true;
     }
     return false;
   } finally { db.close(); }

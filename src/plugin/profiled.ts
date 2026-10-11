@@ -2694,24 +2694,34 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
-        const { root, mission } = await missionAuthority(context.sessionID);
-        if (args.status === "ready") {
-          if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
-            return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
-              next_action: missionExecutionStatus(mission) === "running"
-                ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
-                : "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
+        const { root } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, async () => {
+          const mission = await missions.required(root);
+          if (args.status === "ready") {
+            if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
+              return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
+                next_action: missionExecutionStatus(mission) === "running"
+                  ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
+                  : "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
+            }
+            const run = await operators.required(root);
+            if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
+            await assertMissionReview(root, mission);
+          } else if (args.status === "blocked" || args.status === "needs-decision") {
+            // This owner is stopping its direct work, not validating it. Keep the
+            // failed checks/candidate and settle its existing reservation once.
+            const direct = await activateDirect(context.sessionID);
+            if (direct) await control!.failDirectUnit(root, context.sessionID);
           }
-          const run = await operators.required(root);
-          if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
-          await assertMissionReview(root, mission);
-        }
-        const updated = await missions.update(root, state => { state.phase = "submitted";
-          state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
-         const submittedRun = await operators.read(root);
-         return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
+          const updated = await missions.update(root, state => { state.phase = "submitted";
+            state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
+          const submittedRun = await operators.read(root);
+          return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
             ...compactMissionEvidence(missionPacket(updated, submittedRun), submittedRun, root),
-           next_action: "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt." });
+            next_action: args.status === "ready"
+              ? "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt."
+              : "Return the saved blocker or user-only decision to Operator now. This is incomplete delivery, not acceptance; retain the candidate, failed checks and cumulative spend. Do not repeat unchanged work or dispatch a replacement merely to finalize this result." });
+        });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. A collected terminal failure can satisfy a run-once/report request, not a request for successful execution. Returns operation outcome separately from the measured 🐾 Mission receipt; never treat Worker start, CORRECTION_READY or one passing check as completion.",
       args: {}, execute: async (_args, context) => {
