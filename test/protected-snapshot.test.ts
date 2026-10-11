@@ -386,5 +386,27 @@ test("project-local tool dependency directory symlinks remain verifiable, but ex
   await rm(join(root, "node_modules"));
   await symlink(".sortie-env/node_modules", join(root, "node_modules"), "dir");
   await symlink("../..", join(root, ".sortie-env/node_modules/loop"), "dir");
-  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined, "internal directory cycles cannot become evidence");
+  const cyclic = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.ok(cyclic, "internal directory cycles retain link identity without recursive re-entry");
+  assert.notEqual(cyclic.candidate, changed!.candidate, "the new cycle link changes the candidate identity");
+  await writeFile(join(root, ".sortie-env/node_modules/pkg/index.js"), "third");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.candidate, cyclic.candidate,
+    "terminating a cycle must not hide real dependency edits");
+}));
+
+test("a repository fixture symlink to its own directory retains verifiable source inputs", async () => fixture(async root => {
+  const fixtures = join(root, "test/fixtures/linter/sqlfluffignore");
+  await mkdir(join(fixtures, "path_b"), { recursive: true });
+  await writeFile(join(fixtures, "path_b/query.sql"), "SELECT 1");
+  await symlink(".", join(fixtures, "path_c"), "dir");
+  const pinned = await pin(root, ["test/fixtures/linter/**", "input.txt"], ["result.txt"]);
+  const before = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(before);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(join(fixtures, "path_b/query.sql"), "SELECT 2");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), before);
+  await rm(join(fixtures, "path_c"));
+  await symlink("path_b", join(fixtures, "path_c"), "dir");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source,
+    "a changed in-tree symlink remains a source change");
 }));
