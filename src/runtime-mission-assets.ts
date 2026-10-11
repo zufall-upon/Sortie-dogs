@@ -24,6 +24,9 @@ export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
 Operator/Coordinator: put the known meaningful formal check from the user, project or task context in validation,
 not another objective copy. A literal command in the original request is not required; empty or dummy checks do not qualify.
+For a concrete public reproduction, carry its entrypoint and relevant input into the unit objective and formal reproduction check.
+Derive the shell recipe without substituting lower-level library calls; those checks may supplement, never replace, the public entrypoint.
+Reuse existing checks that already exercise it. If authorized setup cannot run it, retain useful work and report the verification gap, not a passing reproduction.
 For direct work with an unknown reproduction recipe, resolve its flags, configuration and cwd with ordinary native diagnostics before formal registration.
 Reuse an already observed failing baseline; do not rerun it merely to plan. A command that never exercises the reported path is not a passing reproduction.
 Use existing project configuration within the original path constraints. Known recipes and Worker-owned investigation need no extra preparation or unit.
