@@ -353,19 +353,25 @@ export class OperatorMissionRuntime {
   correctionReference(root: string, reviewIdentity: string): string {
     return JSON.stringify({ path: this.file(root), field: "corrections[]", review_identity: reviewIdentity });
   }
+  /** Stage context for a proposed handoff; publish Mission metadata only after plan preparation succeeds. */
+  async contextSnapshot(state: OperatorMission, sessionID: string, messages: readonly Record<string, unknown>[], notes?: string): Promise<OperatorMission> {
+    const next = structuredClone(state);
+    const previous = next.continuity?.sources.find(source => source.session_id === sessionID);
+    const snapshot = await retainMissionContext(join(this.projectRoot, this.profile.stateDirectory, "missions"), sessionID, messages, previous);
+    next.continuity ??= { sources: [] };
+    next.continuity.sources = [...next.continuity.sources.filter(source => source.session_id !== sessionID), snapshot.source];
+    if (typeof notes === "string" && notes.trim()) next.continuity.notes = [
+      ...(next.continuity.notes ?? []).filter(note => note.session_id !== sessionID),
+      { text: notes, session_id: sessionID, recorded_at: new Date().toISOString() }];
+    return next;
+  }
   async retainContext(root: string, sessionID: string, messages: readonly Record<string, unknown>[], notes?: string): Promise<OperatorMission> {
     return this.serial(root, async () => {
       const state = await this.loadMission(root);
       if (!state) throw new Error("mission-missing");
-      const previous = state.continuity?.sources.find(source => source.session_id === sessionID);
-      const snapshot = await retainMissionContext(join(this.projectRoot, this.profile.stateDirectory, "missions"), sessionID, messages, previous);
-      state.continuity ??= { sources: [] };
-      state.continuity.sources = [...state.continuity.sources.filter(source => source.session_id !== sessionID), snapshot.source];
-      if (typeof notes === "string" && notes.trim()) state.continuity.notes = [
-        ...(state.continuity.notes ?? []).filter(note => note.session_id !== sessionID),
-        { text: notes, session_id: sessionID, recorded_at: new Date().toISOString() }];
-      await this.save(this.file(root), state);
-      return state;
+      const next = await this.contextSnapshot(state, sessionID, messages, notes);
+      await this.save(this.file(root), next);
+      return next;
     });
   }
   async handoffContext(state: OperatorMission): Promise<Record<string, unknown>> {

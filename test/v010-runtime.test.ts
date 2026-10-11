@@ -1367,7 +1367,8 @@ async function missionCoordinatorFixture(root: string, host?: { history: Record<
   });
   const unit = { title: "Verify seed", objective: "Inspect the seed and execute its validator", read: ["seed.txt", "check.mjs"],
     write: ["seed.txt"], validation: ["node check.mjs"] };
-  const declare = (units: unknown[], reason?: string) => hooks.tool!.sortie_v010_plan_units.execute({ units, ...(reason ? { reason } : {}) },
+  const declare = (units: unknown[], reason?: string, handoff_context?: string) => hooks.tool!.sortie_v010_plan_units.execute({ units,
+    ...(reason ? { reason } : {}), ...(handoff_context ? { handoff_context } : {}) },
     { sessionID: "coordinator" });
   return { hooks, unit, declare };
 }
@@ -1567,7 +1568,7 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
       await assert.rejects(declare(Array.from({ length: status.budget.remaining_units + 1 }, (_, i) =>
         ({ ...revised, validation: [`node check-${i}.mjs`] })), "Split verification"), /mission-budget-exhausted/);
     } else if (failure === "generated-contract") {
-      const rejected = JSON.parse(await declare([{ ...revised, validation: [`node check.mjs ${"x".repeat(CONTRACT_TEXT_LIMITS.command)}`] }], "Correct validation"));
+      const rejected = JSON.parse(await declare([{ ...revised, validation: [`node check.mjs ${"x".repeat(CONTRACT_TEXT_LIMITS.command)}`] }], "Correct validation", "Unpublished proposed context"));
       assert.equal(rejected.status, "invalid-plan");
       assert.ok(rejected.diagnostics.some(item => item.pointer === "/validation/0" && item.code === "schema_maxLength" &&
         item.limit === CONTRACT_TEXT_LIMITS.command && item.length > item.limit));
@@ -1576,7 +1577,7 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
       await rename(controls, `${controls}.saved`);
       await writeFile(controls, "fixture storage outage");
       try {
-        const rejected = JSON.parse(await declare([revised], "Correct validation"));
+        const rejected = JSON.parse(await declare([revised], "Correct validation", "Unpublished proposed context"));
         assert.equal(rejected.status, "invalid-plan");
         assert.ok(rejected.diagnostics.some(item => item.code === "operator-control-write-failed"));
       }
@@ -1585,7 +1586,7 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
       await rename(operatorPath, `${operatorPath}.saved`);
       await mkdir(operatorPath);
       try {
-        const rejected = JSON.parse(await declare([revised], "Correct validation"));
+        const rejected = JSON.parse(await declare([revised], "Correct validation", "Unpublished proposed context"));
         assert.equal(rejected.status, "invalid-plan");
         assert.ok(rejected.diagnostics.some(item => item.code === "operator-control-write-failed"));
       }
@@ -1597,8 +1598,9 @@ for (const failure of ["budget", "generated-contract", "control-storage", "state
     assert.deepEqual((await readdir(controls)).sort(), names, "failed preparation leaves no partial controls");
     const oldRun = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "prepared", "cold readers must still see the dispatchable prior run");
-    const corrected = JSON.parse(await declare([revised], "Correct validation"));
+    const corrected = JSON.parse(await declare([revised], "Correct validation", "Reuse the prepared seed; only the check changed."));
     assert.ok(corrected.task);
+    assert.equal(JSON.parse(await readFile(missionPath, "utf8")).continuity.notes[0].text, "Reuse the prepared seed; only the check changed.");
     const next = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
     assert.equal(next.parentRunID, oldRun.runID);
     assert.deepEqual(next.acceptance, oldRun.acceptance);

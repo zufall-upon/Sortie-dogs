@@ -1866,8 +1866,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     const stringList = { type: "array", items: { type: "string" } };
     const missionUnitSchema = { type: "object", additionalProperties: false,
-      properties: { title: { type: "string" }, objective: { type: "string", description: "Target or corrective delta, about 2000 characters. Do not copy the original request. Longer authored instructions are preserved separately without a retry gate." },
-        read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
+      properties: { title: { type: "string" }, objective: { type: "string", description: "Target or corrective delta, about 2000 characters. Do not copy the original request. Carry the remaining action, not a routine reconfirmation of supplied facts, setup or instructions. References are available for relevant gaps, not mandatory rereads. Longer authored instructions are preserved separately without a retry gate." },
+        read: { ...stringList, description: "Known inputs that affect validation, not an allowlist or a checklist to reread. Avoid guessed AGENTS.md paths and whole live session/database/log trees just to inspect them; reuse already supplied instructions and known context." }, write: stringList,
         validation: { ...stringList, description: "Meaningful commands using observed repository test paths and runner conventions, not guessed filenames. Reuse already discovered recipes; when unknown, locate the relevant test or repository script with ordinary read/search before declaring it. This is planning guidance, not new approval or proof of execution; native checks still establish acceptance." },
         validation_cwd: { type: "object", additionalProperties: { type: "string" }, description: "Exact cwd per declared command; omitted commands use project_root. Registration-only correction of your active direct unit keeps the same admission and budget and requires new native checks, not historical proof." },
         requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } },
@@ -2125,7 +2125,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
       return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
     }
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string) {
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
       let previous = await operators.read(root);
@@ -2263,13 +2263,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }) : [];
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
       const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
-      for (const history of histories) mission = await missions.retainContext(root, history.id, history.messages);
+      for (const history of histories) mission = await missions.contextSnapshot(mission, history.id, history.messages,
+        history.id === actor ? handoffNotes : undefined);
       const context = await missions.handoffContext(mission);
       const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
+        item.continuity = mission.continuity;
         item.reviewScope = missionReviewScope(item.reviewScope,
           ...(previous && item.runID === previous.runID ? [previous] : []), state);
         if (item.runID !== state.runID) item.plans++;
@@ -2295,12 +2297,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
-            const retained = typeof args.handoff_context === "string" && args.handoff_context.trim()
-              ? await missions.update(root, state => { state.continuity ??= { sources: [] };
-                state.continuity.notes = [...(state.continuity.notes ?? []).filter(note => note.session_id !== context.sessionID),
-                  { text: args.handoff_context!, session_id: context.sessionID, recorded_at: new Date().toISOString() }]; }) : mission;
-            const planned = await declareMissionUnits(root, context.sessionID, retained,
-              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID);
+            const planned = await declareMissionUnits(root, context.sessionID, mission,
+              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context);
             return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
           });
         } catch (error) {

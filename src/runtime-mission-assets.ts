@@ -445,6 +445,8 @@ Public conversation, recent tool results and Mission progress are supplied autom
 When useful, include handoff_context in start_mission/plan_units: current intent and rationale, known environment,
 completed setup/checks, failed approaches and remaining work with existing references. It is optional working
 context, not a form or approval. Preserve useful knowledge instead of assigning unchanged discovery again.
+Assign the remaining action. Reference paths support relevant gaps, not a mandatory reread checklist; avoid
+routine environment/instruction reconfirmation and guessed AGENTS.md paths when that context is already supplied.
 Keep investigation, edits, formal checks and any requested commit in the same Worker before independent Review;
 do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
 ${MISSION_GIT_SCOPE}

@@ -7,6 +7,7 @@ The v0.13.12 global-apply handoff retained the original request and requirements
 ## Change
 
 - `start_mission` retains available public parent history. `plan_units` refreshes root and declaring Coordinator history before generating the handoff, including replans.
+- Proposed context is staged with the plan and published to Mission metadata only after successful preparation. Rejected replans preserve the current run, context and budget.
 - `handoff.ext["sortie-dogs/mission-context"].continuity` supplies recent conversation and completed/error tool observations, current Mission progress, attempts and operation observations.
 - Optional `handoff_context` on `start_mission` and `plan_units` records current intent, rationale, known environment, completed setup/checks, failed approaches and remaining work. Notes retain their author/session and timestamp. Updating one author's notes does not erase another author's notes.
 - Exact public text, tool inputs and text outputs are retained in content-addressed JSON snapshots under the Mission directory. Private reasoning and synthetic instructions are excluded. Previously captured messages remain available after partial history responses or restart.
@@ -18,6 +19,7 @@ The v0.13.12 global-apply handoff retained the original request and requirements
 
 - No new approval, permission, scope restriction, mandatory form, dispatch or model call.
 - Reuse established environment, paths, decisions and unchanged setup. Recheck facts when mutable, conflicting or necessary for the task; explain meaningful repeats with their actual reason.
+- Parent objectives describe the remaining action. Reference paths are available for relevant gaps, not a mandatory reread checklist; avoid guessed instruction-file paths and routine reconfirmation of already supplied facts.
 - Read snapshot JSON entries by message/call IDs only to fill a relevant gap; do not routinely print the entire archive. Snapshots are observations at planning time, not a live shared conversation.
 - Existing direct execution (`executor: "self"`) remains available when the current author already has useful context.
 - Current original requests and requirements govern. Historical success does not turn into fresh formal validation, current execution, independent review or acceptance.
