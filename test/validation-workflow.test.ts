@@ -13,11 +13,13 @@ const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 test('error fallback investigation distinguishes related failures from repeated same-error inputs', () => {
   const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
   const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
-  assert.match(coordinator, /When changing an error fallback, inspect source-backed failures of that same operation/);
-  assert.match(coordinator, /Repeating the same error with another input is not distinct failure-path coverage/);
-  assert.match(coordinator, /Use analogous handlers\/tests to derive a relevant different failure and its expected result/);
-  assert.match(coordinator, /Reuse adequate checks; keep this with the current author, not another unit or review round/);
-  assert.match(worker, /Fallback: inspect peer handlers\/tests; verify distinct errors/);
+  assert.match(coordinator, /distinguish already handled errors from errors the called operation\s+can still raise/);
+  assert.match(coordinator, /Already handled failures and successful neighbors do not establish that new boundary/);
+  assert.match(coordinator, /Repeating the reported error with another input does not cover still-unhandled related errors/);
+  assert.match(coordinator, /If peer source\/tests expose a plausible related still-unhandled error, probe its expected fallback/);
+  assert.match(coordinator, /reuse adequate checks\. Include this in the current author's objective\/check\s+plan, not another unit or review round/);
+  assert.match(coordinator, /Do not invent an exhaustive error matrix/);
+  assert.match(worker, /Fallback: probe other unhandled errors from peer source\/tests/);
   assert.match(worker, /Pre-change oracles, not new tests; check result\/error\/state/);
   assert.match(worker, /No exhaustive matrix/);
   for (const content of [coordinator, worker]) {
