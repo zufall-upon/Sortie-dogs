@@ -232,6 +232,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const result = payload(await session("messages", { path: { id }, query: { directory: input.directory } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
+    async function missionHistory(id: string): Promise<readonly Record<string, unknown>[]> {
+      // Reuse the host's public paginated reader when present; bounded context is a usable fallback.
+      if (typeof nativeSession?.reviewMessages === "function") {
+        try {
+          const value = payload(await session("reviewMessages", { path: { id }, query: { directory: input.directory } }));
+          if (Array.isArray(value)) return value.filter(record);
+        } catch { /* Context continuity must not add a history-service admission gate. */ }
+      }
+      return messages(id).catch(() => []);
+    }
     async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
       const direct = await directExecution(child) ?? await reviewerCorrection(child);
@@ -1878,10 +1888,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const missionExecutionSchema = { type: "object", properties: { commands: stringList, directory: { type: "string" } },
       required: ["commands", "directory"], additionalProperties: false,
       description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion separately from successful exits; no handwritten proof file is needed. For run-once/result collection, validate the collected result without rerunning the operation.", "x-sortie-optional": true };
+    const handoffContextSchema = { type: "string", "x-sortie-optional": true,
+      description: "Optional current working notes: intent/rationale, known environment and paths, completed setup/checks with results, failed approaches and remaining work. Reuse known facts with source references; no required form or new approval. Public history and Mission observations are also supplied automatically. Omit when already sufficient; do not recopy the original request." };
     tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, include unit NOW (and execution for an operation) and dispatch its Worker directly; plan_units remains available after start. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         unit: { ...missionUnitSchema, description: "When the meaningful check and single-unit scope are already known, include this unit now. Returns its configured Worker directly, combining start_mission and plan_units without another model round trip.", "x-sortie-optional": true } as never,
         execution: missionExecutionSchema as never,
+        handoff_context: handoffContextSchema as never,
         confirmed_conditions: conditionsSchema as never,
         prohibited_write: { ...stringList, description: "Only explicit path prohibitions from the user or applicable instructions. Never infer a parent glob from project/repository names, semantic 'do not modify the product', or the complement of estimated unit.write. Preserve the authorized clone and exact prohibited paths; semantic constraints stay in requirements.", "x-sortie-optional": true } as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
@@ -1921,11 +1934,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (relocated) return JSON.stringify({ ...relocated, budget: await control!.currentBudget(context.sessionID) });
           }
           const cancelled = await operators.read(context.sessionID);
+          const history = await missionHistory(context.sessionID);
           let mission = await missions.start(context.sessionID, requirements, args.intent === "replace" || args.intent === "new", {
               kind: args.kind === "operation" ? "operation" : "implementation", executionHost: input.executionHost,
-              context: missionConversationContext(await messages(context.sessionID)),
+              context: missionConversationContext(history),
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
+          mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
           const prohibited = (args as Record<string, unknown>).prohibited_write;
           if (prohibited !== undefined) {
             if (!Array.isArray(prohibited) || !prohibited.every(path => typeof path === "string")) throw new Error("mission-prohibited-write-invalid");
@@ -2247,8 +2262,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           },
         }) : [];
       const dispatcher = actor === root ? undefined : { sessionID: actor, callID: mission.callID! };
-      const context = { original_requests: mission.requests, requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [],
-        launch_conditions: mission.launchConditions ?? [] };
+      const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
+      for (const history of histories) mission = await missions.retainContext(root, history.id, history.messages);
+      const context = await missions.handoffContext(mission);
       const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
@@ -2272,13 +2288,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Keep investigation/edit/check/requested commit with the same author before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Reviewer FINDINGS stay with the same Reviewer for correction, formal validation and self-recheck.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
         execution: missionExecutionSchema as never,
+        handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
         executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here without a Worker handoff. Default worker retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
-            const planned = await declareMissionUnits(root, context.sessionID, mission,
+            const retained = typeof args.handoff_context === "string" && args.handoff_context.trim()
+              ? await missions.update(root, state => { state.continuity ??= { sources: [] };
+                state.continuity.notes = [...(state.continuity.notes ?? []).filter(note => note.session_id !== context.sessionID),
+                  { text: args.handoff_context!, session_id: context.sessionID, recorded_at: new Date().toISOString() }]; }) : mission;
+            const planned = await declareMissionUnits(root, context.sessionID, retained,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID);
             return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
           });
@@ -2455,7 +2476,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const baseline = await missionReviewBaseline(input.directory);
           const dispatcher = mission.coordinator ? { sessionID: mission.coordinator, callID: mission.callID! } : undefined;
           const prepared = await operators.prepareReviewerCorrection(root, run.runID, correctedPlan, authorID, reviewIdentity, retainedPlan.units[0]!.write, dispatcher, {
-            original_requests: mission.requests, requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [],
+            ...await missions.handoffContext(mission),
             correction_context: { findings: recovery ? existing.findings : review.result!,
               retained_findings_ref: JSON.parse(missions.correctionReference(root, reviewIdentity)),
               mission_id: mission.id, prior_run_id: run.runID, review_identity: reviewIdentity,
