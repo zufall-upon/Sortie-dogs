@@ -38,6 +38,19 @@ test('direct reproduction recipes use observed baseline context without another 
   assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|NumPy|1978|extension-pkg|rcfile|capsys|caplog/);
 });
 
+test('standalone reproduction planning preserves its fixture root without replacing the active environment', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /Preserve its fixture layout and working directory/);
+    assert.match(content, /A standalone example project belongs in its own fixture root within allowed paths/);
+    assert.match(content, /invoke from there with the active environment, not the source checkout root/);
+    assert.match(content, /import paths or configuration may mask the failure/);
+    assert.match(content, /Reuse an already observed failing baseline; do not rerun it merely to plan/);
+    assert.match(content, /this workflow adds no approval or denial/);
+  }
+  assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|1333|src\/project|\.repro-missing-init|sys\.path/);
+});
+
 test('dependency setup preserves original missing-only limits without disabling authorized repair', () => {
   for (const name of ['dog-operator', 'dogs-coordinator']) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
@@ -160,6 +173,8 @@ test('native CLI init installs the validation workflow in each active mission ro
         : /an installed but incompatible package is not missing/);
       if (role !== 'dog-worker-v010') {
         assert.match(installed, /carry its entrypoint and relevant input into the unit objective and formal reproduction check/);
+        assert.match(installed, /Preserve its fixture layout and working directory/);
+        assert.match(installed, /invoke from there with the active environment, not the source checkout root/);
         assert.match(installed, /those checks may supplement, never replace, the public entrypoint/);
         assert.match(installed, /retain useful work and report the verification gap, not a passing reproduction/);
       }
