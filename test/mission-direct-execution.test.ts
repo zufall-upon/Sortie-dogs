@@ -298,7 +298,38 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "review-call" }, task);
     agents.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: "review-call" }, { output: "PASS\nResult and actual check agree.", metadata: { sessionId: "reviewer" } });
-    if (actor === "coordinator") await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Direct correction validated and independently reviewed" }, { sessionID: actor });
+    if (actor === "coordinator") {
+      for (const status of mode === "large-source" ? ["blocked", "needs-decision", "ready"] : ["ready"]) {
+        const summary = "Direct correction validated and independently reviewed";
+        const submittedText = await hooks.tool!.sortie_v010_submit_mission.execute({ status, summary }, { sessionID: actor });
+        const submitted = JSON.parse(submittedText);
+        assert.equal(Object.keys(submitted)[0], "acceptance_summary");
+        assert.equal(submitted.phase, "submitted");
+        assert.deepEqual(submitted.submission, { status, summary });
+        assert.equal(submitted.execution_summary.accepted, false, "submission still requires Operator acceptance");
+        assert.deepEqual(submitted.acceptance_summary.original_requests, mission.requests);
+        assert.deepEqual(submitted.acceptance_summary.requirements, mission.requirements);
+        assert.equal(submitted.acceptance_summary.independent_review.verdict, "PASS");
+        assert.equal(submitted.acceptance_summary.independent_review.independent, true);
+        assert.match(submitted.next_action, /Compare the original requests with the candidate and actual evidence/);
+        assert.match(submitted.next_action, /complete_mission receipt/);
+        if (mode === "large-source") {
+          const rawText = JSON.stringify({ acceptance_summary: submitted.acceptance_summary,
+            ...missionPacket(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), done),
+            next_action: submitted.next_action });
+          t.diagnostic(JSON.stringify({ submission_status: status, raw_submission_bytes: Buffer.byteLength(rawText),
+            submission_bytes: Buffer.byteLength(submittedText) }));
+          assert.ok(Buffer.byteLength(rawText) > 32_000, "protected inputs reproduce the oversized submission");
+          assert.ok(Buffer.byteLength(submittedText) < 16_000, "submission acknowledgement and next action remain visible");
+          assert.deepEqual(submitted.units[0].evidence, finished.units[0].evidence, "reuse measured evidence without protected arrays");
+          assert.deepEqual(submitted.units[0].evidence_details_ref, finished.units[0].evidence_details_ref);
+          assert.deepEqual((await readRun()).units[0]!.evidence, done.units[0]!.evidence, "submission projection preserves durable proof");
+          const fullSubmitted = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+          assert.deepEqual(fullSubmitted.units[0].evidence, done.units[0]!.evidence, "explicit full status retains complete evidence");
+          assert.deepEqual(fullSubmitted.acceptance_summary, submitted.acceptance_summary, "submission retains the full original acceptance summary");
+        }
+      }
+    }
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(await readFile(resolve(directory, resultPath), "utf8"), "fixed\n");
