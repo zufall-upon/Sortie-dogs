@@ -390,6 +390,29 @@ Retain these together for reproducibility:
 - scoring snapshots, requests, state, logs, live results, and official harness report;
 - exact command lines, exits, and environment/tool versions without credentials.
 
+### Verify a completed dev23 candidate
+
+```sh
+node scripts/swebench-lite-verify-cycle.mjs --receipt /absolute/cycle-receipt.json
+```
+
+This read-only verifier checks the matching package/runtime identity, 23 canonical
+dev rows, pass@1/no retries, complete official Boolean scores, frozen predictions
+and patch hashes, genuine completed practical CLI task/acceptance/logs, and Git
+ancestry into the recorded main commit. It does not start inference or publish.
+The receipt contains `package/package_sha256`, `manifest/manifest_sha256`,
+`predictions/predictions_sha256`, `supervisor`, `scoring`, `source_repo`, `commit`,
+`main_commit`, `main_integrated`, `runtime_marker`, `runner_root`, `runner_commit`,
+`runner_sha256`, and `practical:{observation,task,repo,base_commit,verification}`.
+Verification entries contain `command`, `exit`, `log`, `log_sha256`. The original
+task bytes must match the CLI observation; a READY/seed fixture is not acceptance.
+
+Scheduling, notification, cross-project configs and their tests are host-owned,
+not product tooling. This Ubuntu host keeps them at `/srv/work/hermes/home/autodev/`.
+Their guide and dependencies are maintained there independently; historical
+campaign artifact paths remain unchanged. No Hermes runtime is required to use
+the benchmark tools or this verifier.
+
 ## Release boundary
 
 Benchmark execution does not authorize release or npm publication.
