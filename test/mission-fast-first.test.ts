@@ -56,6 +56,12 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       assert.match(hooks.tool![name]!.description, /meaningful formal checks?/u);
       assert.match(hooks.tool![name]!.description, /do not require \.git\/\*\* scope/u);
       assert.match(hooks.tool![name]!.description, /requested commit.*before independent Review/u);
+      const args = hooks.tool![name]!.args as Record<string, unknown>;
+      const schema = (name === 'sortie_v010_start_mission' ? args.unit
+        : (args.units as { items: unknown }).items) as { properties: { validation: { description: string } } };
+      assert.match(schema.properties.validation.description, /observed repository test paths/u);
+      assert.match(schema.properties.validation.description, /Reuse already discovered recipes/u);
+      assert.match(schema.properties.validation.description, /not new approval or proof of execution/u);
     }
     const prohibitionDescription = (hooks.tool!.sortie_v010_start_mission.args.prohibited_write as { description: string }).description;
     assert.match(prohibitionDescription, /user or applicable instructions/u);

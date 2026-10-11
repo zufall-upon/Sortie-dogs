@@ -1858,7 +1858,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const missionUnitSchema = { type: "object", additionalProperties: false,
       properties: { title: { type: "string" }, objective: { type: "string", description: "Target or corrective delta, about 2000 characters. Do not copy the original request. Longer authored instructions are preserved separately without a retry gate." },
         read: { ...stringList, description: "Inputs that affect validation, not an allowlist for observation. Do not include whole live session/database/log trees just to inspect them." }, write: stringList,
-        validation: stringList,
+        validation: { ...stringList, description: "Meaningful commands using observed repository test paths and runner conventions, not guessed filenames. Reuse already discovered recipes; when unknown, locate the relevant test or repository script with ordinary read/search before declaring it. This is planning guidance, not new approval or proof of execution; native checks still establish acceptance." },
         validation_cwd: { type: "object", additionalProperties: { type: "string" }, description: "Exact cwd per declared command; omitted commands use project_root. Registration-only correction of your active direct unit keeps the same admission and budget and requires new native checks, not historical proof." },
         requirement_ids: { ...stringList, description: "Related requirement IDs. A single unit inherits all requirements when omitted; specify coverage when splitting work across units." } },
       required: ["title", "objective", "write", "validation"] };
