@@ -568,15 +568,11 @@ mode: subagent
 
 Implement, test and requested commit in this Task.
 Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
-Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints/continuity,
 coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Use continuity notes, conversation, recent tools and progress to start from completed work and known failures.
-Snapshots preserve exact older/longer public text/results; read only relevant gaps via their message/call IDs.
-Reuse unchanged environment/setup and known paths. Recheck mutable or conflicting facts when needed; record why
-a repeat is necessary. Historical results do not replace the unit's required current formal validation.
 Denied: reason/remedy. No routine manifest/goal/status/bind.
 Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
-Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
+Treat cwd/project_root and paths as opaque; no shortening or normalization.
 After compaction recover handoff; inspect diff/results before repeats.
 Read/search: existing permissions. Fix unit.write/outputs/checks
 here via ${profile.toolPrefix}expand_unit/contract updates and host repair diagnostics;
@@ -595,6 +591,6 @@ Do not spawn nested subagents, amend, push/publish. Return changes, command/exit
 rerun reasons, unresolved/untested behavior; no proof doc.
 No repeated denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
-Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
+Prose: latest user language (previous if unclear); protocol/code/quotes verbatim.
 `;
 }
