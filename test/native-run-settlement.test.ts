@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -54,6 +54,52 @@ test('shared settlement wait preserves caller-owned stop conditions and propagat
   await waitForNativeSettlement({ pending: () => { calls++; return true; }, stopped: () => stops, pause: async () => { stops = true; } });
   assert.equal(calls, 1);
   await assert.rejects(waitForNativeSettlement({ pending: () => { throw Error('native read failed'); }, stopped: () => false }), /native read failed/);
+});
+
+test('idle blocked/decision delivery settles as incomplete, without bypassing live writers or acceptance', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'native-blocked-settlement-'));
+  const path = join(project, 'native.db'), db = new DatabaseSync(path);
+  try {
+    db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+      CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+      CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+    const insert = db.prepare('INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?)');
+    insert.run('root', null, project, 100, 140, 'succeeded');
+    insert.run('coordinator', 'root', project, 110, 130, 'succeeded');
+    const messages = db.prepare("INSERT INTO session_message VALUES (?, 'assistant', 1, ?)");
+    messages.run('root', JSON.stringify({ time: { completed: 140 }, finish: 'stop', content: [] }));
+    const final = JSON.stringify({ time: { completed: 130 }, finish: 'stop', content: [{ type: 'text', text: 'BLOCKED; pytest exit 4, not validated.' }] });
+    messages.run('coordinator', final);
+    const missions = join(project, '.sortie-dogs-v010', 'missions');
+    await mkdir(missions, { recursive: true });
+    const mission = join(missions, `${createHash('sha256').update('root').digest('hex')}.json`);
+    for (const status of ['blocked', 'needs-decision']) {
+      const bytes = JSON.stringify({ phase: 'submitted', submission: { status, summary: 'Required check fails; no acceptance.' } });
+      await writeFile(mission, bytes);
+      assert.equal(nativeRunPending(project, path, { since: 100 }), false, 'explicit failed delivery is not unfinished inference');
+      for (const table of ['session_pending', 'session_inbox']) {
+        db.exec(`INSERT INTO ${table} VALUES ('coordinator')`);
+        assert.equal(nativeRunPending(project, path, { since: 100 }), true);
+        db.exec(`DELETE FROM ${table}`);
+      }
+      const update = db.prepare("UPDATE session_message SET data = ? WHERE session_id = 'coordinator'");
+      update.run(JSON.stringify({ time: { completed: 130 }, content: [{ type: 'tool', name: 'shell', state: { status: 'running' } }] }));
+      assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'submitted blocker does not stop a live writer');
+      update.run(JSON.stringify({ time: { completed: 150 }, content: [] }));
+      assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'old idle epoch cannot settle a resumed controller');
+      update.run(final);
+      insert.run('worker', 'coordinator', project, 120, null, null);
+      assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'unstarted active descendant still owns work');
+      db.exec("DELETE FROM session_v2 WHERE id = 'worker'");
+      assert.equal(nativeRunPending(project, path, { since: 100 }), false);
+      assert.equal(await readFile(mission, 'utf8'), bytes, 'read-only settlement never manufactures completion/acceptance');
+    }
+    for (const state of [{ phase: 'submitted', submission: { status: 'ready' } }, { phase: 'submitted' },
+      { phase: 'running', submission: { status: 'blocked' } }, { phase: 'reviewing' }]) {
+      await writeFile(mission, JSON.stringify(state));
+      assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'success/continuation still requires its normal Mission boundary');
+    }
+  } finally { db.close(); await rm(project, { recursive: true, force: true }); }
 });
 
 test('a previous idle epoch cannot settle a resumed root between acceptance and its final response', async () => {
