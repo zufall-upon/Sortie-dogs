@@ -539,7 +539,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       };
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
-      editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
+      // The approved increase is discovered through execute/search. Direct-only registrations
+      // are absent from that catalog; retain the other controls' existing direct entrypoints.
+      editor.add({ name, description: definition.description, input: toolSchema(definition.args),
+        options: { codemode: name === "sortie_v010_extend_mission_budget" },
         execute: async (input, execution) => {
           await background.reconcile(String(execution.sessionID ?? ""));
           let content: string;

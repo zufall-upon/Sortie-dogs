@@ -1412,6 +1412,12 @@ test("V2 exposes the approved cumulative Mission budget extension to root Operat
     const rootTools = await visibleTools("root", "dog-operator");
     assert.equal(rootTools[name], exposed[name], "the actual registered native tool is available in the root Operator's request");
     assert.equal(typeof (rootTools[name] as { execute?: unknown }).execute, "function");
+    assert.deepEqual((rootTools[name] as { options?: unknown }).options, { codemode: true },
+      "execute/search can discover the registered increase, not just the direct model-tool fixture");
+    for (const [other, tool] of Object.entries(exposed)) if (other !== name) {
+      assert.deepEqual((tool as { options?: unknown }).options, { codemode: false },
+        `${other} retains its existing direct entrypoint`);
+    }
 
     const coordinatorTools = await visibleTools("coordinator", "dogs-coordinator");
     assert.equal(Object.hasOwn(coordinatorTools, name), false, "the root-only tool is not exposed to the delegated Coordinator");
