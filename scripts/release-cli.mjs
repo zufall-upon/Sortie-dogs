@@ -31,6 +31,17 @@ export function nativeCLI(executable, args, { platform = process.platform, node 
   if (platform === 'win32' && executable === 'opencode' && existsSync(openCodeEntry)) return { executable: openCodeEntry, args };
   return commandFor(executable, args);
 }
+
+/** OpenCode V2 formats positional messages as shell words; stdin preserves original task text. */
+export function spawnPromptCLI(executable, args, prompt, options) {
+  const child = spawn(executable, args, { ...options, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.on('error', error => {
+    // An early CLI exit remains the caller's process outcome, not an uncaught pipe error.
+    if (!['EPIPE', 'ECONNRESET'].includes(error.code)) child.emit('error', error);
+  });
+  child.stdin.end(prompt);
+  return child;
+}
 export const RELEASE_SMOKE_RUN_TIMEOUT_SECONDS = 900;
 export const RELEASE_SMOKE_TERMINAL_TIMEOUT_SECONDS = 180;
 export const RELEASE_SMOKE_TERMINAL_PROMPT =

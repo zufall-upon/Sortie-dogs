@@ -1,10 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, command } from './release-cli.mjs';
+import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, spawnPromptCLI, command } from './release-cli.mjs';
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 import { nativeRunPending, waitForNativeSettlement } from './native-run-settlement.mjs';
 
@@ -139,9 +138,9 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
   const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6.1-sol#xhigh');
-  const launch = nativeCLI('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel, request]);
-  const child = spawn(launch.executable, launch.args, {
-    cwd: project, env: { ...server.env, PWD: project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  const launch = nativeCLI('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel]);
+  const child = spawnPromptCLI(launch.executable, launch.args, request, {
+    cwd: project, env: { ...server.env, PWD: project }, detached: true,
   });
   let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation;
   child.stdout.on('data', bytes => { stdout += bytes; });

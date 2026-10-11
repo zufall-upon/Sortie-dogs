@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { estimateModelUsageCost } from "./swebench-model-cost.mjs";
-import { startV2ReleaseServer, v2PluginWrapperSource } from "./release-cli.mjs";
+import { startV2ReleaseServer, spawnPromptCLI, v2PluginWrapperSource } from "./release-cli.mjs";
 import { nativeRunPending, waitForNativeSettlement } from "./native-run-settlement.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1161,15 +1161,13 @@ export async function runOpenCode(options, dependencies = {}) {
     "--print-logs",
     "--agent", shellQuote(options.agent),
     "--model", "openai/gpt-6.1-sol#xhigh",
-    shellQuote(options.prompt),
   ].join(" ");
-  const child = spawn("bash", ["-ic", command], {
+  const child = spawnPromptCLI("bash", ["-ic", command], options.prompt, {
     cwd: options.workspace,
     env: { ...options.environment, OPENCODE_SERVER_PASSWORD: server.env.OPENCODE_SERVER_PASSWORD,
       PWD: options.workspace },
     detached: true,
     shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
   });
   let stdoutBytes = 0;
   let stderrBytes = 0;
