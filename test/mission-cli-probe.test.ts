@@ -3,7 +3,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { cliCloseStopReason, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
-import { nativeCLI } from "../scripts/release-cli.mjs";
+import { nativeCLI, spawnPromptCLI } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
@@ -47,6 +47,34 @@ test("CLI probes invoke native Windows npm and OpenCode binaries without a shell
   }), { executable: entry, args: ["run", "user prompt"] });
   assert.deepEqual(nativeCLI("npm", ["install"], { platform: "linux", npmEntry: entry }),
     { executable: "npm", args: ["install"] });
+});
+
+test("native CLI prompt stdin preserves quotes, CRLF, indentation and Unicode without a positional message", async () => {
+  const prompt = "Original task\r\nKeep \"SQL\", 'quotes', \\n, $HOME and `code` literally.\n    日本語\n";
+  const script = 'console.log(JSON.stringify({ args: process.argv.slice(1), text: (await import("node:fs")).readFileSync(0, "utf8") }))';
+  const child = spawnPromptCLI(process.execPath, ["--input-type=module", "-e", script, "--", "flag value"], prompt, {});
+  let stdout = "";
+  child.stdout.on("data", bytes => { stdout += bytes; });
+  const code = await new Promise((done, reject) => { child.once("error", reject); child.once("close", done); });
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(stdout), { args: ["flag value"], text: prompt });
+});
+
+test("native CLI prompt stdin delivers a multi-buffer task without truncation or an extra newline", async () => {
+  const prompt = '  "日本語"\\n\r\n'.repeat(20_000);
+  const script = 'console.log((await import("node:crypto")).createHash("sha256").update((await import("node:fs")).readFileSync(0)).digest("hex"))';
+  const child = spawnPromptCLI(process.execPath, ["--input-type=module", "-e", script], prompt, {});
+  let stdout = "";
+  child.stdout.on("data", bytes => { stdout += bytes; });
+  const code = await new Promise((done, reject) => { child.once("error", reject); child.once("close", done); });
+  assert.equal(code, 0);
+  assert.equal(stdout.trim(), createHash("sha256").update(prompt).digest("hex"));
+});
+
+test("native CLI exit before reading prompt stdin retains the failed process outcome", async () => {
+  const child = spawnPromptCLI(process.execPath, ["-e", "process.exit(23)"], "x".repeat(512_000), {});
+  const code = await new Promise((done, reject) => { child.once("error", reject); child.once("close", done); });
+  assert.equal(code, 23, "a closed stdin pipe neither crashes the observer nor accepts the CLI");
 });
 
 test("native V2 session directories use forward slashes even for Windows projects", () => {

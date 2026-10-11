@@ -190,6 +190,33 @@ async function fakeOpenCode(script: string) {
   return { root, options };
 }
 
+test("benchmark CLI admission preserves the original prompt through stdin, not positional formatting",
+  { skip: process.platform === "win32" }, async () => {
+    const { root, options } = await fakeOpenCode("exit 0");
+    const prompt = "Original task\r\nKeep \"double quotes\", 'apostrophes', \\n and $HOME literally.\n\n    indented 日本語\n";
+    try {
+      // Mirror OpenCode V2's positional formatMessage and raw stdin merge, without a provider.
+      await writeFile(join(root, "bin", "opencode"), `#!${process.execPath}\n
+const args = process.argv.slice(2);
+const input = require("node:fs").readFileSync(0, "utf8");
+const positional = args.slice(args.indexOf("--model") + 2);
+const quote = String.fromCharCode(34), escape = String.fromCharCode(92, 34);
+const message = positional.map(part => part.includes(" ") ? quote + part.replaceAll(quote, escape) + quote : part).join(" ");
+console.log(JSON.stringify({ text: message && input ? message + "\\n" + input : message || input, args, input }));
+`);
+      const result = await runOpenCode(options({ prompt, timeoutSeconds: 8 }), {
+        ...fakeReadyServer, nativeRunPending: () => false,
+        readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }),
+      });
+      assert.equal(result.reason, "completed");
+      const observed = JSON.parse(result.stdout);
+      assert.equal(observed.text, prompt);
+      assert.equal(observed.input, prompt, "no trimming, escaping or appended newline");
+      assert.deepEqual(observed.args, ["run", "--server", "http://127.0.0.1:12345", "--format", "json",
+        "--print-logs", "--agent", "dog-operator", "--model", "openai/gpt-6.1-sol#xhigh"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
 test("native background work survives CLI close until settlement, under the original limits", { skip: process.platform === "win32" }, async () => {
   const { root, options } = await fakeOpenCode("exit 0");
   try {
