@@ -77,7 +77,8 @@ export function observedMissionValidation(validation: readonly string[], childSe
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
            !record(part.state) || !["completed", "error"].includes(String(part.state.status)) || !record(part.state.input) ||
            typeof part.state.input.command !== "string") return [];
-      const command = normalizeCommand(part.state.input.command);
+      // Match raw input first: whitespace normalization destroys Python heredoc boundaries.
+      const command = part.state.input.command;
       const exit = record(part.state.metadata) ? part.state.metadata.exit : undefined;
       const started = record(part.time) ? time(part.time.ran) : record(part.state.time) ? time(part.state.time.start) : null;
       const completed = record(part.time) ? time(part.time.completed) : record(part.state.time) ? time(part.state.time.end) : null;
@@ -97,7 +98,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
       if (command === declared[occurrence]) occurrence = (occurrence + 1) % declared.length;
     }
     const { directory: actual, ...visible } = attempt;
-    return [{ ...visible, ...(directory && resolve(directory, actual ?? ".") !== resolve(directory)
+    return [{ ...visible, command: members.join(" && "), ...(directory && resolve(directory, actual ?? ".") !== resolve(directory)
       ? { directory: resolve(directory, actual ?? ".") } : {}), ...(members.length > 1 ? { observed_members: members } : {}) }];
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
