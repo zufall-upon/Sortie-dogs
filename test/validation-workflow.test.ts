@@ -4,11 +4,21 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_BEHAVIOR_REVIEW, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_REPRESENTATION_ORACLE, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
+
+test('direct implementation, Worker and Review share same-type representation oracle guidance without benchmark answers', () => {
+  for (const name of ['dogs-coordinator', 'dog-worker-v010', 'dog-reviewer-v010']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.equal(content.split(MISSION_REPRESENTATION_ORACLE).length, 2, name);
+  }
+  assert.match(MISSION_REPRESENTATION_ORACLE, /Same-type representation, not name\/visitor analogy/);
+  assert.match(MISSION_REPRESENTATION_ORACLE, /resolve conflicts/);
+  assert.doesNotMatch(MISSION_REPRESENTATION_ORACLE, /Unknown|astroid|1268|approval|permission/);
+});
 
 test('planning and implementation share a staged validation workflow without new authority', t => {
   for (const name of roles) {

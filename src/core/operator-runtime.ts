@@ -130,7 +130,8 @@ interface UnitState {
   childSessionID: string | null;
   /** A scoped implementation continuation in the original native Reviewer, never a review PASS. */
   reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[]; admittedAt?: string; promptID?: string;
-    checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
+    checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
+    validationRegisteredAt?: Readonly<Record<string, string>> };
   evidence: readonly GoalEvidence[];
   /** Implementation in the existing controller session, without a native child Task. */
   directExecution?: {
@@ -930,6 +931,31 @@ export class OperatorRuntime {
         unit.directExecution.validationRegisteredAt = registeredAt;
         await this.save(state);
       }
+      return state;
+    });
+  }
+  correctReviewerValidationRegistration(root: string, actor: string, runID: string, validation: readonly string[],
+    cwd?: Readonly<Record<string, string>>): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const active = state.units.filter(unit => unit.status === "running");
+      const unit = active[0];
+      if (state.runID !== runID || state.phase !== "running" || active.length !== 1 ||
+          unit?.reviewerCorrection?.author !== actor || unit.childSessionID !== actor ||
+          unit.directExecution?.finishedAt) throw new Error("mission-validation-registration-owner-mismatch");
+      const commands = validation.map(normalizeCommand);
+      if (!commands.length || commands.some(command => !command.trim())) throw new Error("mission-validation-registration-empty");
+      const directories = cwd ?? unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ?? {};
+      const priorDirectories = unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ?? {};
+      if (JSON.stringify(commands) === JSON.stringify(unit.unit.validation) &&
+          JSON.stringify(directories) === JSON.stringify(priorDirectories)) return state;
+      // This changes only the check recipe, not the admitted Task, contract or spend.
+      // Keep every prior attempt, but require actual native proof after registration.
+      const now = new Date().toISOString();
+      unit.reviewerCorrection.validationRegisteredAt = Object.fromEntries(commands.map(command => [command, now]));
+      if (unit.directExecution) unit.directExecution.validationCwd = directories;
+      state.units[state.units.indexOf(unit)] = { ...unit, unit: { ...unit.unit, validation: commands, validation_cwd: directories } };
+      await this.save(state);
       return state;
     });
   }

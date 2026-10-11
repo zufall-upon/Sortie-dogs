@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { RelativePathError, normalizeManifestPath, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import type { OperationManifest } from "../core/types.js";
 import { validateOperationManifestSchema } from "../core/validate-schema.js";
+import { missionValidationCommand } from "../core/mission-validation-command.js";
 
 export interface ToolExecuteBeforeInput {
   tool: string;
@@ -889,7 +890,17 @@ export function normalizeCommand(command: string): string {
 }
 
 function declaredCommandMatch(segment: string, declared: readonly string[]): string | undefined {
-  const normalized = normalizeCommand(segment);
+  const original = normalizeCommand(segment);
+  const originalMatches = declared.filter((command) => normalizeCommand(command) === original);
+  if (originalMatches.length === 1) return normalizeCommand(originalMatches[0]!);
+  // Mission registration already stores this exact literal Python heredoc as -c.
+  // Match the original native input to that same identity; retain its real exit,
+  // timing, ordering and source binding instead of demanding a conversion-only rerun.
+  let identity = segment;
+  if (/[\r\n]/u.test(segment)) {
+    try { identity = missionValidationCommand(segment); } catch { /* Other multiline inputs keep their original identity. */ }
+  }
+  const normalized = normalizeCommand(identity);
   const exact = declared.filter((command) => normalizeCommand(command) === normalized);
   if (exact.length === 1) return normalizeCommand(exact[0]!);
   const firstSpace = normalized.indexOf(" ");

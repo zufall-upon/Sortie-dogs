@@ -245,7 +245,7 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
     reviewerCorrectionScope: async () => correcting ? { write: ["vm/**"], validation: ["go test ./..."], generation: 1 } : undefined,
   })).setup(fixture.context);
   const names = ["glob", "grep", "patch", "read", "shell", "skill", "sortie_v010_bind_write_gate",
-    "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate",
+    "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate",
     "sortie_v010_repair_review", "websearch", "execute"];
   const definitions = Object.fromEntries(names.map(name => [name, { description: name, input: { type: "object", properties: {} } }]));
   const event = (agent: string, order = names) => ({ sessionID: "review-author", agent, system: [], messages: [],
@@ -253,7 +253,7 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
   try {
     const initial = event("dog-reviewer-v010");
     await fixture.sessionHooks.get("context")!(initial);
-    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
+    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
       assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
     }
     correcting = true;

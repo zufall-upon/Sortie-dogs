@@ -243,6 +243,7 @@ export type {
 export {
   MAX_RUN_FLIGHT_EVENTS,
   MAX_RUN_FLIGHT_LEDGER_BYTES,
+  MAX_GOAL_FLIGHT_LEDGER_BYTES,
   reconstructRunFlightLedger,
   RUN_FLIGHT_LEDGER_SCHEMA_VERSION,
   RunFlightLedger,

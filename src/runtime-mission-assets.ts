@@ -41,7 +41,8 @@ Rerun affected checks and required broad checks when contract/freshness requires
 
 /** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
 export const REVIEWER_VALIDATION_WORKFLOW = `Run inherited formal commands in order as exact separate foreground native shell calls.
-Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.`;
+Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.
+If a formal recipe is misregistered (for example a valid diagnostic intentionally exits nonzero), the active correction author can call sortie_v010_repair_review with reason, validation and optional validation_cwd to correct the recipe HERE. Preserve all original requirements and behavioral assertions; never suppress a real failure or register unconditional success. Run the newly registered checks before finishing; old outcomes are not proof for a changed recipe. Do not cancel, replace the Task or ask the controller to redispatch merely to fix check registration.`;
 
 const OPERATION_GUIDE = `## Practical operation guide
 
@@ -239,12 +240,16 @@ existing user authorization and project gates; npm publication remains manual.
 `;
 }
 
+/** Keep representation oracles consistent in direct execution, Worker and Review. */
+export const MISSION_REPRESENTATION_ORACLE = `Same-type representation, not name/visitor analogy; resolve conflicts.`;
+
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
 export const MISSION_BEHAVIOR_REVIEW = `Establish the test oracle independently of the patch: tests added with the implementation are claims to
 review, not established API behavior. For a changed failure path, compare a pre-existing analogous public
 test and its shared assertion helper, including default expected outputs, with the new case. A new test
 that asserts the implementation's current result can encode the defect rather than catch it. Preserve
 the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
+${MISSION_REPRESENTATION_ORACLE}
 Trace a concrete rejected input through the changed code back to the public caller, checking result,
 error and observable state together, including earlier results that can survive failure. Missing assertions
 alone are not defects; a concrete contradiction with the established contract is a finding even if tests pass.
@@ -336,8 +341,12 @@ ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this sa
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
 self-recheck, never independent approval of your own edits. No unresolved Medium may pass.
 Do not edit before that host transition or delegate. If the host resumes this SAME
-session with an admitted correction unit, read its exact handoff and use only its existing scoped write
-gate and declared validation/commit boundary. Keep your findings/context; do not rediscover unchanged
+session with an admitted correction unit, read its exact handoff and preserve its declared validation/commit
+boundary. The inherited write list is an estimate, not a user prohibition. Concrete native edit paths are
+reconciled automatically; for outputs whose paths cannot be inferred, call ${profile.toolPrefix}expand_unit
+with the current unit_id, paths and reason, then continue this SAME correction Task and reservation.
+Necessary in-request source or regression-test additions need no Operator round trip, approval or restart.
+Explicit user prohibitions and host permissions remain in force. Keep your findings/context; do not rediscover unchanged
 work. Use normal implementation execution permissions for focused diagnostics/formatting/generation;
 these do not replace formal inherited checks. After formal checks and the requested commit/clean boundary,
 explicitly self-recheck all original requirements, retained Major AND Medium findings, correction and
@@ -353,7 +362,7 @@ Use the exposed read/search tools directly. Shell is unavailable during the init
 do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
 
 If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
-only when correction cannot continue here (for example no existing write scope or an actual blocker).
+only when correction cannot continue here because of an actual blocker, not an omitted estimated write path.
 An operation's existing source or record defects use the same correction lifecycle; preserve its
 execution observations rather than rerunning the operation or treating correction as operation success.
 During an admitted
@@ -442,6 +451,7 @@ existing analogous source/tests for the expected contract when available. Avoid 
 units just to restate the issue. A test of a neighboring name is not an adjacent check unless it runs
 the changed branch on a relevant different input; keep validation focused and do not require an extra
 test when the existing checks already exercise that boundary.
+${MISSION_REPRESENTATION_ORACLE}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
@@ -554,7 +564,7 @@ Implement, test and requested commit in this Task.
 Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
 Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
 coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
-Ready: implement. Denied: reason/remedy. No routine manifest/goal/status/bind.
+Denied: reason/remedy. No routine manifest/goal/status/bind.
 Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.
 After compaction recover handoff; inspect diff/results before repeats.
@@ -564,15 +574,16 @@ no extra approval, restart or delegation. Keep prohibitions, host Git lifecycle,
 Requested add/commit needs source paths, not .git/** scope.
 Use pre-change test helpers as oracles, not new implementation/tests. Check
 result/error/state together, without a hypothetical exhaustive matrix. Keep reproduction entrypoint/input/layout; rerun or report why unverified.
+${MISSION_REPRESENTATION_ORACLE}
 Missing tooling: one documented bounded setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Done: behavior/ordered checks/commit; never fabricate completion.
+Never fabricate completion.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.
-No unchanged denial retry. Early: unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+No repeated denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
 Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { goalFingerprint, selectGoalDelivery, validGoalEvidence, type GoalEvidence } from "../dist/core/goal-bound.js";
-import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
+import { MAX_GOAL_FLIGHT_LEDGER_BYTES, RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
 import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
 import { settledUnitUsage } from "../dist/plugin/unit-usage.js";
 
@@ -39,6 +39,71 @@ test("delivery selection follows explicit current-turn facts without a classifie
     irreversible_or_major_scope: true }), "controlled-change");
   assert.equal(selectGoalDelivery({ declared_intent: "repair", requested_usable_path_established: true,
     irreversible_or_major_scope: false, explicit_mode: "mvp-first" }), "mvp-first");
+});
+
+test("large protected path recipes retain direct-unit settlements and reopen without losing history", async () => {
+  const name = "large-direct-evidence", goalID = `goal-${name}`;
+  const { ledger } = await accepted(name);
+  const command = "python -m pytest test/core test/cli";
+  const criteria = ["core", "cli"].map(id => ({ criterion_id: id, target: id, entrypoint: "pytest",
+    workload: "persistence regression", oracle_coverage: [id], build_boundary: "not-applicable" as const,
+    source: "source", candidate: "candidate", source_binding: "current-protected" as const,
+    candidate_binding: "current-protected" as const, fixture: "public fixture", proof_scope: "requested-full" as const,
+    expected_outcome: "pass" as const, validation_command: command }));
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" },
+    acceptance_contract: { criteria } });
+  // Whole-project bindings repeat their exact path recipes for each heterogeneous criterion.
+  // A few valid settlements must not exhaust the smaller wave-ledger byte allowance.
+  const paths = Array.from({ length: 1200 }, (_, index) => `test/fixtures/${"nested_component/".repeat(9)}case_${index}.sql`);
+  const file = path.join(root, name, ".sortie-dogs", "run-flight", "root.json");
+  let prior = (await ledger.readGoal()).records;
+  for (const id of ["implementation", "correction", "cli-gap"]) {
+    const state = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: id,
+      reservation_id: id, session_id: "root-session", ticket_id: null });
+    const evidence = evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint(id), command: [command],
+      startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
+      source: goalFingerprint("source"), candidate: goalFingerprint("candidate"),
+      binding: { manifest_hash: goalFingerprint(id), project_root: root, manifest_path: "manifest.json",
+        source_paths: paths, candidate_paths: paths } }, state, id);
+    assert.equal(evidence.length, 2);
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, unit_id: id, reservation_id: id,
+      receipt_id: `receipt-${id}`, disposition: "succeeded", result_class: "acceptance",
+      progress_fingerprint: id === "implementation" ? goalFingerprint(evidence) : null,
+      evidence, elapsed_ms: 100, cost_usd: id === "cli-gap" ? null : 0.25, native_session_id: "same-author" });
+    const reopened = await RunFlightLedger.openGoal(file);
+    const snapshot = await reopened.readGoal();
+    assert.deepEqual(snapshot.records.slice(0, prior.length), prior);
+    assert.deepEqual(snapshot.records.at(-1)!.event.kind === "unit.settled" && snapshot.records.at(-1)!.event.evidence, evidence);
+    prior = snapshot.records;
+  }
+  assert.ok(Buffer.byteLength(await readFile(file, "utf8")) > 1024 * 1024);
+  const state = (await ledger.readGoal()).state;
+  assert.equal(state.consumed_units, 3);
+  assert.equal(state.consumed_cost_usd, null, "unpriced native usage remains unknown");
+  assert.equal(state.outstanding_reservations.length, 0);
+  assert.deepEqual(state.satisfied_criteria, ["core", "cli"]);
+  const receipt = { goal_id: goalID, terminal_revision: 2, acceptance_fingerprint: acceptance,
+    started_at: at, ended_at: "2026-09-08T00:00:01.000Z", status: "succeeded" as const, stop_reason: "completed" as const,
+    unit_ids: state.unit_ids, session_ids: state.session_ids,
+    evidence_refs: state.evidence_refs, milestone_at: null };
+  await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: goalID, receipt });
+  assert.deepEqual((await (await RunFlightLedger.openGoal(file)).readGoal()).state.receipt, receipt);
+  const document = JSON.parse(await readFile(file, "utf8"));
+  document.goal_events.find(record => record.event.kind === "unit.settled").event.cost_usd = 0;
+  await writeFile(file, JSON.stringify(document));
+  await assert.rejects(ledger.readGoal(), error => error instanceof RunFlightLedgerError && error.code === "conflict",
+    "larger evidence must not bypass the original hash chain");
+});
+
+test("goal storage still rejects oversized documents without changing the file", async () => {
+  const { ledger } = await accepted("oversized-goal");
+  const file = path.join(root, "oversized-goal", ".sortie-dogs", "run-flight", "root.json");
+  const body = " ".repeat(MAX_GOAL_FLIGHT_LEDGER_BYTES + 1);
+  await writeFile(file, body);
+  await assert.rejects(ledger.readGoal(), error => error instanceof RunFlightLedgerError && error.code === "capacity");
+  assert.equal(await readFile(file, "utf8"), body);
 });
 
 test("late native usage reconciles a cancelled unit once, without replaying work or accepting evidence", async () => {

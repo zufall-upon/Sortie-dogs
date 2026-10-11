@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { cliCloseStopReason, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit } from "../scripts/mission-cli-probe.mjs";
+import { cliCloseStopReason, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { nativeCLI } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
 const status = { agent: "dog-operator", tool: "sortie_v010_operator_status", status: "completed", model: root.model };
+
+test("practical observation binds the exact original prompt and observed checkout, not the declared base", () => {
+  const request = "Original task\r\nKeep exact bytes.\n";
+  assert.deepEqual(probeTaskIdentity(request, { instance_id: "case", repo: "owner/repo", base_commit: "declared" }, "observed"), {
+    task_sha256: createHash("sha256").update(request).digest("hex"),
+    instance: { instance_id: "case", repo: "owner/repo", base_commit: "observed" },
+  });
+  assert.notEqual(probeTaskIdentity(request, undefined, "base").task_sha256,
+    probeTaskIdentity(request.trim(), undefined, "base").task_sha256);
+  assert.equal(probeTaskIdentity(request, undefined, "base").instance, null);
+});
 
 test("explicit status probe observes the requested model and returns on its first status result", () => {
   assert.equal(statusProbeStopReason({ root: "root", models: [], tools: [] }, expected), null);

@@ -9,6 +9,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { estimateModelUsageCost } from "./swebench-model-cost.mjs";
 import { startV2ReleaseServer, v2PluginWrapperSource } from "./release-cli.mjs";
+import { nativeRunPending, waitForNativeSettlement } from "./native-run-settlement.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_COMMAND_OUTPUT = 8 * 1024 * 1024;
@@ -1178,6 +1179,7 @@ export async function runOpenCode(options, dependencies = {}) {
   let progressTimer;
   let readTimer;
   let settled = false;
+  let finishAfterClose;
   let progressDecision = "not-reached";
   let lastUsageProgress = Date.now();
   let stdoutLine = "";
@@ -1187,6 +1189,9 @@ export async function runOpenCode(options, dependencies = {}) {
     stopReason = reason;
     cleanupPromise ??= terminateProcessGroup(child.pid);
     await cleanupPromise;
+    // The CLI can already be gone while the private server owns background work.
+    // Resolve the same lifecycle on a limit/host failure, even without another close.
+    finishAfterClose?.();
   };
   const captureOutput = (chunks, chunk, currentBytes) => {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -1272,7 +1277,14 @@ export async function runOpenCode(options, dependencies = {}) {
       });
     };
     child.once("error", error => { stopReason = "spawn-failed"; finish(127, error.code); });
-    child.once("close", finish);
+    child.once("close", (exit, signal) => {
+      finishAfterClose = () => finish(exit, signal);
+      if (exit !== 0 || signal || stopping) { finish(exit, signal); return; }
+      void waitForNativeSettlement({
+        pending: () => (dependencies.nativeRunPending ?? nativeRunPending)(options.workspace, options.databasePath, { since: startedAt }),
+        stopped: () => stopping || settled,
+      }).then(() => finish(exit, signal), () => { stopReason = "settlement-read-failed"; finish(1, signal); });
+    });
     timer = setTimeout(() => { void stop("timeout"); }, options.timeoutSeconds * 1000);
     const progressCheckSeconds = Math.min(options.progressCheckSeconds ?? PROGRESS_CHECK_SECONDS, options.timeoutSeconds);
     if (progressCheckSeconds < options.timeoutSeconds) progressTimer = setTimeout(() => { void (async () => {
