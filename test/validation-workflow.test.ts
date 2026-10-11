@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_BEHAVIOR_REVIEW, MISSION_REPRESENTATION_ORACLE, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_REPRESENTATION_ORACLE, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
@@ -93,6 +93,23 @@ test('direct implementation, Worker and Review share same-type representation or
   assert.match(MISSION_REPRESENTATION_ORACLE, /Same-type representation, not name\/visitor analogy/);
   assert.match(MISSION_REPRESENTATION_ORACLE, /resolve conflicts/);
   assert.doesNotMatch(MISSION_REPRESENTATION_ORACLE, /Unknown|astroid|1268|approval|permission/);
+});
+
+test('Coordinator planning and direct authorship compose regressions without a new validation lane', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  assert.equal(coordinator.split(MISSION_REGRESSION_PLACEMENT).length, 2);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /existing relevant test suite\/subtest or fixture/);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /when it can express the regression assertion/);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /If a new test module is needed/);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /distinctive behavior-specific name over automatically mirroring the implementation module/);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /Preserve established assertions and project test discovery/);
+  assert.match(MISSION_REGRESSION_PLACEMENT, /not another test, unit or review requirement/);
+  assert.match(coordinator, /execute it directly instead of re-explaining it to another Worker/);
+  assert.match(coordinator, /independent Review and Operator final acceptance still follow/i);
+  assert.doesNotMatch(MISSION_REGRESSION_PLACEMENT, /sqlfluff|pydicom|L060|2419|901|test_config|std_L060|hidden|official|permission|approval/);
+  for (const name of ['dog-operator', 'dog-worker-v010', 'dog-reviewer-v010']) {
+    assert.ok(!runtimeAssets.find(item => item.name === name)!.content.includes(MISSION_REGRESSION_PLACEMENT), name);
+  }
 });
 
 test('planning and implementation share a staged validation workflow without new authority', t => {
@@ -187,6 +204,9 @@ test('native CLI init installs the validation workflow in each active mission ro
       }
     }
     const reviewer = await readFile(join(root, '.opencode', 'agent', 'dog-reviewer-v010.md'), 'utf8');
+    const coordinator = await readFile(join(root, '.opencode', 'agent', 'dogs-coordinator.md'), 'utf8');
+    assert.equal(coordinator.split(MISSION_REGRESSION_PLACEMENT).length, 2);
+    assert.match(coordinator, /not another test, unit or review requirement/);
     assert.equal(reviewer, runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content);
     assert.match(reviewer, /Run inherited formal commands in order as exact separate foreground native shell calls/);
     assert.match(reviewer, /Run formatting and diagnostics separately; do not append undeclared shell commands/);
