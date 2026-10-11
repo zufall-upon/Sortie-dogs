@@ -132,3 +132,64 @@ test('a previous idle epoch cannot settle a resumed root between acceptance and 
     assert.equal(nativeRunPending(project, path, { since: 100 }), false, 'current native idle settles without another model turn');
   } finally { db.close(); await rm(project, { recursive: true, force: true }); }
 });
+
+test('background child idle does not settle before its final parent delivery is admitted', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'native-parent-delivery-'));
+  const path = join(project, 'native.db'), db = new DatabaseSync(path);
+  try {
+    db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+      CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+      CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+    const insertSession = db.prepare('INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?)');
+    // Retained pvlib-1072: parent idles, child finishes, completion notification
+    // follows 15 ms later and the parent's unfinished assistant follows at 46 ms.
+    const parentIdle = 1791725222253, childIdle = 1791725475194;
+    insertSession.run('root', null, project, 100, parentIdle, 'succeeded');
+    insertSession.run('coordinator', 'root', project, 110, childIdle, 'succeeded');
+    const insertMessage = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?)');
+    const backgroundCall = { time: { completed: parentIdle - 3000 }, content: [{
+      type: 'tool', name: 'subagent', state: { status: 'completed', input: { background: true },
+        metadata: { sessionID: 'coordinator' } },
+    }] };
+    insertMessage.run('root', 'assistant', 17, JSON.stringify(backgroundCall));
+    insertMessage.run('root', 'assistant', 23, JSON.stringify({ time: { completed: parentIdle - 3 }, finish: 'stop', content: [] }));
+    insertMessage.run('coordinator', 'assistant', 100, JSON.stringify({ time: { completed: childIdle - 3 }, finish: 'stop', content: [] }));
+    const missions = join(project, '.sortie-dogs-v010', 'missions');
+    await mkdir(missions, { recursive: true });
+    const mission = join(missions, `${createHash('sha256').update('root').digest('hex')}.json`);
+    for (const status of ['blocked', 'needs-decision']) {
+      const bytes = JSON.stringify({ phase: 'submitted', submission: { status } });
+      await writeFile(mission, bytes);
+      assert.equal(nativeRunPending(project, path, { root: 'root' }), true,
+        'child is idle but its background result has not reached the parent');
+      assert.equal(await readFile(mission, 'utf8'), bytes, 'no manufactured acceptance or response');
+    }
+    await writeFile(mission, JSON.stringify({ phase: 'completed' }));
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'acceptance does not replace native final delivery');
+    insertMessage.run('root', 'synthetic', 34, JSON.stringify({ time: { created: childIdle + 15 },
+      metadata: { source: 'subagent', childID: 'coordinator', state: 'completed' } }));
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'admitted notification alone is not a final response');
+    insertMessage.run('root', 'assistant', 35, JSON.stringify({ time: { created: childIdle + 46 }, content: [] }));
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'resumed response and usage are still pending');
+    db.prepare("UPDATE session_message SET data = ? WHERE session_id = 'root' AND seq = 35").run(JSON.stringify({
+      time: { created: childIdle + 46, completed: childIdle + 1000 }, finish: 'stop', content: [],
+    }));
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'final message still needs the fresh parent idle epoch');
+    db.prepare("UPDATE session_v2 SET time_idle = ? WHERE id = 'root'").run(childIdle + 1000);
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), false, 'settles immediately after native final delivery');
+    // No completed background handoff: unrelated children/foreground calls do
+    // not impose an artificial final parent turn or change its stop conditions.
+    db.prepare("UPDATE session_v2 SET time_idle = ? WHERE id = 'root'").run(parentIdle);
+    db.exec("DELETE FROM session_message WHERE session_id = 'root' AND seq >= 34");
+    const updateCall = db.prepare("UPDATE session_message SET data = ? WHERE session_id = 'root' AND seq = 17");
+    for (const call of [
+      { ...backgroundCall, content: [] },
+      { ...backgroundCall, content: [{ type: 'tool', name: 'subagent', state: { status: 'completed', input: { background: false }, metadata: { sessionID: 'coordinator' } } }] },
+      { ...backgroundCall, content: [{ type: 'tool', name: 'subagent', state: { status: 'error', input: { background: true }, metadata: { sessionID: 'coordinator' } } }] },
+      { ...backgroundCall, content: [{ type: 'tool', name: 'subagent', state: { status: 'completed', input: { background: true }, metadata: { sessionID: 'foreign' } } }] },
+    ]) {
+      updateCall.run(JSON.stringify(call));
+      assert.equal(nativeRunPending(project, path, { root: 'root' }), false);
+    }
+  } finally { db.close(); await rm(project, { recursive: true, force: true }); }
+});
