@@ -859,14 +859,21 @@ export function isRemoteMutation(tool: string, args: unknown): boolean {
 }
 
 /**
- * Quoted segments keep their contents; every unquoted whitespace run collapses to one space so the
+ * Quoted segments and backslash escapes keep their contents; unquoted whitespace runs collapse so the
  * same command written with different spacing compares equal.
  */
 export function normalizeCommand(command: string): string {
   let quote: "\"" | "'" | undefined;
+  let escaped = false;
   let whitespace = false;
   let normalized = "";
   for (const character of command.trim()) {
+    if (escaped) {
+      normalized += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") escaped = true;
     if (quote !== undefined) {
       normalized += character;
       if (character === quote) quote = undefined;
