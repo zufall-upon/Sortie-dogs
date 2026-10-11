@@ -441,6 +441,12 @@ run/grade commands and working directory. Setup, launch and result collection no
 do not forbid execution while assigning that Worker the requirement to execute.
 Write objective as a target or corrective delta: aim for 2000 characters.
 The Worker reads the original requests verbatim from the handoff once; do not copy them into objective.
+Public conversation, recent tool results and Mission progress are supplied automatically in continuity.
+When useful, include handoff_context in start_mission/plan_units: current intent and rationale, known environment,
+completed setup/checks, failed approaches and remaining work with existing references. It is optional working
+context, not a form or approval. Preserve useful knowledge instead of assigning unchanged discovery again.
+Assign the remaining action. Reference paths support relevant gaps, not a mandatory reread checklist; avoid
+routine environment/instruction reconfirmation and guessed AGENTS.md paths when that context is already supplied.
 Keep investigation, edits, formal checks and any requested commit in the same Worker before independent Review;
 do not invent a review-before-commit gate or a commit-only handoff. Preserve explicit user ordering.
 ${MISSION_GIT_SCOPE}
@@ -562,8 +568,8 @@ mode: subagent
 
 Implement, test and requested commit in this Task.
 Reuse supplied AGENTS.md; for gaps prefer exact ancestor files/affected subtrees over parent globs.
-Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, Mission constraints,
-coverage indices. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
+Read handoff_path in full first: task.objective, verbatim original_requests/unit_instruction, constraints/continuity,
+coverage. Preserve user scope and ordering; prove assigned criteria, not Mission completion.
 Denied: reason/remedy. No routine manifest/goal/status/bind.
 Recovery: ${profile.toolPrefix}bind_write_gate with exact project_root and manifest_path=operation_manifest.
 Treat cwd/project_root and paths as opaque; never shorten or normalize segments.

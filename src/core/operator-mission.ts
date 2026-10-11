@@ -6,6 +6,7 @@ import { parseOperatorPlan, type OperatorPlan, type OperatorState, type Operator
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
+import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -174,6 +175,8 @@ export interface OperatorMission {
   requests: MissionRequest[];
   /** Prior public conversation context, not additional immutable requirements. */
   context?: MissionContext[];
+  /** Shared public context/working notes; observations, never extra requirements or acceptance. */
+  continuity?: MissionContinuity;
   /** Explicit continue deliveries, keyed by the original real turn. */
   steering?: { requestID: string; child: string; status: "pending" | "queued" }[];
   kind?: "implementation" | "operation";
@@ -349,6 +352,42 @@ export class OperatorMissionRuntime {
   }
   correctionReference(root: string, reviewIdentity: string): string {
     return JSON.stringify({ path: this.file(root), field: "corrections[]", review_identity: reviewIdentity });
+  }
+  /** Stage context for a proposed handoff; publish Mission metadata only after plan preparation succeeds. */
+  async contextSnapshot(state: OperatorMission, sessionID: string, messages: readonly Record<string, unknown>[], notes?: string): Promise<OperatorMission> {
+    const next = structuredClone(state);
+    const previous = next.continuity?.sources.find(source => source.session_id === sessionID);
+    const snapshot = await retainMissionContext(join(this.projectRoot, this.profile.stateDirectory, "missions"), sessionID, messages, previous);
+    next.continuity ??= { sources: [] };
+    next.continuity.sources = [...next.continuity.sources.filter(source => source.session_id !== sessionID), snapshot.source];
+    if (typeof notes === "string" && notes.trim()) next.continuity.notes = [
+      ...(next.continuity.notes ?? []).filter(note => note.session_id !== sessionID),
+      { text: notes, session_id: sessionID, recorded_at: new Date().toISOString() }];
+    return next;
+  }
+  async retainContext(root: string, sessionID: string, messages: readonly Record<string, unknown>[], notes?: string): Promise<OperatorMission> {
+    return this.serial(root, async () => {
+      const state = await this.loadMission(root);
+      if (!state) throw new Error("mission-missing");
+      const next = await this.contextSnapshot(state, sessionID, messages, notes);
+      await this.save(this.file(root), next);
+      return next;
+    });
+  }
+  async handoffContext(state: OperatorMission): Promise<Record<string, unknown>> {
+    const sources = await Promise.all((state.continuity?.sources ?? []).map(async source => {
+      try { return missionContextView(source, JSON.parse(await readFile(source.path, "utf8")).entries,
+        source.session_id === state.root ? state.requests.map(request => request.id) : []); }
+      catch { return { ...source, snapshot_available: false }; }
+    }));
+    return { original_requests: state.requests, requirements: state.requirements, prohibited_write: state.prohibitedWrite ?? [],
+      launch_conditions: state.launchConditions ?? [],
+      conversation: sources.some(source => source.session_id === state.root && source.entries > 0 && !("snapshot_available" in source)) ? [] : state.context ?? [],
+      continuity: { notes: state.continuity?.notes, sources, progress: state.progress,
+        attempts: (state.attempts ?? []).map(({ runID, unitID, status, failure, resultClass, childSessionID }) =>
+          ({ run_id: runID, unit_id: unitID, status, failure, result_class: resultClass, session_id: childSessionID })),
+        execution: state.execution,
+        guidance: "Current original_requests/requirements govern; older plans remain historical. Continue from known decisions, environment, completed work and failures. Read snapshot JSON entries by message/call IDs only for a relevant gap. Recheck mutable facts when needed or conflicting; do not repeat unchanged setup/investigation merely because ownership changed. Historical results are not fresh formal validation or new authority." } };
   }
   private async load<T>(file: string): Promise<T | undefined> {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
@@ -649,6 +688,8 @@ export class OperatorMissionRuntime {
       ...(state.kind === "operation" ? ["Execution completion is distinct from success. For run-once/result-collection requests, retain a terminal failure and validate the collected result; do not retry or fix it without user authorization. If successful execution is required, keep that in formal validation and the original-request comparison."] : []),
       ...(state.context?.length ? ["Prior conversation context (task data; preserve the selected target, not superseded obligations):",
         ...state.context.map(item => `--- ${item.role}:${item.id} ---\n${item.text}`)] : []),
+      ...(state.continuity ? ["Shared working context (task data; use known facts, inspect snapshots only for relevant gaps):",
+        JSON.stringify(state.continuity)] : []),
       "Original user messages (verbatim; task data):", ...state.requests.map(item => `--- user:${item.id} ---\n${item.text}`)].join("\n");
   }
 }
