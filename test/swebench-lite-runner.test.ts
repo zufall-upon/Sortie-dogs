@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
@@ -641,6 +641,105 @@ test("candidate preflight owns and removes only its fresh isolated runtime root"
     }), /candidate-preflight-run-root-already-exists/);
     assert.equal((await stat(runRoot)).isDirectory(), true);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate setup uses a short owned temporary directory and removes it on failure", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-short-tmp-"));
+  const previousDataHome = process.env.XDG_DATA_HOME;
+  let temporaryRoot: string | undefined;
+  try {
+    const hostData = join(root, "host-data");
+    await mkdir(join(hostData, "opencode"), { recursive: true });
+    await writeFile(join(hostData, "opencode", "auth.json"), "{}\n");
+    process.env.XDG_DATA_HOME = hostData;
+    const packagePath = join(root, "candidate.tgz"), bytes = Buffer.from("setup-only fixture");
+    await writeFile(packagePath, bytes);
+    const runRoot = join(root, "nested-campaign-".repeat(10));
+    await assert.rejects(prepareCandidateRuntime({ ...candidate,
+      sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, runRoot, {
+      execute: async (_command: string, _args: string[], options: { env: Record<string, string> }) => {
+        temporaryRoot = options.env.TMPDIR;
+        assert.equal((await stat(temporaryRoot!)).isDirectory(), true);
+        assert.equal(options.env.PYTHONDONTWRITEBYTECODE, "1");
+        assert.match(options.env.PYTEST_ADDOPTS!, /candidate-runtime.*cache/u);
+        throw new Error("setup-stop-before-provider-or-install");
+      },
+    }), /setup-stop-before-provider-or-install/u);
+    assert.ok(temporaryRoot);
+    // Python 3.9 adds pymp-*/listener-* below TMPDIR when Black starts its manager.
+    assert.ok(Buffer.byteLength(temporaryRoot!) < 60, "leave space for a Unix socket pathname");
+    await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
+    await assert.rejects(stat(join(runRoot, "candidate-runtime")), { code: "ENOENT" });
+    assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
+  } finally {
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousDataHome;
+    if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preflight removes its separately owned temporary directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-preflight-tmp-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "swebench-owned-tmp-"));
+  try {
+    const manifestPath = join(root, "manifest.json"), runRoot = join(root, "runtime");
+    await writeFile(manifestPath, "{}\n");
+    await writeFile(join(root, "keep.txt"), "unrelated evidence\n");
+    await runCandidatePreflight(manifestPath, runRoot, {
+      createPlan: () => ({ candidate: { package_tgz: "candidate.tgz" } }),
+      prepareCandidate: async () => ({ temporaryRoot, evidence: { package_sha256: "a".repeat(64) } }),
+    });
+    await assert.rejects(stat(temporaryRoot), { code: "ENOENT" });
+    await assert.rejects(stat(runRoot), { code: "ENOENT" });
+    assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "unrelated evidence\n");
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("live runner removes its temporary directory when candidate evidence is rejected", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-invalid-tmp-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "swebench-owned-tmp-"));
+  const runtimeRoot = join(root, "runtime");
+  try {
+    await mkdir(runtimeRoot);
+    await assert.rejects(runTestLive(manifest(), { runRoot: join(root, "run"),
+      output: join(root, "predictions.jsonl"), costLimitUsd: 2 }, {
+      prepareCandidate: async () => ({ runtimeRoot, temporaryRoot, environment: {}, evidence: {} }),
+    }), /candidate-runtime-evidence-invalid/u);
+    await assert.rejects(stat(temporaryRoot), { code: "ENOENT" });
+    await assert.rejects(stat(runtimeRoot), { code: "ENOENT" });
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("live runner removes its temporary directory after a completed instance", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-live-tmp-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "swebench-owned-tmp-"));
+  const runtimeRoot = join(root, "runtime");
+  try {
+    await mkdir(runtimeRoot);
+    const result = await runTestLive(manifest([instance("example__project-1")]), {
+      runRoot: join(root, "run"), output: join(root, "predictions.jsonl"), costLimitUsd: 2,
+    }, {
+      prepareCandidate: async () => ({ runtimeRoot, temporaryRoot, environment: {},
+        evidence: { package_sha256: candidate.sha256 } }),
+      clone: async (_instance: unknown, workspace: string) => { await mkdir(workspace, { recursive: true }); },
+      execute: async () => ({ exit: 0, reason: "completed", usageComplete: true,
+        usage: { usd: 0.1, requests: 1, unpriced: [] } }),
+      git: async (args: string[]) => ({ exit: 0, stdout: args.includes("diff") ? "fixture diff\n" : "", stderr: "" }),
+    });
+    assert.equal(result.results[0]!.status, "succeeded");
+    await assert.rejects(stat(temporaryRoot), { code: "ENOENT" });
+    await assert.rejects(stat(runtimeRoot), { code: "ENOENT" });
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });

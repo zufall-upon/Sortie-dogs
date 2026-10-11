@@ -1253,6 +1253,88 @@ for (const effect of ["allow", "ask"] as const) test(`native correction dispatch
   } finally { await f.dispose(); }
 });
 
+for (const mode of ["inline-environment", "task-environment", "inline-source", "unchanged"] as const) {
+  test(`ready correction freshness recovery retains the SAME author: ${mode}`, async () => {
+    const key = "SORTIE_CORRECTION_RESTART_INPUT", prior = process.env[key];
+    process.env[key] = "before-restart";
+    const f = await fixture();
+    try {
+      const commands = [`${key}=$${key} node required-test.mjs`, "node check.mjs"];
+      const inline = mode !== "task-environment";
+      const initialReview = await initial(f, { keepReviewOpen: inline, validation: commands });
+      let dispatch = initialReview.dispatch;
+      if (inline) await f.tool("author", "repair_review", { findings: "Medium: output must be ready, not wrong." });
+      else {
+        const prepared = await f.tool("root", "repair_review");
+        dispatch = await f.before("root", "subagent", f.task(prepared.task));
+        await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+      }
+      await f.edit("author", "ready");
+      for (const command of commands) await f.shell("author", command);
+      await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m ready-correction");
+      if (inline) assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+      await f.finish(dispatch, "author", inlineReport());
+      const readyRun = await f.run(), readyMission = await f.missions.required("root"), readyLedger = await f.ledger();
+      assert.equal(readyMission.corrections![0]!.status, "ready");
+      assert.equal(readyMission.review!.verdict, "self-rechecked");
+      const oldChecks = structuredClone(readyRun.units[0]!.reviewerCorrection!.checks);
+      if (mode === "unchanged") {
+        await f.start();
+        const unchanged = await f.tool("root", "repair_review");
+        assert.equal(unchanged.status, "correction-ready"); assert.equal(unchanged.task, undefined);
+        assert.equal((await f.run()).runID, readyRun.runID);
+        assert.equal((await f.ledger()).state.consumed_units, readyLedger.state.consumed_units);
+        assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+        return;
+      }
+      if (mode === "inline-source") await writeFile(join(f.directory, "required-test.mjs"),
+        (await readFile(join(f.directory, "required-test.mjs"), "utf8")) + "// changed validation input\n");
+      else process.env[key] = "after-restart";
+      await f.start();
+      await assert.rejects(f.tool("root", "complete_mission"), /correction-validation-stale/);
+      await assert.rejects(f.tool("root", "review_mission", { risk_tags: [] }), /correction-validation-stale/);
+      const nativeOutcome = f.agents.author!.outcome;
+      delete f.agents.author!.outcome;
+      await assert.rejects(f.tool("root", "repair_review"), /reviewer-not-terminal/);
+      assert.equal((await f.run()).runID, readyRun.runID, "an active author cannot gain a duplicate admission");
+      f.agents.author!.outcome = nativeOutcome;
+      const recovered = await f.tool("root", "repair_review", { reason: "Refresh stale checks in the original author after restart/input change" });
+      assert.equal(recovered.status, "correction-required"); assert.equal(recovered.task.task_id, "author");
+      const prepared = await f.run(), mission = await f.missions.required("root");
+      assert.notEqual(prepared.runID, readyRun.runID);
+      assert.deepEqual(prepared.acceptance, readyRun.acceptance);
+      assert.deepEqual(prepared.sourceRefs, readyRun.sourceRefs);
+      assert.deepEqual(prepared.units[0]!.unit.validation, commands);
+      assert.deepEqual(prepared.units[0]!.unit.write, readyRun.units[0]!.unit.write);
+      assert.equal(prepared.units[0]!.reviewerCorrection!.checks, undefined, "old checks are history, not fresh proof");
+      assert.equal(mission.id, readyMission.id);
+      assert.equal(mission.corrections![1]!.author, "author");
+      assert.equal(mission.corrections![1]!.findings, readyMission.corrections![0]!.findings);
+      assert.deepEqual(mission.corrections![0]!.selfRecheck, readyMission.corrections![0]!.selfRecheck);
+      assert.equal(await readFile(join(f.directory, "result.txt"), "utf8"), "ready\n", "recovery does not redo implementation");
+      assert.deepEqual((await f.tool("root", "repair_review")).task, recovered.task, "repeat preparation reuses its existing admission");
+      assert.equal((await f.ledger()).state.consumed_units, readyLedger.state.consumed_units);
+      await assert.rejects(f.tool("root", "complete_mission"), /mission-review|incomplete|validation/);
+      const resumed = await f.before("root", "subagent", f.task(recovered.task));
+      await f.prompt("author", resumed.input.prompt); await f.bind("author");
+      const registration = await f.tool("author", "repair_review", { reason: "Preserve the same behavior check after restart",
+        validation: commands, validation_cwd: {} });
+      assert.equal(registration.status, "correction-registration-corrected");
+      for (const command of commands) await f.shell("author", command);
+      await f.finish(resumed, "author", inlineReport());
+      const current = await f.run();
+      assert.notDeepEqual(current.units[0]!.reviewerCorrection!.checks, oldChecks);
+      assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+      assert.equal((await f.missions.required("root")).review!.child, "author");
+      assert.equal((await f.ledger()).state.consumed_units, readyLedger.state.consumed_units + 1);
+      assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+    } finally {
+      if (prior === undefined) delete process.env[key]; else process.env[key] = prior;
+      await f.dispose();
+    }
+  });
+}
+
 for (const mode of ["validation", "native"] as const) test(`terminal ${mode} correction failure continues the SAME author in a fresh exact admission`, async () => {
   const f = await fixture();
   try {
