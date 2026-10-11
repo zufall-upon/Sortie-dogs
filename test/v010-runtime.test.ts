@@ -1502,6 +1502,7 @@ test("a user-approved cumulative Mission unit increase resumes the same Coordina
   const { hooks, unit, declare } = await missionCoordinatorFixture(root);
   const status = () => hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }).then(JSON.parse);
   const before = await status(), missionID = before.mission_id;
+  const approvedTotal = 34;
   const ledgerPath = join(root, ".git", "sortie-dogs", "run-flight-v010",
     `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
   const ledger = await RunFlightLedger.openGoal(ledgerPath);
@@ -1518,7 +1519,11 @@ test("a user-approved cumulative Mission unit increase resumes the same Coordina
   const state = (await ledger.readGoal()).state;
   const used = state.consumed_units + state.outstanding_reservations.length;
   assert.equal(used, 32, "the existing Mission spent its cumulative 32-unit allowance");
-  assert.equal((await status()).budget.remaining_units, 0);
+  const exhausted = await status();
+  assert.equal(exhausted.mission_id, missionID);
+  assert.equal(exhausted.budget.max_units, 32);
+  assert.equal(exhausted.budget.consumed_units, 32);
+  assert.equal(exhausted.budget.remaining_units, 0);
   await assert.rejects(declare([unit]), /mission-budget-exhausted/);
   const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
   assert.equal(mission.id, missionID);
@@ -1527,17 +1532,17 @@ test("a user-approved cumulative Mission unit increase resumes the same Coordina
   await assert.rejects(extend(missionID, used + 1, "coordinator"), /profile-coordinator-root-required/);
   await assert.rejects(extend("stale-mission", used + 1), /mission-budget-mission-not-active/);
   await assert.rejects(extend(missionID, 1.5), /mission-budget-limit-invalid/);
-  const revised = JSON.parse(await extend(missionID, used + 1));
+  const revised = JSON.parse(await extend(missionID, approvedTotal));
   assert.equal(revised.status, "extended");
-  assert.deepEqual(revised.budget, { max_units: used + 1, consumed_units: state.consumed_units,
-    reserved_units: state.outstanding_reservations.length, remaining_units: 1 });
+  assert.deepEqual(revised.budget, { max_units: approvedTotal, consumed_units: state.consumed_units,
+    reserved_units: state.outstanding_reservations.length, remaining_units: approvedTotal - used });
   const records = (await ledger.readGoal()).records.length;
-  assert.equal(JSON.parse(await extend(missionID, used + 1)).status, "unchanged");
+  assert.equal(JSON.parse(await extend(missionID, approvedTotal)).status, "unchanged");
   assert.equal((await ledger.readGoal()).records.length, records, "a duplicate request is read-only");
   assert.equal((await status()).mission_id, missionID);
   const next = JSON.parse(await declare([unit]));
   assert.ok(next.task, "the original Coordinator can dispatch the same unit after the cumulative increase");
-  assert.equal((await status()).budget.max_units, used + 1);
+  assert.equal((await status()).budget.max_units, approvedTotal);
 }));
 
 for (const failure of ["budget", "generated-contract", "control-storage", "state-storage"] as const) {
