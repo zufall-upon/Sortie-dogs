@@ -261,6 +261,11 @@ existing user authorization and project gates; npm publication remains manual.
 /** Keep representation oracles consistent in direct execution, Worker and Review. */
 export const MISSION_REPRESENTATION_ORACLE = `Same-type representation, not name/visitor analogy; resolve conflicts.`;
 
+/** Coordinator authors and plans regressions without adding another validation/review lane. */
+export const MISSION_REGRESSION_PLACEMENT = `Prefer an existing relevant test suite/subtest or fixture when it can express the regression assertion.
+If a new test module is needed, prefer a distinctive behavior-specific name over automatically mirroring the implementation module.
+Preserve established assertions and project test discovery. This is placement guidance, not another test, unit or review requirement.`;
+
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
 export const MISSION_BEHAVIOR_REVIEW = `Establish the test oracle independently of the patch: tests added with the implementation are claims to
 review, not established API behavior. For a changed failure path, compare a pre-existing analogous public
@@ -482,6 +487,7 @@ If peer source/tests expose a plausible related still-unhandled error, probe its
 before choosing the fix; reuse adequate checks. Include this in the current author's objective/check
 plan, not another unit or review round. Do not invent an exhaustive error matrix.
 ${MISSION_REPRESENTATION_ORACLE}
+${MISSION_REGRESSION_PLACEMENT}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
