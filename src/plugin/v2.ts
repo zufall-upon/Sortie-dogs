@@ -12,6 +12,8 @@ import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
 import { completionReportModelMessages } from "./receipt-presentation.js";
 import { modelLiveState } from "./model-live-state.js";
+import { runtimeAssets as reviewerAssets } from "../runtime-assets-v010.js";
+import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../runtime-mission-assets.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -228,6 +230,29 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
       return { data: id === undefined ? [] : await legacyMessages(context, id,
         context.message ? input => context.message!.list(input) : reviewList) };
     },
+    reviewExecution: async (request: unknown) => {
+      const id = sessionID(request);
+      if (!id || !record(request)) return undefined;
+      const activity = await (context.session.active ? context.session.active() : active()).catch(() => undefined);
+      const pending = context.session.inbox ? array(await context.session.inbox.list({ sessionID: id })) : [];
+      const queued = pending.some(item => record(item) && (item.id === request.promptID ||
+        !request.promptID && typeof request.prompt === "string" && record(item.payload) && typeof item.payload.text === "string" &&
+        item.payload.text.includes(request.prompt) && record(item.time) && Number(item.time.created) >= Number(request.admittedAt)));
+      let terminal: string | undefined;
+      if (typeof request.promptID === "string" && context.session.log) {
+        let delivered = false;
+        for await (const event of context.session.log({ sessionID: id, follow: false })) {
+          const data = record(event.data) ? event.data : {};
+          if (event.type === "session.inbox.delivered" && data.inboxID === request.promptID) delivered = true;
+          if (delivered && ["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].includes(String(event.type))) {
+            terminal = String(event.type).replace("session.execution.", ""); break;
+          }
+        }
+      }
+      return { data: { ...(record(activity) ? { active: Object.hasOwn(activity, id),
+        parentActive: typeof request.parent === "string" && Object.hasOwn(activity, request.parent) } : {}), queued,
+        ...(terminal ? { terminal } : {}) } };
+    },
     message: async (request: unknown) => {
       const id = sessionID(request), wanted = messageID(request);
       return { data: id === undefined || wanted === undefined ? undefined
@@ -341,7 +366,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 }
 
 const correctionAgent = (agent: unknown): boolean => typeof agent === "string" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent);
-const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "shell", "sortie_v010_bind_write_gate",
+const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "sortie_v010_bind_write_gate",
   "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit"]);
 
 // Order only the genuine, already-filtered native definitions. Initial read-only
@@ -352,6 +377,22 @@ const reviewerModelToolOrder = (tools: JsonObject): JsonObject => Object.fromEnt
   (left < right ? -1 : left > right ? 1 : 0)));
 const correctionAgentID = (sessionID: string) => `dog-reviewer-correction-v010-${createHash("sha256").update(sessionID).digest("hex").slice(0, 16)}`;
 const correctionStoragePrefix = "v2-reviewer-correction-permissions:";
+const reviewerObservationText = "Use the exposed read/search and native shell observations directly. Observe existing state without\n" +
+  "mutating the candidate; actual correction uses repair_review in this same context. Native user permissions remain authoritative.";
+const legacyReviewerObservationText = "Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;\n" +
+  "do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.";
+const reviewerSystem = reviewerAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.split("---").slice(2).join("---");
+const legacyReviewerSystem = reviewerSystem.replace(reviewerObservationText, legacyReviewerObservationText);
+const operatorSystem = reviewerAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+const legacyOperatorSystem = operatorSystem.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "")
+  .replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+function reconcileOperatorContext(event: JsonObject): void {
+  if (event.agent !== "dog-operator" || !Array.isArray(event.system)) return;
+  // Native configuration sources may materialize the released role after our registry transform.
+  // Reconcile its exact request part as well; never rewrite a combined/custom instruction block.
+  event.system = event.system.map(part => record(part) && part.type === "text" && typeof part.text === "string" &&
+    part.text.trim() === legacyOperatorSystem.trim() ? { ...part, text: operatorSystem } : part);
+}
 // OpenCode 2.0.18 util/wildcard.ts + permission.evaluate ordering.
 function nativeRuleMatch(input: string, pattern: string): boolean {
   let escaped = pattern.replaceAll("\\", "/").replace(/[.+^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*").replace(/\?/gu, ".");
@@ -360,12 +401,24 @@ function nativeRuleMatch(input: string, pattern: string): boolean {
 }
 // Exact shipped role block after ConfigAgentV1.normalize + ConfigMigrateV1.migrateAgent in
 // OpenCode v2.0.18 (cd9a14a6), not all matching denies. Everything outside this block is retained.
-export const nativeReviewerRoleRules: readonly NativePermissionRule[] = [
+const legacyNativeReviewerRoleRules: readonly NativePermissionRule[] = [
   { action: "sortie_*", resource: "*", effect: "deny" },
   ...["sortie_v010_repair_review", "sortie_v010_finish_direct_unit"].map(action => ({ action, resource: "*", effect: "allow" as const })),
   ...["read", "glob", "grep", "list"].map(action => ({ action, resource: "*", effect: "allow" as const })),
   ...["shell", "webfetch", "subagent", "question", "edit", "edit", "edit"].map(action => ({ action, resource: "*", effect: "deny" as const })),
 ];
+export const nativeReviewerRoleRules: readonly NativePermissionRule[] = legacyNativeReviewerRoleRules.filter(rule => rule.action !== "shell");
+function shippedReviewerBlock(rules: readonly NativePermissionRule[]): { start: number; rules: readonly NativePermissionRule[] } | undefined {
+  for (const shipped of [legacyNativeReviewerRoleRules, nativeReviewerRoleRules]) {
+    for (let start = rules.length - shipped.length; start >= 0; start--) {
+      if (shipped.every((rule, offset) => {
+        const actual = rules[start + offset];
+        return actual?.action === rule.action && actual.resource === rule.resource && actual.effect === rule.effect;
+      })) return { start, rules: shipped };
+    }
+  }
+  return undefined;
+}
 const correctionAgents = new WeakMap<OpenCodeV2Context, Map<string, { generation: number; registration: Registration }>>();
 
 /** Use 2.0.18's agent.transform/switchAgent BEFORE native tool snapshot selection; never mutate session rules. */
@@ -448,17 +501,11 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
       const reviewer = editor.get?.("dog-reviewer-v010");
       if (!reviewer?.permissions) throw new Error("native-reviewer-correction-role-permissions-unavailable");
       const rules = reviewer.permissions;
-      let start = -1;
-      for (let index = rules.length - nativeReviewerRoleRules.length; index >= 0; index--) {
-        if (nativeReviewerRoleRules.every((rule, offset) => {
-          const actual = rules[index + offset];
-          return actual?.action === rule.action && actual.resource === rule.resource && actual.effect === rule.effect;
-        })) { start = index; break; }
-      }
-      if (start < 0) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
-      const inherited = [...rules.slice(0, start), ...nativeReviewerRoleRules.filter(rule => !["edit", "shell"].includes(rule.action)),
+      const shipped = shippedReviewerBlock(rules);
+      if (!shipped) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
+      const inherited = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => !["edit", "shell"].includes(rule.action)),
         ...["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
-        ...rules.slice(start + nativeReviewerRoleRules.length)];
+        ...rules.slice(shipped.start + shipped.rules.length)];
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
         // Remove ONLY the shipped read-only edit/shell role entries. Native implementation
@@ -487,6 +534,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
+    editor.update("dog-operator", agent => {
+      if (typeof agent.system === "string" && agent.system.trim() === legacyOperatorSystem.trim()) agent.system = operatorSystem;
+    });
     for (const [name, id, variant] of [
       ["dog-operator", "gpt-6.1-sol", "xhigh"],
       ["dogs-coordinator", "gpt-6.1-sol", "xhigh"],
@@ -496,6 +546,17 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
       ["dog-worker-v010", "gpt-6-luna-fast", "max"],
     ]) editor.update(name, agent => { agent.model ??= { providerID: "openai", id, variant }; });
+    editor.update("dog-reviewer-v010", agent => {
+      // Location-only candidate loading may retain released assets. Update only
+      // the exact shipped body; user-customized instructions remain untouched.
+      if (typeof agent.system === "string" && agent.system.trim() === legacyReviewerSystem.trim()) {
+        agent.system = agent.system.replace(legacyReviewerObservationText, reviewerObservationText);
+      }
+      const rules = agent.permissions, shipped = rules && shippedReviewerBlock(rules);
+      if (!rules || !shipped) return;
+      agent.permissions = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => rule.action !== "shell"),
+        ...rules.slice(shipped.start + shipped.rules.length)];
+    });
   });
   await context.tool.transform(editor => {
     // Task.model is for explicit per-task choices. Defaults remain structured in the registry
@@ -504,6 +565,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       const execute = tool.execute;
       tool.execute = async (input, execution) => {
         const value = record(input) ? { ...input } : {};
+        const joined = hooks.nativeTaskJoin?.(String(execution.id ?? ""));
+        if (joined) return { content: joined.output ?? "Joined the existing native Reviewer; it continues in the same context.",
+          metadata: { sessionID: joined.sessionID, status: joined.status ?? "running", joinedCallID: joined.callID, joined: true } };
         if (value.agent !== "dogs-coordinator" || typeof execution.progress !== "function") return execute(value, execution);
         const report = execution.progress as (value: JsonObject) => Promise<void>;
         let metadata: JsonObject = {};
@@ -568,6 +632,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
+    if (event.tool === "subagent" && hooks.nativeTaskJoin?.(String(event.id ?? ""), false)) return;
     if (event.tool === "subagent" && record(event.input) && typeof event.input.sessionID === "string" && event.input.agent === "dog-reviewer-v010") {
       const child = event.input.sessionID;
       try {
@@ -692,9 +757,11 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
+    reconcileOperatorContext(event);
     if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     await background.resume(String(event.sessionID ?? ""));
     await background.reconcile(String(event.sessionID ?? ""));
+    if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     await reconcileCorrectionPermissions(String(event.sessionID));
@@ -710,7 +777,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit", "repair_review", "finish_direct_unit"] : []) : visible[String(event.agent)];
       for (const key of Object.keys(event.tools)) {
         if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && !correcting &&
-            ["edit", "write", "patch", "shell"].includes(key)) { delete event.tools[key]; continue; }
+             ["edit", "write", "patch"].includes(key)) { delete event.tools[key]; continue; }
         if (!key.startsWith("sortie_")) continue;
         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
       }
@@ -736,7 +803,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (projection.messages) event.messages = projection.messages;
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
+    reconcileOperatorContext(event);
     if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
+    await background.reconcile(String(event.sessionID ?? ""));
+    if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     // V2 compaction builds its own tool snapshot and does not run the normal
     // context hook's agent-specific Sortie filter. Summary calls cannot run
     // local tools, so do not expose Sortie schemas to the compaction provider.
@@ -766,11 +836,19 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
       const liveState = new Map<string, unknown>();
       const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
         if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
+        const output = { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
+          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } };
         await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
-          args: legacyToolInput("subagent", dispatch.input) }, { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
-          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+          args: legacyToolInput("subagent", dispatch.input) }, output);
         if (dispatch.child) await syncReviewerCorrectionPermissions(context, hooks, dispatch.child);
-      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore));
+        // Inline Review already has a compact provenance receipt; retain the full diagnostic packet in its ordinary tool route.
+        try {
+          const packet: unknown = JSON.parse(output.output);
+          if (record(packet) && record(packet.completion_receipt)) return JSON.stringify(packet.completion_receipt);
+        } catch { /* Ordinary native outputs are not necessarily JSON. */ }
+        return output.output;
+      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore),
+      (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
       hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
         nativeBackground: background, returnReportTransport: "tool-result",
         reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});

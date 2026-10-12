@@ -196,7 +196,7 @@ export interface OpenCodePluginInput {
   /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
   returnReportTransport?: "tool-result";
   /** Native background Job ownership, persisted by the V2 adapter. */
-  nativeBackground?: { awaiting(sessionID: string): Promise<boolean> };
+  nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void> };
   /** V2 adapter can project and restore native session-scoped correction permissions. */
   reviewerCorrectionPermissions?: boolean;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
@@ -233,6 +233,10 @@ export interface OpenCodeHooks {
   reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
   backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
+  /** Read-only recovery of a retained host result; never repeats Task settlement or validation. */
+  backgroundResult?: (parent: string, callID: string, child: string, promptID?: string) => Promise<string | undefined>;
+  /** Native transport joins an already-running Task instead of submitting a duplicate prompt. */
+  nativeTaskJoin?: (callID: string, consume?: boolean) => { sessionID: string; callID: string; output?: string; status?: "running" | "completed" } | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;
   "permission.ask"?: (
     input: { permission: string; patterns: string[]; sessionID?: string },
@@ -1827,7 +1831,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
     const correction = correcting && dispatchCallID && members
       ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
-    const admittedSnapshot = await protectedSnapshot(authorization).catch(() => undefined);
+    const admittedSnapshot = await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
     if (admittedSnapshot === undefined) return;
     const root = goalRoot(owner);
     const ledger = await goalLedger(root);
@@ -2724,14 +2728,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (state.phase === "terminal" || state.receipt !== null) {
       throw new Error("SORTIE_GOAL_CONTROL_DENIED: terminal");
     }
-    if (state.replan_required) {
-      if (state.replan_used) {
-        await terminalGoal(sessionID, "stop_no_progress", "stopped");
-        throw new Error("SORTIE_GOAL_CONTROL_DENIED: stop_no_progress");
-      }
+    if (state.replan_required && !state.replan_used) {
       state = await ledger.appendGoal({ kind: "goal.replanned", at: new Date().toISOString(),
         goal_id: state.goal_id, revision: state.revision, reason: "no-progress" });
     }
+    // No-progress is diagnostic, not another implicit execution budget. Useful
+    // repair can continue within the same explicit unit/time/cost limits below.
     if (state.budget !== null && state.consumed_units + state.outstanding_reservations.length >= state.budget.max_units) {
       await terminalGoal(sessionID, "stop_budget", "stopped");
       throw budgetDenied("units");
@@ -5459,8 +5461,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         conflicts = [];
         for (const [ownerSessionID, authorization] of sessionAuthorizations) {
           if (ownerSessionID === sessionID || authorization.suspended) continue;
-          for (const [requested, held, access] of [[writeScopes, authorization.writeScopes, "write/write"],
-            [writeScopes, authorization.readScopes, "write/read"], [readScopes, authorization.writeScopes, "read/write"]] as const) {
+          for (const [requested, held, access] of [[writeScopes, authorization.writeScopes, "write/write"]] as const) {
             for (const left of requested) for (const right of held) {
               if (conflicts.length < 8 && writeScopesOverlap([left], [right])) {
                 conflicts.push({ session_id: ownerSessionID, requested: left, held: right, access });

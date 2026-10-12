@@ -1,4 +1,4 @@
-import { normalizeWorktreeScopePath, worktreeScopesOverlap } from "./worktree-scope.js";
+import { normalizeWorktreeScopePath, worktreeScopesConflict } from "./worktree-scope.js";
 import type {
   WorktreeParallelContract,
   WorktreeParallelContractIssue,
@@ -12,7 +12,7 @@ const MESSAGES = {
   cycle: "Dependency graph must be acyclic.",
   mode: "Mode, worker bound, and task count are inconsistent.",
   path: "Scope and changed paths must be normalized repository-relative paths.",
-  overlap: "Parallel tasks must not have write/write or read/write scope overlap.",
+  overlap: "Parallel tasks must not have overlapping write scopes. Exploratory reads are concurrent.",
   artifact: "Commit artifact must match its task, base, and declared write scope.",
   failure: "Failure task and fallback must satisfy the fixed failure policy.",
 } as const;
@@ -123,9 +123,7 @@ export function validateWorktreeParallelContract(
       for (let rightIndex = leftIndex + 1; rightIndex < entries.length; rightIndex += 1) {
         const right = entries[rightIndex]!;
         if (right.scopes === undefined) continue;
-        const overlaps = left.scopes.write.some((path) =>
-          [...right.scopes!.write, ...right.scopes!.read].some((other) => worktreeScopesOverlap(path, other))) ||
-          right.scopes.write.some((path) => left.scopes!.read.some((other) => worktreeScopesOverlap(path, other)));
+        const overlaps = worktreeScopesConflict(left.scopes, right.scopes);
         if (overlaps) diagnostics.push(issue("WTP006_SCOPE_OVERLAP", `/tasks/${right.index}/scope`, MESSAGES.overlap));
       }
     }

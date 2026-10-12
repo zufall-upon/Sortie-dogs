@@ -23,13 +23,13 @@
       "name": "write/read overlap",
       "left": { "read": [], "write": ["src/a.ts"] },
       "right": { "read": ["src"], "write": ["test/b.ts"] },
-      "ok": false
+      "ok": true
     },
     {
       "name": "read/write overlap",
       "left": { "read": ["src/a.ts"], "write": ["test/a.ts"] },
       "right": { "read": [], "write": ["src"] },
-      "ok": false
+      "ok": true
     },
     {
       "name": "read/read overlap",

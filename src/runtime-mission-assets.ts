@@ -88,6 +88,20 @@ function controls(profile: RuntimeProfile, names: readonly string[]): string {
   return names.map(name => `  ${profile.toolPrefix}${name}: true`).join("\n");
 }
 
+export const MISSION_RESULT_HOLD_POLICY = `A user's result-and-hold checkpoint is not final acceptance. When asked to record results and stop,
+use the actual native completion and its host receipt, perform only required project recording, then stop.
+Do not prepare acceptance, discover raw ledger schemas, reread unchanged source/checks or compare unrelated
+tracker items merely to prove the checkpoint. Inspect concrete missing evidence only; preserve real user
+prohibitions, project recording requirements and honest findings. A hold never accepts or completes the Mission.`;
+
+export const LEGACY_MISSION_REFLECTION_WORKFLOW = `When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
+preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
+through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.`;
+export const MISSION_REFLECTION_WORKFLOW = `When bounded process reflections are injected, use relevant prevention while preserving the original requirements.
+Resolved process-failure reflection is optional checkpoint bookkeeping, not a completion requirement.
+Record it when useful alongside existing work; never create a reflection-only model turn, delay an explicit
+result-and-hold checkpoint or block delivery for it. User-correction memory follows the bounded reflection policy.`;
+
 export function missionOperatorContent(profile: RuntimeProfile, version: string): string {
   return `---
 description: Sortie-dogs ${version} Operator — original requirements, user decisions and final acceptance.
@@ -247,9 +261,9 @@ with operator_status.mission_id and the new cumulative max_units (not the increm
 Coordinator. This does not change a separate campaign dollar cap or dispatch a Worker. Do not reset spend,
 silently shrink acceptance, or create substitute goals.
 
-When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
-preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
-through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.
+${MISSION_RESULT_HOLD_POLICY}
+
+${MISSION_REFLECTION_WORKFLOW}
 
 Retain 🐾 Sortie presentation. The host-authored measured return panel is retained in complete_mission's
 tool result. Give a concise final outcome and key checks; do not transcribe the card or spend another model
@@ -322,7 +336,6 @@ permission:
   glob: allow
   grep: allow
   list: allow
-  bash: deny
   webfetch: deny
   task: deny
   question: deny
@@ -336,7 +349,6 @@ ${controls(profile, ["repair_review", "finish_direct_unit"])}
   glob: true
   grep: true
   list: true
-  bash: false
   webfetch: false
   task: false
   question: false
@@ -381,8 +393,8 @@ requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unr
 Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
 Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
 Otherwise return to the caller in the user's language.
-Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;
-do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
+Use the exposed read/search and native shell observations directly. Observe existing state without
+mutating the candidate; actual correction uses repair_review in this same context. Native user permissions remain authoritative.
 
 If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
 only when correction cannot continue here because of an actual blocker, not an omitted estimated write path.

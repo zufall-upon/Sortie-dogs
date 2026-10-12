@@ -206,6 +206,8 @@ export interface OperatorMission {
   consultations?: MissionConsultation[];
   /** Host-observed current-Mission Worker attempts; only an implementation failure followed by a failed remediation can qualify for Rescue. */
   attempts?: MissionAttempt[];
+  /** Native mutating-tool observations, not inference from a role name or a write estimate. */
+  sourceAuthors?: string[];
   /** One bounded Astra Rescue per eligible unit; validation, independent review and root acceptance remain separate. */
   rescue?: MissionTerminalRescue;
   /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
@@ -851,7 +853,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
 }
 
 export function missionReviewIndependent(mission: OperatorMission, child: string | undefined): boolean {
-  return child !== undefined && !(mission.corrections ?? []).some(correction => correction.author === child);
+  return child !== undefined && !mission.sourceAuthors?.includes(child) &&
+    !(mission.corrections ?? []).some(correction => correction.author === child);
 }
 
 export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {

@@ -173,3 +173,75 @@ test("reused Reviewer old idle/text cannot settle a missing new prompt; log fail
   await lifecycle.reconcile("root");
   assert.deepEqual(settled, ["failed"]);
 });
+
+test("host result is durable and projected beside the same native completion without another wakeup or settlement", async () => {
+  const f = fixture();
+  let settlements = 0;
+  const result = JSON.stringify({ status: "review-correction-recorded", call_id: "call", independent: false });
+  let lifecycle = new NativeBackgroundLifecycle(f.context, async () => { settlements++; return result; });
+  await lifecycle.admit("root", "call", { agent: "dog-reviewer-v010", prompt: "review" });
+  await lifecycle.bind("root", "child", "dog-reviewer-v010", "review", "prompt");
+  f.history.child!.push({ id: "prompt", type: "user" }, { id: "terminal", type: "assistant", finish: "stop",
+    content: [{ type: "text", text: "SELF_RECHECKED" }] });
+  await lifecycle.launched("root", "call", "child", true);
+  const text = '<subagent sessionID="child" state="completed">\nSELF_RECHECKED\n</subagent>';
+  f.history.root!.push({ type: "synthetic", text, time: { created: Date.now() },
+    metadata: { source: "subagent", childID: "child", state: "completed" } });
+  const messages = [{ role: "user", content: [{ type: "text", text }] },
+    { role: "user", content: [{ type: "text", text: "Record and hold; no acceptance" }] }];
+  const original = structuredClone(messages);
+  lifecycle = new NativeBackgroundLifecycle(f.context, async () => { throw Error("must not resettle"); });
+  const projected = await lifecycle.project("root", messages) as any[];
+  assert.equal(projected.length, 3);
+  assert.equal(projected[0], messages[0]); assert.equal(projected[2], messages[1]);
+  assert.equal(projected[1].role, "system");
+  assert.match(projected[1].content[0].text, /review-correction-recorded/);
+  assert.match(projected[1].content[0].text, /not a new request or acceptance/);
+  assert.deepEqual(await lifecycle.project("root", projected), projected, "reentrant projection is once-only");
+  assert.deepEqual(await lifecycle.project("other-root", messages), messages, "no cross-parent output");
+  assert.deepEqual(messages, original, "native history remains untouched");
+  assert.equal(settlements, 1);
+});
+
+test("legacy settled receipt recovery is read-only, once cached and isolated from unmatched generations", async () => {
+  const f = fixture(), now = Date.now();
+  f.state.set("v2-background-dispatches:root", [
+    { parent: "root", child: "child", callID: "old", promptID: "old-prompt", agent: "dog-reviewer-v010",
+      input: {}, baseline: [], admittedAt: now - 20, launched: true, settled: true, terminal: "succeeded", result: "old host receipt" },
+    { parent: "root", child: "child", callID: "new", promptID: "new-prompt", agent: "dog-reviewer-v010",
+      input: {}, baseline: [], admittedAt: now, launched: true, settled: true, terminal: "succeeded" },
+  ]);
+  const notices = [
+    { text: "old native notice", time: { created: now - 10 }, metadata: { source: "subagent", childID: "child", state: "completed" } },
+    { text: "new native notice", time: { created: now + 1 }, metadata: { source: "subagent", childID: "child", state: "completed" } },
+    { text: "foreign notice", time: { created: now + 1 }, metadata: { source: "subagent", childID: "foreign", state: "completed" } },
+    { text: "wrong outcome", time: { created: now + 1 }, metadata: { source: "subagent", childID: "child", state: "failed" } },
+  ].map(item => ({ ...item, type: "synthetic" }));
+  f.history.root!.push(...notices);
+  let recoveries = 0;
+  const lifecycle = new NativeBackgroundLifecycle(f.context, async () => { throw Error("no settlement"); }, undefined,
+    async (parent, call, child, prompt) => {
+      recoveries++; assert.deepEqual([parent, call, child, prompt], ["root", "new", "child", "new-prompt"]);
+      return "new host receipt";
+    });
+  const messages = notices.map(item => ({ role: "user", content: [{ type: "text", text: item.text }] }));
+  const projected = await lifecycle.project("root", messages) as any[];
+  assert.equal(projected.length, 6);
+  assert.match(projected[1].content[0].text, /old host receipt/);
+  assert.match(projected[3].content[0].text, /new host receipt/);
+  assert.equal(projected[4], messages[2]); assert.equal(projected[5], messages[3]);
+  assert.deepEqual(await lifecycle.project("root", messages), projected);
+  assert.equal(recoveries, 1);
+});
+
+test("a receipt projection failure never suppresses the actual native result or creates a task blocker", async () => {
+  const f = fixture();
+  f.state.set("v2-background-dispatches:root", [{ parent: "root", child: "child", callID: "call", input: {}, baseline: [],
+    admittedAt: 1, launched: true, settled: true, terminal: "succeeded" }]);
+  f.history.root!.push({ type: "synthetic", text: "native", time: { created: 2 },
+    metadata: { source: "subagent", childID: "child", state: "completed" } });
+  const lifecycle = new NativeBackgroundLifecycle(f.context, async () => {}, undefined, async () => { throw Error("projection unavailable"); });
+  const messages = [{ role: "user", content: [{ type: "text", text: "native" }] }];
+  assert.deepEqual(await lifecycle.project("root", messages), messages);
+  assert.equal(await lifecycle.awaiting("root"), false);
+});

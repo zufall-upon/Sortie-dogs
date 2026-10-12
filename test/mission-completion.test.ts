@@ -166,7 +166,10 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
       traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: dispatcher }));
     const reviewer = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, reviewer);
-    assert.match(reviewer.args.prompt, /deferred Operator checks/);
+    assert.match(reviewer.args.prompt, /host observes this invocation's native outcome after your terminal/u);
+    assert.match(reviewer.args.prompt, /final acceptance is separate.*authorized by the current user request/u);
+    assert.match(reviewer.args.prompt, /result-and-hold checkpoint does not require it/u);
+    assert.doesNotMatch(reviewer.args.prompt, /List those as deferred Operator checks/u);
     assert.match(reviewer.args.prompt, /Public result contract: ready followed by a newline/u);
     assert.deepEqual((await runtime.required("root")).units, validatedUnits,
       "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");

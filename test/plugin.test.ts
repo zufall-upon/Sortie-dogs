@@ -9164,14 +9164,16 @@ test("parallel worker bindings allow disjoint scopes and reject equal or ancesto
       'Write denied for "<parallel-unit>": parallel implementation workers cannot mutate shared remote state.',
       "parallel-remote-mutation",
     );
-    const deniedUnits = ["unit-equal", "unit-ancestor", "unit-reader"];
+    assert.equal((await executeBindWriteGate(hooks, directory, "unit-reader", "unit-reader.operation-manifest.json")).status, "bound",
+      "exploratory read overlap does not reserve another writer's files in the same plugin process");
+    const deniedUnits = ["unit-equal", "unit-ancestor"];
     if (process.platform === "win32") deniedUnits.push("unit-case");
     for (const id of deniedUnits) {
       const denied = await executeBindWriteGate(hooks, directory, id, `${id}.operation-manifest.json`);
       assert.equal(denied.reason, "manifest-overlap");
       assert.equal(denied.recoverable, true);
       assert.ok(denied.conflicts.some((item: { session_id: string; access: string }) => item.session_id === "unit-a" &&
-        ["write/write", "read/write"].includes(item.access)), JSON.stringify(denied.conflicts));
+        item.access === "write/write"), JSON.stringify(denied.conflicts));
       assert.deepEqual(denied.defects, ["manifest /write parallel_write_scope_overlap"]);
       assert.deepEqual(denied.escalation, {
         action: "blocker-resolution-takeover",

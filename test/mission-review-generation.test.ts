@@ -75,6 +75,14 @@ for (const mode of ["already-replaced", "identity-await", "history-await", "fore
       const review = async (generation: string) => JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({
         risk_tags: ["public-logic"], traces: [`Candidate notes ${generation}`],
       }, { sessionID: "root" }));
+      // A normal active Review now joins rather than replacing A. This fixture
+      // separately models a persisted generation change racing A's terminal reader.
+      const replacePersistedGeneration = async () => (await missions.update("root", mission => {
+        const previous = mission.review!;
+        mission.review = { runID: previous.runID, risk: previous.risk, source: previous.source,
+          candidateSource: previous.candidateSource, verdict: "pending", requestFingerprint: "generation-B",
+          task: { ...previous.task!, prompt: `${previous.task!.prompt}\nCandidate notes B` } };
+      })).review;
       const a = await review("A");
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "review-call-A" }, { args: a.task });
       await chat("reviewer", a.task.prompt);
@@ -85,7 +93,7 @@ for (const mode of ["already-replaced", "identity-await", "history-await", "fore
       }
       let replacement: Awaited<ReturnType<typeof missions.required>>["review"];
       if (mode === "already-replaced") {
-        await review("B"); replacement = (await missions.required("root")).review;
+        replacement = await replacePersistedGeneration();
       }
       agents.reviewer!.outcome = "succeeded";
       pause = mode === "identity-await" || mode === "history-await";
@@ -93,7 +101,7 @@ for (const mode of ["already-replaced", "identity-await", "history-await", "fore
       const returned = hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call-A" }, output);
       if (pause) {
         await Promise.race([entered.promise, returned.then(() => { throw new Error("Reviewer completion did not reach the intended await boundary"); })]);
-        await review("B"); replacement = (await missions.required("root")).review;
+        replacement = await replacePersistedGeneration();
         release.resolve();
       }
       await returned;

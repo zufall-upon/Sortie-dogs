@@ -11,8 +11,8 @@ import { worktreeScopesConflict } from "../dist/core/worktree-scope.js";
 const scope = (read: string[] = [], write: string[] = []) => ({ read, write });
 const childFixture = fileURLToPath(new URL("./fixtures/scope-lease-child.mjs", import.meta.url));
 
-test("repository-wide scope conflicts with every nested OpenCode scope", () => {
-  assert.equal(worktreeScopesConflict(scope([], ["**"]), scope(["src/a.ts"], [])), true);
+test("repository-wide writes conflict with nested writes, not exploratory readers", () => {
+  assert.equal(worktreeScopesConflict(scope([], ["**"]), scope(["src/a.ts"], [])), false);
   assert.equal(worktreeScopesConflict(scope([], ["src/a.ts"]), scope([], ["**"])), true);
 });
 

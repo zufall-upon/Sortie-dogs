@@ -1152,7 +1152,7 @@ message evidence without claiming unrun tests. Expected-negative evaluation uses
 Unknown usage stays null. Only a settled worker result that actually fails the accepted criterion
 increments no-progress. Pre-dispatch declaration, handoff, routing, and validation-admission defects,
 plus locally repairable evidence defects, consume no no-progress result. Two consecutive acceptance
-failures permit one bounded replan; another pair stops with stop_no_progress. Exhaustion stops with stop_budget. A real user continuation keeps
+failures trigger a bounded diagnosis/replan. Further useful repair may continue within the existing explicit budget; do not stop merely because another pair fails. Exhaustion stops with stop_budget. A real user continuation keeps
 goal identity and spend; only an explicit accepted budget/scope revision can expand authority.
 
 GOAL_BOUND_DELIVERY_FIXTURE
@@ -1162,7 +1162,7 @@ GOAL_BOUND_DELIVERY_FIXTURE
     delivery: planning-only | mvp-first | repair-first | controlled-change; current-turn planner declaration
     budget: cumulative at unit boundaries; unknown time/cost remain null; rename/resume never reset
     declaration_gate: exact typed fields before Task; defect -> pointer + same-turn repair + no worker
-    no_progress: acceptance-failing worker results only; two -> one bounded replan -> two -> stop_no_progress
+    no_progress: acceptance-failing worker results only; two -> diagnosis/replan; continue useful repair within the explicit budget
     process_defect: declaration | handoff | routing | validation admission | local evidence repair -> no no-progress charge
     terminal: DONE/STOP invalidates tickets; no dispatch after terminal
     command_proof: exact manifest validation + native host exit + child/call/reservation + current protected source/candidate

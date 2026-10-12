@@ -949,10 +949,17 @@ export class OperatorRuntime {
       const priorDirectories = unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ?? {};
       if (JSON.stringify(commands) === JSON.stringify(unit.unit.validation) &&
           JSON.stringify(directories) === JSON.stringify(priorDirectories)) return state;
-      // This changes only the check recipe, not the admitted Task, contract or spend.
-      // Keep every prior attempt, but require actual native proof after registration.
-      const now = new Date().toISOString();
-      unit.reviewerCorrection.validationRegisteredAt = Object.fromEntries(commands.map(command => [command, now]));
+      // Keep unaffected native checks in this admission. Only a new command or a
+      // changed execution directory needs proof after this registration repair.
+      const registeredAt = { ...unit.reviewerCorrection.validationRegisteredAt }, now = new Date().toISOString();
+      const previousCommands = new Set(unit.unit.validation.map(normalizeCommand));
+      for (const command of commands) {
+        if (!previousCommands.has(command) ||
+            resolve(this.projectRoot, directories[command] ?? ".") !== resolve(this.projectRoot, priorDirectories[command] ?? ".")) {
+          registeredAt[command] = now;
+        }
+      }
+      unit.reviewerCorrection.validationRegisteredAt = registeredAt;
       if (unit.directExecution) unit.directExecution.validationCwd = directories;
       state.units[state.units.indexOf(unit)] = { ...unit, unit: { ...unit.unit, validation: commands, validation_cwd: directories } };
       await this.save(state);

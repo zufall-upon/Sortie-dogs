@@ -11,6 +11,7 @@ import test from "node:test";
 import V2Plugin, {
   createSortieDogsV2Plugin,
   createV2ReturnReportFinalizer,
+  nativeReviewerRoleRules,
   type OpenCodeV2Context,
 } from "../dist/plugin/v2.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
@@ -23,6 +24,7 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
+import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../dist/runtime-mission-assets.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -253,7 +255,8 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
   try {
     const initial = event("dog-reviewer-v010");
     await fixture.sessionHooks.get("context")!(initial);
-    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
+    assert.equal(initial.tools.shell, definitions.shell, "native shell observation is available before correction without replacement definitions");
+    for (const forbidden of ["patch", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
       assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
     }
     correcting = true;
@@ -271,6 +274,117 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
     await fixture.sessionHooks.get("context")!(restored);
     assert.deepEqual(Object.keys(restored.tools), Object.keys(initial.tools), "restored read-only role never keeps correction tools for cache");
     assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`location-only candidate reconciles released Reviewer observation text without overwriting custom instructions: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.split("---").slice(2).join("---");
+  const observed = "Use the exposed read/search and native shell observations directly. Observe existing state without\n" +
+    "mutating the candidate; actual correction uses repair_review in this same context. Native user permissions remain authoritative.";
+  const legacy = "Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;\n" +
+    "do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.";
+  const system = current.replace(observed, legacy) + (custom ? "\nCustom instruction remains authoritative." : "");
+  const reviewer = { system, permissions: [...nativeReviewerRoleRules], model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
+  const web = reviewer.permissions.findIndex(rule => rule.action === "webfetch");
+  reviewer.permissions.splice(web, 0, { action: "shell", resource: "*", effect: "deny" });
+  const registry: Record<string, any> = { "dog-reviewer-v010": reviewer };
+  fixture.context.agent!.transform = async callback => {
+    callback({ get: id => registry[id], update: (id, update) => update(registry[id] ??= {}) });
+    return { dispose() {} };
+  };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup(fixture.context);
+  try {
+    assert.equal(reviewer.system, custom ? system : current);
+    assert(!reviewer.permissions.some(rule => rule.action === "shell" && rule.effect === "deny"));
+    assert.deepEqual(reviewer.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`released Operator receives result-and-hold guidance only for the exact shipped body: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+  const legacy = current.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "")
+    .replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+  const operator = { system: legacy + (custom ? "\nKeep my custom policy." : ""), model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
+  const original = operator.system;
+  fixture.context.agent!.transform = async callback => {
+    callback({ update: (id, update) => { if (id === "dog-operator") update(operator); } });
+    return { dispose() {} };
+  };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup(fixture.context);
+  try {
+    assert.equal(operator.system, custom ? original : current);
+    assert.deepEqual(operator.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.match(current, /result-and-hold checkpoint is not final acceptance/);
+    assert.match(current, /reflection is optional checkpoint bookkeeping/);
+    assert.match(current, /never create a reflection-only model turn/);
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`late native role materialization reconciles only the exact Operator model-input part: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+  const legacy = current.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "").replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+  const role = { type: "text", text: legacy + (custom ? "\nMy custom instruction." : "") };
+  const user = { type: "text", text: "Unrelated project instructions" };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+  })).setup(fixture.context);
+  try {
+    for (const name of ["context", "compaction"]) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [role, user], messages: [], tools: {} };
+      await fixture.sessionHooks.get(name)!(event);
+      assert.equal(event.system[0]!.text, custom ? role.text : current);
+      assert.equal(event.system[1], user);
+      assert.equal(role.text, legacy + (custom ? "\nMy custom instruction." : ""), "saved role is not mutated");
+    }
+    const build = { sessionID: "root", agent: "build", system: [role], messages: [], tools: {} };
+    await fixture.sessionHooks.get("context")!(build);
+    assert.equal(build.system[0], role);
+  } finally { cleanup?.(); }
+});
+
+test("background adapter retains rewritten host output for the real completion request and compaction, without another prompt", async () => {
+  const fixture = contextFixture(), histories: Record<string, any[]> = { root: [], child: [] };
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "child" ? "dog-reviewer-v010" : "dog-operator",
+    model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" }, ...(sessionID === "child" ? { parentID: "root" } : {}) });
+  fixture.context.session.context = async ({ sessionID }) => histories[sessionID] ?? [];
+  let settlements = 0;
+  const factory: OpenCodePlugin = async () => ({
+    "tool.execute.before": async () => {}, "chat.message": async () => {},
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+    "tool.execute.after": async (_input, output) => {
+      if ((output.metadata as any)?.status === "running") return;
+      settlements++;
+      output.output = JSON.stringify({ completion_receipt: { status: "review-correction-recorded", native_call: "call", independent: false },
+        acceptance_summary: { original_requests: "full diagnostic detail" } });
+    },
+  });
+  let cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  try {
+    const dispatch = { sessionID: "root", tool: "subagent", id: "call", input: { agent: "dog-reviewer-v010", prompt: "review", background: true } };
+    await fixture.toolHooks.get("execute.before")!(dispatch);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "child", messageID: "prompt", prompt: { text: "review" } });
+    histories.child!.push({ id: "prompt", type: "user" });
+    await fixture.toolHooks.get("execute.after")!({ ...dispatch, status: "completed", result: { content: "Job running", metadata: { status: "running", sessionID: "child" } } });
+    histories.child!.push({ id: "terminal", type: "assistant", finish: "stop", content: [{ type: "text", text: "SELF_RECHECKED" }] });
+    const text = '<subagent sessionID="child" state="completed">\nSELF_RECHECKED\n</subagent>';
+    histories.root!.push({ type: "synthetic", text, time: { created: Date.now() }, metadata: { source: "subagent", childID: "child", state: "completed" } });
+    const native = [{ role: "user", content: [{ type: "text", text }] }];
+    for (const hook of ["context", "compaction"]) {
+      const event = { sessionID: "root", system: [], messages: native, tools: {} };
+      await fixture.sessionHooks.get(hook)!(event);
+      assert.equal(event.messages.length, 2);
+      assert.match(JSON.stringify(event.messages[1]), /review-correction-recorded/);
+      assert.doesNotMatch(JSON.stringify(event.messages[1]), /full diagnostic detail/);
+      assert.equal(event.messages[0], native[0]);
+    }
+    cleanup?.(); cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+    const event = { sessionID: "root", system: [], messages: native, tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    assert.match(JSON.stringify(event.messages[1]), /review-correction-recorded/);
+    assert.equal(settlements, 1); assert.equal(fixture.synthetic.length, 0);
   } finally { cleanup?.(); }
 });
 
@@ -612,7 +726,10 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
         const reviewTask = await before("coordinator", "subagent", nativeTask(review.task));
         await prompt("reviewer", String(reviewTask.input.prompt));
         agents.reviewer!.outcome = "succeeded";
-        await after(reviewTask, "PASS\nCommitted result matches the original request and real validation.", { sessionID: "reviewer" });
+        const report = "PASS\nCommitted result matches the original request and real validation.", now = Date.now();
+        history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+          time: { created: now, completed: now }, content: [{ type: "text", text: report }] });
+        await after(reviewTask, report, { sessionID: "reviewer" });
         assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Implement result");
         assert.equal((await exec("git", ["status", "--porcelain"], { cwd: directory })).stdout, "");
       }

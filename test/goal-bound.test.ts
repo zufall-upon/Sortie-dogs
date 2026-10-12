@@ -446,7 +446,7 @@ for (const outcome of ["passed", "cancelled"] as const) test(`operator retry can
   assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 1);
 });
 
-test("two no-progress boundaries permit one replan, then require stop", async () => {
+test("no-progress triggers diagnosis but useful repair retains the explicit remaining budget", async () => {
   const { ledger } = await accepted("stall", 6);
   for (let index = 1; index <= 2; index += 1) {
     await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `r-${index}`, goal_id: "goal-stall",
@@ -460,6 +460,49 @@ test("two no-progress boundaries permit one replan, then require stop", async ()
   const replanned = await ledger.appendGoal({ kind: "goal.replanned", at, goal_id: "goal-stall", revision: 1,
     reason: "no-progress" });
   assert.equal(replanned.replan_used, true);
+  for (let index = 3; index <= 6; index += 1) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: `r-${index}`, goal_id: "goal-stall",
+      unit_id: `u-${index}`, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, reservation_id: `r-${index}`, receipt_id: `x-${index}`,
+      goal_id: "goal-stall", unit_id: `u-${index}`, disposition: "failed", progress_fingerprint: null,
+      evidence: [], elapsed_ms: null, cost_usd: null });
+  }
+  assert.equal((await ledger.readGoal()).state.consumed_units, 6);
+  await assert.rejects(ledger.appendGoal({ kind: "dispatch.reserved", at, reservation_id: "over-budget",
+    goal_id: "goal-stall", unit_id: "u-7", session_id: "root-session", ticket_id: null }), RunFlightLedgerError);
+});
+
+test("no-progress diagnosis cannot reject a real success against an already satisfied criterion", async () => {
+  const { ledger } = await accepted("repair-success", 6);
+  const goalID = "goal-repair-success", command = "node check.mjs";
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "repair-first", budget: { max_units: 6, time_ms: null, cost_usd: null, source: "accepted-plan" },
+    acceptance_contract: { criteria: [{ criterion_id: "result", target: "result", entrypoint: "check",
+      workload: "regression", oracle_coverage: ["result"], build_boundary: "not-applicable", source: "source", candidate: "candidate",
+      source_binding: "current-protected", candidate_binding: "current-protected", fixture: "public fixture",
+      proof_scope: "requested-full", expected_outcome: "pass", validation_command: command }] } });
+  for (let index = 1; index <= 6; index++) {
+    const id = `repair-${index}`, passed = index === 1 || index === 6;
+    const state = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: id,
+      reservation_id: id, session_id: "root-session", ticket_id: null });
+    const evidence = passed ? evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint(id), command: [command],
+      startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
+      source: goalFingerprint("source"), candidate: goalFingerprint("candidate"),
+      binding: { manifest_hash: goalFingerprint(id), project_root: root, manifest_path: "manifest.json",
+        source_paths: ["input.txt"], candidate_paths: ["result.txt"] } }, state, id) : [];
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, unit_id: id, reservation_id: id,
+      receipt_id: `receipt-${id}`, disposition: passed ? "succeeded" : "failed", result_class: "acceptance",
+      progress_fingerprint: index === 1 ? goalFingerprint(evidence) : null, evidence, elapsed_ms: 100, cost_usd: 0.01 });
+    if (index === 3) await ledger.appendGoal({ kind: "goal.replanned", at, goal_id: goalID, revision: 2, reason: "no-progress" });
+  }
+  const state = (await ledger.readGoal()).state;
+  assert.equal(state.replan_required, true, "the diagnostic counter is retained, not rewritten as new criterion progress");
+  const receipt = { goal_id: goalID, terminal_revision: 2, acceptance_fingerprint: acceptance, started_at: at, ended_at: at,
+    status: "succeeded" as const, stop_reason: "completed" as const, unit_ids: state.unit_ids, session_ids: state.session_ids,
+    evidence_refs: state.evidence_refs, milestone_at: null };
+  await ledger.appendGoal({ kind: "goal.terminal", at, goal_id: goalID, receipt });
+  assert.equal((await ledger.readGoal()).state.receipt?.status, "succeeded");
 });
 
 test("accepted revision starts a fresh no-progress cycle without resetting spend", async () => {

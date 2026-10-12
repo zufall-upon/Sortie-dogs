@@ -151,7 +151,7 @@ function reviewHistoryFixture() {
   return { initial, verification, mission, identities, completion, message, childMessage, history, host };
 }
 
-test("nested review recovery restores completed initial and verification prompts without resetting duplicate limits", async () => {
+test("nested review recovery restores completed initial and verification prompts without blocking native continuation", async () => {
   const f = reviewHistoryFixture();
   f.history.coordinator!.push({ ...f.message, parts: [{ ...f.completion,
     state: { ...f.completion.state, input: { ...f.completion.state.input, prompt: f.verification } } }] });
@@ -160,7 +160,7 @@ test("nested review recovery restores completed initial and verification prompts
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
   lane.restoreReviewLineage("root", f.verification, prompts);
-  assert.throws(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }), /CONSULTATION_RETRY_INVALID/);
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }));
   assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: `${f.verification}\nrevision: follow-up` }));
 });
 
@@ -198,8 +198,8 @@ test("a direct Fast-lane Review restores completed initial lineage after a cold 
   lane.beginTurn("root", false);
   lane.restoreReviewLineage("root", f.verification, prompts);
   assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }));
-  assert.throws(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }),
-    /CONSULTATION_RETRY_INVALID/u, "a cold turn does not grant duplicate verification");
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", { subagent_type: "dog-reviewer", prompt: f.verification }),
+    "native ownership joins or resumes the actual call; prompt text is not permission");
   assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "other-root", f.verification, unavailable), []);
   assert.deepEqual(await completedMissionReviewPrompts(f.mission, V010_RUNTIME_PROFILE, "root", "foreign-request", unavailable), []);
   f.mission.review!.initialPrompt = f.initial.replace("mission-current", "foreign-mission");
@@ -292,6 +292,72 @@ test("mission review source ignores the shared tool environment", async () => {
     assert.equal(after.fingerprint, before.fingerprint);
     assert.match(after.excerpt, /new file: added_test\.py/u);
     assert.doesNotMatch(after.excerpt, /\.sortie-env/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const repository of [true, false]) test(`Review ignores incidental OpenCode config and retains real ignored outputs: git=${repository}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-admin-"));
+  try {
+    if (repository) await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, ".gitignore"), ".opencode/\noutputs/\n");
+    await writeFile(join(root, "source.js"), "actual candidate\n");
+    await mkdir(join(root, "outputs")); await writeFile(join(root, "outputs/report.json"), "real ignored output\n");
+    const run = { units: [{ unit: { read: [], write: ["."] }, hashes: [] }] } as never;
+    const initial = await missionReviewSource(root, run);
+    await mkdir(join(root, ".opencode")); await writeFile(join(root, ".opencode/opencode.json"), "local candidate config\n");
+    const current = await missionReviewSource(root, run);
+    assert.equal(current.fingerprint, initial.fingerprint);
+    assert.equal(current.candidateFingerprint, initial.candidateFingerprint);
+    assert.doesNotMatch(current.excerpt, /local candidate config/);
+    assert.match(current.excerpt, /real ignored output/);
+    for (const kind of ["read", "write", "evidence"] as const) {
+      const declared = { units: [{ unit: { read: kind === "read" ? [".opencode/opencode.json"] : [],
+        write: [".", ...(kind === "write" ? [".opencode/opencode.json"] : [])] }, hashes: [] }] } as never;
+      const evidence = kind === "evidence" ? [{ path: ".opencode/opencode.json", offset: 1, limit: 1 }] : [];
+      const pinned = await missionReviewSource(root, declared, evidence);
+      assert.match(pinned.excerpt, /candidate config/);
+      await writeFile(join(root, ".opencode/opencode.json"), `${kind} changed candidate config\n`);
+      assert.notEqual((await missionReviewSource(root, declared, evidence)).fingerprint, pinned.fingerprint, kind);
+    }
+    assert.equal((await missionReviewSource(root, run)).fingerprint, initial.fingerprint);
+    await writeFile(join(root, "outputs/report.json"), "changed actual ignored output\n");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, initial.fingerprint);
+    if (process.platform !== "win32") {
+      const prior = await missionReviewSource(root, run);
+      await mkdir(join(root, ".OpenCode")); await writeFile(join(root, ".OpenCode/fixture.txt"), "case-distinct source\n");
+      assert.notEqual((await missionReviewSource(root, run)).fingerprint, prior.fingerprint);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review uses the fixed old or new config recipe and never weakens mixed legacy evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-admin-bindings-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await mkdir(join(root, ".opencode")); await mkdir(join(root, ".sortie-dogs-v010"));
+    await writeFile(join(root, ".opencode/opencode.json"), "original config\n");
+    await writeFile(join(root, "source.js"), "actual source\n");
+    const manifestPath = join(root, ".sortie-dogs-v010/manifest.json");
+    const manifest = { task_id: "unit", read: [root + "/**"], write: [root + "/**"], validation: ["node check.mjs"] };
+    const bytes = JSON.stringify(manifest); await writeFile(manifestPath, bytes);
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(bytes).digest("hex") });
+    assert.ok(snapshot);
+    const older = structuredClone(snapshot.binding);
+    delete older.freshness!.incidental_control_paths;
+    delete older.freshness!.toolchain;
+    const run = (bindings: unknown[]) => ({ units: [{ unit: { id: "unit", ...manifest, acceptance_indices: [0] },
+      hashes: [], evidence: bindings.map(protected_binding => ({ protected_binding })) }] }) as never;
+    const modern = run([snapshot.binding]), legacy = run([older]), mixed = run([snapshot.binding, older]);
+    const [newReview, oldReview, mixedReview] = await Promise.all([modern, legacy, mixed].map(value => missionReviewSource(root, value)));
+    await writeFile(join(root, ".opencode/opencode.json"), "changed local candidate config\n");
+    assert.equal((await missionReviewSource(root, modern)).fingerprint, newReview.fingerprint);
+    assert.notEqual((await missionReviewSource(root, legacy)).fingerprint, oldReview.fingerprint);
+    assert.notEqual((await missionReviewSource(root, mixed)).fingerprint, mixedReview.fingerprint);
+    await git("git", ["add", ".opencode/opencode.json"], { cwd: root });
+    const tracked = await missionReviewSource(root, modern);
+    assert.match(tracked.excerpt, /changed local candidate config/);
+    await writeFile(join(root, ".opencode/opencode.json"), "changed tracked plugin source\n");
+    assert.notEqual((await missionReviewSource(root, modern)).fingerprint, tracked.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

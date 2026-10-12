@@ -470,6 +470,10 @@ export class FastLaneController {
       const retry = lineValue(prompt, "fallback_retry");
       const basis = fallbackBasis(prompt);
       const prompts = phase === "initial" ? candidate.initialPrompts : candidate.verificationPrompts;
+      // Prompt registration precedes native execution. Seeing it again can mean an
+      // unstarted dispatch retry or continuation of the same retained Reviewer.
+      // Native call ownership joins active work; this lineage cache is not a retry grant.
+      if (retry === undefined && (candidate.initialPrompts.has(basis) || candidate.verificationPrompts.has(basis))) return;
       if (phase === "initial" && candidate.verificationPrompts.size > 0) {
         throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
       }
@@ -486,7 +490,6 @@ export class FastLaneController {
         }
         candidate.fallbackRetries.add(`${phase}\0${basis}`);
       } else {
-        if (prompts.has(basis)) throw new FastLaneDeniedError("CONSULTATION_RETRY_INVALID");
         if (phase === "initial" && candidate.initialPrompts.size > 0) {
           throw new FastLaneDeniedError("REVIEW_PHASE_INVALID");
         }

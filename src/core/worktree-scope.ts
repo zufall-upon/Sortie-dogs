@@ -23,6 +23,7 @@ export function worktreeScopesOverlap(left: string, right: string): boolean {
 }
 
 export function worktreeScopesConflict(left: WorktreeScope, right: WorktreeScope): boolean {
-  return left.write.some((path) => [...right.write, ...right.read].some((other) => worktreeScopesOverlap(path, other))) ||
-    right.write.some((path) => left.read.some((other) => worktreeScopesOverlap(path, other)));
+  // Exploration is not an exclusive resource. Validation checks input freshness;
+  // write ownership alone prevents concurrent mutation of the same target.
+  return left.write.some((path) => right.write.some((other) => worktreeScopesOverlap(path, other)));
 }

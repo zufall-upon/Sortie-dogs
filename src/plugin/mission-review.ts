@@ -13,7 +13,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { canonicalDeclaredValidationMembers, normalizeCommand } from "./gate.js";
-import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
+import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
 const exec = promisify(execFile);
@@ -117,6 +117,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   } {
   const declared = validation.map(normalizeCommand);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
+  if (!declared.length) return { ready: false, reason: "mission-review-correction-validation-missing", nextOccurrence: 0 };
   const attempts: { callID: string; command: string; directory?: string; exit: number | null; started: number; completed: number }[] = [];
   const seen = new Set<string>();
   let editedAt = notBefore;
@@ -149,43 +150,70 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     }
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
-  let complete: typeof matched | undefined;
-  let previousEnd = notBefore, overlap = false, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
-  for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
-    // Bound native checks are compared with their actual input bytes below. A later
-    // report/cache write is not itself a source change. Unbound history stays conservative.
-    if (!checks && attempt.started < editedAt) continue;
-    const commands = canonicalDeclaredValidationMembers(attempt.command, declared, matched.length % declared.length);
-    if (!commands || !validationDirectoryMatches(commands, attempt.directory, directory, directories) ||
-        commands.some(command => registeredAt?.[command] !== undefined &&
-          (!Number.isFinite(Date.parse(registeredAt[command]!)) || attempt.started < Date.parse(registeredAt[command]!)))) continue;
-    if (attempt.started < previousEnd) {
-      complete = undefined; matched.length = 0; failed = undefined; overlap = true;
-      previousEnd = Math.max(previousEnd, attempt.completed);
-      continue; // A later complete ordered retry can recover in this same admission.
-    }
-    previousEnd = attempt.completed;
-    if (commands[0] !== declared[matched.length] || matched.length === declared.length) matched.length = 0;
-    failed = undefined;
-    // A failed && chain cannot infer any member success (including commands before its failure).
-    if (attempt.exit !== 0) {
-      complete = undefined;
-      matched.length = 0;
-      failed = { command: commands, outcome: "fail", exitCode: attempt.exit };
-      continue;
-    }
-    for (const [member, command] of commands.entries()) {
-      if (command !== declared[matched.length]) {
-        matched.length = 0;
-        if (command !== declared[0]) continue;
-      }
-      matched.push({ callID: attempt.callID, member, occurrence: matched.length });
-      if (matched.length === declared.length) { complete = [...matched]; overlap = false; }
-    }
+  // Registration repairs replace only affected recipes. Retain the ordered actual
+  // occurrences of unchanged checks and join the changed checks after their own
+  // registration, rather than making an inserted/corrected command rerun its neighbors.
+  const groups = new Map<string, number[]>();
+  for (const [occurrence, command] of declared.entries()) {
+    const registration = checks && registeredAt ? registeredAt[command] ?? "" : "";
+    const group = groups.get(registration) ?? [];
+    group.push(occurrence); groups.set(registration, group);
   }
-  if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed, nextOccurrence: 0 };
-  if (overlap && !matched.length) return { ready: false, reason: "mission-review-correction-validation-order:overlap", nextOccurrence: 0 };
-  if (!complete) return { ready: false, reason: `mission-review-correction-validation-missing:${declared[matched.length]}`, nextOccurrence: matched.length };
+  const complete: typeof matched = [];
+  let incomplete: { ready: false; reason: string; nextOccurrence: number } | undefined;
+  for (const occurrences of groups.values()) {
+    const required = occurrences.map(index => declared[index]!);
+    const partial: typeof matched = [];
+    let completed: typeof matched | undefined;
+    let previousEnd = notBefore, overlap = false, failed: { command: readonly string[]; outcome: "fail"; exitCode: number | null } | undefined;
+    for (const attempt of attempts.sort((a, b) => a.started - b.started || a.completed - b.completed)) {
+      // Bound native checks are compared with their actual input bytes below. A later
+      // report/cache write is not itself a source change. Unbound history stays conservative.
+      if (!checks && attempt.started < editedAt) continue;
+      const recorded = registeredAt && checks?.find(check => check.callID === attempt.callID && check.childSessionID === child);
+      const commands = recorded
+        ? canonicalDeclaredValidationMembers(attempt.command, recorded.command)
+        : canonicalDeclaredValidationMembers(attempt.command, declared, occurrences[partial.length % required.length] ?? 0);
+      if (!commands || recorded && JSON.stringify(commands) !== JSON.stringify(recorded.command)) continue;
+      const members = commands.flatMap((command, member) => required.includes(command) &&
+        validationDirectoryMatches([command], attempt.directory, directory, directories) &&
+        (registeredAt?.[command] === undefined || Number.isFinite(Date.parse(registeredAt[command]!)) &&
+          attempt.started >= Date.parse(registeredAt[command]!)) ? [{ command, member }] : []);
+      if (!members.length || !registeredAt && members.length !== commands.length) continue;
+      if (attempt.started < previousEnd) {
+        completed = undefined; partial.length = 0; failed = undefined; overlap = true;
+        previousEnd = Math.max(previousEnd, attempt.completed);
+        continue;
+      }
+      previousEnd = attempt.completed;
+      if (members[0]!.command !== required[partial.length] || partial.length === required.length) partial.length = 0;
+      failed = undefined;
+      // A failed && chain proves no member, even if earlier members could have passed.
+      if (attempt.exit !== 0) {
+        completed = undefined; partial.length = 0;
+        failed = { command: commands, outcome: "fail", exitCode: attempt.exit };
+        continue;
+      }
+      for (const { member, command } of members) {
+        if (command !== required[partial.length]) {
+          partial.length = 0;
+          if (command !== required[0]) continue;
+        }
+        partial.push({ callID: attempt.callID, member, occurrence: occurrences[partial.length]! });
+        if (partial.length === required.length) { completed = [...partial]; overlap = false; }
+      }
+    }
+    if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed, nextOccurrence: occurrences[0]! };
+    if (!completed) {
+      const next = occurrences[partial.length] ?? occurrences[0]!;
+      if (!incomplete || next < incomplete.nextOccurrence) incomplete = { ready: false,
+        reason: overlap && !partial.length ? "mission-review-correction-validation-order:overlap"
+          : `mission-review-correction-validation-missing:${declared[next]}`, nextOccurrence: next };
+    } else complete.push(...completed);
+    matched.push(...partial);
+  }
+  if (incomplete) return incomplete;
+  complete.sort((a, b) => a.occurrence - b.occurrence);
   for (const item of complete) {
     const command = declared[item.occurrence]!;
     const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
@@ -363,14 +391,31 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     fingerprint: string; candidateFingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
-  const protection = bindings.some(binding => binding.freshness) ? await currentSnapshotProtection(directory, scope) : [];
+  const manifestScope = (path: string) => path === "." ? `${resolve(directory)}/**` : path;
+  const protection = await currentSnapshotProtection(directory, { read: scope.read.map(manifestScope), write: scope.write.map(manifestScope) });
   const scratch = bindings.map(binding => ({ binding, excludes: snapshotScratchExclusion(binding, protection) }));
+  const controls = bindings.map(binding => ({ binding, excludes: snapshotControlExclusion(directory, binding, protection) }));
+  const scopes = [...scope.read, ...scope.write].map(path => resolve(directory, normalizeManifestScope(manifestScope(path)).path));
+  const broadOutput = scope.write.some(path => resolve(directory, normalizeManifestScope(manifestScope(path)).path) === resolve(directory));
+  const explicit = [...scopes, ...protection].filter(path => path !== resolve(directory));
+  const related = (root: string, path: string) => {
+    const rest = relative(root, path);
+    return rest === "" || rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
+  };
   const excluded = (path: string) => {
     const absolute = resolve(directory, path);
     const covers = (binding: typeof bindings[number]) => [...binding.source_paths, ...binding.candidate_paths].some(root => {
       const rest = relative(resolve(directory, root), absolute);
       return rest === "" || (rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest));
     });
+    const first = path.replaceAll("\\", "/").split("/")[0]!;
+    const config = (process.platform === "win32" ? first.toLowerCase() : first) === ".opencode";
+    if (broadOutput && (config || isRuntimeControlPath(path)) && !explicit.some(root => related(root, absolute) || related(absolute, root))) {
+      // An old snapshot cannot silently acquire the new config exclusion. Review
+      // uses the same saved recipe when bindings exist, including mixed old/new proof.
+      if (!config || !bindings.length || controls.some(item => covers(item.binding) && item.excludes(absolute)) &&
+          !controls.some(item => covers(item.binding) && !item.excludes(absolute))) return true;
+    }
     return scratch.some(item => item.excludes(absolute)) &&
       !scratch.some(item => covers(item.binding) && !item.excludes(absolute));
   };
@@ -464,15 +509,15 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     else local.push(scoped || ".");
   }
   const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
-  const scopes = [...local, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
+  const gitScopes = [...local, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   let names = "", ignored = "", repository = true, scopedDiff = "";
   const untracked = new Set<string>(), currentFiles = new Set<string>();
   try {
     if (local.length) {
-      names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scopes]);
-      for (const path of (await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...scopes])).split("\0").filter(Boolean)) untracked.add(path);
-      ignored = await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...scopes]);
+      names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...gitScopes]);
+      for (const path of (await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...gitScopes])).split("\0").filter(Boolean)) untracked.add(path);
+      ignored = await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...gitScopes]);
     }
   } catch (error) {
     if (!notRepository(error)) throw error;
@@ -483,8 +528,6 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     const collect = async (path: string): Promise<void> => {
       if (walked.has(path) || excluded(path)) return;
       walked.add(path);
-      if (local.includes(".") && isRuntimeControlPath(path) && !local.some(scope => scope !== "." &&
-          (path === scope || path.startsWith(`${scope}/`)))) return;
       if (!toolInput && (path === TOOL_ENVIRONMENT || path.startsWith(`${TOOL_ENVIRONMENT}/`))) return;
       const absolute = resolve(directory, path);
       const stat = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
@@ -527,7 +570,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   if (repository && local.length && displayBaseline) {
     // HEAD-only diffs are empty once the author commits. Display the original mission delta
     // or the focused correction delta without changing the full fingerprint basis.
-    const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", displayBaseline, "--", ...scopes]))
+    const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", displayBaseline, "--", ...gitScopes]))
       .split("\0").filter(path => path && !excluded(path));
     const shown = changed.slice(0, 16);
     const heading = changed.length ? `Changed since ${displayBaseline === baseline ? "mission" : "correction"} baseline (${displayBaseline}; ${changed.length} paths):\n` : "";
@@ -545,7 +588,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     }
     omitted.push(...changed.slice(shown.length));
   } else if (repository && local.length) {
-    diff = await currentGitDiff(git, scopes);
+    diff = await currentGitDiff(git, gitScopes);
   }
   const unchanged = diff.length === 0;
   let excerpt = selected + diff;
