@@ -414,6 +414,14 @@ The receipt contains `package/package_sha256`, `manifest/manifest_sha256`,
 Verification entries contain `command`, `exit`, `log`, `log_sha256`. The original
 task bytes must match the CLI observation; a READY/seed fixture is not acceptance.
 
+Complete-mode `scripts/mission-cli-probe.mjs` observations report `native_completed`
+(normal CLI exit, completed Mission and succeeded receipt without a stop/schema rejection)
+separately from `worker_model_observed` (actual `dog-worker-v010` on
+`openai/gpt-6-luna-fast#max`). A valid direct Coordinator run can complete without
+Worker coverage. These fields do not change the existing `accepted` predicate or
+CLI exit, prove official correctness, or satisfy missing candidate Worker evidence.
+Retain original observations; do not rerun a completed task just to change its route.
+
 Scheduling, notification, cross-project configs and their tests are host-owned,
 not product tooling. This Ubuntu host keeps them at `/srv/work/hermes/home/autodev/`.
 Their guide and dependencies are maintained there independently; historical
