@@ -24,6 +24,7 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
+import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../dist/runtime-mission-assets.js";
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -297,6 +298,93 @@ for (const custom of [false, true]) test(`location-only candidate reconciles rel
     assert.equal(reviewer.system, custom ? system : current);
     assert(!reviewer.permissions.some(rule => rule.action === "shell" && rule.effect === "deny"));
     assert.deepEqual(reviewer.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`released Operator receives result-and-hold guidance only for the exact shipped body: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+  const legacy = current.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "")
+    .replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+  const operator = { system: legacy + (custom ? "\nKeep my custom policy." : ""), model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
+  const original = operator.system;
+  fixture.context.agent!.transform = async callback => {
+    callback({ update: (id, update) => { if (id === "dog-operator") update(operator); } });
+    return { dispose() {} };
+  };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup(fixture.context);
+  try {
+    assert.equal(operator.system, custom ? original : current);
+    assert.deepEqual(operator.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.match(current, /result-and-hold checkpoint is not final acceptance/);
+    assert.match(current, /reflection is optional checkpoint bookkeeping/);
+    assert.match(current, /never create a reflection-only model turn/);
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`late native role materialization reconciles only the exact Operator model-input part: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+  const legacy = current.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "").replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+  const role = { type: "text", text: legacy + (custom ? "\nMy custom instruction." : "") };
+  const user = { type: "text", text: "Unrelated project instructions" };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+  })).setup(fixture.context);
+  try {
+    for (const name of ["context", "compaction"]) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [role, user], messages: [], tools: {} };
+      await fixture.sessionHooks.get(name)!(event);
+      assert.equal(event.system[0]!.text, custom ? role.text : current);
+      assert.equal(event.system[1], user);
+      assert.equal(role.text, legacy + (custom ? "\nMy custom instruction." : ""), "saved role is not mutated");
+    }
+    const build = { sessionID: "root", agent: "build", system: [role], messages: [], tools: {} };
+    await fixture.sessionHooks.get("context")!(build);
+    assert.equal(build.system[0], role);
+  } finally { cleanup?.(); }
+});
+
+test("background adapter retains rewritten host output for the real completion request and compaction, without another prompt", async () => {
+  const fixture = contextFixture(), histories: Record<string, any[]> = { root: [], child: [] };
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "child" ? "dog-reviewer-v010" : "dog-operator",
+    model: { providerID: "openai", id: "gpt-6-sol", variant: "xhigh" }, ...(sessionID === "child" ? { parentID: "root" } : {}) });
+  fixture.context.session.context = async ({ sessionID }) => histories[sessionID] ?? [];
+  let settlements = 0;
+  const factory: OpenCodePlugin = async () => ({
+    "tool.execute.before": async () => {}, "chat.message": async () => {},
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+    "tool.execute.after": async (_input, output) => {
+      if ((output.metadata as any)?.status === "running") return;
+      settlements++;
+      output.output = JSON.stringify({ completion_receipt: { status: "review-correction-recorded", native_call: "call", independent: false },
+        acceptance_summary: { original_requests: "full diagnostic detail" } });
+    },
+  });
+  let cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  try {
+    const dispatch = { sessionID: "root", tool: "subagent", id: "call", input: { agent: "dog-reviewer-v010", prompt: "review", background: true } };
+    await fixture.toolHooks.get("execute.before")!(dispatch);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "child", messageID: "prompt", prompt: { text: "review" } });
+    histories.child!.push({ id: "prompt", type: "user" });
+    await fixture.toolHooks.get("execute.after")!({ ...dispatch, status: "completed", result: { content: "Job running", metadata: { status: "running", sessionID: "child" } } });
+    histories.child!.push({ id: "terminal", type: "assistant", finish: "stop", content: [{ type: "text", text: "SELF_RECHECKED" }] });
+    const text = '<subagent sessionID="child" state="completed">\nSELF_RECHECKED\n</subagent>';
+    histories.root!.push({ type: "synthetic", text, time: { created: Date.now() }, metadata: { source: "subagent", childID: "child", state: "completed" } });
+    const native = [{ role: "user", content: [{ type: "text", text }] }];
+    for (const hook of ["context", "compaction"]) {
+      const event = { sessionID: "root", system: [], messages: native, tools: {} };
+      await fixture.sessionHooks.get(hook)!(event);
+      assert.equal(event.messages.length, 2);
+      assert.match(JSON.stringify(event.messages[1]), /review-correction-recorded/);
+      assert.doesNotMatch(JSON.stringify(event.messages[1]), /full diagnostic detail/);
+      assert.equal(event.messages[0], native[0]);
+    }
+    cleanup?.(); cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+    const event = { sessionID: "root", system: [], messages: native, tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    assert.match(JSON.stringify(event.messages[1]), /review-correction-recorded/);
+    assert.equal(settlements, 1); assert.equal(fixture.synthetic.length, 0);
   } finally { cleanup?.(); }
 });
 

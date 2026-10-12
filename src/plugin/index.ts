@@ -233,6 +233,8 @@ export interface OpenCodeHooks {
   reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
   backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
+  /** Read-only recovery of a retained host result; never repeats Task settlement or validation. */
+  backgroundResult?: (parent: string, callID: string, child: string, promptID?: string) => Promise<string | undefined>;
   /** Native transport joins an already-running Task instead of submitting a duplicate prompt. */
   nativeTaskJoin?: (callID: string, consume?: boolean) => { sessionID: string; callID: string; output?: string; status?: "running" | "completed" } | undefined;
   event?: (input: { event: OpenCodeEvent }) => Promise<void>;

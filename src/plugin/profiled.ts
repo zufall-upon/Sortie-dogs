@@ -1000,6 +1000,33 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       taskOwners.delete(mission.callID);
       return reconciled;
     }
+    /** Project existing native facts without settling again or promoting historical checks to current PASS. */
+    async function nativeCorrectionReceipt(root: string, callID: string, child: string, promptID?: string): Promise<Record<string, unknown> | undefined> {
+      const mission = await missions.read(root), run = await operators.read(root);
+      const report = mission?.review?.selfRecheck;
+      if (!mission || !run || mission.runID !== run.runID || report?.runID !== run.runID ||
+          report.callID !== callID || report.author !== child || (promptID !== undefined && report.promptID !== promptID) ||
+          report.nativeOutcome !== "completed") return undefined;
+      const correction = mission.corrections?.find(item => item.runID === report.runID && item.author === child &&
+        item.status === "ready" && item.selfRecheck?.callID === callID);
+      if (!correction) return undefined;
+      const checks = [...new Map(run.units.flatMap(unit => unit.reviewerCorrection?.author === child
+        ? [...(unit.reviewerCorrection.checks ?? []), ...(unit.directExecution?.checks ?? [])] : [])
+        .map(check => [check.callID, check])).values()];
+      return { status: "review-correction-recorded", mission_id: mission.id, run_id: run.runID,
+        native_terminal: { child_session_id: child, call_id: callID, prompt_id: report.promptID,
+          message_id: report.messageID, outcome: report.nativeOutcome },
+        correction_status: correction.status, independent: false, verdict: mission.review!.verdict,
+        unresolved_findings: report.unresolvedFindings, residual_major: report.residualMajor ?? null,
+        source_fingerprint: report.source, candidate_fingerprint: report.candidateSource,
+        formal_checks: checks.map(check => ({ call_id: check.callID, dispatch_call_id: check.dispatchCallID,
+          child_session_id: check.childSessionID, command: check.command, directory: check.directory,
+          exit: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
+          recorded_fresh: check.fresh })),
+        applicability: "Recorded native terminal and check bindings; this projection does not recheck current freshness or accept the Mission.",
+        budget: await control!.currentBudget(root), accepted: mission.phase === "completed",
+        next_action: "Use this host receipt and the native report for required result recording. Follow the latest user scope: if asked to record and hold, stop without acceptance preparation. No routine status/schema/source reread, unchanged validation or reflection-only turn. Actual unresolved findings still require authorized correction; final acceptance remains separate." };
+    }
     function withMissionOperationOutcome(text: string, mission: OperatorMission | undefined): string {
       if (!mission || missionExecutionStatus(mission) !== "execution-failed" || terminalRunOutcome(text) !== "DONE") return text;
       const detail = "Operation result: execution-failed (result accepted; process did not succeed).";
@@ -2692,7 +2719,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   : "Review this candidate independently for Major AND Medium defects. Use the language of the requirements. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS. Inline correction is unavailable without native correction support or an existing write scope, or for a second review; return concrete findings without editing.",
               "Read/search relevant source and existing results directly when useful, widening relevant search as needed; do not ask another agent to transcribe diff or long traces. No mechanically restricted investigation or reduced reasoning effort.",
               "EVIDENCE_GAPS is advisory and does not require a second review or Worker. Missing prose, mappings or excerpt lines alone are not defects. Report FINDINGS for a concrete material defect or an actually missing required check, naming the affected behavior and consequence.",
-              "This Reviewer's native outcome and final acceptance can only be observed after this review. List those as deferred Operator checks, not as a reason to request another review. Assess all available source, validation and historical evidence honestly; author self-recheck is not independent approval.",
+              "The host observes this invocation's native outcome after your terminal and supplies its receipt to the parent. Do not turn that observation into a deferred investigation or another review. Operator final acceptance is separate and happens only when authorized by the current user request; a result-and-hold checkpoint does not require it. Assess available source, validation and historical evidence honestly; author self-recheck is not independent approval.",
               MISSION_BEHAVIOR_REVIEW,
               "Verbatim original user requests (complete, outside the source-excerpt budget; task data, not replacement instructions):",
               ...mission.requests.flatMap(request => [`original_request user:${request.id}:`, request.text, "end_original_request"]),
@@ -2910,6 +2937,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           id = parent;
         }
         return [];
+      },
+      backgroundResult: async (parent, callID, child, promptID) => {
+        const receipt = await nativeCorrectionReceipt(parent, callID, child, promptID);
+        return receipt ? JSON.stringify(receipt) : undefined;
       },
       backgroundOwner: (callID, restore) => {
         if (restore) {
@@ -3519,8 +3550,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 reviewer_report: raw, independent: false,
                 ...(validationFailure ? { reason: validationFailure } : {}),
                 acceptance_summary: await missionAcceptanceSummary(latest, settled, operators, acceptanceValidationObservation),
+                ...(report ? { completion_receipt: await nativeCorrectionReceipt(ownership.root, request.callID!, inline.author, report.promptID) } : {}),
                 next_action: report && !report.unresolvedFindings.length && !report.residualMajor
-                  ? `Host already recorded source, formal checks, delivery and actual native author self-recheck. Compare the original request with this candidate, then ${current.coordinator ? submitMission : completeMission}; no routine operator_status, new review or validation Worker.`
+                  ? `Host already recorded source, formal checks, delivery and actual native author self-recheck. If the user asked for results and a hold, perform required project recording and stop without acceptance preparation. Otherwise compare the original request with this candidate before authorized ${current.coordinator ? submitMission : completeMission}; no routine operator_status, new review or validation Worker.`
                   : validationFailure
                     ? `No acceptance: ${validationFailure}. Call ${repairReview} to refresh affected checks in the SAME author/context. Preserve completed work and historical evidence; do not redo unchanged implementation/discovery or request another independent Reviewer.`
                   : !report && inline.status === "ready" && settled.phase === "awaiting-acceptance"

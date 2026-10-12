@@ -13,6 +13,7 @@ import { isSessionNotFoundError } from "@opencode/client";
 import { completionReportModelMessages } from "./receipt-presentation.js";
 import { modelLiveState } from "./model-live-state.js";
 import { runtimeAssets as reviewerAssets } from "../runtime-assets-v010.js";
+import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../runtime-mission-assets.js";
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -382,6 +383,16 @@ const legacyReviewerObservationText = "Use the exposed read/search tools directl
   "do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.";
 const reviewerSystem = reviewerAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.split("---").slice(2).join("---");
 const legacyReviewerSystem = reviewerSystem.replace(reviewerObservationText, legacyReviewerObservationText);
+const operatorSystem = reviewerAssets.find(asset => asset.name === "dog-operator")!.content.split("---").slice(2).join("---");
+const legacyOperatorSystem = operatorSystem.replace(`${MISSION_RESULT_HOLD_POLICY}\n\n`, "")
+  .replace(MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW);
+function reconcileOperatorContext(event: JsonObject): void {
+  if (event.agent !== "dog-operator" || !Array.isArray(event.system)) return;
+  // Native configuration sources may materialize the released role after our registry transform.
+  // Reconcile its exact request part as well; never rewrite a combined/custom instruction block.
+  event.system = event.system.map(part => record(part) && part.type === "text" && typeof part.text === "string" &&
+    part.text.trim() === legacyOperatorSystem.trim() ? { ...part, text: operatorSystem } : part);
+}
 // OpenCode 2.0.18 util/wildcard.ts + permission.evaluate ordering.
 function nativeRuleMatch(input: string, pattern: string): boolean {
   let escaped = pattern.replaceAll("\\", "/").replace(/[.+^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*").replace(/\?/gu, ".");
@@ -523,6 +534,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
   await context.agent?.transform(editor => {
+    editor.update("dog-operator", agent => {
+      if (typeof agent.system === "string" && agent.system.trim() === legacyOperatorSystem.trim()) agent.system = operatorSystem;
+    });
     for (const [name, id, variant] of [
       ["dog-operator", "gpt-6.1-sol", "xhigh"],
       ["dogs-coordinator", "gpt-6.1-sol", "xhigh"],
@@ -743,9 +757,11 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
+    reconcileOperatorContext(event);
     if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
     await background.resume(String(event.sessionID ?? ""));
     await background.reconcile(String(event.sessionID ?? ""));
+    if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     await reconcileCorrectionPermissions(String(event.sessionID));
@@ -787,7 +803,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (projection.messages) event.messages = projection.messages;
   });
   if (hooks["experimental.session.compacting"]) await context.session.hook("compaction", async event => {
+    reconcileOperatorContext(event);
     if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
+    await background.reconcile(String(event.sessionID ?? ""));
+    if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     // V2 compaction builds its own tool snapshot and does not run the normal
     // context hook's agent-specific Sortie filter. Summary calls cannot run
     // local tools, so do not expose Sortie schemas to the compaction provider.
@@ -817,11 +836,19 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
       const liveState = new Map<string, unknown>();
       const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
         if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
+        const output = { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
+          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } };
         await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
-          args: legacyToolInput("subagent", dispatch.input) }, { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
-          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+          args: legacyToolInput("subagent", dispatch.input) }, output);
         if (dispatch.child) await syncReviewerCorrectionPermissions(context, hooks, dispatch.child);
-      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore));
+        // Inline Review already has a compact provenance receipt; retain the full diagnostic packet in its ordinary tool route.
+        try {
+          const packet: unknown = JSON.parse(output.output);
+          if (record(packet) && record(packet.completion_receipt)) return JSON.stringify(packet.completion_receipt);
+        } catch { /* Ordinary native outputs are not necessarily JSON. */ }
+        return output.output;
+      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore),
+      (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
       hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
         nativeBackground: background, returnReportTransport: "tool-result",
         reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});

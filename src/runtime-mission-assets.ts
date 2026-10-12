@@ -88,6 +88,20 @@ function controls(profile: RuntimeProfile, names: readonly string[]): string {
   return names.map(name => `  ${profile.toolPrefix}${name}: true`).join("\n");
 }
 
+export const MISSION_RESULT_HOLD_POLICY = `A user's result-and-hold checkpoint is not final acceptance. When asked to record results and stop,
+use the actual native completion and its host receipt, perform only required project recording, then stop.
+Do not prepare acceptance, discover raw ledger schemas, reread unchanged source/checks or compare unrelated
+tracker items merely to prove the checkpoint. Inspect concrete missing evidence only; preserve real user
+prohibitions, project recording requirements and honest findings. A hold never accepts or completes the Mission.`;
+
+export const LEGACY_MISSION_REFLECTION_WORKFLOW = `When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
+preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
+through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.`;
+export const MISSION_REFLECTION_WORKFLOW = `When bounded process reflections are injected, use relevant prevention while preserving the original requirements.
+Resolved process-failure reflection is optional checkpoint bookkeeping, not a completion requirement.
+Record it when useful alongside existing work; never create a reflection-only model turn, delay an explicit
+result-and-hold checkpoint or block delivery for it. User-correction memory follows the bounded reflection policy.`;
+
 export function missionOperatorContent(profile: RuntimeProfile, version: string): string {
   return `---
 description: Sortie-dogs ${version} Operator — original requirements, user decisions and final acceptance.
@@ -247,9 +261,9 @@ with operator_status.mission_id and the new cumulative max_units (not the increm
 Coordinator. This does not change a separate campaign dollar cap or dispatch a Worker. Do not reset spend,
 silently shrink acceptance, or create substitute goals.
 
-When bounded process reflections are injected, pass the relevant prevention in Coordinator feedback while
-preserving the original requirements. After a resolved repeated process failure, record its verified cause/prevention
-through reflection if enabled; retain concrete evidence and prefer a durable fix for recurring causes.
+${MISSION_RESULT_HOLD_POLICY}
+
+${MISSION_REFLECTION_WORKFLOW}
 
 Retain 🐾 Sortie presentation. The host-authored measured return panel is retained in complete_mission's
 tool result. Give a concise final outcome and key checks; do not transcribe the card or spend another model

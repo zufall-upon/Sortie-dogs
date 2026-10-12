@@ -18,6 +18,8 @@ export interface NativeBackgroundDispatch {
   launched: boolean;
   terminal?: "succeeded" | "failed" | "interrupted";
   settled?: boolean;
+  /** Host-reconciled output for this exact native invocation, not another completion prompt. */
+  result?: string;
 }
 
 /** Lifecycle transport for native Jobs, not a scheduler. The host owns execution and wakeup. */
@@ -25,8 +27,9 @@ export class NativeBackgroundLifecycle {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly restored = new Set<string>();
   constructor(private readonly context: OpenCodeV2Context,
-    private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<void>,
-    private readonly owner?: (callID: string, restore?: ObjectValue) => ObjectValue | undefined) {}
+    private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<string | void>,
+    private readonly owner?: (callID: string, restore?: ObjectValue) => ObjectValue | undefined,
+    private readonly recoverResult?: (parent: string, callID: string, child: string, promptID?: string) => Promise<string | undefined>) {}
   private async serial<T>(parent: string, operation: () => Promise<T>): Promise<T> {
     const next = (this.operations.get(parent) ?? Promise.resolve()).catch(() => undefined).then(operation);
     this.operations.set(parent, next);
@@ -82,6 +85,49 @@ export class NativeBackgroundLifecycle {
   }
   async reconcile(parent: string): Promise<void> {
     await this.serial(parent, async () => this.reconcileInside(parent, await this.read(parent)));
+  }
+  /** Add provenance beside its existing native notification, without editing history or waking the parent again. */
+  async project(parent: string, messages: readonly unknown[]): Promise<unknown[]> {
+    return this.serial(parent, async () => {
+      const dispatches = await this.read(parent);
+      if (!dispatches.some(item => item.settled && item.child && item.terminal)) return [...messages];
+      const history = values(await this.context.session.context({ sessionID: parent }));
+      const notifications = history.filter(item => item.type === "synthetic" && object(item.metadata) &&
+        item.metadata.source === "subagent" && typeof item.text === "string" && object(item.time));
+      const additions = new Map<string, { callID: string; text: string }>();
+      let changed = false;
+      for (const notification of notifications) {
+        const metadata = notification.metadata as ObjectValue, time = notification.time as ObjectValue;
+        const dispatch = [...dispatches].reverse().find(item => item.child === metadata.childID &&
+          typeof time.created === "number" && time.created >= item.admittedAt);
+        if (!dispatch?.settled || !dispatch.terminal || !dispatch.child) continue;
+        const outcome = metadata.state === "completed" ? "succeeded" : metadata.state;
+        if (outcome !== dispatch.terminal) continue;
+        const text = String(notification.text);
+        if (!messages.some(message => object(message) && message.role === "user" &&
+          values(message.content).some(part => part.type === "text" && part.text === text))) continue;
+        if (dispatch.result === undefined && this.recoverResult) {
+          const recovered = await this.recoverResult(parent, dispatch.callID, dispatch.child, dispatch.promptID);
+          if (recovered !== undefined) { dispatch.result = recovered; changed = true; }
+        }
+        if (dispatch.result !== undefined) additions.set(text, { callID: dispatch.callID, text: dispatch.result });
+      }
+      if (changed) await this.write(parent, dispatches);
+      const projected = new Set(messages.filter(object).flatMap(message => object(message.metadata) &&
+        typeof message.metadata["sortie-dogs/native-completion"] === "string"
+        ? [message.metadata["sortie-dogs/native-completion"] as string] : []));
+      return messages.flatMap(message => {
+        if (!object(message) || message.role !== "user") return [message];
+        const completion = values(message.content).map(part => typeof part.text === "string" ? additions.get(part.text) : undefined).find(Boolean);
+        if (!completion || projected.has(completion.callID)) return [message];
+        projected.add(completion.callID);
+        return [message, { role: "system", content: [{ type: "text", text: `SORTIE_NATIVE_COMPLETION_RESULT\nRecorded host outcome for the identified invocation, not a new request or acceptance. Follow the latest user scope.\n${completion.text}` }],
+          metadata: { "sortie-dogs/native-completion": completion.callID } }];
+      });
+    }).catch(error => {
+      console.warn("[sortie-dogs-v010] Background result projection unavailable; native notification retained", error instanceof Error ? error.message : "unknown");
+      return [...messages];
+    });
   }
   /** Restore accounting before a resumed child produces further tool observations. */
   async resume(sessionID: string): Promise<void> {
@@ -161,7 +207,8 @@ export class NativeBackgroundLifecycle {
       // Retain the terminal observation if accounting throws; a later context/status boundary retries it.
       await this.write(parent, dispatches);
       const text = last ? values(last.content).filter(item => item.type === "text" && typeof item.text === "string").map(item => item.text).join("\n") : "";
-      await this.settle(dispatch, text);
+      const result = await this.settle(dispatch, text);
+      if (typeof result === "string") dispatch.result = result;
       dispatch.settled = true;
       await this.write(parent, dispatches);
     }
