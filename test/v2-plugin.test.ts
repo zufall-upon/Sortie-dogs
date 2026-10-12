@@ -1398,6 +1398,32 @@ test("V2 Worker can observe status and repair its scope without acquiring Coordi
   } finally { cleanup?.(); }
 });
 
+test("V2 exposes the approved cumulative Mission budget extension to root Operator, not its delegated Coordinator", async () => {
+  const fixture = contextFixture();
+  const cleanup = await V2Plugin.setup(fixture.context);
+  try {
+    const exposed = Object.fromEntries(fixture.tools.map(tool => [tool.name, tool]));
+    const visibleTools = async (sessionID: string, agent: string) => {
+      const event = { sessionID, agent, system: [], tools: { ...exposed, read: {} } };
+      await fixture.sessionHooks.get("context")!(event);
+      return event.tools;
+    };
+    const name = "sortie_v010_extend_mission_budget";
+    const rootTools = await visibleTools("root", "dog-operator");
+    assert.equal(rootTools[name], exposed[name], "the actual registered native tool is available in the root Operator's request");
+    assert.equal(typeof (rootTools[name] as { execute?: unknown }).execute, "function");
+    assert.deepEqual((rootTools[name] as { options?: unknown }).options, { codemode: true },
+      "execute/search can discover the registered increase, not just the direct model-tool fixture");
+    for (const [other, tool] of Object.entries(exposed)) if (other !== name) {
+      assert.deepEqual((tool as { options?: unknown }).options, { codemode: false },
+        `${other} retains its existing direct entrypoint`);
+    }
+
+    const coordinatorTools = await visibleTools("coordinator", "dogs-coordinator");
+    assert.equal(Object.hasOwn(coordinatorTools, name), false, "the root-only tool is not exposed to the delegated Coordinator");
+  } finally { cleanup?.(); }
+});
+
 test("V2 child prompt adapter removes only the native subagent envelope before strict Sortie claiming", async () => {
   const fixture = contextFixture();
   fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dogs-coordinator",

@@ -539,7 +539,10 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       };
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
-      editor.add({ name, description: definition.description, input: toolSchema(definition.args), options: { codemode: false },
+      // The approved increase is discovered through execute/search. Direct-only registrations
+      // are absent from that catalog; retain the other controls' existing direct entrypoints.
+      editor.add({ name, description: definition.description, input: toolSchema(definition.args),
+        options: { codemode: name === "sortie_v010_extend_mission_budget" },
         execute: async (input, execution) => {
           await background.reconcile(String(execution.sessionID ?? ""));
           let content: string;
@@ -695,7 +698,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await reconcileCorrectionPermissions(String(event.sessionID));
     if (record(event.tools)) {
       const visible: Record<string, string[]> = {
-        "dog-operator": ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
+        "dog-operator": ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
         "dogs-coordinator": ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
         "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
