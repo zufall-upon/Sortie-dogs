@@ -1770,7 +1770,7 @@ test("V2 queued explicit selection survives reload before the first context mess
   } finally { dispose?.(); }
 });
 
-test("V2 status reports the loaded adapter snapshot rather than replacement bytes on disk", async () => {
+test("V2 status decoration keeps actionable lines before full proof and reports the loaded adapter snapshot", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const area = await mkdtemp(resolve("_testenv/v2-loaded-identity-"));
   try {
@@ -1779,15 +1779,27 @@ test("V2 status reports the loaded adapter snapshot rather than replacement byte
     const implementationPath = join(area, "dist/plugin/index.js"), implementationBytes = await readFile(implementationPath);
     const { createSortieDogsV2Plugin: create } = await import(pathToFileURL(path).href);
     const fixture = contextFixture();
+    const original = { units: [{ evidence: "protected-source".repeat(20000) }], status: "idle", budget: { consumed_units: 25,
+      settled_cost_usd: 0.04769424, cost_scope: "worker-only", cost_status: "settled" }, attempts: [{
+      selectedModel: "openai/gpt-6-luna-fast#max", observedModel: "openai/gpt-6-luna-fast", observedVariant: "max" }],
+      next_action: "Compare original requirements before acceptance." };
     const dispose = await create(async () => ({ tool: { sortie_v010_operator_status: {
-      description: "status", args: {}, execute: async () => JSON.stringify({ status: "idle", budget: { consumed_units: 25 } }),
+      description: "status", args: {}, execute: async () => JSON.stringify(original),
     } } })).setup(fixture.context);
     try {
       await writeFile(path, Buffer.concat([bytes, Buffer.from("\n// replaced after module evaluation\n")]));
       await writeFile(implementationPath, Buffer.concat([implementationBytes, Buffer.from("\n// implementation replacement\n")]));
       const tool = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
         execute(input: unknown, execution: unknown): Promise<{ content: string }>; };
-      const packet = JSON.parse((await tool.execute({}, { sessionID: "root" })).content);
+      const output = (await tool.execute({}, { sessionID: "root" })).content;
+      assert.ok(output.includes("\n"), "V2 decoration must not collapse the status back into one giant line");
+      const prefix = output.slice(0, output.indexOf('  "units"'));
+      assert.ok(Buffer.byteLength(prefix) < 51200);
+      for (const fact of ["openai/gpt-6-luna-fast#max", '"observedVariant":"max"', '"settled_cost_usd":0.04769424',
+        '"cost_scope":"worker-only"', original.next_action]) assert.ok(prefix.includes(fact), fact);
+      const packet = JSON.parse(output);
+      const { runtime: _runtime, ...withoutRuntime } = packet;
+      assert.deepEqual(withoutRuntime, original, "explicit full records survive decoration without loss");
       assert.equal(packet.status, "idle");
       assert.equal(packet.budget.consumed_units, 25);
       assert.equal(packet.runtime.adapter_url, pathToFileURL(path).href);
