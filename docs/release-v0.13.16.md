@@ -1,0 +1,21 @@
+# v0.13.16 — practical Reviewer continuity and retained parent results
+
+Integrates PR #212.
+
+- Recover the original retained Reviewer, including legacy pending Reviews without a stored/caller Task ID. Join active Reviews instead of submitting duplicate prompts; reconcile failed/interrupted native terminals and compacted invocation history, and permit identical-prompt retry after a failed launch.
+- Allow repair against stale validation and earlier-run findings. Completion still requires current actual checks. Preserve unchanged command/cwd evidence, native chain/occurrence identities, legacy snapshot recipes, explicit/tracked configuration and the actual command toolchain; do not treat the transport or Task label as product input. Reuse unchanged executable hashes after current file-identity comparison.
+- Classify independent review by observed implementation/correction authorship. Retain an author's context for explicit self-recheck, never relabel it independent PASS.
+- Remove the implicit second no-progress stop and exploratory read/write exclusion. Keep explicit budgets, overlapping-write ownership, input-freshness validation and serialized Git integration.
+- Preserve reconciled host results in the existing native background dispatch. Project their compact receipt beside the same original native completion notification, including read-only recovery of missing legacy receipts, without another prompt, settlement, unit or check.
+- Separate result-and-hold from final acceptance. Preserve required project result recording and honest findings; resolved-process reflection is optional checkpoint bookkeeping, not a reason to delay delivery.
+- Expose native Reviewer shell observations consistently in shipped permissions, actual model tools and exact shipped-role instructions. Preserve user rules, custom/combined instructions, actual models and correction ownership.
+
+## Evidence and limits
+
+The source PR's final candidate passed **1,925 tests / 2 skip** in **328.078 seconds**, plus **18 native Windows tests**. It recovered the actual original shared parent and original Reviewer in OpenCode V2 **2.0.27**, both actual **openai/gpt-6.1-sol#xhigh**, not imported copies. The same Review read source, repaired its registration, observed a real failing regression, corrected three files and ran inherited build/CTest successfully (**2 PASS / 0 FAIL**), then reported `SELF_RECHECKED`. Host recorded `independent=false`, correction `ready`, run `awaiting-acceptance`; original dirty paths and budget were retained. This is a source-candidate result-and-hold observation, not product acceptance, Go or released-version benchmark performance.
+
+A subsequent retained-result checkpoint used the same original parent, Mission, Reviewer, native call/prompt/terminal and check records. Its actual outgoing request received the compact host receipt; the parent reported it and held in **98.039 seconds**, **1 parent request / 0 tools / 0 Reviewer requests**, API-rate estimate **$0.408492**, zero unpriced requests. State, checks, dirty diffs and budget **36/36/0/0** remained unchanged. This is not a controlled full-Reviewer speed comparison. Source-PR consultation/continuation/checkpoint estimates total **$25.740644**, excluding primary coding-chat and historical product costs; those calls are not repeated for this release. [Continuity audit](practical-continuity-audit.md) retains conditions and unresolved historical attribution.
+
+Bind one integrated `main` commit and one tarball before candidate preflight, mandatory full Linux tests, fixed-commit Windows CI and one native CLI Worker startup/model qualification. Use that same tarball for both existing npm-global prefixes, OpenCode's config-local dependency, GitHub Release and one npm publication. Receipts: `_testenv/releases/0.13.16/`. No additional SWE-bench/Anko run, source-PR diagnostic replay, active campaign change or product-state repair is launched.
+
+Compatibility names remain `v010`. Mission marker: `0.13.16-practical-continuity-v1`. The unchanged Codex skill retains `0.13.11-codex-skill-v2`. Completely restart OpenCode after global application to verify its loaded plugin. Installed bytes and isolated Worker startup do not prove active-user-session reload, Mission completion or final acceptance.
