@@ -278,14 +278,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function identity(id: string): Promise<{ role?: CanonicalAgentRole; parent?: string }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }));
       const parent = record(info) && typeof info.parentID === "string" ? info.parentID : undefined;
-      let agent = selected.get(id);
+      // Native session identity survives reload; a completion's metadata.agent is its
+      // child author, not a selection of the receiving session's agent.
+      let agent = selected.get(id) ?? (record(info) && typeof info.agent === "string" ? info.agent : undefined);
       if (agent === undefined) {
         const history = await messages(id);
         for (const message of [...history].reverse()) {
+          if (Array.isArray(message.parts) && message.parts.length > 0 &&
+              message.parts.every(part => record(part) && part.synthetic === true)) continue;
           const metadata = record(message.info) ? message.info : message;
           if (metadata.role === "user" && typeof metadata.agent === "string") { agent = metadata.agent; break; }
         }
-        agent ??= record(info) && typeof info.agent === "string" ? info.agent : undefined;
       }
       return { role: canonicalAgent(profile, agent), ...(parent === undefined ? {} : { parent }) };
     }

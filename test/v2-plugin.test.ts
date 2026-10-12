@@ -1424,6 +1424,75 @@ test("V2 exposes the approved cumulative Mission budget extension to root Operat
   } finally { cleanup?.(); }
 });
 
+for (const mode of ["native", "legacy-history", "synthetic-only", "switched-build"] as const) test(`V2 cold resume ignores completion authors when resolving session identity: ${mode}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-resume-identity-"));
+  const fixture = contextFixture();
+  const nativeAgent = mode === "switched-build" ? "build" : mode === "legacy-history" ? undefined : "dog-operator";
+  fixture.history.splice(0, fixture.history.length,
+    ...(mode === "synthetic-only" ? [] : [{ id: "original-user", type: "user", text: "Keep the original request",
+      metadata: { agent: "dog-operator" }, time: { created: 1 } }]),
+    { id: "restart-notice", type: "synthetic", text: "The server restarted", metadata: { notice: "restart" }, time: { created: 2 } },
+    { id: "review-completed", type: "synthetic", text: "Original Review finding remains unresolved",
+      metadata: { source: "subagent", childID: "reviewer", agent: "dog-reviewer-v010", state: "completed" }, time: { created: 3 } },
+  );
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: nativeAgent,
+    model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } });
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  if (mode !== "switched-build") await missions.capture("root", { id: "diagnostic-request", text: "Keep the same diagnostic Mission" });
+  const mission = mode === "switched-build" ? undefined : await missions.start("root", ["Keep the same diagnostic Mission"]);
+  let historyReads = 0;
+  let hooks: OpenCodeHooks;
+  const cleanup = await createSortieDogsV2Plugin(async (input, options) => {
+    hooks = await SortieDogsV010Plugin(input, options); return hooks;
+  }).setup({ ...fixture.context, location: { directory }, message: { list: async input => {
+    historyReads += 1;
+    return input.cursor ? { data: fixture.history.slice(1), cursor: {} }
+      : { data: fixture.history.slice(0, 1), cursor: { next: "completion-page" } };
+  } } });
+  try {
+    await hooks!.reviewerCorrectionScope!("root");
+    if (mode !== "legacy-history") assert.equal(historyReads, 0, "identity resolution needs no full transcript reread");
+    // A host inbox completion resumes without a new real prompt; process-local selection is empty.
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "review-completed",
+      prompt: fixture.history.at(-1), metadata: fixture.history.at(-1)!.metadata });
+    const before = fixture.toolHooks.get("execute.before")!;
+    for (const [tool, input] of [["read", { path: "result.txt" }], ["shell", { command: "node --version" }],
+      ["execute", { code: 'return search({query:"sortie",limit:10});' }]] as const) {
+      await before({ sessionID: "root", agent: nativeAgent, tool, id: `call-${tool}`, input });
+    }
+    const status = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    if (mode === "switched-build") {
+      await assert.rejects(status.execute({}, { sessionID: "root" }), /runtime-profile-session-inactive/u);
+    } else if (mode !== "legacy-history") {
+      assert.equal(JSON.parse((await status.execute({}, { sessionID: "root" })).content).mission_id, mission!.id);
+      assert.equal((await missions.required("root")).id, mission!.id);
+    }
+    assert.equal(fixture.history.at(-1)!.metadata && (fixture.history.at(-1)!.metadata as any).agent, "dog-reviewer-v010");
+    assert.deepEqual(fixture.agentSwitches, []);
+    assert.deepEqual(fixture.modelSwitches, []);
+    assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("V2 logical Reviewer identity retains the native correction alias and model", async () => {
+  const fixture = contextFixture();
+  const native = { id: "reviewer", parentID: "root", agent: "dog-reviewer-correction-v010-0123456789abcdef",
+    model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
+  fixture.context.session.get = async () => native;
+  let client: Parameters<OpenCodePlugin>[0]["client"];
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const projected = await client!.session!.get!({ path: { id: "reviewer" } }) as { data: typeof native };
+    assert.deepEqual(projected.data, { ...native, agent: "dog-reviewer-v010" });
+    assert.equal((await fixture.context.session.get({ sessionID: "reviewer" })).agent, native.agent);
+    assert.deepEqual(fixture.agentSwitches, []);
+    assert.deepEqual(fixture.modelSwitches, []);
+  } finally { cleanup?.(); }
+});
+
 test("V2 child prompt adapter removes only the native subagent envelope before strict Sortie claiming", async () => {
   const fixture = contextFixture();
   fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, parentID: "root", agent: "dogs-coordinator",

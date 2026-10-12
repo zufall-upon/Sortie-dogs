@@ -215,7 +215,9 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
     active: async () => ({ data: await (context.session.active ? context.session.active() : active()) }),
     get: async (request: unknown) => {
       const id = sessionID(request);
-      return { data: id === undefined ? undefined : await context.session.get({ sessionID: id }) };
+      const info = id === undefined ? undefined : await context.session.get({ sessionID: id });
+      // The native correction alias is still this same Reviewer's logical role.
+      return { data: record(info) && correctionAgent(info.agent) ? { ...info, agent: "dog-reviewer-v010" } : info };
     },
     messages: async (request: unknown) => {
       const id = sessionID(request);
