@@ -31,7 +31,11 @@ export function classifyOfficialTest({ patch, report, runLog, testOutput }) {
   const testIds = new Set(tests);
   const expected = reported(report);
   const exit = [...testOutput.matchAll(/^>>>>> Test Exit Code: (\d+)$/gmu)].at(-1);
-  const importFailure = /(?:ERROR collecting|ImportError:|ModuleNotFoundError:|error while importing test module|AttributeError: `np\.Inf` was removed)/iu.test(testOutput);
+  // Logs also echo source diffs. Exception text there is not a runtime diagnostic;
+  // an import error raised by an executed test is not a collection failure either.
+  const collectionFailure = /^[ _=]*ERROR collecting\b|^\s*(?:ImportError while (?:loading conftest|importing test module)|error while importing test module)\b/imu.test(testOutput);
+  const importFailure = collectionFailure || (!testIds.size &&
+    /^\s*(?:E\s+)?(?:ImportError:|ModuleNotFoundError:|AttributeError: `np\.Inf` was removed)/mu.test(testOutput));
   const stage = candidatePatch === "observed-failed" ? "candidate-patch-apply"
     : collisions.length ? "test-patch-injection"
       : importFailure ? "collection-or-import"
@@ -40,7 +44,7 @@ export function classifyOfficialTest({ patch, report, runLog, testOutput }) {
             : exit && Number(exit[1]) !== 0 ? "test-command-failed" : "unresolved-or-unconfirmed";
   return { stage, candidate_patch: candidatePatch, report_patch_successfully_applied: report?.patch_successfully_applied ?? null,
     test_patch: testPatch, test_exit_code: exit ? Number(exit[1]) : null, expected_failures: expected.length,
-    tests_observed: tests.length, missing_expected_test_ids: expected.filter(id => !testIds.has(id)).slice(0, 30),
+    tests_observed: testIds.size, missing_expected_test_ids: expected.filter(id => !testIds.has(id)).slice(0, 30),
     ...(collisions.length ? { test_patch_collisions: collisions } : {}) };
 }
 
