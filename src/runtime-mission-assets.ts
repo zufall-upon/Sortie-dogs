@@ -32,6 +32,10 @@ Reuse existing checks that already exercise it. If authorized setup cannot run i
 For direct work with an unknown reproduction recipe, resolve its flags, configuration and cwd with ordinary native diagnostics before formal registration.
 Reuse an already observed failing baseline; do not rerun it merely to plan. A command that never exercises the reported path is not a passing reproduction.
 Use existing project configuration within the original path constraints. Known recipes and Worker-owned investigation need no extra preparation or unit.
+For changed observable behavior, follow relevant search hits in existing public caller tests, including output snapshots.
+Read the matched assertions and select their affected checks; implementation-local fixtures alone may miss a consumer regression.
+Update an affected expectation only when the original request changes its contract; otherwise fix the implementation.
+Do this within the current unit, reusing passed checks; no extra suite, approval or review round.
 Keep any user/project-required broad validation for the final integrated candidate,
 not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
 Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
@@ -51,8 +55,9 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 
 /** Worker-only projection; planning/review authorities retain the complete shared workflow. */
 export const WORKER_VALIDATION_WORKFLOW = `Batch edits, reconcile requirements/diff, run focused tests, then every registered formal check exactly in order:
-separate foreground native shell calls, no extra tee, redirect or wrapper. Diagnostics are not formal evidence.
-Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
+separate foreground native shell calls; no tee/redirect/wrapper. Diagnostics lack formal evidence.
+Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation; no stale/unrun proof.
+Check matched caller/output tests.
 `;
 
 /** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
@@ -286,6 +291,8 @@ review, not established API behavior. For a changed failure path, compare a pre-
 test and its shared assertion helper, including default expected outputs, with the new case. A new test
 that asserts the implementation's current result can encode the defect rather than catch it. Preserve
 the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
+For changed observable behavior, inspect affected public caller assertions/output snapshots found by search, not only implementation-local fixtures.
+Reconcile expected outputs with the original requirements and reuse adequate checks; no extra review round.
 ${MISSION_REPRESENTATION_ORACLE}
 Trace a concrete rejected input through the changed code back to the public caller, checking result,
 error and observable state together, including earlier results that can survive failure. Missing assertions
@@ -629,11 +636,11 @@ User missing-only: installed/incompatible is not missing.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Never fabricate completion.
+No fake success.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.
-No repeated denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+No repeat denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
 Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;

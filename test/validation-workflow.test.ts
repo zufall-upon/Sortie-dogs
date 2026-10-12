@@ -10,6 +10,25 @@ import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
 
+test('changed outputs follow discovered public caller assertions within the current validation lane', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.match(content, /follow relevant search hits in existing public caller tests, including output snapshots/);
+    assert.match(content, /Read the matched assertions and select their affected checks/);
+    assert.match(content, /implementation-local fixtures alone may miss a consumer regression/);
+    assert.match(content, /Update an affected expectation only when the original request changes its contract/);
+    assert.match(content, /within the current unit, reusing passed checks; no extra suite, approval or review round/);
+  }
+  const worker = runtimeAssets.find(asset => asset.name === 'dog-worker-v010')!.content;
+  assert.match(worker, /Check matched caller\/output tests/);
+  const reviewer = runtimeAssets.find(asset => asset.name === 'dog-reviewer-v010')!.content;
+  assert.match(reviewer, /inspect affected public caller assertions\/output snapshots found by search/);
+  assert.match(reviewer, /not only implementation-local fixtures/);
+  assert.match(reviewer, /Reconcile expected outputs with the original requirements and reuse adequate checks; no extra review round/);
+  assert.doesNotMatch(VALIDATION_WORKFLOW + WORKER_VALIDATION_WORKFLOW + MISSION_BEHAVIOR_REVIEW,
+    /sqlfluff|L031|commands_test|indentation_error_simple|hidden test|official score/);
+});
+
 test('public reproduction planning keeps its entrypoint rather than a lower-level surrogate', () => {
   for (const name of ['dog-operator', 'dogs-coordinator']) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
