@@ -180,6 +180,9 @@ test("a pending V2 assistant does not abort an in-flight priced request", { skip
 
 async function fakeOpenCode(script: string) {
   const root = await mkdtemp(join(tmpdir(), "swebench-v2-fake-"));
+  // Ubuntu's interactive bash can print a sudo reminder before fake CLI JSON.
+  // Silence only this fixture's HOME, leaving the host shell configuration intact.
+  await writeFile(join(root, ".hushlogin"), "");
   await mkdir(join(root, "bin"));
   await writeFile(join(root, "bin", "opencode"), `#!/bin/sh\n${script}\n`);
   await chmod(join(root, "bin", "opencode"), 0o755);
