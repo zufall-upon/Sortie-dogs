@@ -18,10 +18,10 @@ model routingが必要なtaskだけSortieを起動する。
 このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
 Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
 
-**現行release: [v0.13.14](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.14)**
-（[release notes](release-v0.13.14.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.15](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.15)**
+（[release notes](release-v0.13.15.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.14-mission-recovery-v1`。
+現行asset markerは`0.13.15-native-identity-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -64,7 +64,16 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.14の更新
+## v0.13.15の更新
+
+PR #210を統合。再起動後は現行native sessionのagentを履歴fallbackより優先し、
+子Reviewerのsynthetic完了通知を親Operatorのagent選択と誤認しない。
+既存Reviewer correction aliasは論理Reviewerへ投影し、native alias・model・権限・所有者は保持。
+現行Build選択は古いSortie履歴より優先。既知identityだけの確認で全履歴を読み直さない。
+追加承認・Mission再作成・予算reset・Task再派遣なし。正式検証と受入条件は維持。
+詳細と元candidateの実観測の限界は[release notes](release-v0.13.15.md)を参照。
+
+## v0.13.14の更新（継承）
 
 PR #190〜#207を統合。古いReviewer検証によるnative会話のHTTP 500を防ぎ、
 正式受入は引き続きfresh validationを要求。同一authorで不足checkを回復する。
@@ -370,7 +379,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.14
+npm install --global sortie-dogs@0.13.15
 sortie-dogs init --global --profile v010
 ```
 
@@ -382,7 +391,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.14
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.15
 sortie-dogs init --global --profile v010
 ```
 
@@ -403,7 +412,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.14-mission-recovery-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.15-native-identity-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
