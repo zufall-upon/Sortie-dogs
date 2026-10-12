@@ -28,7 +28,9 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     await exec("git", ["init", "--quiet"], { cwd: product });
     if (mode === "large-source") {
       await mkdir(join(product, "context"));
-      await Promise.all(Array.from({ length: 240 }, (_, i) => writeFile(join(product, "context", `protected-source-${i}.txt`), "protected source\n")));
+      // Keep the raw packet over 32 KB even with shorter POSIX paths; the size
+      // precondition must not depend on the host's checkout path length.
+      await Promise.all(Array.from({ length: 400 }, (_, i) => writeFile(join(product, "context", `protected-source-${i}.txt`), "protected source\n")));
       await exec("git", ["add", "--", "context"], { cwd: product });
       await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture protected inputs"], { cwd: product });
     }
