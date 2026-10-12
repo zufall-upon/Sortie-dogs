@@ -322,7 +322,6 @@ permission:
   glob: allow
   grep: allow
   list: allow
-  bash: deny
   webfetch: deny
   task: deny
   question: deny
@@ -336,7 +335,6 @@ ${controls(profile, ["repair_review", "finish_direct_unit"])}
   glob: true
   grep: true
   list: true
-  bash: false
   webfetch: false
   task: false
   question: false
@@ -381,8 +379,8 @@ requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unr
 Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
 Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
 Otherwise return to the caller in the user's language.
-Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;
-do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.
+Use the exposed read/search and native shell observations directly. Observe existing state without
+mutating the candidate; actual correction uses repair_review in this same context. Native user permissions remain authoritative.
 
 If no correction is required, return exactly PASS or EVIDENCE_GAPS as the first line. Return FINDINGS
 only when correction cannot continue here because of an actual blocker, not an omitted estimated write path.

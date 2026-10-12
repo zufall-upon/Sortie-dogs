@@ -53,7 +53,16 @@ export interface GoalEvidence {
       readonly contract_hash: string;
       readonly scratch_paths: readonly string[];
       readonly protected_paths: readonly string[];
-      readonly environment: Readonly<Record<string, string | null>>;
+       readonly environment: Readonly<Record<string, string | null>>;
+      readonly incidental_control_paths?: readonly string[];
+      readonly toolchain?: {
+        readonly directory: string;
+        readonly commands: readonly string[];
+        readonly executables: readonly {
+          readonly name: string; readonly path: string | null; readonly realpath: string | null;
+          readonly sha256: string | null; readonly mode?: number; readonly runtime?: string;
+        }[];
+      };
     };
   };
   readonly execution: {
@@ -288,7 +297,18 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
       Array.isArray(protectedBinding.freshness.scratch_paths) && protectedBinding.freshness.scratch_paths.every(text) &&
       Array.isArray(protectedBinding.freshness.protected_paths) && protectedBinding.freshness.protected_paths.every(text) &&
       protectedBinding.freshness.environment !== null && typeof protectedBinding.freshness.environment === "object" &&
-      !Array.isArray(protectedBinding.freshness.environment) && Object.values(protectedBinding.freshness.environment).every(value => value === null || typeof value === "string")));
+      !Array.isArray(protectedBinding.freshness.environment) && Object.values(protectedBinding.freshness.environment).every(value => value === null || typeof value === "string") &&
+      (protectedBinding.freshness.incidental_control_paths === undefined || Array.isArray(protectedBinding.freshness.incidental_control_paths) &&
+        protectedBinding.freshness.incidental_control_paths.every(text)) &&
+      (protectedBinding.freshness.toolchain === undefined || protectedBinding.freshness.toolchain !== null &&
+        typeof protectedBinding.freshness.toolchain === "object" && text(protectedBinding.freshness.toolchain.directory) &&
+        Array.isArray(protectedBinding.freshness.toolchain.commands) && protectedBinding.freshness.toolchain.commands.every(commandText) &&
+        Array.isArray(protectedBinding.freshness.toolchain.executables) && protectedBinding.freshness.toolchain.executables.every(executable =>
+          executable !== null && typeof executable === "object" && text(executable.name) &&
+          (executable.path === null || text(executable.path)) && (executable.realpath === null || text(executable.realpath)) &&
+          (executable.sha256 === null || HASH.test(executable.sha256)) &&
+          (executable.mode === undefined || Number.isSafeInteger(executable.mode) && executable.mode >= 0) &&
+          (executable.runtime === undefined || text(executable.runtime))))));
   const matches = criteria.length > 0 && criteria.length === value.measurement.criterion_ids.length &&
     criteria.every((criterion) => criterion.target === value.measurement.target &&
       criterion.entrypoint === value.measurement.entrypoint && criterion.workload === value.measurement.workload &&
@@ -421,7 +441,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         state = { ...state, no_progress_results: 0, replan_required: false, replan_used: false };
         replanRevision = null;
       }
-      requireState(state.phase === "active" && !state.replan_required, "transition", "Dispatch requires terminal handling or one bounded replan.");
+      requireState(state.phase === "active" && (!state.replan_required || state.replan_used), "transition", "Dispatch requires an active goal and the initial no-progress diagnosis.");
       requireState(state.budget !== null && state.consumed_units + state.outstanding_reservations.length < state.budget.max_units, "budget", "Goal unit budget exhausted.");
       requireState(state.budget.time_ms === null || (state.consumed_time_ms !== null && state.consumed_time_ms < state.budget.time_ms), "budget", "Goal time budget is exhausted or usage is unknown.");
       requireState(state.budget.cost_usd === null || (state.consumed_cost_usd !== null && state.consumed_cost_usd < state.budget.cost_usd), "budget", "Goal cost budget is exhausted or usage is unknown.");
@@ -556,7 +576,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         event.receipt.terminal_revision === state.revision && event.receipt.acceptance_fingerprint === state.acceptance_fingerprint &&
         event.receipt.unit_ids.every((id) => state.unit_ids.includes(id)) && event.receipt.session_ids.every((id) => state.session_ids.includes(id)) &&
         event.receipt.evidence_refs.every((id) => state.evidence_refs.includes(id)) &&
-        (event.receipt.status !== "succeeded" || (event.receipt.stop_reason === "completed" && allAccepted && !state.replan_required)) &&
+        (event.receipt.status !== "succeeded" || (event.receipt.stop_reason === "completed" && allAccepted)) &&
         (event.receipt.status !== "stopped" || event.receipt.stop_reason !== "completed"), "transition", "Terminal receipt is not bound to settled goal state.");
       state = { ...state, phase: event.receipt.status === "succeeded" ? "terminal" : "stopped",
         stop_reason: event.receipt.stop_reason, tickets: [], receipt: event.receipt };

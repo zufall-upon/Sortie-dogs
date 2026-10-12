@@ -11,6 +11,7 @@ import test from "node:test";
 import V2Plugin, {
   createSortieDogsV2Plugin,
   createV2ReturnReportFinalizer,
+  nativeReviewerRoleRules,
   type OpenCodeV2Context,
 } from "../dist/plugin/v2.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
@@ -253,7 +254,8 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
   try {
     const initial = event("dog-reviewer-v010");
     await fixture.sessionHooks.get("context")!(initial);
-    for (const forbidden of ["patch", "shell", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
+    assert.equal(initial.tools.shell, definitions.shell, "native shell observation is available before correction without replacement definitions");
+    for (const forbidden of ["patch", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
       assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
     }
     correcting = true;
@@ -271,6 +273,30 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
     await fixture.sessionHooks.get("context")!(restored);
     assert.deepEqual(Object.keys(restored.tools), Object.keys(initial.tools), "restored read-only role never keeps correction tools for cache");
     assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
+for (const custom of [false, true]) test(`location-only candidate reconciles released Reviewer observation text without overwriting custom instructions: ${custom}`, async () => {
+  const fixture = contextFixture();
+  const current = runtimeAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.split("---").slice(2).join("---");
+  const observed = "Use the exposed read/search and native shell observations directly. Observe existing state without\n" +
+    "mutating the candidate; actual correction uses repair_review in this same context. Native user permissions remain authoritative.";
+  const legacy = "Use the exposed read/search tools directly. Shell is unavailable during the initial read-only phase;\n" +
+    "do not enumerate the tool catalog to find an unavailable terminal. Correction uses native shell normally.";
+  const system = current.replace(observed, legacy) + (custom ? "\nCustom instruction remains authoritative." : "");
+  const reviewer = { system, permissions: [...nativeReviewerRoleRules], model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
+  const web = reviewer.permissions.findIndex(rule => rule.action === "webfetch");
+  reviewer.permissions.splice(web, 0, { action: "shell", resource: "*", effect: "deny" });
+  const registry: Record<string, any> = { "dog-reviewer-v010": reviewer };
+  fixture.context.agent!.transform = async callback => {
+    callback({ get: id => registry[id], update: (id, update) => update(registry[id] ??= {}) });
+    return { dispose() {} };
+  };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup(fixture.context);
+  try {
+    assert.equal(reviewer.system, custom ? system : current);
+    assert(!reviewer.permissions.some(rule => rule.action === "shell" && rule.effect === "deny"));
+    assert.deepEqual(reviewer.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
   } finally { cleanup?.(); }
 });
 
@@ -612,7 +638,10 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
         const reviewTask = await before("coordinator", "subagent", nativeTask(review.task));
         await prompt("reviewer", String(reviewTask.input.prompt));
         agents.reviewer!.outcome = "succeeded";
-        await after(reviewTask, "PASS\nCommitted result matches the original request and real validation.", { sessionID: "reviewer" });
+        const report = "PASS\nCommitted result matches the original request and real validation.", now = Date.now();
+        history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+          time: { created: now, completed: now }, content: [{ type: "text", text: report }] });
+        await after(reviewTask, report, { sessionID: "reviewer" });
         assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Implement result");
         assert.equal((await exec("git", ["status", "--porcelain"], { cwd: directory })).stdout, "");
       }

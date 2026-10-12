@@ -252,7 +252,7 @@ test("review dispatch requires canonical PASS and recognized risk tags", () => {
     "REVIEW_EVIDENCE_REQUIRED",
   );
   lane.beforeTool("root", "task", review);
-  expectDenial(() => lane.beforeTool("root", "task", review), "CONSULTATION_RETRY_INVALID");
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", review));
   lane.beforeTool("root", "task", {
     ...review,
     prompt: `${review.prompt}\nfallback_retry: true`,
@@ -269,7 +269,7 @@ test("review dispatch requires canonical PASS and recognized risk tags", () => {
     }),
     "REVIEW_PHASE_INVALID",
   );
-  expectDenial(() => lane.beforeTool("root", "task", verification), "CONSULTATION_RETRY_INVALID");
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", verification));
   lane.beforeTool("root", "task", {
     ...verification,
     prompt: `${verification.prompt}\nfallback_retry: true`,
@@ -304,10 +304,10 @@ test("distinct review candidates have independent phases and retry budgets", () 
     prompt: "candidate_id: candidate-b\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [storage-compatibility]",
   };
   lane.beforeTool("root", "task", candidateB);
-  expectDenial(() => lane.beforeTool("root", "task", candidateB), "CONSULTATION_RETRY_INVALID");
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", candidateB));
 });
 
-test("materially revised verification artifacts continue while exact duplicates are denied", () => {
+test("materially revised and unchanged verification artifacts retain their lineage", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);
   const evidence = "canonical_validation_exit: 0\nrisk_tags: [public-logic]\ncandidate_id: corrected";
@@ -327,20 +327,42 @@ test("materially revised verification artifacts continue while exact duplicates 
     subagent_type: "dog-reviewer",
     prompt: `review_phase: verification\n${evidence}\nartifact_revision: r2`,
   });
-  expectDenial(() => lane.beforeTool("root", "task", {
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
     prompt: `review_phase: verification\n${evidence}\nartifact_revision: r2`,
-  }), "CONSULTATION_RETRY_INVALID");
+  }));
   for (let revision = 3; revision <= 35; revision += 1) {
     lane.beforeTool("root", "task", {
       subagent_type: "dog-reviewer",
       prompt: `review_phase: verification\n${evidence}\nartifact_revision: r${revision}`,
     });
   }
-  expectDenial(() => lane.beforeTool("root", "task", {
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", {
     subagent_type: "dog-reviewer",
     prompt: `review_phase: verification\n${evidence}\nartifact_revision: r1`,
-  }), "CONSULTATION_RETRY_INVALID");
+  }));
+});
+
+test("unstarted Reviewer dispatch and same-context continuation need no prompt rewrite or fallback grant", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  const accounting = lane.snapshotWorkerAccounting("root");
+  const initial = { subagent_type: "dog-reviewer", prompt:
+    "candidate_id: retained\nreview_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [public-logic]" };
+  lane.beforeTool("root", "task", initial);
+  // A native launch failed before there was any child. The unchanged request is still usable.
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", initial));
+  const continuation = { ...initial, task_id: "original-reviewer" };
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", continuation));
+  const verification = { ...continuation, prompt: initial.prompt.replace("initial", "verification") };
+  lane.beforeTool("root", "task", verification);
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", verification));
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", continuation));
+  lane.beginTurn("root", false);
+  lane.restoreReviewLineage("root", verification.prompt, [initial.prompt, verification.prompt]);
+  assert.doesNotThrow(() => lane.beforeTool("root", "task", verification));
+  assert.deepEqual(lane.snapshotWorkerAccounting("root"), accounting, "read-only review consumes no implementation slot");
+  assert.equal(continuation.prompt, initial.prompt);
 });
 
 test("typed evidence fields reject duplicates, case changes, and unbracketed risks", () => {

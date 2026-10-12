@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
@@ -10,6 +10,7 @@ import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const exec = promisify(execFile);
+async function executable(path: string, bytes: string) { await writeFile(path, bytes); await chmod(path, 0o755); }
 async function fixture(run: (root: string) => Promise<void>) {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/source-policy-"));
@@ -110,6 +111,172 @@ test("new whole-project candidate proof ignores host bookkeeping but pins real a
   await writeFile(join(root, ".sortie-dogs-v010/operators/root.json"), "changed explicit output");
   assert.notEqual((await refreshProtectedSnapshot(root, explicit.binding))?.candidate, explicit.candidate,
     "explicit control-like outputs remain bound even alongside broad project scope");
+}));
+
+test("transport restart and an incidental OpenCode plugin config do not invalidate product validation", async () => fixture(async root => fixture(async tools => {
+  await writeFile(join(root, "input.txt"), "checked source");
+  const cmake = join(tools, "cmake.exe"); await executable(cmake, "compiler-driver-v1");
+  const pinned = await validationPin(root, [root + "/**"], [root + "/**"], [`& '${cmake}' --build .`]);
+  assert.equal(pinned.binding.freshness!.environment["@runtime"], undefined);
+  assert.equal(pinned.binding.freshness!.environment["@executable"], undefined);
+  const original = JSON.stringify(pinned.binding), version = Object.getOwnPropertyDescriptor(process, "version")!;
+  try {
+    Object.defineProperty(process, "version", { ...version, value: "transport-restarted" });
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  } finally { Object.defineProperty(process, "version", version); }
+  await mkdir(join(root, ".opencode"));
+  await writeFile(join(root, ".opencode/opencode.json"), JSON.stringify({ plugins: ["local-candidate"] }));
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(join(root, "input.txt"), "actual source changed");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  assert.equal(JSON.stringify(pinned.binding), original);
+})));
+
+for (const fresh of [false, true]) test(`legacy OpenCode bytes retain their original snapshot recipe: freshness=${fresh}`, async () => fixture(async root => {
+  await mkdir(join(root, ".opencode")); await mkdir(join(root, ".sortie-dogs-v010"));
+  await writeFile(join(root, ".opencode/opencode.json"), "old config");
+  await writeFile(join(root, "result.txt"), "old product");
+  const manifest = { task_id: "old-unit", read: [root + "/**"], write: [root + "/**"], validation: ["node check.mjs"] };
+  const bytes = JSON.stringify(manifest), manifestHash = hash(bytes);
+  await writeFile(join(root, ".sortie-dogs-v010/manifest.json"), bytes);
+  const contractHash = goalFingerprint({ task_id: manifest.task_id, read: manifest.read, validation: manifest.validation });
+  const binding = { manifest_hash: `sha256:${manifestHash}`, project_root: root, manifest_path: ".sortie-dogs-v010/manifest.json",
+    source_paths: [root], candidate_paths: [root], source_policy: "project-files-v1" as const,
+    ...(fresh ? { candidate_policy: "project-root-artifacts-v1" as const, freshness: { contract_hash: contractHash,
+      scratch_paths: [], protected_paths: [], environment: { "@runtime": process.version, "@executable": process.execPath } } } : {}) };
+  const expectedSource = goalFingerprint({ manifest_hash: fresh ? contractHash : `sha256:${manifestHash}`, entries: [
+    ["", "directory"], [".opencode", "directory"], [".opencode/opencode.json", "file", hash("old config")], ["result.txt", "file", hash("old product")],
+  ] });
+  const saved = JSON.stringify(binding), first = await refreshProtectedSnapshot(root, binding);
+  assert.equal(first?.source, expectedSource, "independent legacy digest, not a recapture using the new algorithm");
+  await writeFile(join(root, ".opencode/opencode.json"), "changed config");
+  assert.notEqual((await refreshProtectedSnapshot(root, binding))?.source, expectedSource);
+  await rm(join(root, ".opencode"), { recursive: true });
+  assert.notEqual((await refreshProtectedSnapshot(root, binding))?.source, expectedSource, "removing admin bytes cannot relabel legacy proof");
+  if (binding.freshness) {
+    const version = Object.getOwnPropertyDescriptor(process, "version")!;
+    try {
+      Object.defineProperty(process, "version", { ...version, value: "changed-legacy-runtime" });
+      assert.equal(await refreshProtectedSnapshot(root, binding), undefined, "saved legacy environment keys are not dropped");
+    } finally { Object.defineProperty(process, "version", version); }
+  }
+  assert.equal(JSON.stringify(binding), saved);
+}));
+
+for (const scope of ["read", "write", "tracked"] as const) test(`broad new snapshot still pins ${scope} OpenCode input`, async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, ".opencode"));
+  await writeFile(join(root, ".opencode/input.json"), "real input");
+  if (scope === "tracked") await exec("git", ["add", ".opencode/input.json"], { cwd: root });
+  const pinned = await validationPin(root, [root + "/**", ...(scope === "read" ? [".opencode/input.json"] : [])],
+    [root + "/**", ...(scope === "write" ? [".opencode/input.json"] : [])], ["node check.mjs"]);
+  await writeFile(join(root, ".opencode/incidental.json"), "local candidate config");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(join(root, ".opencode/input.json"), "changed actual input");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+}));
+
+test("actual PATH tools, quoted PowerShell paths and CMake-selected compilers detect same-path replacement", async () => fixture(async root => fixture(async tools => {
+  await mkdir(join(tools, "tool bin")); await mkdir(join(root, "build"));
+  const bin = join(tools, "tool bin"), cmake = join(bin, "cmake.exe"), ctest = join(bin, "ctest.exe"), compiler = join(bin, "compiler.exe");
+  for (const path of [cmake, ctest, compiler]) await executable(path, `original ${path}`);
+  await writeFile(join(root, "build/CMakeCache.txt"), `CMAKE_CXX_COMPILER:FILEPATH=${compiler}\n`);
+  const previous = process.env.PATH; process.env.PATH = bin + delimiter + previous;
+  try {
+    const pinned = await validationPin(root, ["source.cpp"], ["result.txt"], [`& '${cmake}' --build build; & "${ctest}" --test-dir build; ctest.exe --test-dir build`]);
+    const saved = JSON.stringify(pinned.binding);
+    for (const path of [cmake, ctest, compiler]) {
+      const previousMetadata = await stat(path);
+      await executable(path, `replaced ${path}`);
+      await utimes(path, previousMetadata.atime, previousMetadata.mtime);
+      assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined, path);
+      await executable(path, `original ${path}`);
+      assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+    }
+    assert.equal(JSON.stringify(pinned.binding), saved);
+  } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
+})));
+
+test("actual executable symlink retarget and shebang interpreter changes invalidate existing checks", async () => fixture(async root => fixture(async tools => {
+  const first = join(tools, "first"), second = join(tools, "second"), selected = join(tools, "selected");
+  await executable(first, "first interpreter"); await executable(second, "second interpreter");
+  await symlink(first, selected);
+  const script = join(tools, "script"); await executable(script, `#!${selected}\ncheck\n`);
+  const pinned = await validationPin(root, ["source.txt"], ["result.txt"], [`'${script}'`]);
+  await executable(first, "changed interpreter");
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+  await executable(first, "first interpreter");
+  await rm(selected); await symlink(second, selected);
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+})));
+
+test("temporary PATH assignment pins the actual next command and compiler wrappers retain their selected compiler", async () => fixture(async root => fixture(async tools => {
+  const a = join(tools, "a"), b = join(tools, "b"); await mkdir(a); await mkdir(b);
+  const executableName = (name: string) => process.platform === "win32" ? `${name}.exe` : name;
+  const cmake = join(a, executableName("cmake")), unused = join(a, executableName("ctest")), ctest = join(b, executableName("ctest"));
+  const wrapper = join(b, executableName("ccache")), compiler = join(b, executableName("compiler"));
+  for (const path of [cmake, unused, ctest, wrapper, compiler]) await executable(path, `original ${path}`);
+  const previous = process.env.PATH; process.env.PATH = b + delimiter + previous;
+  try {
+    const pinned = await validationPin(root, ["source.cpp"], ["result.txt"],
+      [`PATH="${a}${delimiter}$PATH" CXX='"${wrapper}" "${compiler}"' cmake --version && ctest --version`]);
+    await executable(unused, "changed executable that the second command does not select");
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+    for (const path of [ctest, wrapper, compiler]) {
+      await executable(path, `replacement ${path}`);
+      assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined, path);
+      await executable(path, `original ${path}`);
+    }
+  } finally { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous; }
+})));
+
+test("host runtime is relevant when it is the actual command interpreter", async () => fixture(async root => {
+  const pinned = await validationPin(root, ["source.txt"], ["result.txt"], [`& '${process.execPath}' check.mjs`]);
+  const version = Object.getOwnPropertyDescriptor(process, "version")!;
+  try {
+    Object.defineProperty(process, "version", { ...version, value: "different-actual-interpreter" });
+    assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+  } finally { Object.defineProperty(process, "version", version); }
+  const executable = Object.getOwnPropertyDescriptor(process, "execPath")!;
+  try {
+    Object.defineProperty(process, "execPath", { ...executable, value: join(root, "different-transport") });
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate },
+      "relocating the transport does not replace the still-identical command interpreter");
+  } finally { Object.defineProperty(process, "execPath", executable); }
+}));
+
+test("actual command and cwd pin only the check that ran, not unrelated registered toolchains", async () => fixture(async root => fixture(async tools => {
+  const first = join(tools, "check"), other = join(tools, "other");
+  await executable(first, "actual check"); await executable(other, "unrelated check");
+  const manifestPath = join(root, "manifest.json"), bytes = JSON.stringify({ task_id: "unit", read: ["source.txt"], write: ["result.txt"],
+    validation: ["./check", "./other"] });
+  await writeFile(manifestPath, bytes);
+  const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) }, { directory: tools, command: "./check" });
+  assert.ok(pinned);
+  await executable(other, "changed unrelated tool");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await executable(first, "changed actual tool");
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
+})));
+
+test("an explicitly declared OpenCode config remains a real validation input", async () => fixture(async root => {
+  await mkdir(join(root, ".opencode"));
+  await writeFile(join(root, ".opencode/opencode.json"), "real plugin contract");
+  const pinned = await validationPin(root, [".opencode/opencode.json"], ["result.txt"], ["node check.mjs"]);
+  await writeFile(join(root, ".opencode/opencode.json"), "changed plugin contract");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+}));
+
+test("new validation recipes bind command inputs, not the Task label", async () => fixture(async root => {
+  await writeFile(join(root, "input.txt"), "checked source");
+  const pinned = await validationPin(root, ["input.txt"], ["result.txt"], ["node check.mjs"]);
+  const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
+  manifest.task_id = "same work after administrative rebind";
+  await writeFile(join(root, "manifest.json"), JSON.stringify(manifest));
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  manifest.validation = ["node different-check.mjs"];
+  await writeFile(join(root, "manifest.json"), JSON.stringify(manifest));
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding), undefined);
 }));
 
 test("old whole-project candidate recipes never gain bookkeeping exclusions retroactively", async () => fixture(async root => {

@@ -301,7 +301,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
     assert.match(reviewer, new RegExp(`^  ${tool}: allow$`, "m"));
     assert.match(reviewer, new RegExp(`^  ${tool}: true$`, "m"));
   }
-  for (const tool of ["edit", "write", "patch", "bash", "task"]) {
+  assert.doesNotMatch(reviewer, /^  bash: (deny|false)$/m);
+  for (const tool of ["edit", "write", "patch", "task"]) {
     assert.match(reviewer, new RegExp(`^  ${tool}: deny$`, "m"));
   }
   assert.doesNotMatch(reviewer, /invoke no tools|reject a missing index|mapping count|supplied artifact.*only/u);
