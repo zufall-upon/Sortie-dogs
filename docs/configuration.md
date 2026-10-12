@@ -12,7 +12,7 @@ not mean the installed package is v0.10.
 Requirements: Node.js 22.6+, npm and OpenCode V2. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.13.15
+npm install --save-dev sortie-dogs@0.13.16
 npx --no-install sortie-dogs init .
 ```
 
@@ -181,7 +181,7 @@ The default Mission profile is serial; background responsiveness is not parallel
 Project-local installation is recommended. For global OpenCode Mission assets:
 
 ```sh
-npm install --global sortie-dogs@0.13.15
+npm install --global sortie-dogs@0.13.16
 sortie-dogs init --global --profile v010
 ```
 
@@ -190,7 +190,7 @@ may resolve a **separate dependency** under the config root. Updating npm-global
 update it. Install the same release there and rerun global init:
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.15
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.16
 sortie-dogs init --global --profile v010
 ```
 
@@ -203,13 +203,13 @@ Completely restart OpenCode after updating and check installed package, assets a
 For a project update:
 
 ```sh
-npm install --save-dev sortie-dogs@0.13.15
+npm install --save-dev sortie-dogs@0.13.16
 npx --no-install sortie-dogs init .
 ```
 
 `init` is idempotent, updates recognized Sortie-owned assets, records their version and preserves
 user settings. Unknown ownership or conflicting files stop the update. Align exact version pins
-and separate bridge dependencies. Marker `0.13.15-native-identity-v1` identifies installed Mission
+and separate bridge dependencies. Marker `0.13.16-practical-continuity-v1` identifies installed Mission
 assets, not proof that an already-running OpenCode process reloaded them.
 
 There is no supported uninstall command. Remove the dependency separately, then follow
