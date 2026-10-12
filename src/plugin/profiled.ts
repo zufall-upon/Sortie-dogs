@@ -14,7 +14,7 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalDeclaredValidationMembers, extractWritePaths } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
@@ -589,7 +589,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt),
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory, directories,
           unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt);
-        const members = canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
+        const members = canonicalObservedValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
         return members && validationDirectoryMatches(members, directory, input.directory, directories) ? members : undefined;
       },
       recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),

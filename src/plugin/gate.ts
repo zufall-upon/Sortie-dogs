@@ -974,6 +974,34 @@ export function canonicalDeclaredValidationMembers(command: string, declared: Re
   return sequence(0);
 }
 
+/** Observation only, never shell authority. A successful native && chain can prove
+ * its exact declared tail after diagnostics/empty-directory cleanup. The caller
+ * must retain the real exit and the snapshot captured BEFORE the whole command. */
+export function canonicalObservedValidationMembers(command: string, declared: ReadonlySet<string> | readonly string[], occurrence = 0): string[] | undefined {
+  const exact = canonicalDeclaredValidationMembers(command, declared, occurrence);
+  if (exact) return exact;
+  const syntax = scanShellSyntax(command, "posix");
+  // Do not infer a tail through comments, expansions, redirection, subshells or
+  // shell-state changes. Unsupported observations leave existing authority alone.
+  if (syntax.unsafeExpansion || syntax.activeBrace || /[\\#$()<>`]/u.test(syntax.masked)) return undefined;
+  const segments = shellSegments(command, "posix").map(segment => segment.trim());
+  if (segments.length < 2 || segments.some(segment => !segment) ||
+      normalizeCommand(command) !== segments.map(normalizeCommand).join(" && ")) return undefined;
+  const identities = [...new Set(declared)];
+  for (let start = 1; start < segments.length; start++) {
+    const prefix = segments[start - 1]!;
+    // Never discard an ordered declared occurrence to find a later matching tail.
+    if (declaredCommandMatch(prefix, identities) !== undefined) return undefined;
+    if (prefix.includes("`")) return undefined;
+    const extracted = shellPaths(prefix, false);
+    const cleanup = /^rmdir(?:\s|$)/u.test(prefix);
+    if (extracted.ambiguous || extracted.remoteMutation || extracted.gitMutation || extracted.applies && !cleanup) return undefined;
+    const members = canonicalDeclaredValidationMembers(segments.slice(start).join(" && "), declared, occurrence);
+    if (members) return members;
+  }
+  return undefined;
+}
+
 /** Unbound sessions may invoke only tools whose complete input is known to be read-only. */
 export function isKnownReadOnlyTool(
   tool: string,

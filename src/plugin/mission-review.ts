@@ -12,7 +12,7 @@ import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js"
 import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
-import { canonicalDeclaredValidationMembers, normalizeCommand } from "./gate.js";
+import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers, normalizeCommand } from "./gate.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
@@ -65,7 +65,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
   history: readonly Record<string, unknown>[], notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): {
-    attempts: readonly { command: string; directory?: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
+    attempts: readonly { command: string; native_command?: string; directory?: string; observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
   } {
   const declared = validation.map(normalizeCommand);
@@ -90,7 +90,8 @@ export function observedMissionValidation(validation: readonly string[], childSe
   });
   let occurrence = 0;
   const attempts = rawAttempts.sort((a, b) => (a.started_ms ?? 0) - (b.started_ms ?? 0) || (a.completed_ms ?? 0) - (b.completed_ms ?? 0)).flatMap(attempt => {
-    const members = canonicalDeclaredValidationMembers(attempt.command, declared, occurrence);
+    const exact = canonicalDeclaredValidationMembers(attempt.command, declared, occurrence);
+    const members = exact ?? (attempt.exit_code === 0 ? canonicalObservedValidationMembers(attempt.command, declared, occurrence) : undefined);
     if (!members || !validationDirectoryMatches(members, attempt.directory, directory, directories)) return [];
     if (attempt.exit_code !== 0) occurrence = 0;
     else for (const command of members) {
@@ -98,7 +99,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
       if (command === declared[occurrence]) occurrence = (occurrence + 1) % declared.length;
     }
     const { directory: actual, ...visible } = attempt;
-    return [{ ...visible, command: members.join(" && "), ...(directory && resolve(directory, actual ?? ".") !== resolve(directory)
+    return [{ ...visible, command: members.join(" && "), ...(!exact ? { native_command: attempt.command } : {}), ...(directory && resolve(directory, actual ?? ".") !== resolve(directory)
       ? { directory: resolve(directory, actual ?? ".") } : {}), ...(members.length > 1 ? { observed_members: members } : {}) }];
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
@@ -170,11 +171,14 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       // Bound native checks are compared with their actual input bytes below. A later
       // report/cache write is not itself a source change. Unbound history stays conservative.
       if (!checks && attempt.started < editedAt) continue;
-      const recorded = registeredAt && checks?.find(check => check.callID === attempt.callID && check.childSessionID === child);
-      const commands = recorded
-        ? canonicalDeclaredValidationMembers(attempt.command, recorded.command)
-        : canonicalDeclaredValidationMembers(attempt.command, declared, occurrences[partial.length % required.length] ?? 0);
-      if (!commands || recorded && JSON.stringify(commands) !== JSON.stringify(recorded.command)) continue;
+      const recorded = checks?.find(check => check.callID === attempt.callID && check.childSessionID === child);
+      const recipes = registeredAt && recorded ? recorded.command : declared;
+      const occurrence = registeredAt && recorded ? 0 : occurrences[partial.length % required.length] ?? 0;
+      const commands = canonicalDeclaredValidationMembers(attempt.command, recipes, occurrence)
+        // Mixed native input needs its original live binding, not a snapshot added
+        // to retained logs. Nonzero/unknown chain exits cannot prove the tail ran.
+        ?? (recorded && attempt.exit === 0 ? canonicalObservedValidationMembers(attempt.command, recipes, occurrence) : undefined);
+      if (!commands || registeredAt && recorded && JSON.stringify(commands) !== JSON.stringify(recorded.command)) continue;
       const members = commands.flatMap((command, member) => required.includes(command) &&
         validationDirectoryMatches([command], attempt.directory, directory, directories) &&
         (registeredAt?.[command] === undefined || Number.isFinite(Date.parse(registeredAt[command]!)) &&
@@ -255,12 +259,13 @@ export async function observedMissionValidationSummary(validation: readonly stri
   const data = record(response) && "data" in response ? response.data : response;
   if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
   const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory, directories);
-  const grouped = new Map<string, { command: string; directory?: string; exit_code: number | null; observed_attempts: number;
+  const grouped = new Map<string, { command: string; native_command?: string; directory?: string; exit_code: number | null; observed_attempts: number;
     latest_started_ms: number | null; latest_completed_ms: number | null }>();
   for (const attempt of observed.attempts) {
-    const key = JSON.stringify([attempt.command, attempt.directory, attempt.exit_code]);
+    const key = JSON.stringify([attempt.command, attempt.native_command, attempt.directory, attempt.exit_code]);
     const previous = grouped.get(key);
-    grouped.set(key, { command: attempt.command, ...(attempt.directory ? { directory: attempt.directory } : {}), exit_code: attempt.exit_code,
+    grouped.set(key, { command: attempt.command, ...(attempt.native_command ? { native_command: attempt.native_command } : {}),
+      ...(attempt.directory ? { directory: attempt.directory } : {}), exit_code: attempt.exit_code,
       observed_attempts: (previous?.observed_attempts ?? 0) + 1,
       latest_started_ms: attempt.started_ms, latest_completed_ms: attempt.completed_ms });
   }
