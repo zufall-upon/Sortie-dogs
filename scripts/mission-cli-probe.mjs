@@ -96,7 +96,8 @@ export function completeProbeObservations(result, schemaRejected = false) {
 }
 
 /** Monitor the owned CLI and server through native settlement and evidence persistence.
- * Observation seams let retained lifecycle facts be replayed without model requests. */
+ * Observation seams let retained lifecycle facts be replayed without model requests.
+ * finish persists completed evidence idempotently; a first late signal can require a re-save. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish }) {
   let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError, cliError, usageIncomplete;
@@ -188,16 +189,27 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     const observed = observeNow('final');
     await stopping; // A final read can fail after normal cleanup; retain one owned teardown.
     const usageComplete = !usageIncomplete && !cleanupErrors.length;
-    return await finish({ observed: observationError || cliError || cleanupErrors.length ? { ...observed, usage_complete: usageComplete,
+    const evidence = { observed: observationError || cliError || cleanupErrors.length ? { ...observed, usage_complete: usageComplete,
       // Missing coverage retains the existing reservation. The floor is an accounting
       // marker, not a claim that an additional model request was observed.
       ...(!usageComplete ? { known_unpriced_requests: observed.unpriced_requests,
         unpriced_requests: Math.max(1, observed.unpriced_requests) } : {}) } : observed,
-      databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal,
-      observationError, cliError, cleanupErrors, nextAction: cleanupErrors.length
+      databasePath, stdout, stderr, code, signal, observationError, cliError, cleanupErrors };
+    let savedStop, savedSignal, result;
+    do {
+      savedStop = stopped; savedSignal = controllerSignal;
+      result = await finish({ ...evidence, stopped: savedStop, stopObservation, cutoff, controllerSignal: savedSignal,
+        nextAction: cleanupErrors.length
         ? 'Retry teardown only for the recorded owned CLI/server and verify all writers stopped, then reconcile database usage and saved CLI logs. Do not automatically replay the consumed task or restart the shared host.' : cliError
         ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : observationError
-        ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.' : undefined });
+        ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.'
+        : savedStop === 'controller-interrupted'
+        ? 'Inspect the saved Mission receipt, owned database usage and CLI logs before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : undefined });
+      // A signal can arrive after finish copied or serialized its fields. Re-save
+      // only changed stop metadata, not native work, observation or owned teardown.
+      // Both fields are first-write-only, so repeated signals cannot prolong saving.
+    } while (savedStop !== stopped || savedSignal !== controllerSignal);
+    return result;
   } finally {
     // Retain handlers through log/usage persistence, including repeated signals.
     process.off('SIGINT', onInterrupt);

@@ -326,6 +326,83 @@ for (const [signal, phase] of [["SIGTERM", "active"], ["SIGINT", "settlement"], 
   });
 }
 
+for (const phase of ["persistence-first", "persistence-first-after-write", "persistence-first-budget",
+  "persistence-first-cleanup", "persistence-first-observation", "persistence-first-launch", "persistence-normal"] as const) {
+  test(`first controller signal during ${phase} reconciles the durable receipt without repeating owned teardown`,
+    { skip: process.platform === "win32", timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-first-persistence-"));
+    const observed = { root: "root", models: [root], responses: [], tools: [], errors: [],
+      priced_usd: 1.7674084, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory, phase], {
+      detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let stderr = "", persistenceCalls = 0;
+    let owned: { serverPID: number; cliPID?: number } | undefined;
+    let returned: { stopped: string | false } | undefined;
+    const firstSignal = phase === "persistence-first-after-write" ? "SIGINT" : "SIGTERM";
+    child.stdout.resume(); child.stderr.on("data", bytes => { stderr += bytes; });
+    child.on("message", message => {
+      const event = message as { phase: string; serverPID?: number; cliPID?: number; stopped: string | false };
+      if (event.serverPID) owned = { serverPID: event.serverPID, cliPID: event.cliPID };
+      if (event.phase === "persistence") {
+        persistenceCalls++;
+        child.kill(persistenceCalls === 1 ? firstSignal : firstSignal === "SIGTERM" ? "SIGINT" : "SIGTERM");
+      }
+      if (event.phase === "finished") returned = event;
+    });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null, "keep handlers until reconciliation finishes"); assert.equal(exit.code, 1, stderr);
+      const result = JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      const prior = phase === "persistence-first-budget" ? "budget" : phase === "persistence-first-cleanup" ? "cleanup-failed"
+        : phase === "persistence-first-observation" ? "observation-failed" : phase === "persistence-first-launch" ? "cli-launch-failed"
+        : phase === "persistence-normal" ? false : "controller-interrupted";
+      assert.equal(result.stopped, prior); assert.equal(returned?.stopped, prior, "saved and returned outcomes agree");
+      assert.equal(result.controller_signal, phase === "persistence-normal" ? null : firstSignal);
+      assert.equal(result.stop_observation, phase === "persistence-first-budget" ? "cli-close"
+        : phase === "persistence-first-cleanup" ? "cleanup" : phase === "persistence-first-observation" ? "cli-close"
+        : phase === "persistence-first-launch" ? "cli-error" : phase === "persistence-normal" ? undefined : "signal");
+      assert.equal(result.finish_calls, phase === "persistence-normal" ? 1 : 2,
+        "repersist only changed stop metadata; a second signal must not cause more writes");
+      assert.equal(persistenceCalls, phase === "persistence-normal" ? 0 : 2);
+      assert.equal(result.server_stop_calls, 1, "reconciliation never retries owned teardown");
+      assert.equal(result.native_completed, phase === "persistence-normal"); assert.equal(result.accepted, false);
+      assert.equal(result.worker_model_observed, false);
+      if (phase === "persistence-first-launch") assert.notEqual(result.code, 0);
+      else assert.equal(result.code, 0, "the actual root outcome survives the later controller interruption");
+      const missing = ["persistence-first-cleanup", "persistence-first-observation"].includes(phase);
+      assert.equal(result.unpriced_requests, missing ? 1 : 0);
+      if (missing) { assert.equal(result.usage_complete, false); assert.equal(result.known_unpriced_requests, 0); }
+      assert.equal(result.priced_usd, phase === "persistence-first-observation" ? 0 : observed.priced_usd);
+      assert.equal(Boolean(result.cleanup_errors), phase === "persistence-first-cleanup");
+      assert.equal(Boolean(result.observation_error), phase === "persistence-first-observation");
+      assert.equal(Boolean(result.cli_error), phase === "persistence-first-launch");
+      if (["persistence-first", "persistence-first-after-write"].includes(phase)) {
+        assert.match(result.next_action, /saved.*receipt|receipt.*saved/i);
+        assert.match(result.next_action, /do not.*replay/i);
+      }
+      const stdout = await readFile(join(directory, "cli.stdout.jsonl"), "utf8");
+      const logs = await readFile(join(directory, "cli.stderr.log"), "utf8");
+      if (phase === "persistence-first-launch") { assert.equal(stdout, ""); assert.equal(logs, ""); }
+      else { assert.match(stdout, /CLI_CONNECTED/); assert.match(logs, /CLI_OWNED/); }
+      assert(owned);
+      for (const pid of [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])])
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before);
+    } finally {
+      await stopProcessGroup(child);
+      for (const pid of owned ? [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* exact fixture group already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const point of ["interval", "first", "close", "final", "pending", "budget"] as const) {
   test(`observer read failure at ${point} persists logs, stop reason and incomplete-usage coverage`,
     { timeout: 20_000 }, async () => {
