@@ -37,6 +37,7 @@ const metadata = observed => ({ candidate_sha256: started.candidate_sha256, root
   intentional_interruption_errors: baseline.errors, resume_errors: observed.errors.filter(error => !previousErrors.has(JSON.stringify(error))),
   elapsed_ms: Date.now() - since });
 const result = await monitorMissionCLI({ child, server, project: started.project, databasePath: started.database_path,
+  root: started.root,
   since, rootAgent: 'dog-operator', mode: 'complete', rootModel: 'openai/gpt-6-luna-fast#max',
   capUSD: 2, timeoutSeconds: 600, observe,
   // The same old root owns cumulative usage and queued continuations. Do not

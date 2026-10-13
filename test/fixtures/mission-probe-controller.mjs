@@ -53,6 +53,7 @@ if (launchFailure) {
   process.send({ phase: 'monitoring', serverPID });
 }
 const result = await monitorMissionCLI({ child, server,
+  root: observed.root ?? 'owned-lifecycle-root', // Seeded owned identity; no native CLI events in this fixture.
   project: directory, since: Date.now(), rootAgent: 'dog-operator', mode: 'complete',
   rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget', 'cleanup-failure-budget', 'persistence-first-budget', 'persistence-reject-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
   observe: () => {
