@@ -376,3 +376,60 @@ for (const point of ["interval", "first", "close", "final", "pending", "budget"]
     }
   });
 }
+
+for (const phase of ["launch-failure", "launch-failure-observation", "cli-process-error"] as const) {
+  test(`${phase} persists its distinct process error after owned cleanup without replay`,
+    { timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-cli-error-"));
+    const observed = { models: [], responses: [], tools: [], errors: [], priced_usd: 0, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory, phase],
+      { detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stderr = "", owned: { serverPID: number; cliPID?: number } | undefined;
+    child.stderr.on("data", bytes => { stderr += bytes; }); child.stdout.resume();
+    child.on("message", message => {
+      const event = message as { serverPID?: number; cliPID?: number };
+      if (event.serverPID) owned = { serverPID: event.serverPID, cliPID: event.cliPID };
+    });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 1, stderr);
+      const result = JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      const launched = phase === "cli-process-error", missingUsage = phase === "launch-failure-observation";
+      assert.equal(result.stopped, launched ? "cli-error" : "cli-launch-failed");
+      assert.equal(result.stop_observation, "cli-error");
+      assert.equal(result.cli_error.code, launched ? "EIO" : "ENOENT");
+      assert.match(result.cli_error.message, launched ? /injected-cli-process-error/ : /intentionally-absent-cli/);
+      if (!launched) assert.notEqual(result.code, 0, "keep the failed OS spawn outcome, not a fabricated success");
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.cli_started, launched); assert.equal(result.server_stop_calls, 1);
+      assert.equal(result.pending_calls, 0, "a failed process never waits for or replays a native turn");
+      assert.equal(result.usage_complete, !missingUsage);
+      assert.equal(result.priced_usd, 0);
+      assert.equal(result.unpriced_requests, missingUsage ? 1 : 0);
+      assert.equal(result.known_unpriced_requests, missingUsage ? 0 : undefined);
+      assert.equal(Boolean(result.observation_error), missingUsage, "launch errors are not observer errors");
+      assert.match(result.next_action, /executable/i); assert.match(result.next_action, /usage/i);
+      assert.match(result.next_action, /do not.*replay/i);
+      const stdoutLog = await readFile(join(directory, "cli.stdout.jsonl"), "utf8");
+      const stderrLog = await readFile(join(directory, "cli.stderr.log"), "utf8");
+      if (launched) { assert.match(stdoutLog, /CLI_CONNECTED/); assert.match(stderrLog, /CLI_OWNED/); }
+      else { assert.equal(stdoutLog, ""); assert.equal(stderrLog, "", "do not invent output from an unstarted CLI"); }
+      assert.deepEqual(result.models, [], "no invented model request or Worker coverage");
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before);
+      assert(owned);
+      if (process.platform !== "win32") for (const pid of [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])]) {
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "no owned writer remains");
+      }
+    } finally {
+      await stopProcessGroup(child);
+      if (process.platform !== "win32") for (const pid of owned ? [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
