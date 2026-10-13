@@ -100,8 +100,18 @@ export function completeProbeObservations(result, schemaRejected = false) {
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish }) {
   let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError, cliError, usageIncomplete;
+  const cleanupErrors = [];
+  const cleanup = (target, run) => Promise.resolve().then(run).catch(error => {
+    cleanupErrors.push({ target, name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
+      ...(error?.code === undefined ? {} : { code: error.code }) });
+    if (!stopped) {
+      cutoff = lastObserved;
+      stopped = 'cleanup-failed';
+      stopObservation = 'cleanup';
+    }
+  });
   let serverStopping;
-  const stopServer = () => serverStopping ??= Promise.resolve().then(() => server.stop());
+  const stopServer = () => serverStopping ??= cleanup('server', () => server.stop());
   const observeNow = point => {
     try {
       lastObserved = observe(project, since, rootAgent, databasePath);
@@ -121,9 +131,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     stopped = reason;
     stopObservation = point;
     clearInterval(timer);
-    stopping = Promise.all([stopProcessGroup(child), stopServer()]);
-    // Cleanup is awaited below, even if one owned process fails before CLI close.
-    stopping.catch(() => {});
+    // Await both attempts even if one rejects; preserve errors without skipping persistence.
+    stopping = Promise.all([cleanup('cli', () => stopProcessGroup(child)), stopServer()]);
   };
   const failObservation = (error, point) => {
     observationError ??= { name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
@@ -176,13 +185,15 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     }
     const observed = observeNow('final');
     await stopping; // A final read can fail after normal cleanup; retain one owned teardown.
-    return await finish({ observed: observationError || cliError ? { ...observed, usage_complete: !usageIncomplete,
+    const usageComplete = !usageIncomplete && !cleanupErrors.length;
+    return await finish({ observed: observationError || cliError || cleanupErrors.length ? { ...observed, usage_complete: usageComplete,
       // Missing coverage retains the existing reservation. The floor is an accounting
       // marker, not a claim that an additional model request was observed.
-      ...(usageIncomplete ? { known_unpriced_requests: observed.unpriced_requests,
+      ...(!usageComplete ? { known_unpriced_requests: observed.unpriced_requests,
         unpriced_requests: Math.max(1, observed.unpriced_requests) } : {}) } : observed,
       databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal,
-      observationError, cliError, nextAction: cliError
+      observationError, cliError, cleanupErrors, nextAction: cleanupErrors.length
+        ? 'Retry teardown only for the recorded owned CLI/server and verify all writers stopped, then reconcile database usage and saved CLI logs. Do not automatically replay the consumed task or restart the shared host.' : cliError
         ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : observationError
         ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.' : undefined });
   } finally {
@@ -251,7 +262,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     cwd: project, env: { ...server.env, PWD: project }, detached: true,
   });
   return await monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
-    finish: async ({ observed, databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal, observationError, cliError, nextAction }) => {
+    finish: async ({ observed, databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal, observationError, cliError, cleanupErrors, nextAction }) => {
       const state = async area => {
         if (!observed.root) return null;
         try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
@@ -269,6 +280,8 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         controller_signal: controllerSignal ?? null, elapsed_ms: Date.now() - since,
         ...(observationError ? { observation_error: observationError } : {}),
         ...(cliError ? { cli_error: cliError } : {}),
+        ...(cleanupErrors.length ? { cleanup_complete: false, cleanup_errors: cleanupErrors,
+          cli_pid: child.pid ?? null, server_url: server.url ?? null } : {}),
         ...(nextAction ? { next_action: nextAction } : {}),
         ...probeTaskIdentity(request, instance, actualBaseCommit),
         package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
@@ -290,7 +303,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
         (mode === 'start' ? stopped === 'worker-started'
           : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
-      if (observationError || cliError) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
+      if (observationError || cliError || cleanupErrors.length) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
       await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
       await writeFile(join(run, 'cli.stderr.log'), stderr);
       await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));

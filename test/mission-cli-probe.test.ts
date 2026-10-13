@@ -433,3 +433,60 @@ for (const phase of ["launch-failure", "launch-failure-observation", "cli-proces
     }
   });
 }
+
+for (const phase of ["cleanup-failure", "cleanup-failure-budget", "cleanup-failure-observation", "launch-failure-cleanup"] as const) {
+  test(`${phase} persists uncertain cleanup and usage without hiding the original stop`,
+    { timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-cleanup-error-"));
+    const observed = { models: [], responses: [], tools: [], errors: [], priced_usd: 1.7674084, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory, phase],
+      { detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stderr = "", owned: { serverPID: number; cliPID?: number } | undefined;
+    child.stderr.on("data", bytes => { stderr += bytes; }); child.stdout.resume();
+    child.on("message", message => {
+      const event = message as { serverPID?: number; cliPID?: number };
+      if (event.serverPID) owned = { serverPID: event.serverPID, cliPID: event.cliPID };
+    });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 1, stderr);
+      const result = JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      const prior = phase === "cleanup-failure-budget" ? "budget" : phase === "launch-failure-cleanup" ? "cli-launch-failed" : "cleanup-failed";
+      assert.equal(result.stopped, prior);
+      assert.equal(result.stop_observation, prior === "budget" ? "cli-close" : prior === "cli-launch-failed" ? "cli-error" : "cleanup");
+      assert.equal(result.code === 0, phase !== "launch-failure-cleanup", "do not replace the original CLI close outcome");
+      assert.equal(result.cleanup_complete, false, "a rejected teardown is not proof that native writers stopped");
+      assert.equal(result.cleanup_errors.length, 1); assert.equal(result.cleanup_errors[0].target, "server");
+      assert.equal(result.cleanup_errors[0].code, "EIO");
+      assert.match(result.cleanup_errors[0].message, /injected-owned-server-stop-failure/);
+      assert.equal(result.server_stop_calls, 1, "persist the failed teardown, do not automatically retry it");
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.usage_complete, false, "a successful final read cannot settle usage while teardown is uncertain");
+      assert.equal(result.priced_usd, observed.priced_usd); assert.equal(result.unpriced_requests, 1);
+      assert.equal(result.known_unpriced_requests, 0, "retain the existing incomplete-coverage marker, not an invented request");
+      assert.equal(Boolean(result.observation_error), phase === "cleanup-failure-observation");
+      assert.equal(Boolean(result.cli_error), phase === "launch-failure-cleanup");
+      assert.match(result.next_action, /owned/i); assert.match(result.next_action, /stop|teardown/i);
+      assert.match(result.next_action, /usage/i); assert.match(result.next_action, /do not.*replay/i);
+      const stdoutLog = await readFile(join(directory, "cli.stdout.jsonl"), "utf8");
+      const stderrLog = await readFile(join(directory, "cli.stderr.log"), "utf8");
+      if (phase === "launch-failure-cleanup") { assert.equal(stdoutLog, ""); assert.equal(stderrLog, ""); }
+      else { assert.match(stdoutLog, /CLI_CONNECTED/); assert.match(stderrLog, /CLI_OWNED/); }
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before);
+      assert(owned);
+      if (process.platform !== "win32") for (const pid of [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])]) {
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "this fixture stops both surrogates before injecting rejection");
+      }
+    } finally {
+      await stopProcessGroup(child);
+      if (process.platform !== "win32") for (const pid of owned ? [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
