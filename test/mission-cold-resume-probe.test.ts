@@ -21,6 +21,7 @@ for (const phase of ['baseline-error', 'baseline-unpriced', 'baseline-persistenc
       assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
       const receipt = JSON.parse(await readFile(join(directory, 'fixture-receipt.json'), 'utf8'));
       assert.equal(receipt.startup_calls, 1); assert.equal(receipt.observation_calls, 1, 'never repeat the known failed read');
+      assert.equal(receipt.server_start_calls, 0);
       assert.equal(receipt.monitor_calls, 0); assert.equal(receipt.server_stop_calls, 0); assert.equal(receipt.cli_stop_calls, 0);
       assert.equal(receipt.writer, undefined, 'no resume process was started');
       assert.equal(receipt.startup_evidence_preserved, true); assert.equal(receipt.listeners_restored, true);
@@ -53,6 +54,60 @@ for (const phase of ['baseline-error', 'baseline-unpriced', 'baseline-persistenc
   });
 }
 
+for (const phase of ['server-start-error', 'server-start-unpriced', 'server-start-persistence-error']) {
+  test(`cold-resume ${phase} preserves the successful cumulative baseline without replaying startup`,
+    { timeout: 20_000, skip: process.platform === 'win32' }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cold-resume-server-start-'));
+    const child = spawn(process.execPath, ['--experimental-vm-modules', resolve('test/fixtures/cold-resume-controller.mjs'), directory, phase], {
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = ''; child.stdout.resume(); child.stderr.on('data', bytes => { stderr += bytes; });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
+      const receipt = JSON.parse(await readFile(join(directory, 'fixture-receipt.json'), 'utf8'));
+      assert.equal(receipt.startup_calls, 1); assert.equal(receipt.observation_calls, 1);
+      assert.equal(receipt.server_start_calls, 1); assert.equal(receipt.monitor_calls, 0);
+      assert.equal(receipt.server_stop_calls, 0, 'the existing start helper retains ownership of failed-start cleanup');
+      assert.equal(receipt.cli_stop_calls, 0); assert.equal(receipt.writer, undefined);
+      assert.equal(receipt.startup_evidence_preserved, true); assert.equal(receipt.listeners_restored, true);
+      assert.equal(receipt.native_model_requests, 0);
+      assert.equal(receipt.rejected.code, 'EIO'); assert.match(receipt.rejected.message, /injected-owned-server-start/);
+      assert.deepEqual(receipt.observation_arguments.map(args => args[4]), [{ root: 'owned-cold-resume' }]);
+      const unavailable = phase === 'server-start-persistence-error';
+      const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
+      assert.equal(result.root, 'owned-cold-resume'); assert.equal(result.candidate_sha256, 'fixed-package-projection');
+      assert.equal(result.database_path, join(directory, 'owned-lifecycle.db'));
+      assert.equal(result.stopped, 'server-start-failed'); assert.equal(result.stop_observation, 'server-start');
+      assert.equal(result.server_error.code, 'EIO'); assert.equal(result.observation_error, undefined);
+      assert.equal(result.priced_usd, 1.8674084, 'use the successful cumulative baseline, not stale startup usage');
+      assert.equal(result.usage_complete, false);
+      assert.equal(result.known_unpriced_requests, phase === 'server-start-unpriced' ? 2 : 0);
+      assert.equal(result.unpriced_requests, phase === 'server-start-unpriced' ? 2 : 1, 'unresolved coverage is a hold, not an invented request');
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.code, null); assert.equal(result.signal, null); assert.equal(result.controller_signal, null);
+      assert.equal(result.cli_started, false); assert.equal(result.server_start_attempted, true);
+      assert.equal(result.resume_server_ready, false); assert.equal(result.resume_server_started, undefined);
+      assert.equal(result.cleanup_complete, undefined, 'do not invent cleanup success before receiving a ready server handle');
+      assert.deepEqual(result.resume_errors, []); assert.equal(result.intentional_interruption_errors.length, 1);
+      assert.match(result.next_action, /verify any process from the failed owned start has stopped/);
+      assert.match(result.next_action, /Do not automatically replay/);
+      if (unavailable) {
+        assert.equal(receipt.result, undefined, 'unavailable sink does not become a persisted failure');
+        const context = receipt.rejected.monitorContext;
+        assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
+        assert.equal(context.serverError.code, 'EIO'); assert.equal(context.observationError, undefined);
+        assert.equal(context.persistenceError.code, 'EACCES'); assert.match(context.persistenceError.message, /injected-owned-server-start-write/);
+        assert.match(context.nextAction, /retry only failed evidence persistence/);
+      } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }
+      for (const file of ['resume.stdout.jsonl', 'resume.stderr.log'])
+        await assert.rejects(readFile(join(directory, file)), { code: 'ENOENT' }, 'no invented continuation logs');
+    } finally { await stopProcessGroup(child); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 for (const phase of ['closed', 'pending', 'budget', 'signal', 'launch-error', 'observation-error',
   'cleanup-error', 'persistence-error', 'resume-error', 'later-root', 'missing-root']) {
   test(`cold-resume ${phase} uses the shared owned lifecycle without replay or startup-evidence overwrite`,
@@ -69,6 +124,7 @@ for (const phase of ['closed', 'pending', 'budget', 'signal', 'launch-error', 'o
       assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
       const receipt = JSON.parse(await readFile(join(directory, 'fixture-receipt.json'), 'utf8'));
       assert.equal(receipt.monitor_calls, 1);
+      assert.equal(receipt.server_start_calls, 1);
       assert.equal(receipt.startup_calls, 1, 'no consumed startup/task replay');
       assert.equal(receipt.server_stop_calls, 1); assert.equal(receipt.startup_evidence_preserved, true);
       assert.equal(receipt.listeners_restored, true); assert.equal(receipt.native_model_requests, 0);
