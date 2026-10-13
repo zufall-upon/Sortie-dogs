@@ -165,7 +165,10 @@ export interface RuntimeBridge {
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string,
       missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked", reviewEvidenceGaps?: string): Promise<string | undefined>;
     recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
-      manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]>;
+      manifestHash: string; goalFingerprint: string;
+      direct?: { callID: string; startedAt: string; finishedAt: string; checks: readonly ReviewerCorrectionCheck[];
+        validation: readonly string[]; directories?: Readonly<Record<string, string>>; registeredAt?: Readonly<Record<string, string>> };
+    }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
@@ -173,7 +176,7 @@ export interface RuntimeBridge {
     activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
       admission: MissionImplementationAdmission): Promise<void>;
     activateDirectUnit(rootSessionID: string, actorSessionID: string, prompt: string, handoffPath: string): Promise<void>;
-    finishDirectUnit(rootSessionID: string, actorSessionID: string, checks: readonly ReviewerCorrectionCheck[]): Promise<void>;
+    finishDirectUnit(rootSessionID: string, actorSessionID: string, checks: readonly ReviewerCorrectionCheck[]): Promise<SerialDispatchSettlement>;
     /** Settle an unfinished direct unit against its actual actor, never a fabricated child Task. */
     failDirectUnit(rootSessionID: string, actorSessionID: string): Promise<void>;
     releaseDirectUnit(actorSessionID: string): Promise<void>;

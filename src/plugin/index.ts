@@ -136,7 +136,8 @@ import { collectRunMetrics, createSortieResult, createGoalReport, insertRunMetri
   replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
-import type { RuntimeBridge } from "./runtime-bridge.js";
+import type { RuntimeBridge, SerialDispatchSettlement } from "./runtime-bridge.js";
+import { reviewerCorrectionValidationFresh } from "./mission-review.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
 import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
@@ -2766,7 +2767,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function settleGoalDispatch(callID: string, output: TaskResultRepairOutput, nativeOutcome?: "completed" | "failed",
-    directEvidence?: readonly GoalEvidence[]): Promise<void> {
+    directEvidence?: readonly GoalEvidence[]): Promise<SerialDispatchSettlement | undefined> {
     const reservation = goalReservations.get(callID);
     if (reservation === undefined) return;
     const ledger = await goalLedger(reservation.root);
@@ -2781,11 +2782,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const failed = [...hostGoalExecutions.values()].find(execution => execution.root === reservation.root &&
           execution.sessionID === child && execution.endedAt !== undefined && execution.outcome === "fail" &&
           Date.parse(execution.startedAt) >= reservation.started - 1000);
-        await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: reservation.root, callID, unitID: settled.unit_id,
+        const result: SerialDispatchSettlement = { rootSessionID: reservation.root, callID, unitID: settled.unit_id,
           ...(child ? { childSessionID: child } : {}), disposition: settled.disposition, evidence: settled.evidence,
-          resultClass: settled.result_class ?? "process-defect", nativeOutcome: output.status === "error" || output.status === "cancelled" ? "failed" : "completed",
+          resultClass: settled.result_class ?? "process-defect",
+          ...(directEvidence !== undefined ? {} : { nativeOutcome: output.status === "error" || output.status === "cancelled" ? "failed" as const : "completed" as const }),
           ...(settled.result_class === "acceptance" && failed ? { failure: { command: failed.command.slice(0, 8),
-            outcome: "fail" as const, exitCode: failed.exitCode ?? null } } : {}) });
+            outcome: "fail" as const, exitCode: failed.exitCode ?? null } } : {}) };
+        await input.runtimeBridge?.onSerialSettlement?.(result);
+        goalReservations.delete(callID);
+        return result;
       }
       goalReservations.delete(callID);
       return;
@@ -2817,7 +2822,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // Revalidation can succeed for an already-satisfied criterion after a candidate change.
     // New criterion coverage controls progress accounting, not the validation disposition.
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
-    const child = childSessionID ? await input.client?.session?.get?.({ path: { id: childSessionID }, query: { directory: input.directory } }).catch(() => undefined) : undefined;
+    // A direct unit owns this invocation's checks, not the reusable controller
+    // conversation's last native Task outcome. Empty direct evidence still denotes
+    // direct failure; explicit cancellation/error below remains authoritative.
+    const child = directEvidence === undefined && childSessionID ? await input.client?.session?.get?.({ path: { id: childSessionID }, query: { directory: input.directory } }).catch(() => undefined) : undefined;
     const childInfo = isRecord(child) && "data" in child ? child.data : child;
     const childOutcome = isRecord(childInfo) ? childInfo.outcome : undefined;
     const terminalFailed = nativeOutcome === "failed" || metadata?.status === "error" || output.status === "error" ||
@@ -2845,7 +2853,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       evidence: settlementEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
       cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
       ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
-    await input.runtimeBridge?.onSerialSettlement?.({
+    const result: SerialDispatchSettlement = {
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
@@ -2855,7 +2863,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
         exitCode: failedAcceptanceExecution.exitCode ?? null,
       } } : {}),
-    });
+    };
+    await input.runtimeBridge?.onSerialSettlement?.(result);
     goalReservations.delete(callID);
     if (childSessionID !== undefined) {
       goalValidationDefects.delete(childSessionID);
@@ -2863,6 +2872,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (execution.root === reservation.root && execution.sessionID === childSessionID) hostGoalExecutions.delete(executionCallID);
       }
     }
+    return result;
   }
 
   async function settleRejectedGoalDispatch(rootSessionID: string, callID: string): Promise<boolean> {
@@ -2877,12 +2887,90 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return true;
   }
 
-  async function recoverUnitEvidence(root: string, request: { unitID: string; childSessionID: string; manifestPath: string;
-    manifestHash: string; goalFingerprint: string }): Promise<readonly GoalEvidence[]> {
+  async function recoverUnitEvidence(root: string,
+    request: Parameters<Parameters<NonNullable<RuntimeBridge["connected"]>>[0]["recoverUnitEvidence"]>[1]): Promise<readonly GoalEvidence[]> {
     if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
     const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), goal = snapshot.state;
     if (goal.acceptance_fingerprint !== request.goalFingerprint || goal.phase !== "active" || goal.receipt !== null || goal.outstanding_reservations.length) {
       throw new Error("operator-recovery-goal-not-ready");
+    }
+    if (request.direct) {
+      const direct = request.direct;
+      const defect = [...snapshot.records].reverse().map(record => record.event).find(event => event.kind === "unit.settled" &&
+        event.unit_id === request.unitID && event.evidence.length === 0 && event.native_session_id === request.childSessionID &&
+        event.reservation_id === goalFingerprint({ goal_id: goal.goal_id, unit_id: request.unitID, call_id: direct.callID }) &&
+        event.receipt_id === goalFingerprint({ call_id: direct.callID,
+          output: "Host-observed direct unit finished; controller session remains active." }));
+      if (defect?.kind !== "unit.settled" || Math.abs(Date.parse(defect.at) - Date.parse(direct.finishedAt)) > 1000) {
+        throw new Error("operator-recovery-direct-finish-receipt-missing");
+      }
+      const identity = await hostSessionIdentity(request.childSessionID);
+      if (!identity || request.childSessionID !== root && identity.parentID !== root &&
+          coordinatorRootForSession(request.childSessionID) !== root) throw new Error("operator-recovery-direct-owner-mismatch");
+      const sessionAPI = input.client?.session;
+      const historyAPI = sessionAPI as typeof sessionAPI & { reviewMessages?: NonNullable<typeof sessionAPI>["messages"] };
+      const messages = historyAPI?.reviewMessages ?? sessionAPI?.messages;
+      if (!messages) throw new Error("operator-recovery-host-evidence-unavailable");
+      const historyRequest = { path: { id: request.childSessionID }, query: { directory: input.directory,
+        notBefore: new Date(Date.parse(direct.startedAt) - 1000).toISOString() } };
+      const response = await messages.call(input.client!.session, historyRequest);
+      const payload: unknown = isRecord(response) && "data" in response ? response.data : response;
+      if (!Array.isArray(payload)) throw new Error("operator-recovery-host-evidence-invalid");
+      const history = payload.filter(isRecord);
+      const parts = history.filter(message => isRecord(message.info) && message.info.role === "assistant" &&
+        message.info.sessionID === request.childSessionID).flatMap(message => Array.isArray(message.parts) ? message.parts.filter(isRecord) : []);
+      const finish = parts.find(part => part.type === "tool" && ["sortie_finish_direct_unit", `${runtimeProfile.toolPrefix}finish_direct_unit`].includes(String(part.tool)) &&
+        isRecord(part.state) && part.state.status === "completed" && isRecord(part.state.time) &&
+        typeof part.state.time.start === "number" && typeof part.state.time.end === "number" &&
+        part.state.time.start <= Date.parse(defect.at) && part.state.time.end >= Date.parse(defect.at));
+      if (!finish || typeof finish.callID !== "string") throw new Error("operator-recovery-direct-finish-observation-missing");
+      if (parts.some(part => part.type === "tool" && ["cancel_operator", "cancel_mission"].some(name =>
+        part.tool === `sortie_${name}` || part.tool === `${runtimeProfile.toolPrefix}${name}`) && isRecord(part.state) && part.state.status === "completed" &&
+        isRecord(part.state.time) && typeof part.state.time.end === "number" && part.state.time.end >= Date.parse(direct.startedAt))) {
+        throw new Error("operator-recovery-direct-explicit-cancellation");
+      }
+      const checked = await reviewerCorrectionValidationFresh(direct.validation, request.childSessionID, history,
+        Date.parse(direct.startedAt), direct.checks, input.directory, direct.directories, direct.registeredAt);
+      if (!checked.ready) throw new Error(`operator-recovery-proof-unavailable-or-stale:${checked.reason}`);
+      const checks = direct.checks.filter(check => checked.matched?.some(item => item.callID === check.callID));
+      if (checks.some(check => check.dispatchCallID !== direct.callID || check.childSessionID !== request.childSessionID ||
+          resolve(input.directory, check.binding.manifest_path) !== resolve(request.manifestPath) ||
+          Date.parse(check.endedAt) > Date.parse(defect.at) + 1000)) throw new Error("operator-recovery-direct-check-identity-mismatch");
+      const evidence = checks.flatMap(check => observedHostGoalEvidence({ ...check, owner: "coordinator", outcome: "pass",
+        immutableRef: goalFingerprint({ direct_check: check }),
+        correction: { taskID: request.unitID, dispatchCallID: direct.callID, commands: check.command } }, goal, request.unitID));
+      for (const check of checks.filter(check => evidence.some(entry => check.command.includes(entry.execution.command[0]!)))) {
+        // The persisted host check already binds this exact native call to its
+        // Task/cwd/recipe. Its post-check validation recipe can be narrower than
+        // the admission snapshot; do not relabel or recompute that historical key.
+        const admission = snapshot.records.map(record => record.event).find(event => event.kind === "validation.admission" &&
+          event.goal_id === goal.goal_id && event.operation_id === check.callID && event.decision === "ALLOW" &&
+          Date.parse(event.at) >= Date.parse(direct.startedAt) - 1000 && Date.parse(event.at) <= Date.parse(check.endedAt) + 1000);
+        if (admission?.kind !== "validation.admission" || !snapshot.records.some(({ event }) => event.kind === "validation.settled" &&
+            event.reservation_id === admission.reservation_id && event.operation_id === check.callID &&
+            event.goal_id === goal.goal_id && event.evidence_key === admission.evidence_key && event.outcome === "passed" && event.exit_code === 0)) {
+          throw new Error("operator-recovery-direct-validation-settlement-missing");
+        }
+      }
+      if (!evidence.length || evidence.some(entry => !validGoalEvidence(entry, goal))) throw new Error("operator-recovery-proof-unavailable-or-stale");
+      const proof = { call_id: direct.callID, actor_session_id: request.childSessionID, finish_call_id: finish.callID,
+        started_at: direct.startedAt, finished_at: direct.finishedAt, validation_call_ids: checks.map(check => check.callID) };
+      const prior = snapshot.records.map(record => record.event).find(event => event.kind === "unit.evidence-reconciled" &&
+        event.previous_receipt_id === defect.receipt_id);
+      if (prior?.kind === "unit.evidence-reconciled") {
+        if (goalFingerprint(prior.direct_finish) !== goalFingerprint(proof) || goalFingerprint(prior.evidence) !== goalFingerprint(evidence)) {
+          throw new Error("operator-recovery-direct-reconciliation-mismatch");
+        }
+        return prior.evidence;
+      }
+      // Recheck immediately before the existing append path; no reserve/admit/validation
+      // execution or spend settlement occurs when repairing this registration.
+      const final = await reviewerCorrectionValidationFresh(direct.validation, request.childSessionID, history,
+        Date.parse(direct.startedAt), direct.checks, input.directory, direct.directories, direct.registeredAt);
+      if (!final.ready) throw new Error(`operator-recovery-proof-unavailable-or-stale:${final.reason}`);
+      await ledger.appendGoal({ kind: "unit.evidence-reconciled", at: new Date().toISOString(), goal_id: goal.goal_id!, unit_id: request.unitID,
+        previous_receipt_id: defect.receipt_id, evidence, direct_finish: proof });
+      return evidence;
     }
     const defect = [...snapshot.records].reverse().map(record => record.event).find(event => event.kind === "unit.settled" &&
       event.unit_id === request.unitID && event.result_class === "process-defect" && !event.evidence.length);
@@ -8561,10 +8649,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const evidence = checks.flatMap(check => observedHostGoalEvidence({ ...check, owner: "coordinator",
         outcome: check.exitCode === 0 ? "pass" : "fail", immutableRef: goalFingerprint({ direct_check: check }),
         correction: { taskID: direct.taskID, dispatchCallID: direct.callID, commands: check.command } }, snapshot.state, direct.taskID));
-      await settleGoalDispatch(direct.callID, { output: "Host-observed direct unit finished; controller session remains active.",
+      const settled = await settleGoalDispatch(direct.callID, { output: "Host-observed direct unit finished; controller session remains active.",
         metadata: { sessionId: actor } }, undefined, evidence);
+      if (!settled) throw new Error("mission-direct-settlement-unavailable");
       await releaseWriteGate(actor);
       releaseSessionEnforcement(actor);
+      return settled;
     },
     releaseDirectUnit: async actor => {
       await releaseWriteGate(actor);

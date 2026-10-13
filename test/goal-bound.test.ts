@@ -175,6 +175,52 @@ test("one passing command preserves distinct criterion measurements and can reco
     unit_id: "unit", previous_receipt_id: "old-receipt", evidence }), RunFlightLedgerError);
 });
 
+for (const terminal of ["direct-finish", "explicit-cancel", "worker"] as const) test(`direct finish reconciliation: ${terminal}`, async () => {
+  const { ledger } = await accepted(`direct-${terminal}`, 1), goalID = `goal-direct-${terminal}`, unitID = "unit", callID = "direct-original";
+  const command = "node verify.mjs";
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 1, time_ms: null, cost_usd: null, source: "accepted-plan" },
+    acceptance_contract: { criteria: [{ criterion_id: "verified", target: "result", entrypoint: "fixture", workload: "native checks",
+      oracle_coverage: ["verified"], build_boundary: "not-applicable", source: "source", candidate: "candidate",
+      source_binding: "current-protected", candidate_binding: "current-protected", fixture: "fixture", proof_scope: "requested-full",
+      expected_outcome: "pass", validation_command: command }] } });
+  const reservation = goalFingerprint({ goal_id: goalID, unit_id: unitID, call_id: callID });
+  const receipt = goalFingerprint({ call_id: callID, output: terminal === "direct-finish"
+    ? "Host-observed direct unit finished; controller session remains active." : "Explicit cancellation or native Worker terminal." });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: unitID, reservation_id: reservation,
+    session_id: "root-session", ticket_id: null });
+  const spent = await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, unit_id: unitID,
+    reservation_id: reservation, receipt_id: receipt, disposition: "cancelled", result_class: "interrupted", evidence: [],
+    elapsed_ms: 7, cost_usd: 0.5, progress_fingerprint: null, native_session_id: "root-session", native_started_at: at });
+  const evidence = evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint("actual-native-check"),
+    command: [command], startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true,
+    source: goalFingerprint("source"), candidate: goalFingerprint("candidate"),
+    binding: { manifest_hash: goalFingerprint("manifest"), project_root: root, manifest_path: "manifest.json",
+      source_paths: ["source"], candidate_paths: ["output"] } }, spent, unitID);
+  const base = { kind: "unit.evidence-reconciled" as const, at, goal_id: goalID, unit_id: unitID, previous_receipt_id: receipt, evidence };
+  await assert.rejects(ledger.appendGoal(base), RunFlightLedgerError, "ordinary cancelled receipts cannot reconcile");
+  const proof = { call_id: callID, actor_session_id: "root-session", finish_call_id: "native-finish", started_at: at,
+    finished_at: at, validation_call_ids: ["native-validation"] };
+  if (terminal !== "direct-finish") {
+    await assert.rejects(ledger.appendGoal({ ...base, direct_finish: proof }), RunFlightLedgerError);
+    assert.deepEqual((await ledger.readGoal()).state, spent); return;
+  }
+  await assert.rejects(ledger.appendGoal({ ...base, direct_finish: { ...proof, actor_session_id: "other" } }), RunFlightLedgerError);
+  await assert.rejects(ledger.appendGoal({ ...base, direct_finish: { ...proof, call_id: "direct-other" } }), RunFlightLedgerError);
+  await assert.rejects(ledger.appendGoal({ ...base, direct_finish: { ...proof, validation_call_ids: [] } }), RunFlightLedgerError);
+  const event = { ...base, direct_finish: proof };
+  await Promise.all([ledger.appendGoal(event), ledger.appendGoal(event)]);
+  const snapshot = await ledger.readGoal();
+  assert.equal(snapshot.records.filter(record => record.event.kind === "unit.evidence-reconciled").length, 1);
+  assert.deepEqual(snapshot.state.satisfied_criteria, ["verified"]);
+  for (const field of ["consumed_units", "consumed_time_ms", "consumed_cost_usd", "validation_budget", "outstanding_reservations"] as const) {
+    assert.deepEqual(snapshot.state[field], spent[field]);
+  }
+  assert.equal(snapshot.state.consumed_units, snapshot.state.budget!.max_units, "budget is still exhausted");
+  await assert.rejects(ledger.appendGoal({ ...event, direct_finish: { ...proof, finish_call_id: "conflicting-finish" } }), RunFlightLedgerError);
+});
+
 test("coordinator-owned requested-full evidence satisfies an exact settled-pass reuse", async () => {
   const name = "canonical-reuse", goalID = `goal-${name}`, unitID = "canonical-unit";
   const { ledger } = await accepted(name);

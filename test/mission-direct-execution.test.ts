@@ -7,14 +7,19 @@ import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { missionPacket, OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const exec = promisify(execFile);
 
-for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision"] as const) test(`${actor} direct execution: ${mode}`, async t => {
+const directModes = ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+for (const actor of ["root", "coordinator"]) for (const mode of directModes.filter(mode =>
+  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const incomplete = mode === "blocked" || mode === "needs-decision";
   const external = ["external-cwd", "registration"].includes(mode);
@@ -60,7 +65,13 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     let historyBarrier: (() => Promise<void>) | undefined;
     const create = () => SortieDogsV010Plugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
-      messages: async ({ path }: { path: { id: string } }) => { await historyBarrier?.(); return historyAvailable ? ({ data: history[path.id] ?? [] }) : undefined; },
+      messages: async ({ path }: { path: { id: string } }) => {
+        await historyBarrier?.();
+        if (historyAvailable) return { data: history[path.id] ?? [] };
+        return mode === "recovery-paginated" ? { data: (history[path.id] ?? []).map(message => ({ ...message,
+          parts: (message.parts as { tool?: string }[] ?? []).filter(part => part.tool !== "sortie_v010_finish_direct_unit") })) } : undefined;
+      },
+      ...(mode === "recovery-paginated" ? { reviewMessages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }) } : {}),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents).filter(([, item]) => item.parentID === path.id)
         .map(([id, item]) => ({ id, ...item })) }),
       abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); agents[path.id]!.outcome = "interrupted"; return { data: true }; },
@@ -84,7 +95,10 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
       validation: [mode.endsWith("replan") ? "node check.mjs (workdir: project root)" : "node check.mjs"],
       ...(mode === "external-cwd" ? { validation_cwd: { "node check.mjs": externalDirectory! } } : {}) };
-    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration] }, { sessionID: actor }));
+    const multi = mode.includes("pending") || mode === "recovery-normal-succeeded";
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration,
+      ...(multi ? [{ ...declaration, title: "Second planned result", objective: "Validate the second planned result",
+        validation: ["node check.mjs --second"] }] : [])] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -115,11 +129,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
         state: { status: "completed", input: args, time: { end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "write", sessionID: actor, callID, args }, { output: "written" });
     };
-    const check = async (cwd = externalDirectory ?? directory) => {
-      const callID = `check-${++counter}`, args = { command: "node check.mjs", workdir: cwd }, start = Date.now();
+    const check = async (cwd = externalDirectory ?? directory, command = "node check.mjs") => {
+      const callID = `check-${++counter}`, args = { command, workdir: cwd }, start = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: actor, callID }, { args });
       let exit = 0;
-      try { await exec(process.execPath, ["check.mjs"], { cwd }); } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
+      try { await exec(process.execPath, ["check.mjs", ...(command.endsWith(" --second") ? ["--second"] : [])], { cwd }); } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
       (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: actor, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
@@ -285,6 +299,108 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
     await write("fixed\n");
     assert.equal(await check(), 0); // Real native write history requires a check after this edit.
     const checked = (await readRun()).units[0]!.directExecution!.checks;
+    if (mode.startsWith("recovery") || mode === "finish-cancelled") {
+      if (mode === "recovery-normal-succeeded") {
+        await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor });
+        assert.equal((await readRun()).units[0]!.status, "succeeded");
+        await hooks.tool!.sortie_v010_start_direct_unit.execute({}, { sessionID: actor });
+        assert.equal(await check(directory, "node check.mjs --second"), 0);
+      }
+      if (mode === "recovery-latest-failure") {
+        await write("bad\n"); assert.equal(await check(), 1); await writeFile(join(directory, resultPath), "fixed\n");
+      }
+      const state = await readRun(), unitIndex = mode === "recovery-normal-succeeded" ? 1 : 0, unit = state.units[unitIndex]!, direct = unit.directExecution!;
+      const key = createHash("sha256").update("v010\u0000root").digest("hex");
+      const ledger = await RunFlightLedger.openGoal(join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`));
+      const before = await ledger.readGoal(), reservation = before.state.outstanding_reservations[0]!;
+      assert.equal(reservation.unit_id, /^task_id: (.+)$/mu.exec(unit.task.prompt)![1]);
+      const failed = mode === "recovery-failed", at = new Date().toISOString();
+      const receipt = goalFingerprint({ call_id: unit.callID,
+        output: "Host-observed direct unit finished; controller session remains active." });
+      await ledger.appendGoal({ kind: "unit.settled", at, goal_id: before.state.goal_id!, reservation_id: reservation.reservation_id,
+        receipt_id: receipt, unit_id: reservation.unit_id, disposition: failed ? "failed" : "cancelled",
+        result_class: failed ? "acceptance" : "interrupted", evidence: [], progress_fingerprint: null, elapsed_ms: 12, cost_usd: 0.7,
+        native_session_id: actor, native_started_at: direct.startedAt });
+      if (mode === "finish-cancelled") {
+        const result = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
+        assert.equal(result.units[0].status, "cancelled"); assert.equal(result.direct_settlement.disposition, "cancelled");
+        assert.match(result.next_action, /not validated/); assert.doesNotMatch(result.next_action, /This direct unit is validated/);
+        assert.equal((await readRun()).units[0]!.evidence.length, 0); return;
+      }
+      await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).settled({ rootSessionID: "root", callID: unit.callID!,
+        unitID: reservation.unit_id, childSessionID: actor, disposition: failed ? "failed" : "cancelled",
+        resultClass: failed ? "acceptance" : "interrupted", evidence: [], nativeOutcome: "failed" });
+      await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).update("root", mission => {
+        const attempt = mission.attempts!.find(attempt => attempt.callID === unit.callID)!;
+        attempt.status = failed ? "failed" : "cancelled"; attempt.resultClass = failed ? "acceptance" : "interrupted";
+        attempt.failure = { category: "cancellation", code: "native-task-cancelled" };
+        mission.progress.push({ unit: `${state.runID}/${unit.unit.id}`, title: unit.unit.title, status: attempt.status, at });
+      });
+      if (mode !== "recovery-missing-finish") (history[actor] ??= []).push({
+        info: { role: "assistant", sessionID: actor, finish: "stop", time: { created: Date.parse(at) - 1, completed: Date.parse(at) + 1 } },
+        parts: [{ type: "tool", tool: "sortie_v010_finish_direct_unit", callID: "historical-finish", state: {
+          status: "completed", input: {}, time: { start: Date.parse(at) - 1, end: Date.parse(at) + 1 },
+          output: JSON.stringify({ run_id: state.runID, status: "awaiting-decision", next_action: "This direct unit is validated" }) } }],
+      });
+      const broken = await readRun(), spent = (await ledger.readGoal()).state;
+      assert.equal(broken.units[unitIndex]!.evidence.length, 0);
+      assert.equal(broken.phase, "awaiting-decision");
+      if (mode === "recovery-stale") await writeFile(join(directory, resultPath), "changed after validation\n");
+      agents[actor]!.outcome = failed ? "failed" : "interrupted";
+      if (mode === "recovery-paginated") historyAvailable = false;
+      hooks = await create();
+      if (mode === "recovery-explicit-cancel") {
+        await hooks.tool!.sortie_v010_cancel_operator.execute({ run_id: state.runID, reason: "Explicit user cancellation" }, { sessionID: "root" });
+      }
+      const recover = () => hooks.tool!.sortie_v010_resume_operator.execute({ run_id: state.runID,
+        acceptance_fingerprint: state.acceptanceFingerprint }, { sessionID: "root" });
+      if (mode === "recovery-boundary") t.mock.method(OperatorRuntime.prototype, "gitAcceptanceReadiness", () => "operator-post-commit-validation-required");
+      if (["recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel"].includes(mode)) {
+        await assert.rejects(recover, /operator-(?:resume|recovery)/u);
+        assert.equal((await readRun()).units[unitIndex]!.evidence.length, 0);
+        assert.equal((await ledger.readGoal()).records.filter(record => record.event.kind === "unit.evidence-reconciled").length, 0);
+      } else {
+        if (mode === "recovery-crash") {
+          const fault = t.mock.method(OperatorRuntime.prototype, "resume", async () => { throw new Error("fixture crash after ledger append"); });
+          await assert.rejects(recover, /fixture crash/);
+          fault.mock.restore(); hooks = await create();
+          assert.equal((await readRun()).units[unitIndex]!.evidence.length, 0);
+          assert.equal((await ledger.readGoal()).records.filter(record => record.event.kind === "unit.evidence-reconciled").length, 1);
+        }
+        if (mode.includes("projection-crash")) {
+          const fault = t.mock.method(OperatorMissionRuntime.prototype, "update", async () => { throw new Error("fixture crash after operator save"); });
+          await assert.rejects(recover, /fixture crash after operator save/);
+          fault.mock.restore(); hooks = await create();
+          assert.equal((await readRun()).units[unitIndex]!.status, "succeeded");
+          assert.ok((await readRun()).units[unitIndex]!.directExecution!.registrationRecovery);
+        }
+        const restored = JSON.parse(await recover()), done = await readRun();
+        assert.equal(done.phase, mode.includes("pending") ? "prepared" : mode === "recovery-boundary" ? "awaiting-decision" : "awaiting-acceptance"); assert.equal(done.units[unitIndex]!.status, "succeeded");
+        assert.ok(done.units[unitIndex]!.evidence.length); assert.equal(done.units[unitIndex]!.callID, unit.callID);
+        const { registrationRecovery, ...retainedDirect } = done.units[unitIndex]!.directExecution!;
+        assert.deepEqual(retainedDirect, broken.units[unitIndex]!.directExecution);
+        assert.equal(registrationRecovery!.previousStatus, failed ? "failed" : "cancelled");
+        assert.match(restored.next_action, /not acceptance, Go or completion/);
+        const recoveredMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        assert.equal(recoveredMission.attempts![unitIndex]!.status, "succeeded");
+        assert.equal(recoveredMission.attempts![unitIndex]!.registrationRecovery!.previousStatus, failed ? "failed" : "cancelled");
+        if (multi || mode === "recovery-boundary") assert.equal(restored.task, undefined, "registration recovery does not generate a replacement Task");
+        if (mode === "recovery-boundary") {
+          assert.equal(restored.decision, "operator-post-commit-validation-required");
+          assert.match(restored.next_action, /recorded boundary decision remains pending/);
+        }
+        const eventCount = (await ledger.readGoal()).records.length;
+        hooks = await create(); await recover();
+        assert.equal((await ledger.readGoal()).records.length, eventCount, "cold replay does not append evidence again");
+        assert.equal((await readRun()).generation, done.generation, "replay does not resume the run twice");
+      }
+      const after = (await ledger.readGoal()).state;
+      for (const field of ["consumed_units", "consumed_time_ms", "consumed_cost_usd", "validation_budget", "outstanding_reservations"] as const) {
+        assert.deepEqual(after[field], spent[field], `${field} is unchanged by recovery`);
+      }
+      if (mode !== "recovery-explicit-cancel") assert.equal(aborted.length, 0, "direct recovery never interrupts the retained conversation");
+      return;
+    }
     if (externalDirectory) assert.equal(checked.at(-1)!.directory, externalDirectory);
     if (mode === "non-git-root") {
       assert.equal(checked.at(-1)!.binding.validation_policy, undefined,
@@ -296,6 +412,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of ["correction", "
       await write("Actual native check passed.\n", "reports/result.md");
     }
     hooks = await create(); // The saved native checks, not live hook memory, authorize finish.
+    if (mode.startsWith("parent-")) {
+      const previousOutcome = mode.slice("parent-".length);
+      if (previousOutcome === "unset") delete agents[actor]!.outcome;
+      else agents[actor]!.outcome = previousOutcome;
+    }
     const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
     assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
     const done = await readRun();

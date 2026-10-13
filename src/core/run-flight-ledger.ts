@@ -1101,6 +1101,13 @@ export class RunFlightLedger {
         stored.kind === "unit.usage-reconciled" && stored.goal_id === event.goal_id &&
         stored.reservation_id === event.reservation_id && stored.native_session_id === event.native_session_id &&
         stored.cost_usd === event.cost_usd)) return reduceGoalFlight(records);
+      if (event.kind === "unit.evidence-reconciled" && event.direct_finish !== undefined) {
+        const existing = records.find(record => record.event.kind === "unit.evidence-reconciled" &&
+          record.event.previous_receipt_id === event.previous_receipt_id)?.event;
+        if (existing?.kind === "unit.evidence-reconciled" && existing.goal_id === event.goal_id && existing.unit_id === event.unit_id &&
+            goalFingerprint(existing.evidence) === goalFingerprint(event.evidence) &&
+            goalFingerprint(existing.direct_finish) === goalFingerprint(event.direct_finish)) return reduceGoalFlight(records);
+      }
       if (event.kind === "goal.accepted") {
         const prior = records.find(({ event: stored }) => stored.kind === "goal.accepted" &&
           stored.origin_user_message_id === event.origin_user_message_id);

@@ -252,9 +252,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         notBefore === undefined ? undefined : input.directory,
         direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
     }
-    async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
+    async function reviewMessages(id: string, notBefore?: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
-        { path: { id }, query: { directory: input.directory } }));
+        { path: { id }, query: { directory: input.directory, ...(notBefore ? { notBefore } : {}) } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
     async function observedSessionModel(id: string): Promise<{ model?: string; variant?: string; outcome: "completed" | "failed" | "unknown" }> {
@@ -1677,21 +1677,29 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           ...(panel ? { return_report: panel,
             return_report_instruction: "The host-authored receipt is retained in this tool result. Give the user a concise outcome and key checks; do not transcribe this card, recalculate it or request another model turn for presentation." } : {}) });
       } };
-    tools[resume] = { description: "Reconcile a finished process-defect unit from native host validation records and unchanged source. For the exact first validation-only contract-repair continuation process defect, unchanged durable controls/candidate and available validation budget permit one same-worker validation-only retry; the result includes the exact Task to invoke. Never reimplements a unit or resets implementation/goal spend.",
+    tools[resume] = { description: "Reconcile a finished process-defect or diagnosed direct finish-registration defect from retained native checks and currently unchanged source. Direct recovery preserves the same unit and all spend without rerunning checks; explicit cancellation, failed/incomplete/stale validation and ordinary Worker terminal decisions remain authoritative. For the exact first validation-only contract-repair continuation process defect, unchanged durable controls/candidate and available validation budget permit one same-worker validation-only retry. Never reimplements a unit or resets implementation/goal spend.",
       args: { run_id: stringSchema, acceptance_fingerprint: stringSchema }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
+        return serializeDispatchTransition(context.sessionID, async () => {
         let state = await operators.required(context.sessionID);
-        if (state.runID !== args.run_id || state.acceptanceFingerprint !== args.acceptance_fingerprint || state.phase !== "awaiting-decision") throw new Error("operator-resume-identity-mismatch");
-        if (state.decision === "operator-acceptance-remediation-required") {
+        const replayDirect = new Set(state.units.filter(unit => unit.status === "succeeded" && !!unit.directExecution?.registrationRecovery)
+          .map(unit => unit.unit.id));
+        const replay = replayDirect.size > 0 && ["awaiting-acceptance", "awaiting-decision", "prepared"].includes(state.phase) &&
+          !state.units.some(unit => ["failed", "cancelled", "running"].includes(unit.status));
+        if (state.runID !== args.run_id || state.acceptanceFingerprint !== args.acceptance_fingerprint ||
+            state.phase !== "awaiting-decision" && !replay) throw new Error("operator-resume-identity-mismatch");
+        await operators.verifyContinuityControls(state);
+        if (state.decision === "operator-acceptance-remediation-required" &&
+            !state.units.some(unit => unit.status === "failed" && !!unit.directExecution?.finishedAt)) {
           throw new Error(state.repairGeneration === 1
             ? "operator-resume-unit-not-recoverable"
             : "operator-resume-acceptance-remediation-required");
         }
-        async function finishedSession(id: string): Promise<void> {
+        async function finishedSession(id: string, fullHistory = false, notBefore?: string): Promise<void> {
           const statuses = payload(await session("status", { query: { directory: input.directory } }));
           const observed = record(statuses) ? statuses[id] : undefined;
           if (record(observed) && observed.type !== "idle") throw new Error("operator-resume-host-still-active");
-          const history = await messages(id);
+          const history = fullHistory ? await reviewMessages(id, notBefore) : await messages(id);
           const assistants = history.filter(message => (record(message.info) ? message.info.role : message.role) === "assistant");
           const last = assistants.at(-1), info = record(last?.info) ? last.info : last;
           const tail = history.at(-1), tailInfo = record(tail?.info) ? tail.info : tail;
@@ -1702,7 +1710,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         function isRecordTimeComplete(info: Record<string, unknown>): boolean { return record(info.time) && typeof info.time.completed === "number"; }
         const delegate = state.operatorSessionID;
-        if (state.units.length > 1) {
+        if (!replay && state.units.length > 1 && state.units.some(unit => unit.status === "failed" && !unit.directExecution)) {
           const owner = delegate ? await identity(delegate) : undefined;
           if (!delegate || owner?.parent !== context.sessionID || owner.role !== "dog-operator") throw new Error("operator-resume-delegate-owner-mismatch");
           await finishedSession(delegate);
@@ -1713,11 +1721,32 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await control!.assertActiveGoal(context.sessionID, goalFingerprint);
         await restorePriorAcceptance(context.sessionID, state);
         const recovered = new Map<string, readonly import("../core/goal-bound.js").GoalEvidence[]>();
+        const recoveredDirect = new Set<string>();
         const unstarted = new Set<string>();
         for (const unit of state.units) {
-          if (unit.status !== "failed") continue;
+          if (unit.status !== "failed" && unit.status !== "cancelled" && !(replay && replayDirect.has(unit.unit.id))) continue;
           const taskID = /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1];
           if (!taskID) throw new Error("operator-resume-task-id-missing");
+          if (unit.directExecution) {
+            const direct = unit.directExecution;
+            const mission = await missions.required(context.sessionID);
+            if (["cancelled", "completed"].includes(mission.phase) || mission.runID !== state.runID || !unit.callID ||
+                !direct.finishedAt || direct.actor !== unit.childSessionID ||
+                direct.actor !== (mission.coordinator ?? context.sessionID) && unit.reviewerCorrection?.author !== direct.actor) {
+              throw new Error("operator-resume-direct-not-recoverable");
+            }
+            // A reusable root executes this very recovery tool. Its native conversation
+            // need not end like a Worker Task; other actors still must be inactive.
+            if (direct.actor !== context.sessionID) await finishedSession(direct.actor, true, direct.startedAt);
+            recovered.set(unit.unit.id, await control!.recoverUnitEvidence(context.sessionID, { unitID: taskID,
+              childSessionID: direct.actor, manifestPath: unit.manifestPath, manifestHash: unit.hashes[1]!, goalFingerprint,
+              direct: { callID: unit.callID, startedAt: direct.startedAt, finishedAt: direct.finishedAt,
+                checks: unit.reviewerCorrection?.checks ?? direct.checks, validation: unit.unit.validation,
+                directories: direct.validationCwd ?? unit.unit.validation_cwd,
+                registeredAt: unit.reviewerCorrection?.validationRegisteredAt ?? direct.validationRegisteredAt } }));
+            recoveredDirect.add(unit.unit.id);
+            continue;
+          }
           if (unit.resultClass === "process-defect" && unit.childSessionID === null && unit.callID && state.decision === "dispatch-admission-rejected") {
             const history = await messages(state.units.length > 1 ? delegate! : context.sessionID);
             const matching = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part => record(part) &&
@@ -1763,14 +1792,41 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         }
         await control!.assertActiveGoal(context.sessionID, goalFingerprint);
-        const resumed = await operators.resume(context.sessionID, state.runID, recovered, unstarted);
+        const resumed = replay ? state : await operators.resume(context.sessionID, state.runID, recovered, unstarted, recoveredDirect);
+        if (recoveredDirect.size) await missions.update(context.sessionID, mission => {
+          if (mission.runID !== resumed.runID || ["completed", "cancelled"].includes(mission.phase)) throw new Error("operator-resume-direct-mission-changed");
+          for (const unit of resumed.units.filter(unit => recoveredDirect.has(unit.unit.id))) {
+            const attempt = mission.attempts?.find(attempt => attempt.callID === unit.callID);
+            if (attempt && !attempt.registrationRecovery) {
+              attempt.registrationRecovery = { at: unit.directExecution!.registrationRecovery!.at, previousStatus: attempt.status,
+                previousResultClass: attempt.resultClass, previousFailure: attempt.failure };
+              attempt.status = "succeeded"; attempt.resultClass = "acceptance"; delete attempt.failure;
+            }
+            if ([...mission.progress].reverse().find(item => item.unit === `${resumed.runID}/${unit.unit.id}`)?.status !== "succeeded") {
+              mission.progress.push({ unit: `${resumed.runID}/${unit.unit.id}`, title: unit.unit.title, status: "succeeded", at: new Date().toISOString() });
+            }
+            const correction = mission.corrections?.find(item => item.runID === resumed.runID && item.author === unit.directExecution?.actor);
+            if (correction) correction.status = "ready";
+          }
+        });
         await restorePriorAcceptance(context.sessionID, resumed);
-        if (resumed.phase === "awaiting-acceptance") return JSON.stringify(operators.packet(resumed));
+        if (recoveredDirect.size) return JSON.stringify({
+          ...compactMissionEvidence(missionPacket(await missions.required(context.sessionID), resumed), resumed, context.sessionID),
+          recovered_direct_units: [...recoveredDirect],
+          next_action: "The same direct unit's finish registration is reconciled from currently fresh native checks, without a new unit or check rerun. Retain the original erroneous receipt and cumulative spend. " +
+            (resumed.phase === "awaiting-decision" ? `The recorded boundary decision remains pending: ${resumed.decision}. No replacement Task is admitted. ` :
+              resumed.phase === "prepared" ? "Remaining planned units are still pending under the existing authorization and cumulative budget. " : "") +
+            "Latest-change Review and individual product acceptance remain pending; this recovery is not acceptance, Go or completion." });
+        if (resumed.phase === "awaiting-acceptance") {
+          return JSON.stringify(operators.packet(resumed));
+        }
+        if (resumed.phase === "awaiting-decision") return JSON.stringify(operators.packet(resumed));
         const remaining = resumed.units.filter(unit => unit.status === "pending").length;
         control!.enableUnits(context.sessionID, remaining);
         return JSON.stringify({ run_id: resumed.runID, acceptance_fingerprint: resumed.acceptanceFingerprint,
           resumed: true, remaining_units: remaining,
           task: resumed.units.length === 1 ? operators.nextWorkerTask(resumed) : operators.dispatchTask(resumed) });
+        });
       } };
     tools[beginProposal] = { description: `Root-only: freeze original ordered requirements and grant one bounded read-only proposal investigation to dogs-coordinator. The result contains one exact short Task reference; pass task.subagent_type, task.description, and task.prompt byte-for-byte without appending or paraphrasing. The native parent retains that reference; the host expands it only inside the directly claimed proposal child. ${OPERATOR_INTENT_CONTRACT}`,
       args: { intent_json: intentSchema }, execute: async (args, context) => {
@@ -1972,8 +2028,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
            // A resumed correction Task settles at its native terminal, not at this
            // advisory completion call. Inline/direct execution uses its existing finish path.
-           if (direct.unit.directExecution) await control!.finishDirectUnit(root, context.sessionID, (direct.unit.reviewerCorrection?.checks ?? direct.unit.directExecution.checks).filter(check =>
-             checks.matched?.some(item => item.callID === check.callID)));
+           if (direct.unit.directExecution) {
+             const settled = await control!.finishDirectUnit(root, context.sessionID, (direct.unit.reviewerCorrection?.checks ?? direct.unit.directExecution.checks).filter(check =>
+               checks.matched?.some(item => item.callID === check.callID)));
+             const saved = (await operators.required(root)).units.find(unit => unit.callID === direct.unit.callID);
+             if (settled.disposition !== "succeeded" || !settled.evidence.length || saved?.status !== "succeeded" || !saved.evidence.length) {
+               const run = await operators.required(root);
+               return JSON.stringify({ ...compactMissionEvidence(missionPacket(await missions.required(root), run), run, root),
+                 direct_settlement: { disposition: settled.disposition, result_class: settled.resultClass, evidence_count: settled.evidence.length },
+                 next_action: "Direct unit is not validated: retain its actual settlement, native checks, current source and cumulative spend. Inspect the recorded cancellation/failure or use resume_operator for a diagnosed finish-registration defect; do not repeat passed checks or create a replacement unit just to repair registration. Review and Mission acceptance remain pending." });
+             }
+           }
           if (direct.unit.reviewerCorrection) return JSON.stringify({ status: "correction-validated",
             execution: "same-native-task", validation: direct.unit.unit.validation,
             next_action: 'Compare the original requirements, retained findings and affected public behavior in this same context, then finish THIS native Task with SELF_RECHECKED and self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. No handoff reread, second Task or Operator round trip. This is author self-recheck; only the actual successful native terminal can bind it, never this tool result.' });

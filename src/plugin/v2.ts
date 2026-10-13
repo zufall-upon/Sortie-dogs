@@ -180,11 +180,13 @@ function legacyMessage(value: unknown, session: string, agent?: string): JsonObj
 }
 
 async function legacyMessages(context: OpenCodeV2Context, id: string,
-  paginated?: (input: { sessionID: string; limit: number; order?: "asc"; cursor?: string }) => Promise<unknown>): Promise<JsonObject[]> {
+  paginated?: (input: { sessionID: string; limit: number; order?: "asc" | "desc"; cursor?: string }) => Promise<unknown>,
+  notBefore?: number): Promise<JsonObject[]> {
   const list = paginated ?? (context.message ? (input: JsonObject) => context.message!.list(input) : undefined);
   const [info, history] = await Promise.all([
     context.session.get({ sessionID: id }).catch(() => undefined),
-    list ? nativePages(cursor => list({ sessionID: id, limit: 100, ...(cursor ? { cursor } : { order: "asc" }) }))
+    list ? nativePages(cursor => list({ sessionID: id, limit: 100,
+      ...(cursor ? { cursor } : { order: notBefore === undefined ? "asc" : "desc" }) }), notBefore)
       : context.session.context({ sessionID: id }),
   ]);
   const agent = record(info) ? string(info.agent) : undefined;
@@ -194,15 +196,21 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
   });
 }
 
-async function nativePages(fetch: (cursor?: string) => Promise<unknown>): Promise<unknown[]> {
+async function nativePages(fetch: (cursor?: string) => Promise<unknown>, notBefore?: number): Promise<unknown[]> {
   const items: unknown[] = [], seen = new Set<string>();
   let cursor: string | undefined;
-  for (let page = 0; page < 100; page += 1) {
+  for (let page = 0; notBefore !== undefined || page < 100; page += 1) {
     const result = await fetch(cursor);
     if (!record(result) || !Array.isArray(result.data) || !record(result.cursor)) throw new Error("v2-history-page-invalid");
     items.push(...result.data);
+    // Retain the whole boundary page: a message created before admission can
+    // contain tools that started after it. The check verifier applies its own
+    // exact native-start cutoff. Do not scan decades of unrelated controller
+    // history or reject a known unit window at the general full-history cap.
+    if (notBefore !== undefined && result.data.some(message => record(message) && record(message.time) &&
+        typeof message.time.created === "number" && message.time.created < notBefore)) return items.reverse();
     const next = string(result.cursor.next);
-    if (!next) return items;
+    if (!next) return notBefore === undefined ? items : items.reverse();
     if (seen.has(next)) throw new Error("v2-history-cursor-repeated");
     seen.add(next); cursor = next;
   }
@@ -228,8 +236,11 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
     },
     reviewMessages: async (request: unknown) => {
       const id = sessionID(request);
+      const query = record(request) && record(request.query) ? request.query : undefined;
+      const requestedStart = typeof query?.notBefore === "string" ? Date.parse(query.notBefore) : undefined;
       return { data: id === undefined ? [] : await legacyMessages(context, id,
-        context.message ? input => context.message!.list(input) : reviewList) };
+        context.message ? input => context.message!.list(input) : reviewList,
+        Number.isFinite(requestedStart) ? requestedStart : undefined) };
     },
     reviewExecution: async (request: unknown) => {
       const id = sessionID(request);

@@ -138,6 +138,7 @@ interface UnitState {
     actor: string;
     startedAt: string;
     finishedAt?: string;
+    registrationRecovery?: { at: string; previousStatus: "failed" | "cancelled"; previousResultClass: string | null };
     checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
     validationCwd?: Readonly<Record<string, string>>;
     validationRegisteredAt?: Readonly<Record<string, string>>;
@@ -2116,25 +2117,33 @@ export class OperatorRuntime {
       return state;
     });
   }
-  resume(root: string, runID: string, recovered: ReadonlyMap<string, readonly GoalEvidence[]>, unstarted: ReadonlySet<string> = new Set()): Promise<OperatorState> {
+  resume(root: string, runID: string, recovered: ReadonlyMap<string, readonly GoalEvidence[]>, unstarted: ReadonlySet<string> = new Set(),
+    recoveredDirect: ReadonlySet<string> = new Set()): Promise<OperatorState> {
     return this.serial(root, async () => {
       const state = await this.required(root);
       if (state.contractRepair !== null) throw new Error("operator-resume-contract-repair-required");
-      if (state.runID !== runID || state.phase !== "awaiting-decision" || state.units.some(unit => unit.status === "running" || unit.status === "cancelled")) {
+      if (state.runID !== runID || state.phase !== "awaiting-decision" || state.units.some(unit => unit.status === "running" ||
+          unit.status === "cancelled" && !recoveredDirect.has(unit.unit.id))) {
         throw new Error("operator-resume-not-ready");
       }
       for (const unit of state.units) {
-        if (unit.status !== "failed") continue;
+        if (unit.status !== "failed" && unit.status !== "cancelled") continue;
         if (unstarted.has(unit.unit.id)) {
           if (unit.resultClass !== "process-defect" || unit.childSessionID !== null || state.decision !== "dispatch-admission-rejected") throw new Error("operator-resume-unstarted-invalid");
           unit.status = "pending"; unit.callID = null; unit.resultClass = null;
           continue;
         }
         const evidence = recovered.get(unit.unit.id);
+        const direct = recoveredDirect.has(unit.unit.id) && unit.directExecution?.actor === unit.childSessionID &&
+          !!unit.directExecution.finishedAt && !!unit.callID && !!evidence?.length;
+        await this.verifyControls(unit);
         const ids = new Set(evidence?.flatMap(item => item.measurement.criterion_ids) ?? []);
-        if (unit.resultClass !== "process-defect" || !evidence?.length || !unit.unit.acceptance_indices.every(index => state.acceptanceProof[index]!.some(id => ids.has(id)))) {
+        if (unit.resultClass !== "process-defect" && !direct || !evidence?.length || !unit.unit.acceptance_indices.every(index => state.acceptanceProof[index]!.some(id => ids.has(id)))) {
           throw new Error("operator-resume-proof-incomplete");
         }
+        if (unit.status === "cancelled" && !direct) throw new Error("operator-resume-proof-incomplete");
+        if (direct) unit.directExecution!.registrationRecovery = { at: new Date().toISOString(),
+          previousStatus: unit.status, previousResultClass: unit.resultClass };
         unit.status = "succeeded"; unit.resultClass = "acceptance"; unit.evidence = evidence; unit.repairValidation = null;
       }
       state.generation++; state.operatorCallID = null; state.operatorSessionID = null; state.decision = null;

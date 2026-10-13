@@ -112,6 +112,15 @@ export interface GoalTerminalReceipt {
 }
 
 interface GoalEventBase { readonly at: string }
+/** Host verification of an existing direct finish receipt, not a new execution. */
+export interface GoalDirectFinishRecovery {
+  readonly call_id: string;
+  readonly actor_session_id: string;
+  readonly finish_call_id: string;
+  readonly started_at: string;
+  readonly finished_at: string;
+  readonly validation_call_ids: readonly string[];
+}
 export interface GoalValidationRetryAuthorization {
   readonly authority: "operator-repair-validation-retry";
   readonly operator_run_id: string;
@@ -160,7 +169,8 @@ export type GoalFlightEvent =
         readonly reservation_id: string; readonly native_session_id: string; readonly cost_usd: number;
         readonly source: "native-usage-price-table" })
   | (GoalEventBase & { readonly kind: "unit.evidence-reconciled"; readonly goal_id: string; readonly unit_id: string;
-      readonly previous_receipt_id: string; readonly evidence: readonly GoalEvidence[] })
+      readonly previous_receipt_id: string; readonly evidence: readonly GoalEvidence[];
+      readonly direct_finish?: GoalDirectFinishRecovery })
   | (GoalEventBase & { readonly kind: "validation.admission"; readonly goal_id: string; readonly reservation_id: string;
        readonly operation_id: string; readonly evidence_key: string; readonly scope: ValidationScope | null;
        readonly decision: "ALLOW" | "SKIP" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number;
@@ -362,7 +372,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
   let replanRevision: number | null = null;
   let legacyResetRevision = false;
   let previous: string | null = null;
-  const processDefects = new Map<string, { unitID: string; revision: number; epoch: number }>();
+  const recoverableSettlements = new Map<string, { unitID: string; revision: number; epoch: number;
+    settlement: Extract<GoalFlightEvent, { kind: "unit.settled" }> }>();
   const unitCosts = new Map<string, { cost: number | null; session?: string }>();
   const validationAdmissions = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>>();
   const validationSettlements = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>>();
@@ -389,7 +400,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         session_ids: [event.origin_session_id] };
       replanRevision = null;
       legacyResetRevision = false;
-      processDefects.clear();
+      recoverableSettlements.clear();
       validationAdmissions.clear();
       validationSettlements.clear();
       reopenedValidationEvidence.clear();
@@ -479,8 +490,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         unit_ids: addUnique(state.unit_ids, event.unit_id),
         evidence_refs: event.evidence.reduce((refs, evidence) => addUnique(refs, evidence.evidence_id), state.evidence_refs),
         satisfied_criteria: event.evidence.reduce((ids, evidence) => evidence.measurement.criterion_ids.reduce(addUnique, ids), state.satisfied_criteria) };
-      if (event.result_class === "process-defect" && event.evidence.length === 0 && event.disposition !== "cancelled") {
-        processDefects.set(event.receipt_id, { unitID: event.unit_id, revision: state.revision, epoch: state.scope_epoch });
+      if (event.evidence.length === 0 && event.disposition !== "succeeded") {
+        recoverableSettlements.set(event.receipt_id, { unitID: event.unit_id, revision: state.revision, epoch: state.scope_epoch, settlement: event });
       }
     } else if (event.kind === "unit.usage-reconciled") {
       const prior = unitCosts.get(event.reservation_id);
@@ -493,13 +504,26 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       state = { ...state, consumed_cost_usd: costs.some(item => item.cost === null) ? null
         : costs.reduce((sum, item) => sum + item.cost!, 0) };
     } else if (event.kind === "unit.evidence-reconciled") {
-      const old = processDefects.get(event.previous_receipt_id);
+      const old = recoverableSettlements.get(event.previous_receipt_id);
+      const direct = event.direct_finish, settled = old?.settlement;
+      const directFinish = direct !== undefined && text(direct.call_id) && direct.call_id.startsWith("direct-") &&
+        text(direct.actor_session_id) && text(direct.finish_call_id) && instant(direct.started_at) && instant(direct.finished_at) &&
+        Date.parse(direct.finished_at) >= Date.parse(direct.started_at) && Array.isArray(direct.validation_call_ids) && direct.validation_call_ids.length > 0 &&
+        direct.validation_call_ids.every(text) && settled?.native_session_id === direct.actor_session_id &&
+        settled.native_started_at !== undefined && Math.abs(Date.parse(settled.native_started_at) - Date.parse(direct.started_at)) <= 1000 &&
+        Math.abs(Date.parse(settled.at) - Date.parse(direct.finished_at)) <= 1000 &&
+        settled.reservation_id === goalFingerprint({ goal_id: event.goal_id, unit_id: event.unit_id, call_id: direct.call_id }) &&
+        settled.receipt_id === goalFingerprint({ call_id: direct.call_id,
+          output: "Host-observed direct unit finished; controller session remains active." }) &&
+        (settled.disposition === "cancelled" && settled.result_class === "interrupted" ||
+          settled.disposition === "failed" && ["process-defect", "acceptance"].includes(settled.result_class ?? ""));
+      const processDefect = direct === undefined && settled?.disposition !== "cancelled" && settled?.result_class === "process-defect";
       requireState(state.phase === "active" && state.receipt === null && old?.unitID === event.unit_id &&
-        old.revision === state.revision && old.epoch === state.scope_epoch && state.outstanding_reservations.length === 0,
-        "transition", "Evidence reconciliation requires a current settled process defect.");
+        old.revision === state.revision && old.epoch === state.scope_epoch && state.outstanding_reservations.length === 0 && (processDefect || directFinish),
+        "transition", "Evidence reconciliation requires a current settled process defect or verified direct finish defect.");
       requireState(event.evidence.length > 0 && event.evidence.every(entry => validGoalEvidence(entry, state) && entry.execution.units.includes(event.unit_id)),
         "evidence", "Reconciled evidence must retain the current goal and unit identity.");
-      processDefects.delete(event.previous_receipt_id);
+      recoverableSettlements.delete(event.previous_receipt_id);
       state = { ...state, evidence_refs: event.evidence.reduce((refs, evidence) => addUnique(refs, evidence.evidence_id), state.evidence_refs),
         satisfied_criteria: event.evidence.reduce((ids, evidence) => evidence.measurement.criterion_ids.reduce(addUnique, ids), state.satisfied_criteria) };
     } else if (event.kind === "validation.admission") {
