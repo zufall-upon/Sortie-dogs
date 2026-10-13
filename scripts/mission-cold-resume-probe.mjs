@@ -23,35 +23,50 @@ const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), 
   OPENCODE_DB: started.database_path, XDG_DATA_HOME: started.data_home };
 const observe = () => observeMissionCLI(started.project, 0, 'dog-operator', started.database_path, { root: started.root });
 const baselineSince = Date.now();
-async function persistPrelaunchFailure(error, observed, stage) {
+async function persistPrelaunchFailure(error, observed, stage, server) {
   // No continuation has launched. Preserve startup evidence and known cumulative
   // usage, but do not settle the unresolved coverage as zero or replay startup.
-  const isBaseline = stage === 'baseline';
+  const isBaseline = stage === 'baseline', isCLILaunch = stage === 'cli-launch';
+  const cleanupErrors = [];
+  // A synchronous spawn failure never reaches the shared monitor. Only this
+  // caller's already-obtained server handle needs teardown; preserve the launch cause.
+  if (isCLILaunch) try { await server.stop(); }
+  catch (cleanupError) { cleanupErrors.push({ resource: 'server', name: cleanupError.name,
+    message: String(cleanupError.message).slice(0, 1500),
+    ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }); }
   const failure = { name: error.name, message: String(error.message).slice(0, 1500),
     ...(error.code === undefined ? {} : { code: error.code }) };
   const result = { ...started, ...observed, mode: 'complete',
-    stopped: isBaseline ? 'observation-failed' : 'server-start-failed', stop_observation: stage,
+    stopped: isBaseline ? 'observation-failed' : isCLILaunch ? 'cli-launch-failed' : 'server-start-failed', stop_observation: stage,
     code: null, signal: null, controller_signal: null, cli_started: false,
-    ...(isBaseline ? { resume_server_started: false } : { server_start_attempted: true, resume_server_ready: false }),
+    ...(isBaseline ? { resume_server_started: false } : { server_start_attempted: true, resume_server_ready: isCLILaunch }),
+    ...(isCLILaunch ? { cli_start_attempted: true, server_url: server.url ?? null,
+      cleanup_complete: cleanupErrors.length === 0, ...(cleanupErrors.length ? { cleanup_errors: cleanupErrors } : {}) } : {}),
     usage_complete: false, known_unpriced_requests: observed.known_unpriced_requests ?? observed.unpriced_requests,
     unpriced_requests: Math.max(1, observed.unpriced_requests), accepted: false, native_completed: false,
-    ...(isBaseline ? { observation_error: failure } : { server_error: failure }),
+    ...(isBaseline ? { observation_error: failure } : isCLILaunch ? { cli_error: failure } : { server_error: failure }),
     intentional_interruption_errors: observed.errors, resume_errors: [], elapsed_ms: Date.now() - baselineSince,
     failure_recorded: true,
     next_action: isBaseline
       ? 'Inspect the recorded owned database read failure and retained startup receipt; reconcile cumulative session usage before deciding continuation. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+      : isCLILaunch ? cleanupErrors.length
+        ? 'Retry teardown only for the recorded owned server and verify it stopped, then inspect the recorded CLI launch error and reconcile cumulative baseline/startup receipt/database usage. No resume CLI handle was obtained. Do not automatically replay the consumed startup/task or restart the shared host.'
+        : 'Inspect the recorded CLI launch error, executable and working directory; reconcile cumulative baseline/startup receipt/database usage before deciding continuation. No resume CLI handle was obtained; the owned server was stopped. Do not automatically replay the consumed startup/task or restart the shared host.'
       : 'Inspect the recorded owned server startup failure and retained cumulative baseline/startup receipt; verify any process from the failed owned start has stopped, then reconcile session usage before deciding continuation. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   try { await writeFile(join(run, 'cold-resume-observation.json'), JSON.stringify(result, null, 2) + '\n'); }
   catch (persistenceError) {
     // If the sink is unavailable, retain the original failure plus fresh evidence.
     error.monitorContext = { observed: { ...result, failure_recorded: false }, databasePath: started.database_path, stdout: '', stderr: '',
-      code: null, signal: null, stopped: result.stopped, stopObservation: stage, cleanupErrors: [],
-      ...(isBaseline ? { observationError: failure } : { serverError: failure }),
+      code: null, signal: null, stopped: result.stopped, stopObservation: stage, cleanupErrors,
+      ...(isBaseline ? { observationError: failure } : isCLILaunch ? { cliError: failure } : { serverError: failure }),
       persistence_complete: false, failure_recorded: false,
       persistenceError: { name: persistenceError.name, message: String(persistenceError.message).slice(0, 1500),
         ...(persistenceError.code === undefined ? {} : { code: persistenceError.code }) },
       nextAction: isBaseline
         ? 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the startup receipt/database. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+        : isCLILaunch ? cleanupErrors.length
+          ? 'Retry teardown only for the recorded owned server and verify it stopped, then retain unresolved usage holds and retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI handle was obtained. Do not automatically replay the consumed startup/task or restart the shared host.'
+          : 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI handle was obtained; the owned server was stopped. Do not automatically replay the consumed startup/task or restart the shared host.'
         : 'Inspect the recorded owned evidence path and retain unresolved usage holds; verify any process from the failed owned server start has stopped, then retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   }
   throw error;
@@ -65,10 +80,12 @@ try { server = await startV2ReleaseServer(started.project, env); }
 catch (error) { await persistPrelaunchFailure(error, baseline, 'server-start'); }
 const since = Date.now();
 const request = '前回の作業を置き換えます。旧runは中断済みです。start_missionのintent=replaceで現在の要件を保存し、古いreceipt.txt作成要件は取り消してください。現在の要件はresult.txtをrecoveredと末尾改行にしてnode check.mjsを通すことだけです。check*.mjs・設定は変更しない。単一unitのFast-laneで、既存の費用を継承して実行し、低リスクreview skipとcomplete_missionまで完了してください。';
-const child = spawn('opencode', ['run', '--server', server.url, '--session', started.root, '--format', 'json',
+let child;
+try { child = spawn('opencode', ['run', '--server', server.url, '--session', started.root, '--format', 'json',
   '--agent', 'dog-operator', '--model', 'openai/gpt-6-luna-fast#max', request], {
   cwd: started.project, env: { ...process.env, ...server.env, PWD: started.project }, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-});
+}); }
+catch (error) { await persistPrelaunchFailure(error, baseline, 'cli-launch', server); }
 const key = createHash('sha256').update(started.root).digest('hex');
 const metadata = observed => ({ candidate_sha256: started.candidate_sha256, root: started.root,
   initial_worker: started.models.find(item => item.agent === 'dog-worker-v010'),
