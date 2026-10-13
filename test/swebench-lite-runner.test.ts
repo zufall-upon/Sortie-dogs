@@ -827,6 +827,27 @@ test("live plan keeps instance sessions independent and prompt input public", ()
   assert.equal(Object.hasOwn(result.instances[0]!, "patch"), false);
 });
 
+test("benchmark setup reuses its environment without freezing proven incompatible prerequisites", () => {
+  for (const preparedEnvironment of [undefined, "official-image-testbed"] as const) {
+    const result = createTestLiveRunPlan(manifest(), { costLimitUsd: 2, ...(preparedEnvironment ? { preparedEnvironment } : {}) });
+    const prompt = result.instances[0]!.prompt;
+    assert.match(prompt, /When a check or dependency resolver proves a required package missing or incompatible/u);
+    assert.match(prompt, /repair it and its necessary prerequisites in the current environment using the repository's compatible versions/u);
+    assert.match(prompt, /Do not freeze every installed version if that prevents the authorized installation/u);
+    assert.match(prompt, /preserve explicit user restrictions and avoid unrelated upgrades/u);
+    assert.match(prompt, /Time-box dependency setup to a brief, repository-documented attempt/u);
+    assert.match(prompt, /report a blocked\/incomplete outcome, not succeeded completion/u);
+    assert.doesNotMatch(prompt, /install a package only when a check proves it is missing|Jinja2|dbt-core|setuptools|MarkupSafe/u);
+    if (preparedEnvironment) {
+      assert.match(prompt, /\.sortie-env\/ is first on PATH/u);
+      assert.match(prompt, /Do not create another environment\./u);
+    }
+    assert.equal(result.execution.timeout_seconds, 1800);
+    assert.equal(result.execution.cost_limit_usd, 2);
+    assert.equal(result.policy.retry_count, 0);
+  }
+});
+
 test("benchmark prompt preserves public-only safety boundaries individually", () => {
   const result = createTestLiveRunPlan(manifest(), {
     agent: "dog-operator",
