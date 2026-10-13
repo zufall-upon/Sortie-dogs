@@ -23,34 +23,46 @@ const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), 
   OPENCODE_DB: started.database_path, XDG_DATA_HOME: started.data_home };
 const observe = () => observeMissionCLI(started.project, 0, 'dog-operator', started.database_path, { root: started.root });
 const baselineSince = Date.now();
-let baseline;
-try { baseline = observe(); }
-catch (error) {
+async function persistPrelaunchFailure(error, observed, stage) {
   // No continuation has launched. Preserve startup evidence and known cumulative
   // usage, but do not settle the unresolved coverage as zero or replay startup.
-  const result = { ...started, mode: 'complete', stopped: 'observation-failed', stop_observation: 'baseline',
-    code: null, signal: null, controller_signal: null, cli_started: false, resume_server_started: false,
-    usage_complete: false, known_unpriced_requests: started.unpriced_requests,
-    unpriced_requests: Math.max(1, started.unpriced_requests), accepted: false, native_completed: false,
-    observation_error: { name: error.name, message: String(error.message).slice(0, 1500),
-      ...(error.code === undefined ? {} : { code: error.code }) },
-    intentional_interruption_errors: started.errors, resume_errors: [], elapsed_ms: Date.now() - baselineSince,
+  const isBaseline = stage === 'baseline';
+  const failure = { name: error.name, message: String(error.message).slice(0, 1500),
+    ...(error.code === undefined ? {} : { code: error.code }) };
+  const result = { ...started, ...observed, mode: 'complete',
+    stopped: isBaseline ? 'observation-failed' : 'server-start-failed', stop_observation: stage,
+    code: null, signal: null, controller_signal: null, cli_started: false,
+    ...(isBaseline ? { resume_server_started: false } : { server_start_attempted: true, resume_server_ready: false }),
+    usage_complete: false, known_unpriced_requests: observed.known_unpriced_requests ?? observed.unpriced_requests,
+    unpriced_requests: Math.max(1, observed.unpriced_requests), accepted: false, native_completed: false,
+    ...(isBaseline ? { observation_error: failure } : { server_error: failure }),
+    intentional_interruption_errors: observed.errors, resume_errors: [], elapsed_ms: Date.now() - baselineSince,
     failure_recorded: true,
-    next_action: 'Inspect the recorded owned database read failure and retained startup receipt; reconcile cumulative session usage before deciding continuation. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+    next_action: isBaseline
+      ? 'Inspect the recorded owned database read failure and retained startup receipt; reconcile cumulative session usage before deciding continuation. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+      : 'Inspect the recorded owned server startup failure and retained cumulative baseline/startup receipt; verify any process from the failed owned start has stopped, then reconcile session usage before deciding continuation. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   try { await writeFile(join(run, 'cold-resume-observation.json'), JSON.stringify(result, null, 2) + '\n'); }
   catch (persistenceError) {
-    // If the sink is unavailable, retain the original read error plus fresh evidence.
+    // If the sink is unavailable, retain the original failure plus fresh evidence.
     error.monitorContext = { observed: { ...result, failure_recorded: false }, databasePath: started.database_path, stdout: '', stderr: '',
-      code: null, signal: null, stopped: result.stopped, stopObservation: 'baseline', cleanupErrors: [],
-      observationError: result.observation_error, persistence_complete: false, failure_recorded: false,
+      code: null, signal: null, stopped: result.stopped, stopObservation: stage, cleanupErrors: [],
+      ...(isBaseline ? { observationError: failure } : { serverError: failure }),
+      persistence_complete: false, failure_recorded: false,
       persistenceError: { name: persistenceError.name, message: String(persistenceError.message).slice(0, 1500),
         ...(persistenceError.code === undefined ? {} : { code: persistenceError.code }) },
-      nextAction: 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the startup receipt/database. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+      nextAction: isBaseline
+        ? 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the startup receipt/database. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+        : 'Inspect the recorded owned evidence path and retain unresolved usage holds; verify any process from the failed owned server start has stopped, then retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   }
   throw error;
 }
+let baseline;
+try { baseline = observe(); }
+catch (error) { await persistPrelaunchFailure(error, started, 'baseline'); }
 const previousErrors = new Set(baseline.errors.map(error => JSON.stringify(error)));
-const server = await startV2ReleaseServer(started.project, env);
+let server;
+try { server = await startV2ReleaseServer(started.project, env); }
+catch (error) { await persistPrelaunchFailure(error, baseline, 'server-start'); }
 const since = Date.now();
 const request = '前回の作業を置き換えます。旧runは中断済みです。start_missionのintent=replaceで現在の要件を保存し、古いreceipt.txt作成要件は取り消してください。現在の要件はresult.txtをrecoveredと末尾改行にしてnode check.mjsを通すことだけです。check*.mjs・設定は変更しない。単一unitのFast-laneで、既存の費用を継承して実行し、低リスクreview skipとcomplete_missionまで完了してください。';
 const child = spawn('opencode', ['run', '--server', server.url, '--session', started.root, '--format', 'json',
