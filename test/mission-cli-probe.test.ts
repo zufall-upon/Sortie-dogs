@@ -137,6 +137,80 @@ test("practical database observation honors explicit OPENCODE_DB instead of a fo
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+for (const [order, created] of [
+  ["parent-first", [210, 220]],
+  ["parent-later", [220, 210]],
+  ["equal-time child-first", [210, 210]],
+  ["deep reverse ancestry", [240, 230, 220, 210]],
+] as const) {
+  test(`practical observation covers ${order} descendants once within the selected root, directory and since`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-observer-hierarchy-"));
+    const path = join(directory, "owned.db"), project = "M:\\work\\owned-fixture", normalized = project.replaceAll("\\", "/");
+    const db = seedObservationDatabase(path, project, "selected-root", 200);
+    try {
+      const session = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, 300, 'succeeded')");
+      const chain = ["selected-root", ...created.map((_, i) => `child-${i}`)];
+      // Insert children first as well, so equal timestamps cannot supply a parent-first guarantee.
+      for (let i = created.length - 1; i >= 0; i--) {
+        session.run(chain[i + 1], chain[i], i ? "dog-worker-v010" : "dogs-coordinator", normalized, created[i]);
+      }
+      for (const [id, parent, agent, scope, at] of [
+        ["older-root", null, "dog-operator", project, 150],
+        ["older-child", "older-root", "dog-worker-v010", normalized, 250],
+        ["other-agent-root", null, "build", normalized, 260],
+        ["other-agent-child", "other-agent-root", "dog-worker-v010", project, 270],
+        ["foreign-root", null, "dog-operator", "M:/work/foreign-fixture", 280],
+        ["foreign-child", "selected-root", "dog-worker-v010", "M:/work/foreign-fixture", 290],
+        ["before-since", "selected-root", "dogs-coordinator", project, 99],
+        ["through-before-since", "before-since", "dog-worker-v010", project, 230],
+        ["through-foreign-directory", "foreign-child", "dog-worker-v010", project, 230],
+        ["cycle-a", "cycle-b", "dog-worker-v010", project, 230],
+        ["cycle-b", "cycle-a", "dog-worker-v010", project, 230],
+        ["orphan", "missing-parent", "dog-worker-v010", project, 230],
+      ] as const) session.run(id, parent, agent, scope, at);
+      const message = db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?)");
+      for (const { id } of db.prepare("SELECT id FROM session_v2").all() as { id: string }[]) {
+        // The same message ID in different sessions must not drop either session's usage.
+        message.run("same-id-across-sessions", id, "assistant", 1, JSON.stringify({
+          model: root.model, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: 290, completed: 295 }, finish: "stop",
+          content: [{ type: "text", text: `fixture response ${id}` },
+            { type: "tool", name: "shell", time: { created: 291 }, state: { status: "completed" } }],
+        }));
+        message.run("user-message", id, "user", 0, JSON.stringify({ content: [
+          { type: "tool", name: "ignored-user-tool", state: { status: "error", error: "not an assistant" } },
+        ] }));
+      }
+      const leaf = chain.at(-1)!;
+      message.run("unpriced-error", leaf, "assistant", 2, JSON.stringify({
+        model: { providerID: "unpriced-fixture", id: "fixture-only-model" }, time: { created: 296, completed: 299 },
+        content: [{ type: "tool", name: "shell", time: { created: 297 },
+          state: { status: "error", error: "owned-descendant-failure" } }],
+      }));
+      const observed = observeMissionCLI(project, 100, "dog-operator", path);
+      assert.equal(observed.root, "selected-root", "latest matching scoped root, not another root or agent");
+      assert.equal(observed.database_path, path);
+      assert.deepEqual(observed.models.map((item: { sessionID: string }) => item.sessionID).sort(), [...chain].sort());
+      assert(observed.models.every((item: { started_ms: number }) => item.started_ms === 90));
+      assert.deepEqual(observed.responses.map((item: { sessionID: string }) => item.sessionID).sort(), [...chain].sort());
+      assert(observed.responses.every((item: { finished_ms: number }) => item.finished_ms === 95));
+      assert.equal(observed.tools.length, chain.length + 1, "multiple ancestry passes do not repeat message/tool reads");
+      assert.equal(observed.tools.filter((item: { status: string }) => item.status === "error").length, 1);
+      assert.deepEqual(observed.errors, [{ sessionID: leaf, tool: "shell", error: '"owned-descendant-failure"' }]);
+      assert(Math.abs(observed.priced_usd - chain.length * 0.003) < 1e-12, "each selected request priced exactly once");
+      assert.equal(observed.unpriced_requests, 1, "missing descendant usage remains unknown, not zero or duplicated");
+      assert.equal(probeStopReason(observed, { mode: "complete", capUSD: chain.length * 0.003 - 0.0001,
+        elapsedMs: 0, timeoutMs: 1000 }), "budget", "descendant coverage feeds the existing budget stop");
+      assert.deepEqual(observeMissionCLI(project, 100, "absent-agent", path), {
+        database_path: path, root: undefined, models: [], tools: [], responses: [], errors: [], priced_usd: 0, unpriced_requests: 0,
+      }, "no matching root does not collect foreign ancestry or cycles");
+    } finally {
+      db.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("practical monitor freezes the owning server database for observation and native settlement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mission-monitor-db-"));
   const path = join(directory, "owned.db"), since = Date.now();

@@ -20,7 +20,11 @@ export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator'
     const roots = sessions.filter(session => !session.parent_id && session.agent === rootAgent);
     const root = roots.at(-1);
     const descendants = new Set(root ? [root.id] : []);
-    for (const session of sessions) if (descendants.has(session.parent_id)) descendants.add(session.id);
+    // Creation order need not put a parent before its descendants.
+    for (let size = -1; size !== descendants.size;) {
+      size = descendants.size;
+      for (const session of sessions) if (descendants.has(session.parent_id)) descendants.add(session.id);
+    }
     let usd = 0, unpriced = 0;
     const errors = [], models = [], tools = [], responses = [];
     for (const session of sessions.filter(item => descendants.has(item.id))) {
