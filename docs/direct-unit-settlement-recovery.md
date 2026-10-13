@@ -45,3 +45,13 @@ Local `_testenv/direct-settlement/` retains the original state/native history, e
 - The temporary RPC was removed after recovery. The fixed candidate remains active only in the original Location: the released v0.13.17 reader was actually observed rejecting the new verified-direct reconciliation record. Do not retire into that incompatible reader; apply a compatible released package first, then restore the saved exact original Location config and remove this known wrapper. Global npm/C/O packages are not updated by this experiment.
 
 Requested Astra consultation used native `openai/gpt-6-astra`, variant `default`:22 priced requests, API-rate estimate USD2.207154, zero unpriced requests. The previous bounded observation subtotal USD33.4056462 plus one unpriced request is retained, yielding USD35.6128002 plus that unknown. This excludes the primary coding chat and historical product costs, and is not an invoice or a claim about subscription billing. Registration recovery itself added no model request or implementation charge.
+
+## Integrated validation
+
+- Runtime/test implementation commit: `134681691fafdeb623917eeae4d6f14e1a77e68a` (includes initial repair commit `dfef05d`).
+- `npm run test:full`: exit0, 1,997 PASS / 2 skip / 0 FAIL,122 files,358.898 seconds including WSL setup/build. Source SHA-256 `5f55f173b76bb382aab4ae07ede1ba37dbdd8f154028448671296c344d770e32`; logs `_testenv/wsl-1791866471416-28520/`.
+- Sequential `npm run test:windows`: exit0,18 PASS; build10.282 seconds, test4.064 seconds. The existing dependency preparation was reused.
+- Final targeted native-lifecycle/V2 regressions:129 PASS, including59 direct-execution cases. These are Sortie-dogs tests, not repeated product checks.
+- Earlier targeted failures and their diagnosed corrections remain in the local receipt. The first full invocation was interrupted by the outer120-second shell limit. A second background invocation disappeared without a terminal receipt in the same window as a native Location reload; its exact termination cause is not established. No surviving controller/runner was found. Neither incomplete invocation is counted as PASS. The final changed-source validation used one long-lived foreground invocation, no Location reload, and the unchanged dependency cache.
+
+Documentation-only validation/receipt additions do not change the tested runtime, tests, fixed archive or original-unit recovery. No SWE-Bench campaign, release, publish or global application is performed here.
