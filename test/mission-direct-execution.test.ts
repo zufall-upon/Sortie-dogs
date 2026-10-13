@@ -85,9 +85,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
     };
     await prompt("root", "Make result.txt fixed and run node check.mjs; independent review required.");
     const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validated fixed result"] }, { sessionID: "root" }));
+    let coordinatorOwner: Record<string, unknown> | undefined;
     if (actor === "coordinator") {
       const task = { args: structuredClone(started.task) };
       await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, task);
+      coordinatorOwner = hooks.backgroundOwner!("coordinator-call");
       await prompt(actor, task.args.prompt);
     }
     const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
@@ -250,6 +252,19 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
         "repeated submission does not reserve or settle another unit");
       assert.equal(await readFile(join(directory, resultPath), "utf8"), "broken\n");
       assert.deepEqual(aborted, [], "failure disposition does not interrupt its controller or dispatch a replacement");
+      if (coordinatorOwner) {
+        hooks.backgroundOwner!("coordinator-call", coordinatorOwner);
+        const returned = { output: summary, metadata: { sessionID: actor, status: "succeeded" } };
+        await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, returned);
+        const packet = JSON.parse(returned.output);
+        assert.equal(packet.coordinator_report, summary);
+        assert.equal(packet.status, "awaiting-decision");
+        assert.deepEqual(packet.submission, { status: mode, summary });
+        assert.equal(packet.execution_summary.accepted, false, "successful native delivery does not accept incomplete work");
+        assert.deepEqual(packet.units[0].failure, { outcome: "fail", exit_code: 4 });
+        assert.deepEqual(packet.units[0].evidence, []);
+        assert.equal((await readRun()).units[0]!.status, "failed");
+      }
       return;
     }
     await write("fixed\n");
@@ -495,6 +510,31 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
           assert.deepEqual(fullSubmitted.units[0].evidence, done.units[0]!.evidence, "explicit full status retains complete evidence");
           assert.deepEqual(fullSubmitted.acceptance_summary, submitted.acceptance_summary, "submission retains the full original acceptance summary");
         }
+      }
+      if (mode === "large-source") {
+        hooks.backgroundOwner!("coordinator-call", coordinatorOwner!);
+        const beforeReturn = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const returned = { output: "Ready for root acceptance; concrete review gaps retained.",
+          metadata: { sessionID: actor, status: "succeeded" } };
+        await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, returned);
+        const packet = JSON.parse(returned.output);
+        const returnBytes = Buffer.byteLength(returned.output);
+        t.diagnostic(JSON.stringify({ coordinator_return_bytes: returnBytes }));
+        assert.ok(returnBytes < 16_000, "native completion must not inject the full protected snapshot into the root model context");
+        assert.equal(packet.coordinator_report, "Ready for root acceptance; concrete review gaps retained.");
+        assert.equal(packet.phase, "submitted");
+        assert.equal(packet.status, "awaiting-acceptance");
+        assert.equal(packet.execution_summary.accepted, false);
+        assert.deepEqual(packet.requirements, beforeReturn.requirements);
+        assert.deepEqual(packet.submission, beforeReturn.submission);
+        assert.deepEqual(packet.review, missionPacket(beforeReturn, done).review);
+        assert.deepEqual(packet.units[0].evidence, finished.units[0].evidence, "return keeps exact measured command, exit, coverage and identities");
+        assert.deepEqual(packet.units[0].evidence_details_ref, finished.units[0].evidence_details_ref);
+        assert.deepEqual((await readRun()).units[0]!.evidence, done.units[0]!.evidence, "native completion projection never changes saved proof");
+        const afterReturn = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        assert.deepEqual(afterReturn, { ...beforeReturn, dispatchOpen: false }, "only the existing Coordinator dispatch is closed");
+        const fullReturn = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+        assert.deepEqual(fullReturn.units[0].evidence, done.units[0]!.evidence, "explicit full status still exposes authoritative snapshot details");
       }
     }
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));

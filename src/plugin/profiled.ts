@@ -3595,8 +3595,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             taskOwners.delete(request.callID!); return;
           }
           const mission = await missions.update(ownership.root, state => { if (state.callID === request.callID) state.dispatchOpen = false; });
-          output.output = JSON.stringify({ ...missionPacket(mission, await operators.read(ownership.root)),
-            coordinator_report: output.output, budget: await control!.currentBudget(ownership.root) });
+          const run = await operators.read(ownership.root);
+          // V2 projects this result into the resumed root request without native tool truncation.
+          // Reuse measured evidence and durable detail references, not the full snapshot recipe.
+          output.output = JSON.stringify(compactMissionEvidence({ ...missionPacket(mission, run),
+            coordinator_report: output.output, budget: await control!.currentBudget(ownership.root) }, run, ownership.root));
           taskOwners.delete(request.callID!);
           return;
         }
