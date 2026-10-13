@@ -244,7 +244,7 @@ test("Fast-lane Reviewer FINDINGS use the SAME author correction and native self
     await review();
     const findings = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal(findings.review.verdict, "findings");
-    assert.match(findings.next_action, /repair_review.*SAME original Reviewer/u);
+    assert.match(findings.next_action, /repair_review.*plan_units/u);
     await assert.rejects(hooks.tool!.sortie_v010_retry_mission_unit.execute({ unit_id: "unit-1" }, { sessionID: "root" }),
       /operator-mission-normal-remediation-unavailable/u);
     await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);

@@ -1465,7 +1465,7 @@ async function selfRecheck(f: Awaited<ReturnType<typeof fixture>>, residual: unk
   return { dispatch, text, candidate };
 }
 
-test("native residual concrete Major alone triggers second Review; newer findings return to original correction owner", async () => {
+test("native residual concrete Major requires independent Review; new findings reuse their reporting Reviewer by default", async () => {
   const f = await fixture();
   try {
     await initial(f); await correctionReady(f);
@@ -1483,7 +1483,7 @@ test("native residual concrete Major alone triggers second Review; newer finding
     await f.finish(dispatch, "final", "FINDINGS\nMedium: ready output has a newly detected concrete formatting defect; fix result.txt.");
     const newCorrection = await f.tool("root", "repair_review");
     assert.equal(newCorrection.status, "correction-required", "new generation is not the old settled idempotent Task");
-    assert.equal(newCorrection.task.task_id, "author", "second-side finding returns to the ORIGINAL correction owner, not second Reviewer");
+    assert.equal(newCorrection.task.task_id, "final", "new reporting context is reusable, not permanently bound to an old author");
     assert.equal((await f.missions.required("root")).corrections!.length, 2);
   } finally { await f.dispose(); }
 });
@@ -1701,12 +1701,8 @@ for (const mode of ["validation", "native"] as const) test(`terminal ${mode} cor
     const failedRun = await f.run(), failedMission = await f.missions.required("root"), failedLedger = await f.ledger();
     assert.equal(failedRun.phase, "awaiting-decision");
     assert.equal(failedMission.corrections![0]!.status, "failed");
-    assert.match((await f.tool("root", "operator_status")).next_action, /repair_review.*SAME original Reviewer/);
+    assert.match((await f.tool("root", "operator_status")).next_action, /repair_review.*plan_units/);
     await assert.rejects(f.tool("root", "complete_mission"), /correction-validation|required|incomplete/);
-    const raw = missionPlan(failedMission, [{ title: "Wrong fresh repair", objective: "Fix own regression", write: ["result.txt"], validation: ["node required-test.mjs", "node check.mjs"] }], f.directory);
-    await assert.rejects(new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE).replanMission("root", failedRun.runID, raw), /correction-owner-continuation-required/);
-    const replan = await f.tool("root", "plan_units", { units: raw.units, reason: "Fix validation failure" });
-    assert.equal(replan.status, "correction-owner-continuation-required"); assert.equal(replan.task, undefined);
     await f.start();
     const nativeOutcome = f.agents.author!.outcome;
     delete f.agents.author!.outcome;
@@ -1741,6 +1737,125 @@ for (const mode of ["validation", "native"] as const) test(`terminal ${mode} cor
     assert.equal((await f.missions.required("root")).corrections!.length, 2);
     const self = await selfRecheck(f); await f.finish(self.dispatch, "author", self.text);
     assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+  } finally { await f.dispose(); }
+});
+
+for (const disposition of ["ready", "failed", "unresolved"] as const) for (const executor of ["self", "worker"] as const) {
+  test(`terminal correction history permits ${executor} continuation with ${disposition} findings/evidence retained`, async () => {
+    const f = await fixture();
+    try {
+      await initial(f);
+      const prepared = await f.tool("root", "repair_review");
+      const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+      await f.edit("author", "ready"); await f.shell("author", "node check.mjs");
+      if (disposition === "failed") {
+        f.terminal("author", "Native correction failed", true);
+        await f.after(dispatch, "Native correction failed", { sessionID: "author", status: "failed" }, "error");
+      } else await f.finish(dispatch, "author", disposition === "unresolved"
+        ? inlineReport(["Medium: output still needs the remaining requested behavior."]) : inlineReport());
+      const oldRun = await f.run(), oldMission = await f.missions.required("root"), oldLedger = await f.ledger();
+      await f.start(); // Durable/cold recovery must not recreate a historical owner lock.
+      const next = await f.tool("root", "plan_units", { executor, execution: "", reason: "Continue remaining authorized implementation, retaining all findings",
+        units: [{ title: "Remaining implementation", objective: "Finish the remaining output behavior and retained findings, not administrative rechecking",
+          read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      const run = await f.run(), mission = await f.missions.required("root");
+      assert.notEqual(run.runID, oldRun.runID);
+      assert.equal(mission.id, oldMission.id);
+      assert.deepEqual(mission.corrections, oldMission.corrections);
+      assert.deepEqual(mission.sourceAuthors, oldMission.sourceAuthors);
+      assert.deepEqual(run.acceptance, oldRun.acceptance);
+      assert.equal(mission.phase, "running"); assert.equal(mission.submission, null);
+      const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8")).ext["sortie-dogs/mission-context"];
+      assert.deepEqual(handoff.continuity.corrections[0].findings, oldMission.corrections![0]!.findings);
+      assert.deepEqual(handoff.continuity.corrections[0].selfRecheck, oldMission.corrections![0]!.selfRecheck);
+      assert.equal(handoff.retained_validation[0].correction_checks[0].child_session_id, "author");
+      assert.deepEqual(handoff.retained_validation[0].correction_checks[0].command, ["node check.mjs"]);
+      assert.equal(run.units[0]!.reviewerCorrection, undefined, "historical authorship is not a new writer lease");
+      const archived = JSON.parse(await readFile(join(f.directory, ".sortie-dogs-v010/operators",
+        `${createHash("sha256").update("root").digest("hex")}.json.${oldRun.runID}.${oldRun.sequence}.archive`), "utf8"));
+      assert.deepEqual(archived, oldRun, "old native checks, authors and failed evidence survive unmodified");
+      assert.equal(handoff.retained_validation[0].correction_checks[0].details_ref.path,
+        new OperatorRuntime(f.directory, V010_RUNTIME_PROFILE).replanArchivePath(oldRun));
+      assert.equal(JSON.parse(await readFile(handoff.retained_validation[0].correction_checks[0].details_ref.path, "utf8")).runID, oldRun.runID);
+      let worker: ObjectValue | undefined;
+      if (executor === "worker") {
+        assert(next.task); worker = await f.before("root", "subagent", f.task(next.task));
+        await f.prompt("worker", worker.input.prompt); await f.bind("worker");
+      } else assert.equal(next.status, "direct-unit-running");
+      await f.edit(executor === "self" ? "root" : "worker", "ready remaining behavior");
+      await f.shell(executor === "self" ? "root" : "worker", "node check.mjs");
+      if (worker) await f.finish(worker, "worker", "Remaining implementation completed; retained findings compared");
+      else await f.tool("root", "finish_direct_unit");
+      const ledger = await f.ledger();
+      assert.equal(ledger.state.budget!.max_units, oldLedger.state.budget!.max_units);
+      assert.equal(ledger.state.consumed_units, oldLedger.state.consumed_units + 1);
+      assert.equal(ledger.state.outstanding_reservations.length, 0);
+      assert.equal((await f.missions.required("root")).corrections![0]!.status, oldMission.corrections![0]!.status);
+      assert.equal(missionReviewIndependent(await f.missions.required("root"), "author"), false);
+      const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"], reviewer_session_id: "final", mode: "independent" });
+      assert.equal(review.task.task_id, "final");
+      assert.match((await f.missions.required("root")).review!.task!.prompt, /retained_findings_and_authors:.*Medium/);
+      await assert.rejects(f.tool("root", "complete_mission"), /mission-review/);
+    } finally { await f.dispose(); }
+  });
+}
+
+test("failed correction can hand off to another existing Reviewer without dropping findings, model or spend", async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "bad-required"); await f.shell("author", "node check.mjs");
+    f.terminal("author", "Failed correction", true);
+    await f.after(dispatch, "Failed correction", { sessionID: "author", status: "failed" }, "error");
+    f.agents.final!.outcome = "succeeded";
+    f.agents.final!.model = { providerID: "openai", id: "gpt-6.1-sol", variant: "high" };
+    f.history.final = [{ id: "existing-review-context", type: "user", text: "Retain this existing Reviewer and its selected model.", time: { created: Date.now() - 10_000 } }];
+    const old = await f.missions.required("root"), oldLedger = await f.ledger();
+    const handoff = await f.tool("root", "repair_review", { author_session_id: "final" });
+    assert.equal(handoff.task.task_id, "final");
+    const resumed = await f.before("root", "subagent", f.task(handoff.task));
+    await f.prompt("final", resumed.input.prompt); await f.bind("final");
+    await f.edit("final", "ready"); await f.shell("final", "node check.mjs");
+    const beforeFinish = await f.ledger();
+    assert.equal((await f.tool("final", "finish_direct_unit")).status, "correction-validated", "native resumed author must not hit mission-controller-required");
+    assert.equal((await f.run()).phase, "running", "advisory finish is not the native Task terminal");
+    assert.equal((await f.ledger()).state.consumed_units, beforeFinish.state.consumed_units);
+    await f.finish(resumed, "final", inlineReport());
+    const mission = await f.missions.required("root"), ledger = await f.ledger();
+    assert.equal(mission.corrections![1]!.author, "final");
+    assert.deepEqual(mission.corrections![0], old.corrections![0]);
+    assert.equal(mission.corrections![1]!.findings, old.corrections![0]!.findings);
+    assert.equal(mission.review!.mode, "self-recheck"); assert.equal(mission.review!.verdict, "self-rechecked");
+    assert.equal(missionReviewIndependent(mission, "author"), false);
+    assert.equal(missionReviewIndependent(mission, "final"), false);
+    assert.equal(ledger.state.consumed_units, oldLedger.state.consumed_units + 1);
+    assert.equal(ledger.state.outstanding_reservations.length, 0);
+    assert.deepEqual(f.agents.final!.model, { providerID: "openai", id: "gpt-6.1-sol", variant: "high" });
+  } finally { await f.dispose(); }
+});
+
+test("an independent Reviewer remains selectable after a completed self-recheck without mandatory repeat checks", async () => {
+  const f = await fixture();
+  try {
+    await initial(f);
+    const prepared = await f.tool("root", "repair_review"), dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    await f.edit("author", "ready"); await f.shell("author", "node check.mjs");
+    await f.finish(dispatch, "author", inlineReport());
+    const run = await f.run(), ledger = await f.ledger();
+    await assert.rejects(f.tool("root", "review_mission", { risk_tags: ["public-logic"], mode: "independent", reviewer_session_id: "author" }), /author-mode-mismatch/);
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"], mode: "independent", reviewer_session_id: "final" });
+    assert.equal(review.status, "review-required"); assert.equal(review.task.task_id, "final");
+    const final = await f.before("root", "subagent", f.task(review.task));
+    await f.prompt("final", final.input.prompt);
+    await f.finish(final, "final", "PASS\nCompared retained findings and original behavior using the existing actual checks.");
+    assert.equal((await f.missions.required("root")).review!.mode, "independent");
+    assert.equal(missionReviewIndependent(await f.missions.required("root"), "final"), true);
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, run.units[0]!.reviewerCorrection!.checks);
+    assert.equal((await f.ledger()).state.consumed_units, ledger.state.consumed_units);
   } finally { await f.dispose(); }
 });
 
@@ -2547,7 +2662,7 @@ for (const mode of ["cancel", "agent-change", "native-launch-error", "background
       const prior = [{ action: "webfetch", resource: "*", effect: "deny" }];
       f.agents.author!.permissions = prior;
       const prepared = await f.tool("root", "repair_review");
-      await assert.rejects(f.before("root", "subagent", { ...f.task(prepared.task), model: "openai/gpt-6-astra" }), /operator-/);
+      await assert.rejects(f.before("root", "subagent", { ...f.task(prepared.task), prompt: "Wrong task identity" }), /operator-/);
       assert.equal((await f.tool("root", "operator_status")).budget.reserved_units, 0);
       if (mode === "permission-failed") {
         f.projection.failGrant = true;

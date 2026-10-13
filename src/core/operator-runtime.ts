@@ -490,6 +490,10 @@ export class OperatorRuntime {
   }
   /** Exact persisted source for read-only status projections. */
   statePath(root: string): string { return this.file(root); }
+  /** Stable detail source for a settled run replaced by Mission replanning. */
+  replanArchivePath(state: OperatorState): string {
+    return `${this.file(state.rootSessionID)}.${state.runID}.${state.sequence}.archive`;
+  }
   /** Read-only lineage projection. Never imports archived evidence into current acceptance. */
   async acceptanceHistory(state: OperatorState, missionRunIDs: readonly string[]): Promise<{
     status: "available" | "unavailable"; runs: { path: string; state: OperatorState }[]; reason?: string;
@@ -1032,14 +1036,12 @@ export class OperatorRuntime {
       if (!previous || previous.runID !== mission.replaceRunID || ["cancelled", "completed"].includes(previous.phase)) {
         throw new Error("mission-replan-run-mismatch");
       }
-      if (previous.units.some(unit => unit.reviewerCorrection) && !mission.reviewerCorrection) {
-        throw new Error("mission-review-correction-owner-continuation-required");
-      }
-      if (previous.units.some(unit => unit.status === "running") || (previous.gitLifecycle !== null && !mission.reviewerCorrection)) throw new Error("mission-replan-worker-still-active");
+      // Completed correction/Git metadata is history, not a live writer lease.
+      // The plugin reconciles actual native executions before replacing this run.
+      if (previous.units.some(unit => unit.status === "running")) throw new Error("mission-replan-worker-still-active");
       const failedContinuation = previous.phase === "awaiting-decision" && previous.units.every(unit =>
-        unit.status === "failed" && unit.reviewerCorrection?.author === mission.reviewerCorrection?.author);
+        unit.status === "failed" && unit.reviewerCorrection);
       if (mission.reviewerCorrection && ((!failedContinuation && (previous.phase !== "awaiting-acceptance" || previous.units.some(unit => unit.status !== "succeeded"))) ||
-          previous.units.some(unit => unit.reviewerCorrection && unit.reviewerCorrection.author !== mission.reviewerCorrection!.author) ||
           plan.units.length !== 1 || plan.acceptance.length !== previous.acceptance.length ||
           previous.acceptance.some((text, i) => text !== plan.acceptance[i]) ||
           JSON.stringify(plan.acceptance_proof) !== JSON.stringify(previous.acceptanceProof) ||
@@ -1308,10 +1310,11 @@ export class OperatorRuntime {
         created.push(control.path);
         try { await handle.writeFile(control.content); } finally { await handle.close(); }
       }
-      if ((superseding || replanning) && previous) {
+      if ((superseding || replanning || previous?.phase === "completed") && previous) {
         // A crash before the state switch may leave a checkpoint while the old run later advances.
         // Sequence-qualified replan snapshots keep that history without blocking a subsequent correction.
-        const archive = `${this.file(root)}.${previous.runID}${replanning ? `.${previous.sequence}` : ""}.archive`;
+        const archive = replanning || previous.phase === "completed" ? this.replanArchivePath(previous)
+          : `${this.file(root)}.${previous.runID}.archive`;
         try {
           const handle = await open(archive, "wx", 0o600);
           created.push(archive);
@@ -1439,7 +1442,6 @@ export class OperatorRuntime {
       return args.task_id === expected.task_id && args.subagent_type === expected.subagent_type &&
         args.description === expected.description && args.prompt === expected.prompt;
     }
-    if (unit.reviewerCorrection && (args.model !== undefined || args.variant !== undefined)) return false;
     if (unit.reviewerCorrection ? args.task_id !== unit.reviewerCorrection.author : args.task_id !== undefined && args.task_id !== "") return false;
     if (args.subagent_type !== unit.task.subagent_type || args.description !== unit.task.description) return false;
     return args.prompt === unit.task.prompt || args.prompt === this.workerTask(state, unit).prompt;

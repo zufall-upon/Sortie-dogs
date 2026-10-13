@@ -55,7 +55,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     for (const name of ['sortie_v010_start_mission', 'sortie_v010_plan_units']) {
       assert.match(hooks.tool![name]!.description, /meaningful formal checks?/u);
       assert.match(hooks.tool![name]!.description, /do not require \.git\/\*\* scope/u);
-      assert.match(hooks.tool![name]!.description, /requested commit.*before independent Review/u);
+      assert.match(hooks.tool![name]!.description, /Preserve explicit user ordering and host Git lifecycle/u);
       const args = hooks.tool![name]!.args as Record<string, unknown>;
       const schema = (name === 'sortie_v010_start_mission' ? args.unit
         : (args.units as { items: unknown }).items) as { properties: { validation: { description: string } } };
@@ -265,7 +265,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     if (verdict === "FINDINGS") {
       await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review-required-or-stale/);
       assert.equal(reviewed.task, undefined, "FINDINGS do not dispatch a Coordinator/fresh Worker repair workaround");
-      assert.match(reviewed.next_action, /Fast-lane: known Major\/Medium findings.*repair_review.*SAME original Reviewer's/);
+      assert.match(reviewed.next_action, /Fast-lane: known Major\/Medium findings.*repair_review.*plan_units/);
       assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n", "Fast work survives escalation");
       const correction = JSON.parse(await hooks.tool!.sortie_v010_repair_review.execute({}, { sessionID: "root" }));
       assert.ok(correction.task);

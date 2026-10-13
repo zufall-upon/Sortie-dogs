@@ -389,7 +389,11 @@ export class OperatorMissionRuntime {
         attempts: (state.attempts ?? []).map(({ runID, unitID, status, failure, resultClass, childSessionID }) =>
           ({ run_id: runID, unit_id: unitID, status, failure, result_class: resultClass, session_id: childSessionID })),
         execution: state.execution,
-        guidance: "Current original_requests/requirements govern; older plans remain historical. Continue from known decisions, environment, completed work and failures. Read snapshot JSON entries by message/call IDs only for a relevant gap. Recheck mutable facts when needed or conflicting; do not repeat unchanged setup/investigation merely because ownership changed. Historical results are not fresh formal validation or new authority." } };
+        source_authors: state.sourceAuthors ?? [],
+        corrections: (state.corrections ?? []).map(({ initialPrompt: _prompt, inlineReview: _inline, ...correction }) => correction),
+        retained_review: state.review ? { run_id: state.review.runID, verdict: state.review.verdict,
+          mode: state.review.mode, author: state.review.child, result: state.review.result, self_recheck: state.review.selfRecheck } : null,
+        guidance: "Current original_requests/requirements govern; older plans remain historical. Continue from known decisions, environment, completed work, retained findings and failures. A new plan or author does not resolve findings or turn self-recheck into independent approval. Read snapshot JSON entries by message/call IDs only for a relevant gap. Recheck mutable facts when needed or conflicting; do not repeat unchanged setup/investigation/checks merely because ownership changed. Successful evidence remains with its actual author/call and input bindings; historical results are not new authority." } };
   }
   private async load<T>(file: string): Promise<T | undefined> {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
@@ -902,14 +906,14 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
       : run?.phase === "awaiting-acceptance" && mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !reviewAccepted
         ? mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.unresolvedFindings.length
-          ? "Known Major/Medium findings remain after self-recheck. Call repair_review for the SAME original correction owner; do not dispatch another Reviewer or accept unresolved Medium. Retain original requirements and cumulative spend."
+          ? "Known Major/Medium findings remain after self-recheck. Correct them with repair_review (reuse the author by default, or select an available Reviewer), or plan_units for Worker/direct execution. Retain findings, original requirements and cumulative spend; unresolved Medium is not acceptance."
           : mission.corrections.find(item => item.runID === run.runID)?.selfRecheck?.residualMajor
             ? "A concrete reachable Major risk remains after native author self-recheck. Call review_mission for a DIFFERENT Reviewer of the correction, retained findings and relevant impact; dispatch the exact returned Task if not already active. No fresh Worker or unchanged validation is required."
-            : "Correction ready; call review_mission for the SAME native author to explicitly self-recheck the retained findings, relevant impact and original requirements. Only a concrete reachable Major risk remaining after self-recheck requires a DIFFERENT Reviewer. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
+            : "Correction ready; reuse the native author for explicit self-recheck or select an independent Reviewer with review_mission when useful. Remaining authorized implementation may proceed with plan_units without acceptance. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
       : run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")
-        ? "Correction validation or native execution failed. Call repair_review for a new admission in the SAME original Reviewer's native session; fix its own regression, rerun inherited checks and retain the commit/clean boundary and cumulative spend. Do not use ordinary retry, Rescue or a fresh Worker replan. Failure is never acceptance."
+        ? "Correction validation or native execution failed. Reuse its context with repair_review, select another available Reviewer, or plan_units for Worker/direct correction. Retain findings, affected checks, requested delivery and cumulative spend. Failure is never acceptance."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
@@ -920,8 +924,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState): Re
       : run?.phase === "awaiting-acceptance" && !operationComplete
         ? `Requested operation is ${operationStatus}. Continue the actual operation or report its blocker; auxiliary checks and review disposition cannot complete it.`
       : run?.phase === "awaiting-acceptance" ? (reviewAccepted
-          ? "Coordinator: review permits submission. Retain advisory review notes; do not repeat passed validation or review for evidence formatting. Operator performs final acceptance against the original requirements."
-          : "Coordinator: correct known Major/Medium findings, then obtain explicit native author self-recheck (different Reviewer only for residual concrete Major risk), or initial independent review, then submit_mission. Operator compares all requirements with source/evidence before complete_mission.")
+          ? "Coordinator: review permits submission, not completion of remaining implementation. Continue authorized remaining work with plan_units, or submit when the original requirements are met. Retain review notes; do not repeat passed validation or review for evidence formatting. Operator final acceptance remains separate."
+          : "Coordinator: correct known Major/Medium findings, then obtain native author self-recheck or useful independent review (required for concrete residual Major risk). Remaining authorized implementation can proceed without submission/acceptance. Operator compares all requirements with source/evidence before complete_mission.")
       : "Coordinator: continue the next useful unit within original requirements. Return only a completion candidate, user-only decision, or scope/budget extension." };
 }
 

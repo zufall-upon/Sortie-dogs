@@ -493,7 +493,9 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(primary, /Operator fixes ordinary path, environment, registration and Review-preparation defects directly when authorized/);
   assert.match(primary, /otherwise resume the same author with concrete feedback, not a user turn/);
   assert.match(primary, /Resume the same work after\nthe answer/);
-  assert.match(primary, /Reviewer FINDINGS\s+instead use sortie_v010_repair_review to recover the SAME native Reviewer\/context only if it/u);
+  assert.match(primary, /Reviewer FINDINGS\s+can reuse sortie_v010_repair_review to recover useful native Reviewer\/context if it/u);
+  assert.match(primary, /another available Reviewer or plan_units Worker\/direct\s+correction is also legitimate/u);
+  assert.match(primary, /Completed correction history never blocks plan_units for remaining authorized implementation/u);
   assert.match(primary, /do not request an interim findings return or dispatch a routine second correction Task/u);
   assert.match(primary, /Only concrete reachable Major risk remaining\s+after self-recheck requires a DIFFERENT Reviewer/u);
   assert.match(primary, /cumulative budget increase/);
