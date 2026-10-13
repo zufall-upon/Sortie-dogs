@@ -157,9 +157,70 @@ At the 2026-10-13 00:58:35 UTC evidence snapshot:
   observation subtotal USD25.740644 gives USD29.297664, not an all-history
   product/Mission cost.
 
-The candidate remains loaded only in the original Location while its execution is
-active; npm-global and both config-local released packages are unchanged. Do not
-reload or retire an active original execution merely to finalize the PR. Its
-remaining result and any actual blocker can be collected without resending the
-accepted prompt, resetting budget or repeating passed checks. Release/global
-application and subsequent audit themes remain separate.
+The intermediate snapshot above is retained as chronology, not the final result.
+
+### Final original-conversation outcome
+
+- Same original parent/Mission and Sol/xhigh implementation continued through
+  eight source files, actual limited validation and the requested result-and-hold
+  checkpoint. Run `operator-beb1dde4-cb32-4a2b-835c-29a302824857` is
+  `awaiting-acceptance`, its one direct unit is `succeeded`; the Mission remains
+  `running`, not accepted/completed.
+- Actual declared build: exit0, 47 build actions. Isolated Godot check-only parse:
+  exit0. Focused CTest: exit0, 2 PASS / 0 FAIL, reported2.70s. Native check-record
+  envelopes were8.693s /0.714s /3.178s respectively, not separate benchmark
+  measurements. These new-candidate checks ran once; old unchanged checks were
+  not repeated for actor handoff or receipt formatting.
+- The retained original Reviewer read the new development difference in the same
+  conversation, strictly read-only. Native completion retained two concrete
+  Medium findings: the pending summary adapter hides compact confirmation
+  content; shared execution code references a Windows-only consumer and risks
+  the existing Linux link. Linux link was not executed, so this is a source
+  finding, not a measured Linux failure or PASS. Parse success does not prove the
+  compact-display behavior.
+- One attempt to label the existing source author `independent` was rejected as
+  `mission-review-selected-author-mode-mismatch`; the parent used read-only
+  `self-recheck` in that same conversation instead, without a new Session.
+  The host's final verdict is `findings`, not independent PASS or accepted
+  `self-rechecked`. The native text contains a self-recheck section after
+  progress prose; it is not silently promoted to a certified disposition. No
+  repeat Review was dispatched merely to repair that presentation.
+- Final parent terminal records the authorized hold: implementation differences,
+  checks and unresolved findings appended to the same result, original body
+  retained exactly, all23 cards/other22 items/statuses unchanged,04 still
+  `In progress`. The two Medium findings were not fixed beyond the explicit
+  read-only/remaining-budget boundary. Native activation producer/live hook and
+  actual product delivery remain incomplete/unverified. No actual04 Start,
+  product paid request, product Session, product package launch, product
+  acceptance, Go, publication or product commit/push occurred.
+- Final cumulative budget: max38 / consumed38 / reserved0 / remaining0. The one
+  remaining implementation unit did useful source work and validation, not a
+  correction-owner recovery loop. Further product fixes require the applicable
+  explicit work/budget authorization; no allowance was reset or extended.
+- Accepted prompt to final native parent idle:2,964.347s, about49m24s. Observer
+  completion:2,964.706s. Parent44 observed assistant requests: priced portion
+  USD4.171894 plus one request with missing native token usage. Retained
+  Reviewer11 requests: USD1.5751462. Requested Astra14 requests: USD1.917962.
+  Current observation subtotal: USD7.6650022 **plus the one unpriced request**.
+  Adding the previous bounded subtotal gives USD33.4056462 plus that unknown,
+  excluding primary coding chat and historical product work. This is not final
+  billing or a controlled performance comparison; execution path/task differ
+  from the prior result-reporting observation.
+- The first observer's local30-minute wait cap expired while source work was
+  active. A new passive wait observed the same accepted invocation, without
+  resending its prompt, restarting execution, or consuming another unit. The
+  observer error is not a native Task failure.
+
+After both original sessions became inactive, only the generated local wrapper
+and candidate-disable configuration were retired. Original configuration bytes,
+Mission/run/budget, Git HEAD and complete dirty differences match the final
+pre-retirement snapshot exactly. Released npm-global and both config-local
+packages remain unchanged. Fixed package/hash, original messages, native checks,
+final costs and cleanup comparison remain in `_testenv/reviewer-handoff/`.
+
+PR215's initial head passed both GitHub `npm test` and `npm run test:windows`
+checks. The final follow-up changes documentation only; runtime/tests and the
+fixed tested candidate are unchanged. Release/global application and subsequent
+audit themes remain separate. Product findings do not weaken this repair's
+verification scope or become accepted merely because the continuation lock was
+removed.
