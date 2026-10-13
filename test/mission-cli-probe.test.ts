@@ -490,3 +490,47 @@ for (const phase of ["cleanup-failure", "cleanup-failure-budget", "cleanup-failu
     }
   });
 }
+
+for (const phase of ["closed", "closed-stubborn", "signalled", "active"] as const) {
+  test(`owned process group cleanup stops its ${phase} parent's remaining writer before returning`,
+    { skip: process.platform !== "linux", timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-owned-group-"));
+    const child = spawn(process.execPath, [resolve("test/fixtures/owned-process-group.mjs"), directory, phase],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", bytes => { stdout += bytes; }); child.stderr.on("data", bytes => { stderr += bytes; });
+    const closed = new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+      child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+    });
+    try {
+      const ready = await new Promise<{ writerPID: number; file: string }>((done, reject) => {
+        child.stdout.on("data", () => { if (stdout.includes("\n")) done(JSON.parse(stdout)); });
+        child.once("error", reject);
+        child.once("close", () => { if (!stdout.includes("\n")) reject(Error(`Root closed before writer readiness: ${stderr}`)); });
+      });
+      const original = phase === "active" ? null : await closed;
+      assert(ready.writerPID);
+      await stopProcessGroup(child);
+      const snapshot = await readFile(ready.file, "utf8");
+      await new Promise(done => setTimeout(done, 100));
+      assert.equal(await readFile(ready.file, "utf8"), snapshot, "no descendant writes after the cleanup barrier");
+      const exit = await closed;
+      assert.deepEqual(exit, original ?? { code: null, signal: "SIGTERM" }, "retain the actual root exit/signal");
+      const absentOrZombie = await readFile(`/proc/${ready.writerPID}/stat`, "utf8").then(value => {
+        const state = value.slice(value.lastIndexOf(")") + 2).split(" ")[0];
+        return state === "Z" || state === "X";
+      }, error => { if (error.code === "ENOENT") return true; throw error; });
+      assert.equal(absentOrZombie, true, "a writer is stopped, not merely paused between writes");
+      const started = Date.now();
+      await stopProcessGroup(child);
+      assert(Date.now() - started < 1_000, "already-stopped groups do not wait for a second close event or kill timeout");
+    } finally {
+      // Only the exact detached group created by this fixture; also clean baseline failures.
+      try { process.kill(-child.pid!, "SIGKILL"); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      await closed;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
