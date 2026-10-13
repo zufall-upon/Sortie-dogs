@@ -7,20 +7,22 @@ import vm from 'node:vm';
 
 // Actual probe source, synthetic installation/git/startup; no native CLI/model.
 const [directory, phase] = process.argv.slice(2);
+const hook = phase.startsWith('server-hook-');
 const run = join(directory, 'smoke-1'), project = join(run, 'project');
 await fs.mkdir(project, { recursive: true });
 const tgz = join(directory, 'seeded-package.tgz'); await fs.writeFile(tgz, 'fixture-only-package-bytes\n');
 const budgetFile = join(directory, 'projected-budget.json');
 await fs.writeFile(budgetFile, JSON.stringify({ prior_priced_usd: 1.7674084, unresolved_prior_reserve_usd: 1,
   limit_usd: 5, new_probe_total_limit_usd: 2, per_probe_limit_usd: 2, probes: [] }));
-const failure = Object.assign(Error('injected-owned-probe-server-start'), { code: 'EIO' });
-if (phase.includes('cleanup')) failure.serverStartContext = {
+const failure = Object.assign(Error(hook ? 'injected-owned-probe-server-hook' : 'injected-owned-probe-server-start'), { code: 'EIO' });
+const cleanupFailure = Object.assign(Error('injected-owned-probe-hook-cleanup'), { code: 'EACCES' });
+if (!hook && phase.includes('cleanup')) failure.serverStartContext = {
   serverPID: 719000001, stateDirectory: join(project, '.opencode/v2-service-state'), cleanup_complete: false,
   cleanupErrors: [{ resource: 'server', name: 'Error', code: 'EACCES', message: 'injected-owned-start-cleanup' }],
   nextAction: 'Retry teardown only for the recorded owned server PID/process group; retain unresolved usage holds. Do not automatically replay the consumed startup/task or restart the shared host.' };
 const env = { OPENCODE_DB: join(run, 'data/opencode/opencode.db'), XDG_DATA_HOME: join(run, 'data') };
 const source = resolve('scripts/mission-cli-probe.mjs');
-let installations = 0, starts = 0, cliStarts = 0, writes = 0;
+let installations = 0, starts = 0, cliStarts = 0, writes = 0, hooks = 0, stops = 0;
 const commands = [];
 const context = vm.createContext({ process: { argv: [], env: {}, cwd: () => project, execPath: process.execPath },
   setTimeout, clearTimeout, setInterval, clearInterval });
@@ -31,7 +33,13 @@ await script.link(async specifier => {
     installedFixture: async () => { installations++; return { project, run, env,
       pkg: { version: '0.13.19' }, runtimeMarker: 'fixture-only-projection', runtime: { stateDirectory: '.sortie-dogs-v010' } }; },
     command: async (exe, args) => { commands.push({ exe, args }); return args[0] === 'rev-parse' ? 'b'.repeat(40) + '\n' : ''; },
-    startV2ReleaseServer: async () => { starts++; throw failure; },
+    startV2ReleaseServer: async () => {
+      starts++;
+      if (!hook) throw failure;
+      return { url: 'http://owned-process-only.invalid', env, stop: async () => {
+        stops++; if (phase.includes('cleanup')) throw cleanupFailure;
+      } };
+    },
     spawnPromptCLI: () => { cliStarts++; throw Error('must not launch CLI after failed server start'); },
   };
   else if (specifier === 'node:fs/promises') values = { ...fs, writeFile: async (file, ...args) => {
@@ -49,13 +57,14 @@ await script.link(async specifier => {
 await script.evaluate();
 let rejected, result;
 try { await script.namespace.probe(tgz, directory, { mode: 'complete', timeoutSeconds: 30, capUSD: 2,
-  budgetFile, prompt: 'retained immutable fixture task, not a native model request' }); }
+  budgetFile, onServer: hook ? async () => { hooks++; throw failure; } : undefined,
+  prompt: 'retained immutable fixture task, not a native model request' }); }
 catch (error) { rejected = error; }
 assert.equal(rejected, failure);
 try { result = JSON.parse(await fs.readFile(join(run, 'observation.json'), 'utf8')); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
 await fs.writeFile(join(directory, 'fixture-receipt.json'), JSON.stringify({ phase, installations, starts, cliStarts,
-  writes, commands, original_error_identity_retained: rejected === failure,
+  writes, hooks, stops, commands, original_error_identity_retained: rejected === failure,
   rejected: { name: rejected.name, code: rejected.code, message: rejected.message, monitorContext: rejected.monitorContext },
   result, projected_budget: JSON.parse(await fs.readFile(budgetFile, 'utf8')), native_model_requests: 0,
   actual_installation_or_CLI_started: false }, null, 2) + '\n');
