@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { resolve, join } from "node:path";
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
-import { cliCloseStopReason, completeProbeObservations, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
+import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
@@ -83,6 +84,84 @@ test("native CLI exit before reading prompt stdin retains the failed process out
 test("native V2 session directories use forward slashes even for Windows projects", () => {
   assert.deepEqual(observationDirectories("M:\\work\\fixture"), ["M:\\work\\fixture", "M:/work/fixture"]);
   assert.deepEqual(observationDirectories("/home/user/fixture"), ["/home/user/fixture", "/home/user/fixture"]);
+});
+
+test("practical database paths respect explicit, XDG and home settings with server-relative paths", () => {
+  const project = resolve("_testenv", "owning-project"), home = resolve("_testenv", "private-home");
+  assert.equal(missionDatabasePath({ OPENCODE_DB: "owned.db", XDG_DATA_HOME: "ignored" }, project), join(project, "owned.db"));
+  assert.equal(missionDatabasePath({ OPENCODE_DB: join(home, "fixed.db") }, project), join(home, "fixed.db"));
+  assert.equal(missionDatabasePath({ XDG_DATA_HOME: join(home, "data") }, project), join(home, "data/opencode/opencode.db"));
+  assert.equal(missionDatabasePath({ HOME: home }, project), join(home, ".local/share/opencode/opencode.db"));
+  assert.equal(missionDatabasePath({ USERPROFILE: home }, project), join(home, ".local/share/opencode/opencode.db"));
+});
+
+function seedObservationDatabase(path: string, project: string, root: string, since: number, pending = false) {
+  const db = new DatabaseSync(path);
+  db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, agent TEXT, directory TEXT, time_created INTEGER,
+    time_idle INTEGER, idle_outcome TEXT);
+    CREATE TABLE session_message(id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+    CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+  db.prepare("INSERT INTO session_v2 VALUES (?, NULL, 'dog-operator', ?, ?, ?, 'succeeded')")
+    .run(root, project, since, since);
+  if (pending) db.prepare("INSERT INTO session_pending VALUES (?)").run(root);
+  return db;
+}
+
+test("practical database observation honors explicit OPENCODE_DB instead of a foreign host-path root", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-observer-db-"));
+  const home = join(directory, "home"), project = join(directory, "project");
+  const host = join(home, ".local/share/opencode/opencode.db"), owned = join(directory, "owned.db");
+  try {
+    await mkdir(join(home, ".local/share/opencode"), { recursive: true });
+    seedObservationDatabase(host, project, "foreign-root", 100).close();
+    seedObservationDatabase(owned, project, "owned-root", 100).close();
+    const code = `import { observeMissionCLI } from ${JSON.stringify(new URL("../scripts/mission-cli-probe.mjs", import.meta.url).href)};
+      console.log(JSON.stringify(observeMissionCLI(${JSON.stringify(project)})));`;
+    const observed = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", code], {
+      encoding: "utf8", env: { ...process.env, HOME: home, USERPROFILE: home, OPENCODE_DB: owned },
+    }));
+    assert.equal(observed.root, "owned-root");
+    assert.equal(observed.database_path, owned);
+    assert.deepEqual(observed.models, [], "synthetic session metadata is not a model request");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("practical monitor freezes the owning server database for observation and native settlement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-monitor-db-"));
+  const path = join(directory, "owned.db"), since = Date.now();
+  const db = seedObservationDatabase(path, directory, "owned-root", since, true);
+  const child = spawn(process.execPath, ["-e", "console.log('ROOT_TURN_CLOSED')"], {
+    detached: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stopped = false, settled = false;
+  try {
+    const monitor = monitorMissionCLI({ child, server: { env: { OPENCODE_DB: path }, stop: async () => { stopped = true; } },
+      project: directory, since, rootAgent: "dog-operator", mode: "complete", rootModel: expected,
+      capUSD: 2, timeoutSeconds: 30,
+      observe: (project: string, after: number, agent: string, selected: string) => {
+        assert.equal(selected, path, "never fall back to the controller host DB");
+        return observeMissionCLI(project, after, agent, selected);
+      },
+      finish: async (result: unknown) => result,
+    }).finally(() => { settled = true; });
+    const pendingResult = monitor.then(value => ({ value }), error => ({ error }));
+    await new Promise<void>(done => child.once("close", () => done()));
+    await new Promise(done => setTimeout(done, 30));
+    assert.equal(settled, false, "root CLI close must wait for this DB's native inbox/pending work");
+    assert.equal(stopped, false, "do not tear down the owning server while its work is pending");
+    db.exec("DELETE FROM session_pending");
+    const result = await pendingResult;
+    if ("error" in result) throw result.error;
+    assert.equal(result.value.observed.root, "owned-root");
+    assert.equal(result.value.databasePath, path);
+    assert.equal(result.value.stopped, false);
+    assert.equal(stopped, true);
+  } finally {
+    db.exec("DELETE FROM session_pending");
+    await stopProcessGroup(child);
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("the start-only Worker deadline does not invalidate a completed native receipt", () => {

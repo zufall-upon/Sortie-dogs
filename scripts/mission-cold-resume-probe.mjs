@@ -18,8 +18,10 @@ const started = await probe(tgz, output, { mode: 'start', timeoutSeconds: 240, c
 assert.equal(started.stopped, 'worker-started', JSON.stringify(started));
 assert.ok(started.models.some(item => item.agent === 'dogs-coordinator'), 'Exercise nested native dispatch');
 const run = dirname(started.project), xdg = join(run, 'xdg');
-const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json') };
-const baseline = observeMissionCLI(started.project);
+const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json'),
+  OPENCODE_DB: started.database_path };
+const observe = () => observeMissionCLI(started.project, 0, 'dog-operator', started.database_path);
+const baseline = observe();
 const previousErrors = new Set(baseline.errors.map(error => JSON.stringify(error)));
 const server = await startV2ReleaseServer(started.project, env);
 let stdout = '', stderr = '', cutoff, code;
@@ -32,7 +34,7 @@ const child = spawn('opencode', ['run', '--server', server.url, '--session', sta
 child.stdout.on('data', bytes => { stdout += bytes; });
 child.stderr.on('data', bytes => { stderr += bytes; });
 const timer = setInterval(() => {
-  const observed = observeMissionCLI(started.project);
+  const observed = observe();
   if (observed.priced_usd >= 2 || Date.now() - since > 600_000) {
     cutoff = observed.priced_usd >= 2 ? 'budget' : 'timeout';
     void server.stop();
@@ -41,7 +43,7 @@ const timer = setInterval(() => {
 }, 1000);
 try { code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done); }); }
 finally { clearInterval(timer); await server.stop(); }
-const observed = observeMissionCLI(started.project);
+const observed = observe();
 const key = createHash('sha256').update(started.root).digest('hex');
 const mission = JSON.parse(await readFile(join(started.project, '.sortie-dogs-v010/missions', key + '.json')));
 const operator = JSON.parse(await readFile(join(started.project, '.sortie-dogs-v010/operators', key + '.json')));
