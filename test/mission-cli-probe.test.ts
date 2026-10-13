@@ -13,6 +13,69 @@ const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
 const status = { agent: "dog-operator", tool: "sortie_v010_operator_status", status: "completed", model: root.model };
 
+for (const phase of ["server-start-error", "server-start-cleanup-error", "server-start-persistence-error", "server-start-cleanup-persistence-error"]) {
+  test(`regular probe ${phase} retains reservation and actionable evidence before monitor`,
+    { timeout: 20_000, skip: process.platform === "win32" }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "probe-startup-"));
+    const child = spawn(process.execPath, ["--experimental-vm-modules", resolve("test/fixtures/probe-startup-controller.mjs"), directory, phase], {
+      detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = ""; child.stdout.resume(); child.stderr.on("data", bytes => { stderr += bytes; });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
+      const receipt = JSON.parse(await readFile(join(directory, "fixture-receipt.json"), "utf8"));
+      assert.equal(receipt.installations, 1); assert.equal(receipt.starts, 1); assert.equal(receipt.cliStarts, 0);
+      assert.equal(receipt.writes, 1, "no failed persistence or consumed startup retry");
+      assert.equal(receipt.commands.length, 4); assert.equal(receipt.original_error_identity_retained, true);
+      assert.equal(receipt.native_model_requests, 0); assert.equal(receipt.actual_installation_or_CLI_started, false);
+      assert.equal(receipt.rejected.code, "EIO"); assert.match(receipt.rejected.message, /injected-owned-probe-server-start/);
+      const unavailable = phase.endsWith("persistence-error"), cleanupFailed = phase.includes("cleanup");
+      const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
+      assert.equal(result.stopped, "server-start-failed"); assert.equal(result.stop_observation, "server-start");
+      assert.equal(result.server_error.code, "EIO"); assert.equal(result.code, null); assert.equal(result.signal, null);
+      assert.equal(result.controller_signal, null); assert.equal(result.cli_started, false);
+      assert.equal(result.server_start_attempted, true); assert.equal(result.server_ready, false);
+      assert.equal(result.usage_complete, false); assert.equal(result.known_unpriced_requests, 0);
+      assert.equal(result.priced_usd, 0, "known observed sum only, not complete or zero-cost coverage");
+      assert.equal(result.unpriced_requests, 1, "unresolved coverage retains a reservation, not an invented observed request");
+      assert.equal(result.cap_usd, 2); assert.equal(result.budget_settlement_attempted, false);
+      assert.equal(result.budget_file, join(directory, "projected-budget.json"));
+      assert.equal(result.project, join(directory, "smoke-1/project"));
+      assert.equal(result.database_path, join(directory, "smoke-1/data/opencode/opencode.db"));
+      assert.equal(result.data_home, join(directory, "smoke-1/data"));
+      assert.equal(result.package_version, "0.13.19"); assert.equal(result.runtime_marker, "fixture-only-projection");
+      assert.equal(result.candidate_sha256, createHash("sha256").update("fixture-only-package-bytes\n").digest("hex"));
+      assert.equal(result.task_sha256, createHash("sha256").update("retained immutable fixture task, not a native model request").digest("hex"));
+      assert.equal(result.instance, null); assert.equal(result.root, undefined);
+      assert.deepEqual(result.models, []); assert.equal(result.worker_model_observed, false);
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.mission_phase, undefined); assert.equal(result.receipt_status, undefined);
+      assert.match(result.next_action, /Do not automatically replay/);
+      const budget = receipt.projected_budget;
+      assert.equal(budget.prior_priced_usd, 1.7674084); assert.equal(budget.unresolved_prior_reserve_usd, 1);
+      assert.deepEqual(budget.probes, [{ project: result.project, charged_usd: 2, reserved_usd: 2, state: "reserved" }]);
+      if (cleanupFailed) {
+        assert.equal(result.cleanup_complete, false); assert.equal(result.cleanup_errors[0].code, "EACCES");
+        assert.equal(result.server_pid, 719000001); assert.equal(result.server_state_directory, join(result.project, ".opencode/v2-service-state"));
+        assert.match(result.next_action, /Retry teardown only/);
+      } else assert.equal(result.cleanup_complete, undefined);
+      if (unavailable) {
+        assert.equal(receipt.result, undefined);
+        const context = receipt.rejected.monitorContext;
+        assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
+        assert.equal(context.serverError.code, "EIO"); assert.equal(context.persistenceError.code, "EACCES");
+        assert.equal(context.cleanupErrors.length, cleanupFailed ? 1 : 0);
+        assert.match(context.nextAction, /retry only failed evidence persistence/);
+      } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }
+      for (const file of ["cli.stdout.jsonl", "cli.stderr.log"])
+        await assert.rejects(readFile(join(directory, "smoke-1", file)), { code: "ENOENT" }, "no invented CLI logs");
+    } finally { await stopProcessGroup(child); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 test("practical observation binds the exact original prompt and observed checkout, not the declared base", () => {
   const request = "Original task\r\nKeep exact bytes.\n";
   assert.deepEqual(probeTaskIdentity(request, { instance_id: "case", repo: "owner/repo", base_commit: "declared" }, "observed"), {
