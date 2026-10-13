@@ -7,6 +7,9 @@ import { spawnPromptCLI, startV2ReleaseServer, stopProcessGroup } from '../../sc
 // Process-only replay of Cycle053: root CLI close can precede native settlement.
 // These are retained lifecycle projections, not a model request or task solution.
 const [directory, phase, serverKind = 'process'] = process.argv.slice(2);
+const observationFailure = phase.startsWith('observation-failure-');
+const immediateClose = ['settlement', 'observation-failure-close', 'observation-failure-final',
+  'observation-failure-pending', 'observation-failure-budget'].includes(phase);
 let server, serverPID;
 if (serverKind === 'native') {
   // Explicit service-only check: no native run/session/provider request.
@@ -27,32 +30,40 @@ if (serverKind === 'native') {
   serverPID = serverChild.pid;
 }
 const child = spawnPromptCLI(process.execPath, ['-e',
-  `process.stdin.resume();console.log('CLI_CONNECTED');console.error('CLI_OWNED');${phase === 'settlement'
+  `process.stdin.resume();console.log('CLI_CONNECTED');console.error('CLI_OWNED');${immediateClose
     ? 'process.exit(0)' : 'setInterval(() => {}, 1000)'}`], 'retained task bytes', { detached: true });
 const initialListeners = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));
-let announced = false;
+let announced = false, reads = 0;
 const observed = JSON.parse(await readFile(join(directory, 'retained-observation.json'), 'utf8'));
 const result = await monitorMissionCLI({ child, server,
   project: directory, since: Date.now(), rootAgent: 'dog-operator', mode: 'complete',
-  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: phase === 'budget' ? 1 : 2, timeoutSeconds: 30,
+  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
   observe: () => {
     if (!announced && phase !== 'settlement') {
       announced = true;
       process.send({ phase: 'monitoring', serverPID, cliPID: child.pid });
     }
+    reads++;
+    if (['observation-failure-first', 'observation-failure-close'].includes(phase) ||
+      ['observation-failure-interval', 'observation-failure-final', 'observation-failure-budget'].includes(phase) && reads > 1) {
+      throw Error('injected-database-read-failure');
+    }
     return observed;
   },
   pending: () => {
+    if (phase === 'observation-failure-pending') throw Error('injected-native-settlement-read-failure');
+    if (observationFailure) return false;
     if (!announced) {
       announced = true;
       process.send({ phase: 'settlement', serverPID, cliPID: child.pid });
     }
     return true;
   },
-  finish: async ({ observed, stdout, stderr, stopped, stopObservation, code, signal, controllerSignal }) => {
+  finish: async ({ observed, stdout, stderr, stopped, stopObservation, code, signal, controllerSignal, observationError, nextAction }) => {
     const result = { ...observed, mode: 'complete', stopped, stop_observation: stopObservation,
       code, signal, controller_signal: controllerSignal ?? null,
-      mission_phase: 'completed', receipt_status: 'succeeded', accepted: false };
+      mission_phase: 'completed', receipt_status: 'succeeded', accepted: false,
+      ...(observationError ? { observation_error: observationError, next_action: nextAction } : {}) };
     Object.assign(result, completeProbeObservations(result));
     // A signal during persistence must not truncate the final usage/observation.
     if (phase === 'persistence') {

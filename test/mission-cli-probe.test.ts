@@ -325,3 +325,54 @@ for (const [signal, phase] of [["SIGTERM", "active"], ["SIGINT", "settlement"], 
     }
   });
 }
+
+for (const point of ["interval", "first", "close", "final", "pending", "budget"] as const) {
+  test(`observer read failure at ${point} persists logs, stop reason and incomplete-usage coverage`,
+    { timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-observer-failure-"));
+    const observed = { root: "root", models: [root], responses: [], tools: [], errors: [],
+      priced_usd: 1.7674084, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory,
+      `observation-failure-${point}`], { detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stderr = "", owned: { serverPID: number; cliPID: number } | undefined;
+    child.stderr.on("data", bytes => { stderr += bytes; }); child.stdout.resume();
+    child.on("message", message => {
+      const event = message as { serverPID?: number; cliPID?: number };
+      if (event.serverPID && event.cliPID) owned = { serverPID: event.serverPID, cliPID: event.cliPID };
+    });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 1, stderr);
+      const result = JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      assert.equal(result.stopped, point === "budget" ? "budget" : "observation-failed");
+      assert.equal(result.stop_observation, { interval: "interval", first: "interval", close: "cli-close",
+        final: "final", pending: "native-settlement", budget: "cli-close" }[point]);
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.usage_complete, point === "pending", "only a successful final DB read can release missing-coverage holds");
+      assert.equal(result.priced_usd, ["first", "close"].includes(point) ? 0 : observed.priced_usd);
+      assert.equal(result.unpriced_requests, point === "pending" ? 0 : 1);
+      assert.equal(result.known_unpriced_requests, point === "pending" ? undefined : 0,
+        "incomplete coverage is an accounting marker, not an invented model request");
+      assert.match(result.observation_error.message, /injected-(database|native-settlement)-read-failure/);
+      assert.match(result.next_action, /database/i); assert.match(result.next_action, /usage/i);
+      assert.match(result.next_action, /do not.*replay/i);
+      assert.match(await readFile(join(directory, "cli.stdout.jsonl"), "utf8"), /CLI_CONNECTED/);
+      assert.match(await readFile(join(directory, "cli.stderr.log"), "utf8"), /CLI_OWNED/);
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before);
+      assert(owned);
+      if (process.platform !== "win32") for (const pid of [owned.serverPID, owned.cliPID]) {
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "no owned writer remains");
+      }
+    } finally {
+      await stopProcessGroup(child);
+      if (process.platform !== "win32") for (const pid of owned ? [owned.serverPID, owned.cliPID] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}

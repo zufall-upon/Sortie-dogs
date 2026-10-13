@@ -99,10 +99,20 @@ export function completeProbeObservations(result, schemaRejected = false) {
  * Observation seams let retained lifecycle facts be replayed without model requests. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish }) {
-  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError;
+  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError, usageIncomplete;
   let serverStopping;
   const stopServer = () => serverStopping ??= Promise.resolve().then(() => server.stop());
-  const observeNow = () => lastObserved = observe(project, since, rootAgent, databasePath);
+  const observeNow = point => {
+    try {
+      lastObserved = observe(project, since, rootAgent, databasePath);
+      usageIncomplete = false;
+      return lastObserved;
+    } catch (error) {
+      failObservation(error, point);
+      return lastObserved ?? { database_path: databasePath, models: [], tools: [], responses: [], errors: [],
+        priced_usd: 0, unpriced_requests: 0 };
+    }
+  };
   child.stdout.on('data', bytes => { stdout += bytes; });
   child.stderr.on('data', bytes => { stderr += bytes; });
   const stop = (reason, observed, point) => {
@@ -115,15 +125,20 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     // Cleanup is awaited below, even if one owned process fails before CLI close.
     stopping.catch(() => {});
   };
+  const failObservation = (error, point) => {
+    observationError ??= { name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
+      ...(error?.code === undefined ? {} : { code: error.code }) };
+    usageIncomplete = true;
+    stop('observation-failed', lastObserved, point);
+  };
   const stopOptions = () => ({ mode, rootModel, capUSD, elapsedMs: Date.now() - since, timeoutMs: timeoutSeconds * 1000 });
   const timer = setInterval(() => {
     try {
-      const observed = observeNow();
+      const observed = observeNow('interval');
       const reason = probeStopReason(observed, stopOptions());
       if (reason) stop(reason, observed, 'interval');
     } catch (error) {
-      observationError = error;
-      stop('observation-failed', lastObserved, 'interval');
+      failObservation(error, 'interval');
     }
   }, 250);
   const interrupt = signal => {
@@ -139,20 +154,29 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
       ({ code, signal } = await new Promise((done, reject) => {
         child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
       }));
-      const observed = observeNow();
+      const observed = observeNow('cli-close');
       const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
       if (reason) stop(reason, observed, 'cli-close');
       if (mode === 'complete' && code === 0 && !stopped) {
-        await waitForNativeSettlement({ pending: pending ?? (() => nativeRunPending(project,
-          databasePath, { since, root: observed.root })), stopped: () => stopped });
+        await waitForNativeSettlement({ pending: async () => {
+          try { return await (pending ?? (() => nativeRunPending(project, databasePath, { since, root: observed.root })))(); }
+          catch (error) { failObservation(error, 'native-settlement'); return false; }
+        }, stopped: () => stopped });
       }
     } finally {
       clearInterval(timer);
       try { await stopping; } finally { await stopServer(); }
     }
-    if (observationError) throw observationError;
-    return await finish({ observed: observeNow(), databasePath, stdout, stderr,
-      stopped, stopObservation, cutoff, code, signal, controllerSignal });
+    const observed = observeNow('final');
+    await stopping; // A final read can fail after normal cleanup; retain one owned teardown.
+    return await finish({ observed: observationError ? { ...observed, usage_complete: !usageIncomplete,
+      // Missing coverage retains the existing reservation. The floor is an accounting
+      // marker, not a claim that an additional model request was observed.
+      ...(usageIncomplete ? { known_unpriced_requests: observed.unpriced_requests,
+        unpriced_requests: Math.max(1, observed.unpriced_requests) } : {}) } : observed,
+      databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal,
+      observationError, nextAction: observationError
+        ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.' : undefined });
   } finally {
     // Retain handlers through log/usage persistence, including repeated signals.
     process.off('SIGINT', onInterrupt);
@@ -219,7 +243,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     cwd: project, env: { ...server.env, PWD: project }, detached: true,
   });
   return await monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
-    finish: async ({ observed, databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal }) => {
+    finish: async ({ observed, databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal, observationError, nextAction }) => {
       const state = async area => {
         if (!observed.root) return null;
         try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
@@ -235,6 +259,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         project, database_path: databasePath, data_home: env.XDG_DATA_HOME,
         mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
         controller_signal: controllerSignal ?? null, elapsed_ms: Date.now() - since,
+        ...(observationError ? { observation_error: observationError, next_action: nextAction } : {}),
         ...probeTaskIdentity(request, instance, actualBaseCommit),
         package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
         mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
@@ -255,6 +280,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
         (mode === 'start' ? stopped === 'worker-started'
           : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
+      if (observationError) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
       await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
       await writeFile(join(run, 'cli.stderr.log'), stderr);
       await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
