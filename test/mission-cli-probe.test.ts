@@ -3,7 +3,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { resolve, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
@@ -396,6 +396,85 @@ for (const phase of ["persistence-first", "persistence-first-after-write", "pers
     } finally {
       await stopProcessGroup(child);
       for (const pid of owned ? [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* exact fixture group already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const phase of ["persistence-reject", "persistence-reject-signal", "persistence-reject-budget",
+  "persistence-reject-cleanup", "persistence-reject-observation", "persistence-reject-launch",
+  "persistence-reject-late-signal", "persistence-reject-no-handler", "persistence-reject-fallback"] as const) {
+  test(`${phase} retains a structured persistence failure without retrying settlement or clearing its lock`,
+    { timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-persistence-rejection-"));
+    const observed = { root: "root", models: [root], responses: [], tools: [], errors: [],
+      priced_usd: 1.7674084, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const budget = { probes: [{ root: "root", state: "reserved", reserved_usd: 2, charged_usd: 2 }] };
+    const budgetBytes = JSON.stringify(budget);
+    await writeFile(join(directory, "owned-settlement.json"), budgetBytes);
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory, phase], {
+      detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let stderr = "", signalsSent = 0;
+    let owned: { serverPID: number; cliPID?: number } | undefined;
+    child.stdout.resume(); child.stderr.on("data", bytes => { stderr += bytes; });
+    child.on("message", message => {
+      const event = message as { phase: string; serverPID?: number; cliPID?: number };
+      if (event.serverPID) owned = { serverPID: event.serverPID, cliPID: event.cliPID };
+      if (process.platform !== "win32" && ["persistence", "failure-persistence"].includes(event.phase)) {
+        signalsSent++;
+        child.kill(signalsSent === 1 ? "SIGTERM" : "SIGINT");
+      }
+    });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 1, stderr);
+      const unsaved = ["persistence-reject-no-handler", "persistence-reject-fallback"].includes(phase);
+      const rejection = unsaved ? JSON.parse(await readFile(join(directory, "terminal-rejection.json"), "utf8")) : undefined;
+      if (!unsaved) await assert.rejects(readFile(join(directory, "terminal-rejection.json")), { code: "ENOENT" });
+      const result = unsaved ? rejection.monitorContext : JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      const prior = phase === "persistence-reject-budget" ? "budget" : phase === "persistence-reject-cleanup" ? "cleanup-failed"
+        : phase === "persistence-reject-observation" ? "observation-failed" : phase === "persistence-reject-launch" ? "cli-launch-failed"
+        : phase === "persistence-reject-signal" && process.platform !== "win32" ? "controller-interrupted" : "persistence-failed";
+      assert.equal(result.stopped, prior);
+      const error = unsaved ? result.persistenceError : result.persistence_error;
+      assert.equal(error.code, "EEXIST"); assert.match(error.message, /owned-settlement.json.lock/);
+      const coverage = unsaved ? result.observed : result;
+      assert.equal(coverage.usage_complete, false); assert.equal(coverage.unpriced_requests, 1);
+      assert.equal(coverage.known_unpriced_requests, 0, "missing persistence is a hold marker, not a new model request");
+      assert.equal(coverage.priced_usd, phase === "persistence-reject-observation" ? 0 : observed.priced_usd);
+      assert.equal(result.code === 0, phase !== "persistence-reject-launch", "retain actual root outcome");
+      assert.equal(result.persistence_complete, false);
+      assert.match(unsaved ? result.nextAction : result.next_action, /lock/i);
+      assert.match(unsaved ? result.nextAction : result.next_action, /do not.*replay/i);
+      if (unsaved) {
+        assert.equal(rejection.code, "EEXIST"); assert.equal(rejection.cause_code, "EEXIST");
+        assert.equal(result.failure_recorded, false);
+        assert.equal(rejection.finish_calls, 1); assert.equal(rejection.server_stop_calls, 1);
+        assert.equal(rejection.failure_saves, phase === "persistence-reject-fallback" ? 1 : 0);
+        if (phase === "persistence-reject-fallback") assert.equal(result.failurePersistenceError.code, "EACCES");
+      } else {
+        assert.equal(result.accepted, false); assert.equal(result.native_completed, false); assert.equal(result.failure_recorded, true);
+        assert.equal(result.finish_calls, 1, "never retry the known failed full settlement callback");
+        assert.equal(result.failure_saves, phase === "persistence-reject-late-signal" && process.platform !== "win32" ? 2 : 1);
+        assert.equal(result.server_stop_calls, 1); assert.equal(result.worker_model_observed, false);
+        assert.equal(result.controller_signal, ["persistence-reject-signal", "persistence-reject-late-signal"].includes(phase) && process.platform !== "win32" ? "SIGTERM" : null);
+      }
+      assert.equal(await readFile(join(directory, "owned-settlement.json"), "utf8"), budgetBytes, "do not release or recharge held usage");
+      assert.deepEqual(await readdir(join(directory, "owned-settlement.json.lock")), [], "existing owner retained");
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before);
+      assert(owned);
+      if (process.platform !== "win32") for (const pid of [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])])
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    } finally {
+      await stopProcessGroup(child);
+      if (process.platform !== "win32") for (const pid of owned ? [owned.serverPID, ...(owned.cliPID ? [owned.cliPID] : [])] : []) {
         try { process.kill(-pid, "SIGKILL"); } catch { /* exact fixture group already stopped */ }
       }
       await rm(directory, { recursive: true, force: true });
