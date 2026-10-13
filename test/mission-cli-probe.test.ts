@@ -403,6 +403,69 @@ for (const phase of ["persistence-first", "persistence-first-after-write", "pers
   });
 }
 
+for (const phase of ["signal", "nonzero", "prior-observation", "later-cleanup"] as const) {
+  test(`abnormal CLI ${phase} close records failure and next action without relabeling the real exit`,
+    { skip: process.platform === "win32", timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-abnormal-close-"));
+    const child = spawn(process.execPath, phase === "nonzero"
+      ? ["-e", "console.log('CLI_FAILED');console.error('owned exit failure');process.exit(7)"]
+      : [resolve("test/fixtures/owned-process-group.mjs"), directory, "signalled"], {
+      detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let serverStops = 0, finishCalls = 0, pendingCalls = 0;
+    const listeners = ["SIGINT", "SIGTERM"].map(signal => process.listenerCount(signal));
+    try {
+      const result = await monitorMissionCLI({ child,
+        server: { stop: async () => {
+          serverStops++;
+          if (phase === "later-cleanup") throw Object.assign(Error("injected-owned-stop-failure"), { code: "EIO" });
+        } }, project: directory, databasePath: join(directory, "unused-owned.db"), since: Date.now(),
+        rootAgent: "dog-operator", mode: "complete", rootModel: expected, capUSD: 2, timeoutSeconds: 10,
+        observe: () => {
+          if (phase === "prior-observation") throw Object.assign(Error("injected-owned-db-read-failure"), { code: "EACCES" });
+          return { models: [], tools: [], responses: [], errors: [], priced_usd: 0, unpriced_requests: 0 };
+        },
+        pending: () => { pendingCalls++; return false; },
+        finish: async context => {
+          finishCalls++;
+          await writeFile(join(directory, "cli.stdout.jsonl"), context.stdout);
+          await writeFile(join(directory, "cli.stderr.log"), context.stderr);
+          return context;
+        },
+      });
+      assert.equal(result.stopped, phase === "prior-observation" ? "observation-failed" : "cli-exit-failed");
+      assert.equal(result.stopObservation, "cli-close");
+      assert.equal(result.code, phase === "nonzero" ? 7 : null);
+      assert.equal(result.signal, phase === "nonzero" ? null : "SIGTERM");
+      assert.equal(result.controllerSignal, undefined, "external CLI termination is not a controller interruption");
+      assert.match(result.nextAction, /Do not automatically replay/);
+      assert.match(result.nextAction, /owned|recorded/i);
+      assert.equal(result.cliError, undefined, "real failed close is distinct from an executable/process error event");
+      assert.equal(serverStops, 1); assert.equal(finishCalls, 1); assert.equal(pendingCalls, 0);
+      assert.deepEqual(["SIGINT", "SIGTERM"].map(signal => process.listenerCount(signal)), listeners);
+      assert.equal(result.observed.priced_usd, 0); assert.deepEqual(result.observed.models, []);
+      if (phase === "prior-observation" || phase === "later-cleanup") {
+        assert.equal(result.observed.usage_complete, false); assert.equal(result.observed.unpriced_requests, 1);
+        assert.equal(result.observed.known_unpriced_requests, 0, "retain coverage hold without inventing model requests");
+      }
+      if (phase === "prior-observation") assert.equal(result.observationError.code, "EACCES");
+      if (phase === "later-cleanup") assert.equal(result.cleanupErrors[0].code, "EIO");
+      const stdout = await readFile(join(directory, "cli.stdout.jsonl"), "utf8");
+      if (phase === "nonzero") {
+        assert.match(stdout, /CLI_FAILED/); assert.match(await readFile(join(directory, "cli.stderr.log"), "utf8"), /owned exit failure/);
+      } else {
+        const { writerPID, file } = JSON.parse(stdout), before = await readFile(file);
+        await new Promise(done => setTimeout(done, 100)); assert(before.equals(await readFile(file)));
+        const state = await readFile(`/proc/${writerPID}/stat`, "utf8").then(stat =>
+          stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[0], error => {
+            if (error.code === "ENOENT") return "absent"; throw error;
+          });
+        assert(["absent", "Z", "X"].includes(state));
+      }
+    } finally { await stopProcessGroup(child); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 for (const phase of ["persistence-reject", "persistence-reject-signal", "persistence-reject-budget",
   "persistence-reject-cleanup", "persistence-reject-observation", "persistence-reject-launch",
   "persistence-reject-late-signal", "persistence-reject-no-handler", "persistence-reject-fallback"] as const) {
@@ -721,7 +784,7 @@ for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-una
 }
 
 for (const phase of ["closed", "closed-stubborn", "signalled", "closed-cleanup-error"] as const) {
-  test(`normal monitor finalization stops the ${phase} CLI group before persisting its outcome`,
+  test(`monitor finalization stops the ${phase} CLI group before persisting its outcome`,
     { skip: process.platform !== "linux", timeout: 20_000 }, async context => {
     const directory = await mkdtemp(join(tmpdir(), "mission-normal-close-"));
     const child = spawn(process.execPath, [resolve("test/fixtures/owned-process-group.mjs"), directory,
@@ -753,7 +816,10 @@ for (const phase of ["closed", "closed-stubborn", "signalled", "closed-cleanup-e
       assert.equal(pendingCalls, phase === "signalled" ? 0 : 1, "keep native-settlement eligibility before teardown");
       assert.equal(result.code, phase === "signalled" ? null : 0);
       assert.equal(result.signal, phase === "signalled" ? "SIGTERM" : null, "keep the real root exit/signal");
-      assert.equal(result.stopped, phase === "closed-cleanup-error" ? "cleanup-failed" : false);
+      assert.equal(result.stopped, phase === "closed-cleanup-error" ? "cleanup-failed" : phase === "signalled" ? "cli-exit-failed" : false);
+      if (phase === "signalled") {
+        assert.equal(result.stopObservation, "cli-close"); assert.match(result.nextAction, /recorded CLI exit code\/signal/);
+      }
       assert(writerPID);
       await new Promise(done => setTimeout(done, 100));
       const later = await readFile(join(directory, "owned-writer.log"), "utf8");

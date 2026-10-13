@@ -174,7 +174,9 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
         child.once('close', (code, signal) => done({ code, signal }));
       }));
       const observed = observeNow('cli-close');
-      const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
+      // A failed close need not emit a child error event. Keep its real code/signal
+      // and earlier stop, but do not leave this terminal outcome labelled normal.
+      const reason = !stopped && code !== 0 ? 'cli-exit-failed' : cliCloseStopReason(code, stopped, observed, stopOptions());
       if (reason) stop(reason, observed, 'cli-close');
       if (mode === 'complete' && code === 0 && !stopped) {
         await waitForNativeSettlement({ pending: async () => {
@@ -201,7 +203,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
       const context = { ...evidence, stopped: savedStop, stopObservation, cutoff, controllerSignal: savedSignal,
         nextAction: cleanupErrors.length
         ? 'Retry teardown only for the recorded owned CLI/server and verify all writers stopped, then reconcile database usage and saved CLI logs. Do not automatically replay the consumed task or restart the shared host.' : cliError
-        ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : observationError
+        ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : savedStop === 'cli-exit-failed'
+        ? 'Inspect the recorded CLI exit code/signal and saved logs; reconcile the owned database usage and Mission receipt before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : observationError
         ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.'
         : savedStop === 'controller-interrupted'
         ? 'Inspect the saved Mission receipt, owned database usage and CLI logs before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : undefined };
