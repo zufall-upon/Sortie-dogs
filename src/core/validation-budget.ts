@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CONTRACT_TEXT_LIMITS } from "./contract-limits.js";
 
 export const VALIDATION_PROFILES = ["fast", "balanced", "assurance"] as const;
 export type ValidationProfile = typeof VALIDATION_PROFILES[number];
@@ -92,6 +93,7 @@ export function validationEvidenceState(events: readonly unknown[]): {
 }
 
 const id = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
+const commandText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= CONTRACT_TEXT_LIMITS.command;
 const scopes = new Set<ValidationScope>(["static", "targeted", "related", "canonical", "full-suite", "full"]);
 const normalizedScope = (scope: ValidationScope): Exclude<ValidationScope, "full"> => scope === "full" ? "canonical" : scope;
 
@@ -158,7 +160,7 @@ export function decideValidationBudget(request: unknown, state: ValidationBudget
   const environment = value.environment;
   const marginal = value.marginal_value;
   const valid = id(value.run_id) && id(value.operation_id) && id(value.source_snapshot) && id(value.candidate) &&
-    value.command.length > 0 && value.command.every(id) && scopes.has(value.scope) &&
+    value.command.length > 0 && value.command.every(commandText) && scopes.has(value.scope) &&
     environment !== null && typeof environment === "object" && id(environment.platform) && id(environment.arch) &&
     id(environment.runtime) && (environment.toolchain === undefined || id(environment.toolchain)) &&
     (value.owner === "worker" || value.owner === "coordinator") &&
