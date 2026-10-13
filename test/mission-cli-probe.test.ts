@@ -534,3 +534,32 @@ for (const phase of ["closed", "closed-stubborn", "signalled", "active"] as cons
     }
   });
 }
+
+for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-unavailable"] as const) {
+  test(`owned group inspection handles ${fault} without hiding an uncertain cleanup`,
+    { skip: process.platform !== "linux", timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-group-inspection-"));
+    try {
+      const result = JSON.parse(execFileSync(process.execPath,
+        [resolve("test/fixtures/owned-group-inspection.mjs"), directory, fault], { encoding: "utf8", timeout: 15_000 }));
+      assert.deepEqual(result.root_exit, { code: 0, signal: null }, "retain the actual closed root outcome");
+      assert.equal(result.new_model_requests, 0);
+      if (fault === "foreign-read") {
+        assert.equal(result.cleanup_error, null, "unrelated denied metadata must not abort the owned cleanup");
+        assert.equal(result.denied_reads, 0, "read detailed metadata only for the selected owned group");
+        assert.equal(result.writer_frozen, true, "no descendant writes after the cleanup barrier");
+        assert.equal(result.writer_stopped, true);
+        assert(result.signals.includes("SIGKILL"), "still escalate a stubborn owned writer after the existing grace");
+      } else {
+        const expected = fault === "owned-read" ? "EACCES" : fault === "signal-denied" ? "EPERM" : "ENOENT";
+        assert.equal(result.cleanup_error?.code, expected, "genuine owned cleanup failures remain actionable errors");
+        assert.equal(result.writer_stopped, false, "uncertain cleanup is not a successful barrier");
+        if (fault === "owned-read") assert.equal(result.denied_reads, 1);
+      }
+      const cleanup = JSON.parse(await readFile(join(directory, "cleanup-receipt.json"), "utf8"));
+      assert.equal(cleanup.owned_writer_stopped, true);
+      assert.equal(cleanup.builtin_read_and_kill_restored, true);
+      assert.equal(cleanup.shared_host_touched, false);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+}

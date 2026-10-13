@@ -128,7 +128,17 @@ async function processGroupRunning(pid) {
   if (process.platform !== 'linux') return true;
   // An orphan can remain as a zombie until its new parent reaps it. Zombies
   // cannot write; kill(0) alone would spend the whole timeout on a stopped group.
-  const members = await Promise.all((await readdir('/proc')).filter(name => /^[0-9]+$/.test(name)).map(async name => {
+  // Select the owned group first. An unrelated process's unreadable stat must
+  // not prevent stopping this group, while an owned stat/read failure still matters.
+  const selected = await runProcess('pgrep', ['-g', String(pid)], { timeoutMs: 1_000 });
+  if (![0, 1].includes(selected.code) || selected.timedOut || selected.overflow) {
+    throw Error(`Could not inspect owned process group ${pid}: pgrep failed (exit ${selected.code})`);
+  }
+  // kill(0) found the group, but an empty/racing selection is not proof it stopped.
+  const names = selected.stdout.trim().split(/\s+/).filter(Boolean);
+  if (names.length === 0) return true;
+  if (names.some(name => !/^[1-9][0-9]*$/.test(name))) throw Error(`Invalid owned process group ${pid} selection`);
+  const members = await Promise.all(names.map(async name => {
     try {
       const stat = await readFile(`/proc/${name}/stat`, 'utf8');
       const [state, , group] = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
