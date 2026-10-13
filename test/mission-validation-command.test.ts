@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import test from "node:test";
 import { missionValidationCommand } from "../dist/core/operator-mission.js";
+import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
+import { decideValidationBudget } from "../dist/core/validation-budget.js";
 import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import { observedMissionValidation, observedMissionValidationSummary, reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 
@@ -21,6 +23,25 @@ test("the original quoted Python heredoc matches its existing Mission registrati
   assert.deepEqual(canonicalDeclaredValidationMembers(registered, commands), [registered]);
   assert.deepEqual(canonicalDeclaredValidationMembers(original, [original]), [original.replace(/\s+/g, " ")],
     "legacy raw declarations retain their existing whitespace-normalized identity");
+});
+
+test("an admitted heredoc remains budget-valid after canonical quoting exceeds the identifier bound", () => {
+  const input = `python - <<'PY'\n${"# 'quoted comment'\n".repeat(200)}assert True\nPY`;
+  const canonical = missionValidationCommand(input);
+  assert.ok(input.length < 4096);
+  assert.ok(canonical.length > 4096 && canonical.length <= CONTRACT_TEXT_LIMITS.command);
+  assert.deepEqual(canonicalDeclaredValidationMembers(input, [canonical]), [canonical]);
+  const request = {
+    run_id: "run", operation_id: "native-call", source_snapshot: "source", candidate: "candidate",
+    command: [canonical], environment: { platform: "linux", arch: "x64", runtime: "node-22" },
+    scope: "targeted", owner: "worker", expected_evidence: ["command", "exit_code"],
+    marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance",
+  };
+  const state = { limit: 1, consumed: 0, evidence_keys: [] };
+  assert.equal(decideValidationBudget(request, state).decision, "ALLOW");
+  assert.equal(decideValidationBudget({ ...request, scope: "canonical" }, state).reason, "owner-mismatch");
+  assert.equal(reviewerCorrectionValidation([canonical], child, history([input]), 50).ready, true);
+  assert.equal(reviewerCorrectionValidation([canonical], child, history([input], [1]), 50).ready, false);
 });
 
 test("ordered native checks using the original heredoc finish without a conversion-only rerun", () => {

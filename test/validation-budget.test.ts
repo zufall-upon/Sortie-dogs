@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { decideValidationBudget, selectValidationScope, validationEvidenceKey, validationEvidenceState, validationResultFingerprint, type ValidationBudgetRequest } from "../dist/core/validation-budget.js";
 
 const request = (extra: Partial<ValidationBudgetRequest> = {}): ValidationBudgetRequest => ({
@@ -15,6 +16,20 @@ const state = (consumed = 0, evidence_keys: string[] = [], prior_duration_ms?: n
 test("typed invalid requests deny before execution", () => {
   assert.equal(decideValidationBudget({ ...request(), reason: "not-a-reason" }, state()).decision, "DENY");
   assert.equal(decideValidationBudget({ ...request(), expected_evidence: [] }, state()).reason, "invalid-contract");
+});
+
+test("validation commands use the shared command bound without widening identifier fields", () => {
+  for (const length of [4097, CONTRACT_TEXT_LIMITS.command]) {
+    const value = request({ command: ["x".repeat(length)] });
+    assert.equal(decideValidationBudget(value, state()).decision, "ALLOW");
+    const key = validationEvidenceKey(value);
+    assert.equal(decideValidationBudget(value, state(1, [key])).decision, "SKIP");
+    assert.equal(decideValidationBudget(value, state(1)).reason, "budget-exhausted");
+  }
+  for (const command of [[], [""], ["x".repeat(CONTRACT_TEXT_LIMITS.command + 1)], [null]]) {
+    assert.equal(decideValidationBudget({ ...request(), command }, state()).reason, "invalid-contract");
+  }
+  assert.equal(decideValidationBudget(request({ operation_id: "x".repeat(4097) }), state()).reason, "invalid-contract");
 });
 
 test("same candidate, command, and environment dedupe while changed conditions do not", () => {

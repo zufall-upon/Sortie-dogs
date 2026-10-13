@@ -12,7 +12,11 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-test("same Worker reruns its exact failed check after setup repair without a new plan or source change", async () => {
+for (const longCommand of [false, true]) test(longCommand
+  ? "long native validation keeps its original Worker and budget through setup repair"
+  : "same Worker reruns its exact failed check after setup repair without a new plan or source change", async () => {
+  const checkArgs = ["check.mjs", ...(longCommand ? [`--command-bound=${"x".repeat(4096)}`] : [])];
+  const validator = ["node", ...checkArgs].join(" ");
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-validation-retry-"));
   try {
@@ -40,7 +44,7 @@ test("same Worker reruns its exact failed check after setup repair without a new
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
     await chat("coordinator", started.task.prompt);
     const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validate", objective: "Run the check",
-      read: ["check.mjs"], write: [], validation: ["node check.mjs"] }] }, { sessionID: "coordinator" }));
+      read: ["check.mjs"], write: [], validation: [validator] }] }, { sessionID: "coordinator" }));
     const task = { args: structuredClone(next.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
     await chat("worker", task.args.prompt);
@@ -48,11 +52,11 @@ test("same Worker reruns its exact failed check after setup repair without a new
     await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
     await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } }, { output: "inspected" });
     await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" });
-    const before = (callID: string, args = { command: "node check.mjs" }) => hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID }, { args });
+    const before = (callID: string, args = { command: validator }) => hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID }, { args });
     const after = (callID: string, output: string, exit: number) => hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID }, { output, metadata: { exit, status: "completed" } });
     await before("check-first");
     let failure: { code: number; stderr: string } | undefined;
-    try { await exec(process.execPath, ["check.mjs"], { cwd: root }); }
+    try { await exec(process.execPath, checkArgs, { cwd: root }); }
     catch (error) { failure = error as typeof failure; }
     assert.equal(failure?.code, 1);
     assert.match(failure!.stderr, /ENOENT/);
@@ -61,10 +65,10 @@ test("same Worker reruns its exact failed check after setup repair without a new
     await before("repair-setup", { command: 'node -e "require(\'node:fs\').mkdirSync(\'.sortie-env/logs\',{recursive:true})"' });
     await mkdir(join(root, ".sortie-env/logs"), { recursive: true });
     await after("repair-setup", "created log directory", 0);
-    const retry = { command: "node check.mjs" };
+    const retry = { command: validator };
     await before("check-retry", retry);
-    assert.equal(retry.command, "node check.mjs", "a failed check must run, not reuse a fake PASS");
-    const result = await exec(process.execPath, ["check.mjs"], { cwd: root });
+    assert.equal(retry.command, validator, "a failed check must run, not reuse a fake PASS");
+    const result = await exec(process.execPath, checkArgs, { cwd: root });
     await after("check-retry", result.stdout, 0);
     identities.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "validated after local setup repair", metadata: { sessionId: "worker" } });
