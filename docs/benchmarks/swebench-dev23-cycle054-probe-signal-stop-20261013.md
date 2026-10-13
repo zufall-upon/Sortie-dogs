@@ -46,7 +46,9 @@ up the owned processes before propagating the observation error.
 - Raw receipts/logs/source hashes: canonical `_testenv/autodev/sortie-dogs-dev23/cycle-054/`
   (`signal-baseline.json`, `signal-final-targeted-validation.json`,
   `native-service-signal-check.json`). Raw evidence is not committed.
-- Full integration validation is recorded in `signal-full-validation.json`.
+- Full integration validation: `npm run test:full`, exit 0, 315.911 seconds;
+  2,005 passed, 2 skipped, 0 failed across 122 files. Recorded in
+  `signal-full-validation.json`. This is regression validation, not task success.
 
 This establishes controlled interruption handling, not completion of a new
 development task or improved benchmark correctness. SIGKILL/host loss cannot run
