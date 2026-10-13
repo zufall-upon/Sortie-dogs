@@ -4,11 +4,96 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_BEHAVIOR_REVIEW, MISSION_REPRESENTATION_ORACLE, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_CLIENT_STATE_CHECK, MISSION_REPRESENTATION_ORACLE, MISSION_RETURN_CONTRACT, MISSION_MUTATION_CONTRACT, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
 const roles = ['dog-operator', 'dogs-coordinator', 'dog-worker-v010'];
+
+test('side-effect guidance checks controls with client state without redefining authorized behavior', () => {
+  for (const name of ['dog-operator', 'dogs-coordinator', 'dog-reviewer-v010']) {
+    const content = runtimeAssets.find(asset => asset.name === name)!.content;
+    assert.equal(content.split(MISSION_CLIENT_STATE_CHECK).length, 2, name);
+    assert.match(content, /check remaining controls with existing client-owned state, not only isolated defaults/);
+    assert.match(content, /Judge allowed effects from the original request; preserve authorized opt-in behavior/);
+  }
+  const worker = runtimeAssets.find(asset => asset.name === 'dog-worker-v010')!.content;
+  assert.match(worker, /Preserve user scope and ordering/);
+  assert.match(worker, /No exhaustive matrix/);
+  assert.match(worker, /verbatim original_requests\/unit_instruction/);
+  assert.match(VALIDATION_WORKFLOW, /this workflow adds no approval or denial/);
+  assert.match(MISSION_BEHAVIOR_REVIEW, /Missing assertions\s+alone are not defects/);
+  assert.doesNotMatch(MISSION_CLIENT_STATE_CHECK + WORKER_VALIDATION_WORKFLOW,
+    /pydicom|901|NullHandler|StreamHandler|handler_type|test_config|debug\(|official|hidden|new argument|must remove/);
+});
+
+test('Coordinator authors preserve explicit effects under established caller preconditions', () => {
+  const coordinator = runtimeAssets.find(asset => asset.name === 'dogs-coordinator')!.content;
+  const marker = 'When removing implicit initialization effects';
+  assert.equal(coordinator.split(marker).length, 2, 'author guidance exactly once');
+  const guidance = coordinator.slice(coordinator.indexOf(marker)).split('\nFor read-only verification')[0];
+  assert.match(guidance, /preserve established explicit opt-in behavior unless the request changes it/);
+  assert.match(guidance, /Trace its real caller-visible effect from existing source\/tests/);
+  assert.match(guidance, /flags or internal state alone are not that behavior/);
+  assert.match(guidance, /Keep the established caller preconditions in the regression check/);
+  assert.match(guidance, /added setup can supply the removed effect and mask a regression/);
+  assert.match(guidance, /Reuse adequate checks and include this distinction in the current author's objective\/check plan/);
+  assert.match(guidance, /not another unit or review round/);
+  assert.doesNotMatch(guidance, /pydicom|sqlfluff|901|debug\(|StreamHandler|NullHandler|approval|permission/);
+  for (const role of ['dog-operator', 'dog-worker-v010', 'dog-reviewer-v010']) {
+    assert.ok(!runtimeAssets.find(asset => asset.name === role)!.content.includes(marker), role);
+  }
+});
+
+test('Coordinator carries source-backed return shape and missing-value semantics into existing authorship', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  assert.equal(coordinator.split(MISSION_RETURN_CONTRACT).length, 2);
+  assert.match(MISSION_RETURN_CONTRACT, /derive its return contract from public callers and unchanged source\/tests/);
+  assert.match(MISSION_RETURN_CONTRACT, /return type\/container, metadata and label alignment/);
+  assert.match(MISSION_RETURN_CONTRACT, /unless the original request changes them/);
+  assert.match(MISSION_RETURN_CONTRACT, /equal numeric values alone do not prove that contract/);
+  assert.match(MISSION_RETURN_CONTRACT, /Trace which inputs determine result shape and labels,\s+including non-primary parameters/);
+  assert.match(MISSION_RETURN_CONTRACT, /a scalar primary input need not yield a scalar result/);
+  assert.match(MISSION_RETURN_CONTRACT, /mask or conditional\s+replacement/);
+  assert.match(MISSION_RETURN_CONTRACT, /preserve established broadcasting and missing-value propagation/);
+  assert.match(MISSION_RETURN_CONTRACT, /an unknown condition is not proof\s+that replacement is intended/);
+  assert.match(MISSION_RETURN_CONTRACT, /direct work or the Worker's objective/);
+  assert.match(MISSION_RETURN_CONTRACT, /Reuse an adequate focused assertion/);
+  assert.match(MISSION_RETURN_CONTRACT, /smallest source-backed regression when needed/);
+  assert.match(MISSION_RETURN_CONTRACT, /not an input matrix,\s+another unit, validation lane or review/);
+  assert.doesNotMatch(MISSION_RETURN_CONTRACT, /pvlib|physical|1154|1707|pandas|Series|NumPy|np\.where|fillna|mask\(.*False|permission|approval|must run/);
+  for (const asset of runtimeAssets.filter(item => item.name !== 'dogs-coordinator')) {
+    assert.ok(!asset.content.includes(MISSION_RETURN_CONTRACT), asset.name);
+  }
+});
+
+test('Coordinator authors mutation checks from existing state and failure semantics, not the new mechanism', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  assert.equal(coordinator.split(MISSION_MUTATION_CONTRACT).length, 2);
+  assert.match(MISSION_MUTATION_CONTRACT, /state and failure contract from public callers and unchanged source\/tests/);
+  assert.match(MISSION_MUTATION_CONTRACT, /permission failures, link identity and new-file creation\/umask behavior/);
+  assert.match(MISSION_MUTATION_CONTRACT, /preserve those established outcomes unless the original request changes them/);
+  assert.match(MISSION_MUTATION_CONTRACT, /Derive regression expectations from\s+the original operation, not the new write mechanism/);
+  assert.match(MISSION_MUTATION_CONTRACT, /direct work or the Worker's objective/);
+  assert.match(MISSION_MUTATION_CONTRACT, /Reuse an adequate focused assertion/);
+  assert.match(MISSION_MUTATION_CONTRACT, /only the smallest source-backed regression when needed/);
+  assert.match(MISSION_MUTATION_CONTRACT, /not an exhaustive\s+matrix, another unit, validation lane or review/);
+  assert.doesNotMatch(MISSION_MUTATION_CONTRACT, /sqlfluff|1763|persist_tree|_safe_create_replace_file|UnicodeEncodeError|NamedTemporaryFile|os\.replace|hidden|official|approval|grant/);
+  for (const asset of runtimeAssets.filter(item => item.name !== 'dogs-coordinator')) {
+    assert.ok(!asset.content.includes(MISSION_MUTATION_CONTRACT), asset.name);
+  }
+});
+
+test('requested scratch cleanup precedes final formal checks without removing needed fixtures', () => {
+  const cleanup = 'Finish requested scratch cleanup before final formal checks; retain fixtures those checks need.';
+  for (const role of ['dog-operator', 'dogs-coordinator', 'dog-reviewer-v010']) {
+    const content = runtimeAssets.find(asset => asset.name === role)!.content;
+    assert.equal(content.split(cleanup).length, 2, `${role}: cleanup ordering exactly once`);
+  }
+  assert.match(VALIDATION_WORKFLOW, /this workflow adds no approval or denial/);
+  assert.match(VALIDATION_WORKFLOW, /host evidence freshness requires it/);
+  assert.doesNotMatch(cleanup, /sqlfluff|1763|dbt|persist|permission|ignore|exempt/);
+});
 
 test('changed outputs follow discovered public caller assertions within the current validation lane', () => {
   for (const name of ['dog-operator', 'dogs-coordinator']) {
@@ -204,6 +289,11 @@ test('native CLI init installs the validation workflow in each active mission ro
       const installed = await readFile(join(root, '.opencode', 'agent', `${role}.md`), 'utf8');
       const policy = role === 'dog-worker-v010' ? WORKER_VALIDATION_WORKFLOW : VALIDATION_WORKFLOW;
       assert.equal(installed.split(policy).length, 2, role);
+      if (role !== 'dog-worker-v010') {
+        assert.match(installed, /Finish requested scratch cleanup before final formal checks/);
+        assert.match(installed, /retain fixtures those checks need/);
+        assert.equal(installed.split(MISSION_CLIENT_STATE_CHECK).length, 2, role);
+      }
       assert.match(installed, role === 'dog-worker-v010'
         ? /User missing-only: installed\/incompatible is not missing/
         : /an installed but incompatible package is not missing/);
@@ -224,11 +314,23 @@ test('native CLI init installs the validation workflow in each active mission ro
     }
     const reviewer = await readFile(join(root, '.opencode', 'agent', 'dog-reviewer-v010.md'), 'utf8');
     const coordinator = await readFile(join(root, '.opencode', 'agent', 'dogs-coordinator.md'), 'utf8');
+    assert.equal(reviewer.split(MISSION_CLIENT_STATE_CHECK).length, 2);
+    assert.equal(await readFile(join(root, '.opencode', 'agent', 'dog-worker-v010.md'), 'utf8'),
+      runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content);
+    assert.equal(coordinator.split(MISSION_RETURN_CONTRACT).length, 2);
+    assert.equal(coordinator.split(MISSION_MUTATION_CONTRACT).length, 2);
     assert.equal(coordinator.split(MISSION_REGRESSION_PLACEMENT).length, 2);
     assert.match(coordinator, /not another test, unit or review requirement/);
+    assert.equal(coordinator.split('When removing implicit initialization effects').length, 2);
+    assert.match(coordinator, /preserve established explicit opt-in behavior unless the request changes it/);
+    assert.match(coordinator, /flags or internal state alone are not that behavior/);
+    assert.match(coordinator, /Keep the established caller preconditions in the regression check/);
+    assert.match(coordinator, /added setup can supply the removed effect and mask a regression/);
     assert.equal(reviewer, runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content);
     assert.match(reviewer, /Run inherited formal commands in order as exact separate foreground native shell calls/);
     assert.match(reviewer, /Run formatting and diagnostics separately; do not append undeclared shell commands/);
+    assert.match(reviewer, /Finish requested scratch cleanup before final formal checks/);
+    assert.match(reviewer, /retain fixtures those checks need/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
