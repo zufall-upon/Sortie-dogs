@@ -44,7 +44,7 @@ const source = resolve('scripts/mission-cold-resume-probe.mjs');
 const beforeListeners = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));
 let child, serverStarts = 0, serverStops = 0, monitorCalls = 0, observationCalls = 0, startupCalls = 0, pendingReleased = false;
 const observationArguments = [];
-let monitorOptions, result, rejected, cliStops = 0;
+let monitorOptions, result, rejected, cliStops = 0, cliStarts = 0;
 const originalKill = process.kill;
 process.kill = (pid, signal) => {
   if (pid === -child?.pid && signal === 'SIGTERM') cliStops++;
@@ -71,9 +71,9 @@ await script.link(async specifier => {
       }
       if (['baseline-error', 'baseline-unpriced', 'baseline-persistence-error'].includes(phase) ||
           phase === 'observation-error' && observationCalls > 1) throw Object.assign(Error('injected-owned-db-read'), { code: 'EACCES' });
-      return { ...observed, priced_usd: phase.startsWith('server-start-') ? 1.8674084
+      return { ...observed, priced_usd: phase.startsWith('server-start-') || phase.startsWith('sync-launch-') ? 1.8674084
         : phase === 'budget' && observationCalls > 1 ? 2 : observed.priced_usd,
-        unpriced_requests: phase === 'server-start-unpriced' ? 2 : observed.unpriced_requests,
+        unpriced_requests: ['server-start-unpriced', 'sync-launch-unpriced'].includes(phase) ? 2 : observed.unpriced_requests,
         errors: phase === 'resume-error' && observationCalls > 1 ? [intentional, newError] : observed.errors };
     },
     monitorMissionCLI: options => {
@@ -89,11 +89,14 @@ await script.link(async specifier => {
       return { url: 'http://owned-process-only.invalid', env: {}, stop: async () => {
         serverStops++;
         if (phase === 'pending') assert(pendingReleased, 'do not stop the server before inherited native continuation settles');
-        if (phase === 'cleanup-error') throw Object.assign(Error('injected-owned-server-stop'), { code: 'EACCES' });
+        if (['cleanup-error', 'sync-launch-cleanup-error'].includes(phase))
+          throw Object.assign(Error('injected-owned-server-stop'), { code: 'EACCES' });
       } };
     },
   };
   else if (specifier === 'node:child_process') values = { spawn: () => {
+    cliStarts++;
+    if (phase.startsWith('sync-launch-')) throw Object.assign(Error('injected-owned-sync-cli-start'), { code: 'EIO' });
     if (realObservation) {
       const db = new DatabaseSync(database);
       db.prepare("INSERT INTO session_v2 VALUES ('later-other-root', NULL, 'dog-operator', ?, 3, 4, 'succeeded')").run(project);
@@ -118,6 +121,8 @@ await script.link(async specifier => {
       throw Object.assign(Error('injected-owned-baseline-write'), { code: 'EACCES' });
     if (phase === 'server-start-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
       throw Object.assign(Error('injected-owned-server-start-write'), { code: 'EACCES' });
+    if (phase === 'sync-launch-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
+      throw Object.assign(Error('injected-owned-sync-cli-write'), { code: 'EACCES' });
     return writeFile(file, ...args);
   }, readFile: async (file, ...args) => {
     if (phase === 'persistence-error' && String(file).includes('/missions/'))
@@ -150,7 +155,8 @@ try {
   const startupEvidencePreserved = (await Promise.all(startupFiles.map(file => readFile(join(directory, file), 'utf8'))))
     .every(bytes => bytes === 'retained-startup-evidence\n');
   await writeFile(join(directory, 'fixture-receipt.json'), JSON.stringify({ phase, result, rejected, writer,
-    server_start_calls: serverStarts, server_stop_calls: serverStops, cli_stop_calls: cliStops, startup_calls: startupCalls, monitor_calls: monitorCalls,
+    server_start_calls: serverStarts, server_stop_calls: serverStops, cli_start_calls: cliStarts, cli_stop_calls: cliStops,
+    startup_calls: startupCalls, monitor_calls: monitorCalls,
     observation_calls: observationCalls, observation_arguments: observationArguments,
     monitor_options: monitorOptions, pending_released: pendingReleased,
     listeners_restored: ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal)).join() === beforeListeners.join(),
