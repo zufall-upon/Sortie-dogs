@@ -19,6 +19,8 @@ import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath 
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
+import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
+import { cachedWorkProgress, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
 import { serializeOperatorStatus } from "./operator-status-output.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
    observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
@@ -824,8 +826,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           });
         }
         if (result.childSessionID) missionRescueSelections.delete(result.childSessionID);
-        await publishMissionProgress(result.rootSessionID, { description: `🐾 ${unit.status === "succeeded" ? "✅" : "🔧"} ${unit.unit.title}`,
-          sortie_progress: progress });
+        const workload = cachedWorkProgress(input.directory, result.rootSessionID);
+        await publishMissionProgress(result.rootSessionID, { description: `🐾 ${workload ? `${formatWorkQuantity(workload)} · ` : ""}${unit.status === "succeeded" ? "✅" : "🔧"} ${unit.unit.title}`,
+          sortie_progress: { ...progress, ...(workload ? { work_quantity: workload } : {}) } });
       },
       onRootTerminal: (root, receipt) => operators.terminal(root, receipt),
     };
@@ -1452,6 +1455,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const units = currentRun?.units ?? [];
       const current = units.find(unit => unit.status !== "succeeded");
       return { profile: profile.id, view: "progress" as const, mission_id: mission.id,
+        work_quantity: packet.work_quantity,
         run_id: typeof packet.run_id === "string" ? packet.run_id : null,
         stage: typeof packet.status === "string" ? packet.status : mission.phase, mission_phase: mission.phase,
         decision: currentRun?.decision ?? null,
@@ -2078,6 +2082,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       description: "Optional current working notes: intent/rationale, known environment and paths, completed setup/checks with results, failed approaches and remaining work. Reuse known facts with source references; no required form or new approval. Public history and Mission observations are also supplied automatically. Omit when already sufficient; do not recopy the original request." };
     tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, include unit NOW (and execution for an operation) and dispatch its Worker directly; plan_units remains available after start. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
+        work_quantities: { type: ["array", "object", "string", "number", "boolean", "null"], items: {}, additionalProperties: true, "x-sortie-optional": true,
+          minLength: 0, maxLength: 65535, minItems: 0, maxItems: 4096,
+          description: "Optional display-only workload array: stable id, kind, relative_weight, bindings.paths/commands, checkpoints. Reuse this ordinary plan; never add a planning/report turn for progress. Invalid shapes/estimates fall back without changing execution." } as never,
         unit: { ...missionUnitSchema, description: "When the meaningful check and single-unit scope are already known, include this unit now. Returns its configured Worker directly, combining start_mission and plan_units without another model round trip.", "x-sortie-optional": true } as never,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
@@ -2162,7 +2169,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if ((args as Record<string, unknown>).unit !== undefined && mission.runID === null && !mission.dispatchOpen &&
               (mission.kind !== "operation" || (args as Record<string, unknown>).execution !== undefined || mission.execution)) {
             const planned = JSON.parse(await declareMissionUnits(context.sessionID, context.sessionID, mission,
-              [(args as Record<string, unknown>).unit], undefined, (args as Record<string, unknown>).execution));
+              [(args as Record<string, unknown>).unit], undefined, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities));
             return JSON.stringify({ ...locationObservation(context.sessionID), mission_id: mission.id, requirements: mission.requirements, ...planned });
           }
           if ((args as Record<string, unknown>).execution !== undefined && mission.runID === null && !mission.dispatchOpen) {
@@ -2311,7 +2318,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
       return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
     }
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string) {
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
       let previous = await operators.read(root);
@@ -2463,6 +2470,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
         if (operation) { item.kind = "operation"; item.execution = operation; }
+        item.workQuantity = planWorkQuantity(item, raw as Parameters<typeof planWorkQuantity>[1], state, item.workQuantity, workQuantities, input.directory);
       });
       const next = await operators.next(root, actor);
       if (!record(next) || !record(next.task)) return JSON.stringify(next);
@@ -2474,6 +2482,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Reuse useful author context by default; legitimate Worker/direct handoff remains available after terminal work, including correction. Retain findings, actual authorship and passed input-bound checks; do not rediscover or revalidate unchanged work merely for a new actor. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Completion history is not a correction-owner lock or an acceptance prerequisite.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
+        work_quantities: tools[startMission]!.args.work_quantities,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
@@ -2483,7 +2492,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try {
           return await serializeDispatchTransition(root, async () => {
             const planned = await declareMissionUnits(root, context.sessionID, mission,
-              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context);
+              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
             return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
           });
         } catch (error) {
@@ -3003,6 +3012,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } finally { renderingMessages.delete(messageKey); }
     }
 
+    for (const name of [startMission, planUnits, startDirectUnit, finishDirectUnit, reviewMission, submitMission, completeMission]) {
+      const definition = tools[name]!;
+      const execute = definition.execute;
+      definition.execute = async (args, context) => {
+        const result = await execute(args, context), work = cachedWorkProgress(input.directory, context.sessionID);
+        if (!work) return result;
+        try { const packet: unknown = JSON.parse(result);
+          return record(packet) ? JSON.stringify({ ...packet, work_quantity: work, work_quantity_display: formatWorkQuantity(work) }) : result;
+        } catch { return result; }
+      };
+    }
+    const displayedWork = new Map<string, string>();
     const hooks: OpenCodeHooks & { config(config: Record<string, unknown>): Promise<void> } = {
       nativeTaskJoin: (callID, consume = true) => { const joined = taskJoins.get(callID); if (consume) taskJoins.delete(callID); return joined; },
       reviewerCorrectionScope: async id => {
@@ -3576,6 +3597,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "tool.execute.after": async (request, output) => {
         const id = request.sessionID;
         if (!id) return;
+        const beforeWork = cachedWorkProgress(input.directory, id);
+        const args = record(request.args) ? request.args : {};
+        const successful = output.status !== "error" && output.status !== "cancelled";
+        const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
+        const changed = successful ? extractWritePaths(request.tool, args, input.directory).paths.map(relativePath) : [];
+        if (changed.length) observeActorWork(input.directory, id, { kind: "change", paths: changed, callID: request.callID });
+        if (successful && request.tool === "read" && typeof (args.filePath ?? args.path) === "string") {
+          observeActorWork(input.directory, id, { kind: "read", paths: [relativePath(String(args.filePath ?? args.path))], callID: request.callID });
+        }
+        if (["bash", "shell"].includes(request.tool.toLowerCase()) && typeof args.command === "string") {
+          const metadata = record(output.metadata) ? output.metadata : {};
+          observeActorWork(input.directory, id, { kind: metadata.status === "running" ? "command-start" : "command-end", command: args.command,
+            exit: typeof metadata.exit === "number" ? metadata.exit : null, successful, callID: request.callID });
+        }
+        if (successful && request.tool === "todowrite" && Array.isArray(args.todos)) observeActorWork(input.directory, id, {
+          kind: "checkpoint", checkpoints: args.todos.filter(record).filter(todo => todo.status === "completed").map(todo => String(todo.id)), callID: request.callID });
         if (record(output.metadata) && output.metadata.joined === true) return;
         const ownership = request.callID === undefined ? undefined : taskOwners.get(request.callID);
         const returnedOutput = output.output;
@@ -3843,6 +3880,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : await operatorPacket(settledRun), null, 2);
           taskOwners.delete(request.callID!);
         }
+        const work = cachedWorkProgress(input.directory, id);
+        if (work && !ownership) {
+          const label = formatWorkQuantity(work);
+          output.metadata = { ...(record(output.metadata) ? output.metadata : {}), work_quantity: work, work_quantity_display: label };
+          // Reuse the native result channel once per changed estimate. Never queue a progress turn.
+          if (input.executionHost !== "codex" && ["write", "edit", "multiedit", "patch", "apply_patch"].includes(request.tool) &&
+              changed.length > 0 && typeof output.output === "string" &&
+              (!beforeWork || formatWorkQuantity(beforeWork) !== label) && displayedWork.get(work.scope_id) !== label) {
+            output.output += `\n\n[Sortie] ${label}`; displayedWork.set(work.scope_id, label);
+          }
+          if (!beforeWork || formatWorkQuantity(beforeWork) !== label) await publishMissionProgress(workRootForActor(input.directory, id)!,
+            { description: `🐾 ${label}`, sortie_progress: { work_quantity: work } });
+        }
       },
       "permission.ask": async (request, output) => {
         if (!request.sessionID) return;
@@ -3973,7 +4023,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if ((await identity(request.sessionID)).role === "dog-operator") {
           const mission = await missions.read(root);
           if (mission?.coordinator === request.sessionID) {
-            (output.context ??= []).push(`Mission continuation: ${JSON.stringify(missionPacket(mission, await operators.read(root)))}. ` +
+            (output.context ??= []).push(`Mission continuation: ${JSON.stringify(missionPacket(mission, await operators.read(root), false))}. ` +
               `Continue in this same Coordinator. Use ${status} or ${next}; retain original requirements and cumulative budget. No proposal/approval phase.`);
             return;
           }

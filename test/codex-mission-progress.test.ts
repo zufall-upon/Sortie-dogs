@@ -74,3 +74,14 @@ test("effective native permissions are visible without implying host-executor au
   assert.equal(progress?.requested_profile, null);
   assert.equal(progress?.command_executor, "host");
 });
+
+test("Codex native progress reuses workload already attached to tool results", () => {
+  const work = { n: 47, denominator: 100, estimated: true, scope: "whole-request" };
+  const progress = codexMissionProgress({ method: "item/completed", threadId: "worker", params: { item: {
+    type: "dynamicToolCall", tool: "bash", contentItems: [{ type: "inputText", text: JSON.stringify({
+      output: "PASS", metadata: { exit: 0, work_quantity: work, work_quantity_display: "全体作業量 47/100（概算）" },
+    }) }],
+  } } });
+  assert.deepEqual(progress?.work_quantity, work);
+  assert.equal(progress?.work_quantity_display, "全体作業量 47/100（概算）");
+});

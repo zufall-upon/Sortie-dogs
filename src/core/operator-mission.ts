@@ -7,6 +7,8 @@ import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
+import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
+import { applyPendingWork, rememberWorkMission, rememberedWorkRun } from "./work-quantity-observations.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -217,6 +219,8 @@ export interface OperatorMission {
   supersededRunID?: string;
   plans: number;
   progress: { unit: string; title: string; status: string; at: string }[];
+  /** Display-only request workload; excluded from controls, prompts and acceptance. */
+  workQuantity?: WorkQuantityState;
   submission: { status: "ready" | "needs-decision" | "blocked"; summary: string } | null;
   review?: { runID: string; risk: string[]; source: string; candidateSource?: string; task: OperatorTask | null;
     callID?: string;
@@ -446,9 +450,19 @@ export class OperatorMissionRuntime {
     return matches.length === 1 ? matches[0] : undefined;
   }
   private async save(file: string, value: unknown): Promise<void> {
+    if (record(value) && value.version === "0.12" && typeof value.root === "string") {
+      const mission = value as unknown as OperatorMission;
+      const run = rememberedWorkRun(this.projectRoot, mission.root);
+      const current = run?.runID === mission.runID ? run : undefined;
+      if (!mission.workQuantity || current && mission.workQuantity.planRunID !== current.runID) {
+        mission.workQuantity = planWorkQuantity(mission, current?.units.map(unit => unit.unit), current, mission.workQuantity, undefined, this.projectRoot);
+      }
+      mission.workQuantity = syncWorkQuantity(applyPendingWork(this.projectRoot, mission.root, mission.workQuantity), mission, current);
+    }
     const temporary = `${file}.${randomUUID()}.tmp`;
     await mkdir(join(this.projectRoot, this.profile.stateDirectory, "missions"), { recursive: true });
-    try { await writeFile(temporary, JSON.stringify(value), { flag: "wx", mode: 0o600 }); await rename(temporary, file); }
+    try { await writeFile(temporary, JSON.stringify(value), { flag: "wx", mode: 0o600 }); await rename(temporary, file);
+      if (record(value) && value.version === "0.12" && file === this.file(String(value.root))) rememberWorkMission(this.projectRoot, value as unknown as OperatorMission); }
     finally { await rm(temporary, { force: true }); }
   }
   private async serial<T>(root: string, operation: () => Promise<T>): Promise<T> {
@@ -461,6 +475,7 @@ export class OperatorMissionRuntime {
     await OperatorMissionRuntime.writes.get(this.file(root));
     const state = await this.loadMission(root);
     if (state && (state.version !== "0.12" || state.root !== root)) throw new Error("mission-state-invalid");
+    if (state) rememberWorkMission(this.projectRoot, state);
     return state;
   }
   /** Serialize host recovery claims across processes; a stale lock never authorizes takeover. */
@@ -559,6 +574,7 @@ export class OperatorMissionRuntime {
           throw new Error("mission-requirements-preserved: keep the existing ordered requirements and append user additions");
         }
         previous.requirements = requirements.map((text, index) => ({ id: `R${index + 1}`, text }));
+        previous.workQuantity = planWorkQuantity(previous, [], undefined, previous.workQuantity);
         // Only an explicit Mission action adopts the latest real turn; chat capture alone never does.
         if (!previous.requests.some(item => item.id === request.id)) previous.requests.push(request);
         if (options.kind === "operation") previous.kind = "operation";
@@ -579,10 +595,14 @@ export class OperatorMissionRuntime {
         context: (options.context ?? []).filter(item => item.id !== request.id),
         requirements: requirements.map((text, index) => ({ id: `R${index + 1}`, text })), phase: "open",
         ...(replaceRequirements ? { requirementsReplaced: true } : {}),
-        coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
+         coordinator: null, callID: null, dispatchOpen: false, runID: null, plans: 0, progress: [], submission: null,
         ...((previous === undefined || previous.phase === "cancelled") &&
           (replaceRequirements || previous?.runID === null || previous === undefined || request.id !== previous.requests[0]?.id) && predecessor
-          ? { supersededRunID: predecessor } : {}) };
+           ? { supersededRunID: predecessor } : {}) };
+      if (previous?.phase === "cancelled" && !replaceRequirements &&
+          previous.requirements.every((requirement, index) => state.requirements[index]?.text === requirement.text)) {
+        state.workQuantity = planWorkQuantity(state, [], undefined, previous.workQuantity);
+      }
       await this.save(this.file(root), state);
       return state;
     });
@@ -864,14 +884,17 @@ export function missionReviewIndependent(mission: OperatorMission, child: string
     !(mission.corrections ?? []).some(correction => correction.author === child);
 }
 
-export function missionPacket(mission: OperatorMission, run?: OperatorState): Record<string, unknown> {
+export function missionPacket(mission: OperatorMission, run?: OperatorState, includeWorkQuantity = true): Record<string, unknown> {
   const predecessor = run && mission.runID !== run.runID && (mission.supersededRunID === run.runID || run.phase === "cancelled") ? run : undefined;
   if (predecessor) run = undefined;
   const currentReview = mission.review !== undefined && mission.review.runID === (run?.runID ?? mission.runID);
   const reviewAccepted = currentReview && missionReviewAccepted(mission.review!);
   const operationStatus = missionExecutionStatus(mission);
   const operationComplete = missionExecutionComplete(mission);
+  const workload = syncWorkQuantity(structuredClone(mission.workQuantity ?? planWorkQuantity(mission,
+    run?.runID === mission.runID ? run.units.map(unit => unit.unit) : [], run)), mission, run);
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
+    ...(includeWorkQuantity ? { work_quantity: projectWorkQuantity(workload, mission.phase === "completed", mission.phase === "cancelled") } : {}),
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),

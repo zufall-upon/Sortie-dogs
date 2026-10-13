@@ -98,7 +98,9 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
       objective: "Create result.txt with ready followed by newline", read: verdict === "PASS" ? ["."] : ["check.mjs"],
-      write: verdict === "PASS" ? ["result.txt", "untouched.txt", "scratch.tmp"] : ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
+       write: verdict === "PASS" ? ["result.txt", "untouched.txt", "scratch.tmp"] : ["result.txt"], validation: [...(verdict === "PASS" ? ["node build.mjs"] : []), "node check.mjs"] }] }, { sessionID: "root" }));
+    assert.equal(planned.work_quantity.scope, "whole-request");
+    assert.equal(planned.work_quantity.n, 0);
     const worker = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, worker);
     await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker!.agent }, {
@@ -153,8 +155,11 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validation" },
       { args: { command: "node check.mjs" } });
     await exec(process.execPath, ["check.mjs"], { cwd: directory });
-    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validation" },
-      { output: "PASS", metadata: { exit: 0, status: "completed" } });
+    const liveCheck: { output: string; metadata: Record<string, unknown> } = { output: "PASS", metadata: { exit: 0, status: "completed" } };
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validation", args: { command: "node check.mjs" } }, liveCheck);
+    assert.ok(Number((liveCheck.metadata.work_quantity as { n: number }).n) > 0);
+    assert.equal(liveCheck.output, "PASS", "progress must not alter actual command stdout");
+    assert.match(String(liveCheck.metadata.work_quantity_display), /全体作業量 \d+\/100（概算）/);
     if (verdict === "PASS") history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
       state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } },
       time: { ran: 1200, completed: 1300 } }] });

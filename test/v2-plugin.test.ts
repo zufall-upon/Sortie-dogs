@@ -17,6 +17,8 @@ import V2Plugin, {
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 import { buildDebrief, renderDebrief } from "../dist/plugin/sortie-debrief.js";
+import { rememberWorkMission } from "../dist/core/work-quantity-observations.js";
+import { publishMissionProgress } from "../dist/plugin/mission-progress.js";
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
@@ -1032,6 +1034,31 @@ test("progress observes unit admission after reading the prepared run, rather th
     assert.equal((await observe())!.sortie_progress.last_transition_at, "2026-09-27T12:00:00.000Z");
     assert.equal(await missionProgressReader(directory, "root", "foreign-call")(), undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("native fast-lane Worker Task carries whole-request progress without a new observer or model/status request", async () => {
+  const directory = await mkdtemp(resolve("_testenv/v2-worker-progress-")), fixture = contextFixture();
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "user", text: "Implement result" });
+  const mission = await missions.start("root", ["Implement result"]);
+  rememberWorkMission(directory, mission);
+  const updates: Record<string, unknown>[] = [];
+  const native = { execute: async () => {
+    await publishMissionProgress("root", { description: "全体作業量 20/100（概算）", sortie_progress: { work_quantity: { n: 20, denominator: 100 } } });
+    return { content: "Native output", output: { answer: "unchanged" }, metadata: { sessionID: "worker", status: "completed" } };
+  } };
+  const context: OpenCodeV2Context = { ...fixture.context, location: { directory }, tool: { ...fixture.context.tool,
+    transform: async callback => { callback({ add() {}, update: (id, update) => { if (id === "subagent") update(native); } }); return { dispose() {} }; },
+  } };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup(context);
+  try {
+    const result = await native.execute({ agent: "dog-worker-v010" }, { sessionID: "root", id: "worker-call",
+      progress: async (value: Record<string, unknown>) => { updates.push(value); } });
+    assert.ok(updates.some(update => /20\/100/.test(String(update.description))));
+    assert.equal(result.content, "Native output");
+    assert.deepEqual(result.output, { answer: "unchanged" });
+    assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test("V2 missing child-list API recovers nested model gauges from native Task history in one message pass", async () => {

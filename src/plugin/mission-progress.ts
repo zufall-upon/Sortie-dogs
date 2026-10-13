@@ -2,31 +2,37 @@
 import { OperatorMissionRuntime } from "../core/operator-mission.js";
 import { OperatorRuntime } from "../core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../core/runtime-profile.js";
+import { formatWorkQuantity, projectWorkQuantity } from "../core/work-quantity.js";
+import { missionWorkState } from "../core/work-quantity-observations.js";
 
 type Sink = (value: Record<string, unknown>) => Promise<void>;
-const sinks = new Map<string, Sink>();
+const sinks = new Map<string, Set<Sink>>();
 export function bindMissionProgress(root: string, sink: Sink): () => void {
-  sinks.set(root, sink);
-  return () => { if (sinks.get(root) === sink) sinks.delete(root); };
+  const bound = sinks.get(root) ?? new Set<Sink>();
+  bound.add(sink); sinks.set(root, bound);
+  return () => { bound.delete(sink); if (!bound.size && sinks.get(root) === bound) sinks.delete(root); };
 }
 export async function publishMissionProgress(root: string, value: Record<string, unknown>): Promise<void> {
-  await sinks.get(root)?.(value).catch(() => undefined);
+  await Promise.all([...(sinks.get(root) ?? [])].map(async sink => { try { await sink(value); } catch { /* Display cannot interrupt work. */ } }));
 }
 
 /** Read durable transitions even when settlement ran in a different/reloaded plugin instance. */
-export function missionProgressReader(directory: string, root: string, callID: string) {
+export function missionProgressReader(directory: string, root: string, callID: string, coordinator = true) {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   return async (): Promise<Record<string, unknown> | undefined> => {
     const mission = await missions.read(root);
-    if (!mission || mission.callID !== callID) return undefined;
+    if (!mission || coordinator && mission.callID !== callID) return undefined;
     // OperatorRuntime caches its own writes; a display observer must read a fresh disk snapshot.
     const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).read(root);
     const units = run?.runID === mission.runID ? run.units : [];
+    if (!coordinator && !units.some(unit => unit.callID === callID) && mission.review?.callID !== callID) return undefined;
     const running = units.find(unit => unit.status === "running");
     const last = mission.progress.at(-1);
     const status = running ? "running" : last?.status ?? mission.phase;
     const title = running?.unit.title ?? last?.title ?? mission.requirements[0]?.text ?? "Coordinator";
-    return { description: `🐾 ${status}: ${title}`, sortie_progress: {
+    const work = projectWorkQuantity(missionWorkState(directory, mission, run), mission.phase === "completed", mission.phase === "cancelled");
+    return { description: `🐾 ${formatWorkQuantity(work)} · ${status}: ${title}`, sortie_progress: {
+      work_quantity: work,
       mission_id: mission.id, phase: mission.phase, unit: running ? `${run!.runID}/${running.unit.id}` : last?.unit ?? null,
       title, status, child_session_id: running?.childSessionID ?? null,
       // Stable timestamps, not a fabricated heartbeat. The parent can tell when the

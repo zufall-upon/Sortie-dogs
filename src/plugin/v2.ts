@@ -2,6 +2,8 @@ import { toolSchema, legacyToolArgs } from "./tool-schema.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
+import { cachedWorkProgress, workRootForActor } from "../core/work-quantity-observations.js";
+import { formatWorkQuantity } from "../core/work-quantity.js";
 import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive } from "./v2-session-history.js";
 import { nativeContractReadSnapshot } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
@@ -580,18 +582,25 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         const joined = hooks.nativeTaskJoin?.(String(execution.id ?? ""));
         if (joined) return { content: joined.output ?? "Joined the existing native Reviewer; it continues in the same context.",
           metadata: { sessionID: joined.sessionID, status: joined.status ?? "running", joinedCallID: joined.callID, joined: true } };
-        if (value.agent !== "dogs-coordinator" || typeof execution.progress !== "function") return execute(value, execution);
+        const coordinator = value.agent === "dogs-coordinator";
+        const missionRole = coordinator || typeof value.agent === "string" && /^(?:dog-worker|dog-luna-worker|dog-reviewer)(?:-v010)?$/u.test(value.agent);
+        if (!missionRole || typeof execution.progress !== "function") return execute(value, execution);
         const report = execution.progress as (value: JsonObject) => Promise<void>;
         let metadata: JsonObject = {};
         let pending = Promise.resolve();
         const update = (update: JsonObject) => {
-          metadata = { ...metadata, ...update };
+          metadata = { ...metadata, ...update, ...(record(metadata.sortie_progress) && record(update.sortie_progress)
+            ? { sortie_progress: { ...metadata.sortie_progress, ...update.sortie_progress } } : {}) };
           const snapshot = { ...metadata };
           pending = pending.catch(() => undefined).then(() => report(snapshot));
           return pending;
         };
-        const unbind = bindMissionProgress(String(execution.sessionID), update);
-        const readProgress = missionProgressReader(context.location.directory, String(execution.sessionID), String(execution.id));
+        const root = workRootForActor(context.location.directory, String(execution.sessionID)) ?? String(execution.sessionID);
+        const unbind = bindMissionProgress(root, update);
+        const readProgress = coordinator ? missionProgressReader(context.location.directory, root, String(execution.id)) : async () => {
+          const work = cachedWorkProgress(context.location.directory, root);
+          return work ? { description: `🐾 ${formatWorkQuantity(work)}`, sortie_progress: { work_quantity: work } } : undefined;
+        };
         let previous = "", reading: Promise<void> | undefined;
         const refresh = (): Promise<void> => {
           if (reading) return reading;
@@ -604,8 +613,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         };
         // The native executor is a stable snapshot. Poll only local durable state, not models or
         // session status APIs; this also recovers progress after another plugin instance settles work.
-        const timer = setInterval(() => { void refresh(); }, 1000);
-        timer.unref();
+        const timer = coordinator ? setInterval(() => { void refresh(); }, 1000) : undefined;
+        timer?.unref();
         try {
           await refresh();
           const result = await execute(value, { ...execution, progress: update });
@@ -613,7 +622,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
           await pending.catch(() => undefined);
           // Native completion replaces metadata, so retain our display fields alongside its own.
           return { ...result, metadata: { ...metadata, ...(record(result.metadata) ? result.metadata : {}) } };
-        } finally { clearInterval(timer); unbind(); await reading; await pending.catch(() => undefined); }
+        } finally { if (timer) clearInterval(timer); unbind(); await reading; await pending.catch(() => undefined); }
       };
     });
     for (const [name, definition] of Object.entries(hooks.tool ?? {})) {
