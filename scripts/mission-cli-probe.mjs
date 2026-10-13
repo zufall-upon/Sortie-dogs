@@ -99,7 +99,7 @@ export function completeProbeObservations(result, schemaRejected = false) {
  * Observation seams let retained lifecycle facts be replayed without model requests.
  * finish persists completed evidence idempotently; a first late signal can require a re-save. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
-  databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish }) {
+  databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish, persistFailure }) {
   let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError, cliError, usageIncomplete;
   const cleanupErrors = [];
   const cleanup = (target, run) => Promise.resolve().then(run).catch(error => {
@@ -198,13 +198,43 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     let savedStop, savedSignal, result;
     do {
       savedStop = stopped; savedSignal = controllerSignal;
-      result = await finish({ ...evidence, stopped: savedStop, stopObservation, cutoff, controllerSignal: savedSignal,
+      const context = { ...evidence, stopped: savedStop, stopObservation, cutoff, controllerSignal: savedSignal,
         nextAction: cleanupErrors.length
         ? 'Retry teardown only for the recorded owned CLI/server and verify all writers stopped, then reconcile database usage and saved CLI logs. Do not automatically replay the consumed task or restart the shared host.' : cliError
         ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : observationError
         ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.'
         : savedStop === 'controller-interrupted'
-        ? 'Inspect the saved Mission receipt, owned database usage and CLI logs before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : undefined });
+        ? 'Inspect the saved Mission receipt, owned database usage and CLI logs before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : undefined };
+      try { result = await finish(context); }
+      catch (error) {
+        stop('persistence-failed', lastObserved, 'persistence');
+        const failureContext = () => ({ ...evidence, observed: { ...evidence.observed, usage_complete: false,
+          known_unpriced_requests: evidence.observed.known_unpriced_requests ?? evidence.observed.unpriced_requests,
+          unpriced_requests: Math.max(1, evidence.observed.unpriced_requests) },
+          stopped, stopObservation, cutoff, controllerSignal, persistence_complete: false,
+          persistenceError: { name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
+            ...(error?.code === undefined ? {} : { code: error.code }) },
+          nextAction: 'Inspect the recorded owned output and budget lock, retain unresolved usage holds, and reconcile saved receipt/database usage and CLI logs before retrying only failed persistence. Verify owned writers stopped. Do not automatically replay the consumed task, remove another owner\'s lock or restart the shared host.' });
+        let failurePersistenceError;
+        if (persistFailure) try {
+          // A distinct evidence-only sink avoids repeating failed state reads or settlement.
+          do {
+            savedStop = stopped; savedSignal = controllerSignal;
+            result = await persistFailure(failureContext());
+          } while (savedStop !== stopped || savedSignal !== controllerSignal);
+          return result;
+        } catch (failure) {
+          failurePersistenceError = { name: failure?.name ?? 'Error', message: String(failure?.message ?? failure).slice(0, 1500),
+            ...(failure?.code === undefined ? {} : { code: failure.code }) };
+        }
+        // If the receipt path is unavailable, surface original cause plus fresh evidence,
+        // never return the earlier success or claim the failure was durably recorded.
+        const rejected = new Error('Mission CLI evidence persistence failed', { cause: error });
+        if (error?.code !== undefined) rejected.code = error.code;
+        rejected.monitorContext = { ...failureContext(), failure_recorded: false,
+          ...(failurePersistenceError ? { failurePersistenceError } : {}) };
+        throw rejected;
+      }
       // A signal can arrive after finish copied or serialized its fields. Re-save
       // only changed stop metadata, not native work, observation or owned teardown.
       // Both fields are first-write-only, so repeated signals cannot prolong saving.
@@ -215,6 +245,32 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     process.off('SIGINT', onInterrupt);
     process.off('SIGTERM', onTerminate);
   }
+}
+
+/** Correct terminal evidence only; never retry model work, Mission reads or budget settlement. */
+export async function persistMissionCLIFailure(run, context, metadata = {}) {
+  let previous = {}, previousObservationError;
+  try { previous = JSON.parse(await readFile(join(run, 'observation.json'), 'utf8')); }
+  catch (error) {
+    if (error.code !== 'ENOENT') previousObservationError = { name: error.name, message: String(error.message).slice(0, 1500),
+      ...(error.code === undefined ? {} : { code: error.code }) };
+  }
+  const result = { ...previous, ...context.observed, ...metadata,
+    database_path: context.databasePath, stopped: context.stopped, stop_observation: context.stopObservation ?? null,
+    code: context.code, signal: context.signal ?? null, controller_signal: context.controllerSignal ?? null,
+    ...(context.cutoff ? { errors: context.cutoff.errors,
+      cancellation_errors: context.observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
+    ...(context.observationError ? { observation_error: context.observationError } : {}),
+    ...(context.cliError ? { cli_error: context.cliError } : {}),
+    ...(context.cleanupErrors.length ? { cleanup_complete: false, cleanup_errors: context.cleanupErrors } : {}),
+    ...(previousObservationError ? { previous_observation_error: previousObservationError } : {}),
+    persistence_complete: false, persistence_error: context.persistenceError,
+    failure_recorded: true, next_action: context.nextAction, accepted: false };
+  Object.assign(result, completeProbeObservations(result), { native_completed: false });
+  await writeFile(join(run, 'cli.stdout.jsonl'), context.stdout);
+  await writeFile(join(run, 'cli.stderr.log'), context.stderr);
+  await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
+  return result;
 }
 
 async function updateBudget(file, update) {
@@ -250,6 +306,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   }
   if (setupFixture) await setupFixture(fixture);
   const actualBaseCommit = (await command('git', ['rev-parse', 'HEAD'], project, env)).trim();
+  const candidateSHA256 = createHash('sha256').update(await readFile(tgz)).digest('hex');
   await updateBudget(budgetFile, budget => {
     const probes = budget.probes ??= [];
     const charged = probes.reduce((sum, item) => sum + item.charged_usd, 0);
@@ -301,7 +358,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
         mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
         review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
-        candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
+        candidate_sha256: candidateSHA256 };
       const worker = result.models.find(item => item.agent === 'dog-worker-v010');
       const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
       Object.assign(result, completeProbeObservations(result, schemaRejected));
@@ -329,6 +386,12 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
       });
       return result;
     },
+    persistFailure: context => persistMissionCLIFailure(run, context, {
+      project, data_home: env.XDG_DATA_HOME, mode, elapsed_ms: Date.now() - since,
+      ...probeTaskIdentity(request, instance, actualBaseCommit), package_version: fixture.pkg.version,
+      runtime_marker: fixture.runtimeMarker, candidate_sha256: candidateSHA256,
+      ...(context.cleanupErrors.length ? { cli_pid: child.pid ?? null, server_url: server.url ?? null } : {}),
+    }),
   });
 }
 
