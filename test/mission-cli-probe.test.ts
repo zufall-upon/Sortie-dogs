@@ -300,6 +300,90 @@ test("practical monitor freezes the owning server database for observation and n
   }
 });
 
+for (const phase of ["budget", "settlement", "missing", "no-root-first", "stable"]) {
+  test(`practical monitor retains its first observed root through ${phase}`, { timeout: 10_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-monitor-root-"));
+    const path = join(directory, "owned.db"), since = Date.now();
+    const db = seedObservationDatabase(path, directory, "owned-root", since, phase === "settlement");
+    db.prepare("UPDATE session_v2 SET time_idle = ?").run(since + 500);
+    const session = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?, 'succeeded')");
+    session.run("owned-coordinator", "owned-root", "dogs-coordinator", directory, since + 10, since + 500);
+    const message = db.prepare("INSERT INTO session_message VALUES (?, ?, 'assistant', ?, ?)");
+    const priced = (input: number, output: number) => JSON.stringify({ model: root.model,
+      tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: since + 150, completed: since + 190 }, content: [],
+    });
+    message.run("owned-priced", "owned-root", 1, priced(100000, 60000));
+    message.run("owned-unpriced", "owned-coordinator", 1, JSON.stringify({
+      model: { providerID: "unpriced-fixture", id: "fixture-only-model" }, time: { completed: since + 190 },
+      content: [{ type: "tool", name: "shell", state: { status: "error", error: "owned-root-error" } }],
+    }));
+    if (phase === "no-root-first") db.exec("DELETE FROM session_v2 WHERE id = 'owned-root'");
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    const reads: { root?: string, pinned?: string }[] = [];
+    let serverStops = 0, finishCalls = 0, released = false, releaseTimer;
+    const listenerCounts = ["SIGINT", "SIGTERM"].map(signal => process.listenerCount(signal));
+    try {
+      const result = await monitorMissionCLI({ child, server: { stop: async () => {
+        serverStops++;
+        if (phase === "settlement") assert(released, "a later idle root cannot settle original queued work");
+      } }, project: directory, databasePath: path, since, rootAgent: "dog-operator", mode: "complete",
+        rootModel: expected, capUSD: 2, timeoutSeconds: 5,
+        observe: (project: string, after: number, agent: string, selected: string, options: { root?: string }) => {
+          assert.equal(after, since); assert.equal(selected, path); assert.equal(agent, "dog-operator");
+          const observed = observeMissionCLI(project, after, agent, selected, options);
+          reads.push({ root: observed.root, pinned: options.root });
+          const firstOwned = phase === "no-root-first" ? 2 : 1;
+          if (phase === "no-root-first" && reads.length === 1) {
+            session.run("owned-root", null, "dog-operator", directory, since, since + 500);
+          }
+          if (reads.length === firstOwned && phase !== "stable") {
+            session.run("later-root", null, "dog-operator", directory, since + 100, since + 500);
+            message.run("later-priced", "later-root", 1, priced(1000, 100));
+            if (phase === "budget") for (let seq = 2; seq <= 3; seq++)
+              message.run(`owned-${seq}`, "owned-root", seq, priced(100000, 60000));
+            if (phase === "missing") db.exec("DELETE FROM session_v2 WHERE id = 'owned-root'");
+          }
+          if (reads.length === firstOwned + 1 && ["settlement", "no-root-first", "stable"].includes(phase)) {
+            child.stdin.end();
+            if (phase === "settlement") releaseTimer = setTimeout(() => {
+              db.exec("DELETE FROM session_pending"); released = true;
+            }, 50);
+          }
+          return observed;
+        },
+        finish: async context => { finishCalls++; return context; },
+      });
+      assert.equal(result.observed.root, "owned-root");
+      assert.deepEqual(result.observed.models.map((item: { sessionID: string }) => item.sessionID), ["owned-root", "owned-coordinator"]);
+      assert.deepEqual(result.observed.errors, [{ sessionID: "owned-coordinator", tool: "shell", error: '"owned-root-error"' }]);
+      assert.equal(result.observed.unpriced_requests, 1);
+      assert(Math.abs(result.observed.priced_usd - (phase === "budget" ? 2.4 : 0.8)) < 1e-12);
+      assert.equal(result.stopped, phase === "budget" ? "budget" : phase === "missing" ? "observation-failed" : false);
+      assert.equal(serverStops, 1); assert.equal(finishCalls, 1);
+      const firstOwnedIndex = phase === "no-root-first" ? 1 : 0;
+      assert.equal(reads[firstOwnedIndex].pinned, undefined);
+      assert(reads.slice(firstOwnedIndex + 1).every(read => read.pinned === "owned-root"));
+      if (phase === "no-root-first") assert.equal(reads[0].root, undefined, "wait for an actual identity before pinning");
+      if (phase === "missing") {
+        assert.equal(result.observed.usage_complete, false);
+        assert.equal(result.observed.known_unpriced_requests, 1);
+        assert.match(result.observationError.message, /Observation root owned-root not found/);
+        assert.match(result.nextAction, /Do not automatically replay/);
+      }
+      if (["settlement", "no-root-first", "stable"].includes(phase)) assert.equal(result.code, 0);
+      assert.deepEqual(["SIGINT", "SIGTERM"].map(signal => process.listenerCount(signal)), listenerCounts);
+    } finally {
+      clearTimeout(releaseTimer);
+      db.exec("DELETE FROM session_pending");
+      child.stdin.end();
+      await stopProcessGroup(child);
+      db.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("the start-only Worker deadline does not invalidate a completed native receipt", () => {
   const worker = { started_ms: 75_895 };
   assert.equal(workerStartWithinProbeLimit("start", worker), false);

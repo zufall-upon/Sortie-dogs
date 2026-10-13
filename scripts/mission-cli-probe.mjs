@@ -106,7 +106,7 @@ export function completeProbeObservations(result, schemaRejected = false) {
  * finish persists completed evidence idempotently; a first late signal can require a re-save. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish, persistFailure }) {
-  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError, cliError, usageIncomplete;
+  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationRoot, observationError, cliError, usageIncomplete;
   const cleanupErrors = [];
   const cleanup = (target, run) => Promise.resolve().then(run).catch(error => {
     cleanupErrors.push({ target, name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
@@ -123,7 +123,9 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   const stopOwned = () => stopping ??= Promise.all([cleanup('cli', () => stopProcessGroup(child)), stopServer()]);
   const observeNow = point => {
     try {
-      lastObserved = observe(project, since, rootAgent, databasePath);
+      lastObserved = observe(project, since, rootAgent, databasePath, { root: observationRoot });
+      // Once observed, this CLI's root owns all later usage and settlement.
+      observationRoot ??= lastObserved.root;
       usageIncomplete = false;
       return lastObserved;
     } catch (error) {
@@ -186,7 +188,7 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
       if (reason) stop(reason, observed, 'cli-close');
       if (mode === 'complete' && code === 0 && !stopped) {
         await waitForNativeSettlement({ pending: async () => {
-          try { return await (pending ?? (() => nativeRunPending(project, databasePath, { since, root: observed.root })))(); }
+          try { return await (pending ?? (() => nativeRunPending(project, databasePath, { since, root: observationRoot })))(); }
           catch (error) { failObservation(error, 'native-settlement'); return false; }
         }, stopped: () => stopped });
       }
