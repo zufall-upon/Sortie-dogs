@@ -209,14 +209,18 @@ ${MISSION_DEPENDENCY_WORKFLOW}
    ${profile.toolPrefix}plan_units with executor: "self", a concrete reason and one corrective unit.
    Finish direct work with ${profile.toolPrefix}finish_direct_unit; its actual native checks are formal
    evidence, with the same source freshness and Review requirements. Reviewer FINDINGS
-    instead use ${profile.toolPrefix}repair_review to recover the SAME native Reviewer/context only if it
-    actually returned before correction or was interrupted, correct
+     can reuse ${profile.toolPrefix}repair_review to recover useful native Reviewer/context if it
+     returned before correction or was interrupted; another available Reviewer or plan_units Worker/direct
+     correction is also legitimate within existing user authorization. Retain findings and actual authorship; correct
    all known Major/Medium defects and pass formal validation/requested commit, then call review_mission
    only for legacy CORRECTION_READY-only fallback; normally that SAME author explicitly self-rechecks
    after formal checks/commit within its correction Task, using candidate=current-validated for host binding.
    Only concrete reachable Major risk remaining
    after self-recheck requires a DIFFERENT Reviewer; Medium, tags, hashes and prose gaps alone do not;
-   they are not a failed-validation retry. Keep the SAME mission, original requirements, failure history
+    they are not a failed-validation retry. A different Reviewer remains optional when useful, not forbidden.
+    Completed correction history never blocks plan_units for remaining authorized implementation or requires
+    acceptance first. No routine handoff approval, new conversation, rediscovery or unchanged checks.
+    Keep the SAME mission, original requirements, failure history
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
    correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
@@ -417,7 +421,10 @@ After current formal checks, retain the requested commit/clean boundary, then
 ${profile.toolPrefix}finish_direct_unit. Explicitly self-recheck and end this same native Task with
 SELF_RECHECKED; only its actual successful terminal binds the current validated source. This is author
 self-recheck, never independent approval of your own edits. No unresolved Medium may pass.
-Do not edit before that host transition or delegate. If the host resumes this SAME
+Do not edit before that host transition. Reuse this context by default; the controller may choose another
+available author or direct execution after terminal work without a handoff approval. Preserve all findings,
+actual source authors, passed input-bound checks and cumulative spend; a new actor does not resolve defects.
+If the host resumes this
 session with an admitted correction unit, read its exact handoff and preserve its declared validation/commit
 boundary. The inherited write list is an estimate, not a user prohibition. Concrete native edit paths are
 reconciled automatically; for outputs whose paths cannot be inferred, call ${profile.toolPrefix}expand_unit
@@ -431,7 +438,8 @@ relevant impact IN THIS SAME TASK. Return SELF_RECHECKED with candidate=current-
 the actual current source after this prompt's successful native terminal and fresh checks. Never copy a
 pre-edit hash or return PASS for your own correction. Legacy CORRECTION_READY-only uses a separate same-author
 read-only fallback, not acceptance. Only a concrete reachable Major risk remaining after self-recheck
-requires a DIFFERENT Reviewer. Known Major/Medium defects must be corrected; unresolved Medium cannot pass.
+requires a DIFFERENT Reviewer; independent review also remains optional when useful, not forbidden.
+Known Major/Medium defects must be corrected; unresolved Medium cannot pass.
 Tags, hashes, public-api/public-logic, missing prose and EVIDENCE_GAPS alone do not trigger a second review.
 Self-recheck is not independent approval; root acceptance still compares the actual result with the request.
 Otherwise return to the caller in the user's language.

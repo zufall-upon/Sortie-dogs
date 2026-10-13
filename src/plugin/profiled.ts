@@ -1078,12 +1078,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           run?.phase === "awaiting-acceptance" &&
            (!mission.review || missionReviewAccepted(mission.review))) {
         return { ...packet, next_action: mission.review && missionReviewAccepted(mission.review)
-          ? "Fast-lane: compare all original requirements with actual evidence and review disposition, then call complete_mission. Report any remaining evidence gaps; they are not PASS."
+          ? "Fast-lane: continue authorized remaining implementation with plan_units, or compare all original requirements with actual evidence before complete_mission when acceptance is authorized. A passed correction does not complete remaining development. Report evidence gaps; they are not PASS."
           : "Fast-lane: assess actual risk and call review_mission with real risk_tags. Implementation notes are optional. Dispatch its Reviewer Task if required; then compare all requirements before complete_mission." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")) {
-        return { ...packet, next_action: `Fast-lane: correction failed; call ${repairReview} for a new scoped Task in the SAME original Reviewer's native session. Fix its own regression, run inherited validation and retain the commit/clean boundary. No ordinary Worker retry, fresh Worker replan or duplicate settlement; cumulative spend and failed history remain.` };
+        return { ...packet, next_action: `Fast-lane: correction failed. Reuse its author via ${repairReview}, choose another available Reviewer, or ${planUnits} for Worker/direct correction. Retain findings, affected checks, requested delivery and cumulative spend; no duplicate settlement or unchanged reinvestigation.` };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-decision" && run.units.length === 1 &&
@@ -1099,7 +1099,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           run?.phase === "awaiting-acceptance" && mission.review?.verdict === "findings") {
         const checked = mission.corrections?.find(item => item.runID === run.runID)?.selfRecheck;
         if (mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !checked) {
-          return { ...packet, next_action: `Fast-lane: correction ready; call ${reviewMission} for explicit read-only self-recheck in the SAME native author. CORRECTION_READY is not acceptance; only concrete reachable residual Major risk then requires a different Reviewer.` };
+          return { ...packet, next_action: `Fast-lane: correction ready. Reuse the author's explicit self-recheck or select an independent Reviewer with ${reviewMission}. Authorized remaining implementation can proceed with ${planUnits}; CORRECTION_READY is not acceptance.` };
         }
         if (checked?.residualMajor && !checked.unresolvedFindings.length && mission.review.mode === "self-recheck") {
           return { ...packet, next_action: `Fast-lane: native author self-recheck retained concrete reachable Major risk. ` +
@@ -1107,9 +1107,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             `Do not start a fresh Worker or repeat unchanged validation.` };
         }
         return { ...packet, next_action: `Fast-lane: known Major/Medium findings require correction. Call ${repairReview} ` +
-          `for the SAME original Reviewer's scoped correction Task, then ${reviewMission} for its explicit native self-recheck. ` +
+          `to reuse the author's scoped correction Task or select another available Reviewer; ${planUnits} also permits Worker/direct correction. Then obtain native self-recheck or useful independent Review. ` +
           `Only a concrete reachable Major risk remaining after self-recheck requires a different Reviewer. ` +
-          `No fresh Worker, routine diff transcription or unchanged reinvestigation is required.` };
+          `No routine diff transcription, handoff approval or unchanged reinvestigation is required.` };
       }
       if (!mission.dispatchOpen && (["open", "running"].includes(mission.phase) ||
           (mission.phase === "submitted" && mission.submission?.status !== "ready"))) {
@@ -1952,7 +1952,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         executor_session_id: actor, validation: direct!.unit.unit.validation,
         next_action: `Implement/correct and run the declared checks here, in this same session. Call ${finishDirectUnit} after the requested delivery boundary. No Worker or handoff read is needed. Retain the original requirements; independent Review and Operator acceptance still follow.` });
     }
-    tools[startDirectUnit] = { description: "Execute the next already-planned unit in this SAME Coordinator/Operator session. Native edits and declared checks become formal evidence without a Worker, handoff read or approval. Use after plan_units or a settled-unit retry; never replace an active Worker or the Reviewer correction owner.",
+    tools[startDirectUnit] = { description: "Execute the next already-planned ordinary unit in this Coordinator/Operator session, including a correction planned with executor=self. Native edits and declared checks become formal evidence without a Worker, handoff read or approval. Never replace an active writer; completed correction history does not restrict this choice.",
       args: {}, execute: async (_args, context) => {
         const { root } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, () => startDirect(root, context.sessionID));
@@ -1960,17 +1960,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     tools[finishDirectUnit] = { description: "Finish this controller's or admitted Reviewer's direct unit using actual ordered native checks bound to current source. Retains this session for review/coordination or explicit author self-recheck; this is not a native Task terminal, independent Review or Mission acceptance. Missing/failed/stale checks continue here without a Worker.",
       args: {}, execute: async (_args, context) => {
         const inline = await directExecution(context.sessionID);
-        const root = inline?.unit.reviewerCorrection
-          ? inline.root : (await missionAuthority(context.sessionID)).root;
-        return serializeDispatchTransition(root, async () => {
-          const direct = await activateDirect(context.sessionID);
-          if (!direct) throw new Error("mission-direct-unit-not-running");
-          const checks = await runtimeBridge.reviewerCorrectionValidation!(root, direct.unit.callID!, context.sessionID,
-            Date.parse(direct.unit.directExecution!.startedAt));
+         const correction = await reviewerCorrection(context.sessionID);
+         const root = inline?.unit.reviewerCorrection
+           ? inline.root : correction?.root ?? (await missionAuthority(context.sessionID)).root;
+         return serializeDispatchTransition(root, async () => {
+           const direct = await activateDirect(context.sessionID) ?? correction;
+           if (!direct) throw new Error("mission-direct-unit-not-running");
+           const checks = await runtimeBridge.reviewerCorrectionValidation!(root, direct.unit.callID!, context.sessionID,
+             Date.parse(direct.unit.directExecution?.startedAt ?? direct.unit.reviewerCorrection!.admittedAt ?? direct.run.createdAt));
           if (!checks?.ready) return JSON.stringify({ status: "direct-unit-awaits-validation", ...checks,
             next_action: "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
-          await control!.finishDirectUnit(root, context.sessionID, (direct.unit.reviewerCorrection?.checks ?? direct.unit.directExecution!.checks).filter(check =>
-            checks.matched?.some(item => item.callID === check.callID)));
+           // A resumed correction Task settles at its native terminal, not at this
+           // advisory completion call. Inline/direct execution uses its existing finish path.
+           if (direct.unit.directExecution) await control!.finishDirectUnit(root, context.sessionID, (direct.unit.reviewerCorrection?.checks ?? direct.unit.directExecution.checks).filter(check =>
+             checks.matched?.some(item => item.callID === check.callID)));
           if (direct.unit.reviewerCorrection) return JSON.stringify({ status: "correction-validated",
             execution: "same-native-task", validation: direct.unit.unit.validation,
             next_action: 'Compare the original requirements, retained findings and affected public behavior in this same context, then finish THIS native Task with SELF_RECHECKED and self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. No handoff reread, second Task or Operator round trip. This is author self-recheck; only the actual successful native terminal can bind it, never this tool result.' });
@@ -2235,7 +2238,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     function declaredMissionExecution(mission: OperatorMission, execution?: unknown): OperatorMission["execution"] {
       const operation = mission.execution;
       // Optional empty operation fields must not turn a normal edit into an operation.
-      if (execution === undefined || mission.kind === "implementation" && record(execution) &&
+      if (execution === undefined || mission.kind === "implementation" && (execution === "" || execution === null) || mission.kind === "implementation" && record(execution) &&
           Array.isArray(execution.commands) && execution.commands.length === 0) return operation;
       if (!record(execution) || typeof execution.directory !== "string" || !execution.directory.trim() ||
           !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
@@ -2247,10 +2250,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       await control!.currentBudget(root);
       mission = await missions.required(root);
       let previous = await operators.read(root);
-      if (previous && mission.runID === previous.runID && previous.units.some(unit => unit.reviewerCorrection)) {
-        return JSON.stringify({ ...missionPacket(mission, previous), status: "correction-owner-continuation-required",
-          next_action: `Call ${repairReview} to continue the SAME original Reviewer after a terminal failed correction or newer findings. Do not replace the correction owner with a fresh Worker through plan_units; retain requirements, checks and cumulative spend.` });
-      }
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
@@ -2259,8 +2258,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const operation = declaredMissionExecution(mission, execution);
       // Models can serialize an optional operation field as an empty object for a normal edit.
       // Do not turn an implementation mission into an operation (or block its first Worker).
-      const emptyImplementationExecution = mission.kind === "implementation" && record(execution) &&
-        Array.isArray(execution.commands) && execution.commands.length === 0;
+      const emptyImplementationExecution = mission.kind === "implementation" && (execution === "" || execution === null || record(execution) &&
+        Array.isArray(execution.commands) && execution.commands.length === 0);
       const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
@@ -2383,7 +2382,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
       for (const history of histories) mission = await missions.contextSnapshot(mission, history.id, history.messages,
         history.id === actor ? handoffNotes : undefined);
-      const context = await missions.handoffContext(mission);
+      const context = { ...await missions.handoffContext(mission),
+        ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
+          ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
+          prior_run_id: previous.runID } : {}) };
       const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
@@ -2405,7 +2407,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: "Before dispatch, correct or prepare the listed in-project TMPDIR directories. Keep this plan and its budget; no new approval or validation run is needed." } : {}) }
         : next);
     }
-    tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Keep investigation/edit/check/requested commit with the same author before independent Review, not a commit-only handoff. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Reviewer FINDINGS stay with the same Reviewer for correction, formal validation and self-recheck.`,
+    tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Reuse useful author context by default; legitimate Worker/direct handoff remains available after terminal work, including correction. Retain findings, actual authorship and passed input-bound checks; do not rediscover or revalidate unchanged work merely for a new actor. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Completion history is not a correction-owner lock or an acceptance prerequisite.`,
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
@@ -2489,8 +2491,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         findings: correction.findings, validation: unit.unit.validation, write: unit.unit.write,
         next_action: `Correct all retained defects here using your existing context and public test harness; no handoff read or new Task. ${REVIEWER_VALIDATION_WORKFLOW} Retain requested commit/clean delivery, then ${finishDirectUnit} and your explicit SELF_RECHECKED native terminal. Additional investigation may widen when useful; no reduced effort or acceptance of unresolved Medium.` });
     }
-    tools[repairReview] = { description: "Reviewer: record your concrete Major/Medium findings and continue correction, inherited formal checks, commit and self-recheck HERE without ending this native Task. Controller: recover the ORIGINAL correction owner after a terminated review/correction. Host prepares/binds the existing authorized write scope and validation; no findings transcription, new approval or Worker rediscovery. Author self-recheck is not independent PASS. Operations retain their original execution observations; correction does not rerun the operation. Reviews without an existing write scope do not use this route.",
+    tools[repairReview] = { description: "Reviewer: record concrete Major/Medium findings and continue correction, affected formal checks, requested delivery and self-recheck HERE without ending this native Task. Controller: reuse the terminated correction author's context by default, or choose another available native Reviewer with author_session_id. Worker/direct handoff uses plan_units instead. Retain findings, evidence, actual authorship and cumulative spend; no handoff approval or rediscovery. Completed correction does not prevent remaining implementation. Author self-recheck is not independent PASS. Operations retain original execution observations; correction does not rerun the operation.",
       args: { findings: optionalStringSchema as never, reason: optionalStringSchema as never,
+        author_session_id: { type: "string", "x-sortie-optional": true, description: "Optional existing available Reviewer conversation for correction handoff. Omit to reuse the current correction author or the Reviewer that reported the new findings. Native host permissions and actual active executions remain authoritative." } as never,
         validation: { ...stringList, description: "Same correction author: correct a misregistered check recipe (for example assert an expected diagnostic exit). Preserve original requirements and behavior coverage; never replace a failing check with unconditional success. Requires fresh actual native checks, not historical proof.", optional: true } as never,
         validation_cwd: { type: "object", additionalProperties: { type: "string" }, optional: true } as never }, execute: async (args, context) => {
         if (!input.reviewerCorrectionPermissions) throw new Error("native-reviewer-correction-permissions-unavailable");
@@ -2526,7 +2529,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                ["prepared", "running"].includes(existing.status)) return startInlineReviewerCorrection(root, context.sessionID,
                  typeof args.findings === "string" ? args.findings : undefined);
           if (reviewer) {
-            if (!review || review.verdict !== "pending" || review.mode === "self-recheck" || mission.corrections?.length || review.child !== context.sessionID ||
+             if (!review || review.verdict !== "pending" || review.mode === "self-recheck" || review.child !== context.sessionID ||
                 !review.callID || !review.promptID || !review.task || !missionReviewIndependent(mission, context.sessionID) ||
                 typeof args.findings !== "string" || !args.findings.trim()) throw new Error("mission-review-correction-reviewer-not-current");
             if (!run.units.some(unit => unit.unit.write.length)) throw new Error("mission-review-correction-unavailable");
@@ -2555,14 +2558,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
           }
           const recovery = existing !== undefined && ((existing.status === "failed" && run.phase === "awaiting-decision") || validationRecovery);
-          if (existing && ((!newFindings && !recovery) || ["prepared", "running"].includes(existing.status))) return JSON.stringify({ status: `correction-${existing.status}`,
-            ...(run.phase === "prepared" ? { task: operators.nextWorkerTask(run) } : {}),
-            next_action: "Continue only the existing correction Task. Ready requires explicit SAME-author native self-recheck; only residual concrete Major risk requires a different Reviewer. Failure retains the candidate and cumulative spend." });
+           if (existing && ((!newFindings && !recovery) || ["prepared", "running"].includes(existing.status))) return JSON.stringify({ status: `correction-${existing.status}`,
+             ...(run.phase === "prepared" ? { task: operators.nextWorkerTask(run) } : {}),
+             next_action: existing.status === "ready"
+               ? `Correction is complete. Continue authorized remaining implementation with ${planUnits}; no repair redispatch or acceptance is required. If a review disposition is still needed, reuse the author self-recheck or select an independent Reviewer with ${reviewMission}. Preserve findings, evidence and cumulative spend.`
+               : "This correction admission is prepared/running. Continue or join its actual execution; do not replace a live writer. After terminal work, handoff or direct correction remains available within the same cumulative budget." });
           if (!run.units.some(unit => unit.unit.write.length) ||
               (!recovery && run.phase !== "awaiting-acceptance") || !review || (!validationRecovery && review.verdict !== "findings") ||
               !review.child || !review.initialPrompt || !review.result) throw new Error("mission-review-correction-unavailable");
-          const original = mission.corrections?.at(-1);
-          const authorID = original?.author ?? review.child;
+           const selectedAuthor = typeof args.author_session_id === "string" && args.author_session_id.trim() ? args.author_session_id : undefined;
+           const authorID = reviewer ? context.sessionID : selectedAuthor ?? (recovery ? existing.author : review.child);
           const author = await identity(authorID), native = payload(await session("get", { path: { id: authorID } }));
           if (author.role !== "dog-reviewer" || author.parent !== (mission.coordinator ?? root) ||
               !record(native) || (!reviewer && !(recovery ? ["succeeded", "completed", "failed"] : ["succeeded", "completed"]).includes(String(native.outcome)))) throw new Error("mission-review-correction-reviewer-not-terminal");
@@ -2570,13 +2575,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID &&
               (item.kind === "reviewer_correction" || existing.inlineReview && item.kind === "direct_execution"));
             const terminal = attempt ? await missionWorkerTerminalProof(root, mission, run, attempt, true) : undefined;
-            if (terminal?.status !== "ready" || terminal.child !== authorID) throw new Error(`mission-review-correction-terminal-unreconciled:${terminal && "reason" in terminal ? terminal.reason : "terminal_record_missing"}`);
+             if (terminal?.status !== "ready" || terminal.child !== existing.author) throw new Error(`mission-review-correction-terminal-unreconciled:${terminal && "reason" in terminal ? terminal.reason : "terminal_record_missing"}`);
           }
           const budget = await control!.currentBudget(root);
           if (!budget || budget.reserved_units || budget.remaining_units < 1) throw new Error("mission-review-correction-budget-unavailable");
           const reviewIdentity = missionReviewIdentity(mission);
           const plan = missionPlan(mission, [{ title: `Correct ${run.units[0]!.unit.title}`,
-            objective: `${validationRecovery ? "The prior correction completed, but its inherited validation is now stale. Preserve completed implementation, reproduction, original findings and historical checks; refresh only affected checks in this SAME author context. If the check recipe needs repair, use repair_review here as its existing author. Do not redo unchanged implementation/discovery or request another independent Review. " : ""}Correct all retained concrete Major/Medium findings in this SAME native conversation; preserve every original requirement. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. ${REVIEWER_VALIDATION_WORKFLOW} Retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Only concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer. Tags/hashes/Medium/prose gaps alone never trigger it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck only permits a same-author read-only fallback Task, never acceptance.`,
+             objective: `${validationRecovery ? "The prior correction completed, but its inherited validation is now stale. Preserve completed implementation, reproduction, original findings and historical checks; refresh only affected checks in this selected author context. If the check recipe needs repair, use repair_review here as its actual author. Do not redo unchanged implementation/discovery or request a routine repeat Review. " : ""}Correct all retained concrete Major/Medium findings in this selected native conversation; preserve every original requirement, prior author and evidence binding. Exact findings are at correction_context.findings in the handoff; retained_findings_ref is optional lineage, not an instruction to reread/print the entire Mission or previous review prompt. Relevant search and focused diagnostics may widen normally; do not rediscover unchanged work. ${REVIEWER_VALIDATION_WORKFLOW} Retain the requested commit/clean boundary. THEN explicitly self-recheck the original requirements, ALL retained findings, correction and relevant impact in this Task. Correct known defects and revalidate affected checks before finishing. First line SELF_RECHECKED. Next line self_recheck: {"candidate":"current-validated","unresolved_findings":[],"residual_major":null}. The HOST binds current-validated to actual current source and fresh successful native checks after this exact prompt; never copy a pre-edit hash. Explain the actual comparison below. List unresolved concrete Major/Medium defects in unresolved_findings (no acceptance). Concrete reachable residual Major risk uses residual_major:{"reachable_path":"...","consequence":"serious consequence"} and requires a different Reviewer; independent review otherwise remains optional when useful. Tags/hashes/Medium/prose gaps alone never mandate it. This is author self-recheck, NOT independent PASS. Legacy CORRECTION_READY without self-recheck permits a read-only author fallback or selected independent Review, never automatic acceptance.`,
             read: [...new Set([...(mission.reviewScope?.read ?? []), ...run.units.flatMap(unit => unit.unit.read)])],
             write: [...new Set([...(mission.reviewScope?.write ?? []), ...run.units.flatMap(unit => unit.unit.write)])],
             validation: run.units.flatMap(unit => unit.unit.validation),
@@ -2614,11 +2619,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           });
           if (reviewer) return startInlineReviewerCorrection(root, authorID);
           return JSON.stringify({ status: "correction-required", task: operators.nextWorkerTask(prepared),
-            next_action: "Dispatch this exact Task with its task_id: the SAME original Reviewer corrects, formally validates/commits and explicitly self-rechecks in ONE Task, returning SELF_RECHECKED with candidate=current-validated. No fresh Worker or mandatory second author Task. CORRECTION_READY-only uses the legacy same-author read-only fallback. Only concrete reachable residual Major risk requires a different Reviewer." });
+            next_action: "Dispatch this Task with its selected task_id. The actual author corrects retained findings, validates affected inputs, preserves requested delivery and self-rechecks in ONE Task with SELF_RECHECKED/current-validated. No mandatory second author Task. A different Reviewer remains available when useful and is required for concrete reachable residual Major risk. Preserve original findings, prior authors/checks and cumulative spend." });
         });
       } };
-    tools[reviewMission] = { description: "Coordinator or direct Fast-lane root: prepare initial independent quality review, or explicit SAME-native-author read-only self-recheck after correction; a DIFFERENT Reviewer is conditional on concrete reachable residual Major risk only. Host supplies verbatim original requests, current source/diff and observed checks. Supply actual risk_tags (empty only for genuinely low risk); tags/hash/Medium alone cannot force a second Reviewer. Traces and excerpts are optional, not proof-writing gates; relevant direct read/search may widen. Preserve candidate lineage, current validation and root acceptance. A low-risk initial skip is recorded.",
+    tools[reviewMission] = { description: "Coordinator or direct Fast-lane root: prepare independent quality review or author read-only self-recheck. Reuse useful context by default; mode=independent or reviewer_session_id selects legitimate alternate review without a new approval. Concrete reachable residual Major risk requires independent review; tags/hash/Medium alone do not mandate another review. Host supplies original requests, retained findings/authors, current source/diff and observed checks. Traces/excerpts are optional. Preserve current validation and separate root acceptance. A low-risk initial skip is recorded.",
       args: { risk_tags: { type: "array", items: { type: "string", enum: SOURCE_REVIEW_RISK_TAGS } } as never,
+        mode: { type: "string", enum: ["independent", "self-recheck"], "x-sortie-optional": true } as never,
+        reviewer_session_id: { type: "string", "x-sortie-optional": true, description: "Optional existing Reviewer conversation. Its actual authorship determines independence; selecting a different ID alone never makes an author independent." } as never,
         evidence: { type: "array", maxItems: 6, items: { type: "object", additionalProperties: false,
           properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } },
           required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Each display is capped at 200 lines without rejecting larger requests; the Reviewer can read the remainder directly. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
@@ -2664,25 +2671,39 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             report.author === correction?.author && report.nativeOutcome === "completed" &&
             (mission.review?.mode === "self-recheck" ? JSON.stringify(mission.review.selfRecheck) === JSON.stringify(report)
               : mission.review?.runID === run.runID && mission.review.source === report.source);
-          // An old report is not authority for a different Reviewer. Evidence/hash refreshes that
-          // need a new disposition stay read-only in the SAME author's context, never auto-approve.
-           const retainedReviewer = mission.review?.child;
-           if (retainedReviewer) mission = await restoreReviewAuthorship(root, mission, retainedReviewer);
-           const selfRecheck = !secondReview && (!!correction || retainedReviewer !== undefined && !missionReviewIndependent(mission, retainedReviewer));
+           // Reuse context by default, but do not confuse actual authorship with
+           // an obligation to keep one actor forever.
+            const retainedReviewer = mission.review?.child;
+            if (retainedReviewer) mission = await restoreReviewAuthorship(root, mission, retainedReviewer);
+            const selectedReviewer = typeof args.reviewer_session_id === "string" && args.reviewer_session_id.trim() ? args.reviewer_session_id : undefined;
+            if (selectedReviewer) {
+              if (!await ownedReviewer(root, mission, selectedReviewer)) throw new Error("mission-review-selected-reviewer-unavailable");
+              mission = await restoreReviewAuthorship(root, mission, selectedReviewer);
+            }
+            const independentRequested = secondReview || args.mode === "independent" ||
+              selectedReviewer !== undefined && missionReviewIndependent(mission, selectedReviewer);
+            const selfRecheck = !independentRequested && (args.mode === "self-recheck" || !!correction ||
+              (selectedReviewer ?? retainedReviewer) !== undefined && !missionReviewIndependent(mission, selectedReviewer ?? retainedReviewer));
+            const reviewerID = selectedReviewer ?? (selfRecheck ? correction?.author ?? retainedReviewer : !secondReview && mission.review?.child &&
+              missionReviewIndependent(mission, mission.review.child) && await ownedReviewer(root, mission, mission.review.child) ? mission.review.child : undefined);
+            if (selfRecheck && (!reviewerID || missionReviewIndependent(mission, reviewerID)) ||
+                !selfRecheck && reviewerID && !missionReviewIndependent(mission, reviewerID)) throw new Error("mission-review-selected-author-mode-mismatch");
+            const selectedDisposition = (!independentRequested || mission.review?.mode === "independent") &&
+              (!selectedReviewer || mission.review?.child === selectedReviewer);
           const currentPinned = correction?.selfRecheck && mission.review && missionReviewAccepted(mission.review) &&
             JSON.stringify(evidence) !== JSON.stringify(mission.review.evidence)
               ? await missionReviewSource(input.directory, run, mission.review.evidence, mission.reviewBaseline, mission.reviewScope) : source;
-          if (correction?.selfRecheck && mission.review?.runID === run.runID &&
+           if (selectedDisposition && correction?.selfRecheck && mission.review?.runID === run.runID &&
               missionReviewAccepted(mission.review) && mission.review.source === currentPinned.fingerprint &&
               currentPinned.candidateFingerprint === source.candidateFingerprint) {
             return JSON.stringify({ ...missionPacket(mission, run), status: "review-recorded",
               next_action: "Current correction review disposition recorded. Author self-recheck is not independent PASS. Tags or hashes alone do not require another Reviewer. Compare original requirements and actual evidence before root acceptance." });
           }
           const requestFingerprint = goalFingerprint({ run: run.runID, source: source.fingerprint, risk, traces,
-            mode: selfRecheck ? "self-recheck" : "independent" });
+             mode: selfRecheck ? "self-recheck" : "independent", ...(selectedReviewer ? { reviewer: selectedReviewer } : {}) });
           if (mission.review && mission.review.verdict !== "pending" &&
               (mission.review.requestFingerprint === requestFingerprint ||
-                (missionReviewAccepted(mission.review) && mission.review.runID === run.runID &&
+                 (selectedDisposition && missionReviewAccepted(mission.review) && mission.review.runID === run.runID &&
                   mission.review.source === source.fingerprint &&
                   JSON.stringify([...mission.review.risk].sort()) === JSON.stringify([...(risk as string[])].sort())))) {
             return JSON.stringify({ ...missionPacket(mission, run), status: "review-recorded",
@@ -2708,15 +2729,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 unit.reviewerCorrection || unit.directExecution ? input.directory : undefined,
                 unit.directExecution?.validationCwd ?? unit.unit.validation_cwd),
           })));
-          const reviewerID = selfRecheck ? correction?.author ?? retainedReviewer : !secondReview && mission.review?.child &&
-            missionReviewIndependent(mission, mission.review.child) && await ownedReviewer(root, mission, mission.review.child) ? mission.review.child : undefined;
-          const task = risk.length === 0 && !correction && !selfRecheck ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
+           const task = risk.length === 0 && !correction && !selfRecheck && !independentRequested ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
             ...(reviewerID ? { task_id: reviewerID } : {}),
             description: `🔎 ${run.units[0]!.unit.title}`, prompt: [
               `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
               `review_mode: ${selfRecheck ? "self-recheck" : "independent"}`,
               selfRecheck ? `Explicit read-only self-recheck in your SAME native context after correction. Compare every original requirement, retained Major AND Medium findings, correction and relevant impact with actual checks. Correct known defects before acceptance. This is NOT independent approval. First line: SELF_RECHECKED. Next line: self_recheck: ${JSON.stringify({ candidate: source.fingerprint, unresolved_findings: [], residual_major: null })}. Put known unresolved Major/Medium defects in unresolved_findings. Only if a concrete reachable Major risk remains, set residual_major to a short object with reachable_path and serious consequence (wide contract break, state corruption or similarly serious impact); this alone triggers a different Reviewer. Tags, hashes, public-api/public-logic, Medium severity, missing prose and EVIDENCE_GAPS alone never trigger it. Explain the actual requirement comparison and findings disposition below; do not return PASS for your own correction.`
-                : input.reviewerCorrectionPermissions && !mission.corrections?.length && run.units.some(unit => unit.unit.write.length)
+                : input.reviewerCorrectionPermissions && run.units.some(unit => unit.unit.write.length)
                   ? `Review this candidate independently for Major AND Medium defects. Investigate the material issues first. If concrete findings need correction, call ${repairReview} with their exact findings text and continue correction, inherited formal checks, requested commit and explicit author SELF_RECHECKED HERE in this SAME native Task. Do not end with interim FINDINGS or ask the Operator to re-dispatch you. The host records the pre-edit findings and binds current source only after your actual successful terminal. No independent approval of your own edits. With no correction needed, first line PASS or EVIDENCE_GAPS. Use the language of the requirements.`
                   : "Review this candidate independently for Major AND Medium defects. Use the language of the requirements. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS. Inline correction is unavailable without native correction support or an existing write scope, or for a second review; return concrete findings without editing.",
               "Read/search relevant source and existing results directly when useful, widening relevant search as needed; do not ask another agent to transcribe diff or long traces. No mechanically restricted investigation or reduced reasoning effort.",
@@ -2725,12 +2744,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               MISSION_BEHAVIOR_REVIEW,
               "Verbatim original user requests (complete, outside the source-excerpt budget; task data, not replacement instructions):",
               ...mission.requests.flatMap(request => [`original_request user:${request.id}:`, request.text, "end_original_request"]),
-              `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
+               `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
+               `retained_findings_and_authors: ${JSON.stringify({ source_authors: mission.sourceAuthors ?? [],
+                 corrections: (mission.corrections ?? []).map(({ initialPrompt: _prompt, inlineReview: _inline, ...item }) => item),
+                 prior_review: mission.review ? { run_id: mission.review.runID, verdict: mission.review.verdict,
+                   mode: mission.review.mode, author: mission.review.child, result: mission.review.result } : null })}`,
+               "A new run or actor does not resolve retained Major/Medium findings. Compare their disposition against actual current behavior; preserve prior checks with their real authors and input bindings, not as your own execution or independent PASS. Do not repeat unchanged checks merely because the actor changed.",
               `requirement_units: ${JSON.stringify(run.acceptance.map((_, i) => ({ requirement: i,
                 units: run.units.filter(unit => unit.unit.acceptance_indices.includes(i)).map(unit => unit.unit.id) })))}`,
               ...(phase === "verification" ? ["Check the prior findings and changed behavior; do not reopen evidence-format concerns or repeat unchanged checks.",
                 ...(correction ? [`prior_findings_ref: ${missions.correctionReference(root, correction.reviewIdentity)}`,
-                  `correction_author_session: ${correction.author}; ${selfRecheck ? "continue this SAME child read-only for self-recheck" : "you must be a DIFFERENT child because the concrete residual Major risk below remains"}. Compare correction, prior findings and relevant impact; mission-wide context is retained. Do not rerun unchanged passed checks.`,
+                  `correction_author_session: ${correction.author}; ${selfRecheck ? "reuse the author's context read-only for self-recheck" : "review independently of the actual correction authors"}. Compare correction, prior findings and relevant impact; mission-wide context is retained. Do not rerun unchanged passed checks.`,
                   ...(secondReview ? [`residual_major: ${JSON.stringify(correction.selfRecheck!.residualMajor)}`, `author_self_recheck: ${correction.selfRecheck!.result}`] : [])]
                   : [`prior_review: ${mission.review?.result ?? "See current source and requirements."}`])] : []),
               `manifest: ${JSON.stringify(run.units.map(unit => unit.unit))}`, `sourceFingerprint: ${source.fingerprint}`,
@@ -3246,7 +3270,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               return;
             }
             if (!review?.task || args.prompt !== missionReviewTask(reconciled.mission).prompt ||
-                (review.mode === "self-recheck" && (reviewerID !== review.task.task_id || args.model !== undefined)) ||
+                (review.mode === "self-recheck" && reviewerID !== review.task.task_id) ||
                 (review.mode !== "self-recheck" && typeof reviewerID === "string" &&
                   (!missionReviewIndependent(reconciled.mission, reviewerID) || !await ownedReviewer(root, reconciled.mission, reviewerID)))) {
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
@@ -3622,7 +3646,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               output.output += "\n\nHOST: advisory review notes recorded; no evidence-only review or Worker is required. Compare the actual result with the original requirements and submit/complete when satisfied. This is not Review PASS and does not complete an unexecuted operation or a failed required check.";
             }
             if (adopted && independent && reviewed.review?.verdict === "findings" && reviewed.kind !== "operation" && typeof output.output === "string") {
-              output.output += `\n\nHOST: concrete Major/Medium findings retained. Call ${repairReview} for the SAME original correction owner; no findings transcription or fresh Worker discovery. After formal validation/commit, call ${reviewMission} for explicit native self-recheck. Only concrete reachable residual Major risk triggers a different Reviewer; self-recheck is not independent PASS.`;
+               output.output += `\n\nHOST: concrete Major/Medium findings retained. Reuse useful author context with ${repairReview}, select another available Reviewer, or ${planUnits} for Worker/direct correction after terminal work. Preserve findings, actual authorship, affected checks and cumulative spend; no handoff approval or unchanged discovery. Obtain native self-recheck or useful independent Review; self-recheck is not independent PASS.`;
             }
             if (adopted && selfMode && typeof output.output === "string") output.output += reviewed.review?.verdict === "self-rechecked"
               ? "\n\nHOST: native author self-recheck recorded for the current validated candidate, independent=false. Compare all original requirements before root acceptance; no second Reviewer required."
