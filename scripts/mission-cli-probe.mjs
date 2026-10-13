@@ -112,6 +112,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   });
   let serverStopping;
   const stopServer = () => serverStopping ??= cleanup('server', () => server.stop());
+  // Share one owned teardown across normal close, interruption and final-read failure.
+  const stopOwned = () => stopping ??= Promise.all([cleanup('cli', () => stopProcessGroup(child)), stopServer()]);
   const observeNow = point => {
     try {
       lastObserved = observe(project, since, rootAgent, databasePath);
@@ -132,7 +134,7 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     stopObservation = point;
     clearInterval(timer);
     // Await both attempts even if one rejects; preserve errors without skipping persistence.
-    stopping = Promise.all([cleanup('cli', () => stopProcessGroup(child)), stopServer()]);
+    stopOwned();
   };
   const failObservation = (error, point) => {
     observationError ??= { name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
@@ -181,7 +183,7 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
       }
     } finally {
       clearInterval(timer);
-      try { await stopping; } finally { await stopServer(); }
+      try { await stopOwned(); } finally { await stopServer(); }
     }
     const observed = observeNow('final');
     await stopping; // A final read can fail after normal cleanup; retain one owned teardown.

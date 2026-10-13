@@ -563,3 +563,70 @@ for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-una
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 }
+
+for (const phase of ["closed", "closed-stubborn", "signalled", "closed-cleanup-error"] as const) {
+  test(`normal monitor finalization stops the ${phase} CLI group before persisting its outcome`,
+    { skip: process.platform !== "linux", timeout: 20_000 }, async context => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-normal-close-"));
+    const child = spawn(process.execPath, [resolve("test/fixtures/owned-process-group.mjs"), directory,
+      phase === "closed-cleanup-error" ? "closed" : phase], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let serverStops = 0, pendingCalls = 0, cliStops = 0, snapshot = "", writerPID: number | undefined;
+    const observed = { root: "process-only-root", models: [], tools: [], responses: [], errors: [],
+      priced_usd: 0, unpriced_requests: 0 };
+    const kill = process.kill;
+    const injected = context.mock.method(process, "kill", (pid: number, signal: NodeJS.Signals | number) => {
+      if (pid === -child.pid! && signal === "SIGTERM") {
+        cliStops++;
+        if (phase === "closed-cleanup-error") throw Object.assign(Error("injected-owned-cli-stop-failure"), { code: "EPERM" });
+      }
+      return kill(pid, signal);
+    });
+    try {
+      const result = await monitorMissionCLI({ child, server: { stop: async () => { serverStops++; } },
+        project: directory, databasePath: join(directory, "unused-process-only.db"), since: Date.now(),
+        rootAgent: "dog-operator", mode: "complete", rootModel: expected, capUSD: 2, timeoutSeconds: 10,
+        observe: () => observed, pending: async () => { pendingCalls++; return false; },
+        finish: async value => {
+          writerPID = JSON.parse(value.stdout).writerPID;
+          snapshot = await readFile(join(directory, "owned-writer.log"), "utf8");
+          await writeFile(join(directory, "stop-receipt.json"), JSON.stringify(value));
+          return value;
+        } });
+      assert.equal(cliStops, 1, "one owned CLI teardown even on normal close or cleanup failure");
+      assert.equal(serverStops, 1, "do not duplicate server teardown");
+      assert.equal(pendingCalls, phase === "signalled" ? 0 : 1, "keep native-settlement eligibility before teardown");
+      assert.equal(result.code, phase === "signalled" ? null : 0);
+      assert.equal(result.signal, phase === "signalled" ? "SIGTERM" : null, "keep the real root exit/signal");
+      assert.equal(result.stopped, phase === "closed-cleanup-error" ? "cleanup-failed" : false);
+      assert(writerPID);
+      await new Promise(done => setTimeout(done, 100));
+      const later = await readFile(join(directory, "owned-writer.log"), "utf8");
+      if (phase === "closed-cleanup-error") {
+        assert.notEqual(later, snapshot, "a denied teardown must not be described as a successful writer barrier");
+        assert.equal(result.cleanupErrors.length, 1); assert.equal(result.cleanupErrors[0].target, "cli");
+        assert.equal(result.cleanupErrors[0].code, "EPERM"); assert.equal(result.stopObservation, "cleanup");
+        assert.equal(result.observed.usage_complete, false); assert.equal(result.observed.unpriced_requests, 1);
+        assert.equal(result.observed.known_unpriced_requests, 0, "retain coverage hold, not an invented model request");
+        assert.match(result.nextAction, /owned.*CLI\/server/i); assert.match(result.nextAction, /do not.*replay/i);
+      } else {
+        assert.equal(later, snapshot, "no descendant writes after the persistence boundary");
+        assert.deepEqual(result.cleanupErrors, []); assert.equal(result.observed.unpriced_requests, 0);
+        const state = await readFile(`/proc/${writerPID}/stat`, "utf8").then(stat =>
+          stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[0], error => {
+          if (error.code === "ENOENT") return "absent"; throw error;
+        });
+        assert(["absent", "Z", "X"].includes(state), "writer is stopped, not merely between writes");
+      }
+      const persisted = JSON.parse(await readFile(join(directory, "stop-receipt.json"), "utf8"));
+      assert.equal(persisted.stopped, result.stopped); assert.equal(persisted.code, result.code);
+      assert.deepEqual(persisted.cleanupErrors, result.cleanupErrors); assert.deepEqual(result.observed.models, []);
+    } finally {
+      injected.mock.restore();
+      // Exact detached group created here; baseline and genuine cleanup failures still need teardown.
+      try { kill(-child.pid!, "SIGKILL"); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
