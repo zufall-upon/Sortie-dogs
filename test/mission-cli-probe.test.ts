@@ -14,7 +14,8 @@ const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "o
 const status = { agent: "dog-operator", tool: "sortie_v010_operator_status", status: "completed", model: root.model };
 
 for (const phase of ["server-start-error", "server-start-cleanup-error", "server-start-persistence-error", "server-start-cleanup-persistence-error",
-  "server-hook-error", "server-hook-cleanup-error", "server-hook-persistence-error", "server-hook-cleanup-persistence-error"]) {
+  "server-hook-error", "server-hook-cleanup-error", "server-hook-persistence-error", "server-hook-cleanup-persistence-error",
+  "cli-launch-error", "cli-launch-command-error", "cli-launch-cleanup-error", "cli-launch-persistence-error", "cli-launch-cleanup-persistence-error"]) {
   test(`regular probe ${phase} retains reservation and actionable evidence before monitor`,
     { timeout: 20_000, skip: process.platform === "win32" }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "probe-startup-"));
@@ -28,24 +29,29 @@ for (const phase of ["server-start-error", "server-start-cleanup-error", "server
       });
       assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
       const receipt = JSON.parse(await readFile(join(directory, "fixture-receipt.json"), "utf8"));
-      assert.equal(receipt.installations, 1); assert.equal(receipt.starts, 1); assert.equal(receipt.cliStarts, 0);
+      const hook = phase.startsWith("server-hook-"), launch = phase.startsWith("cli-launch-"), readyServer = hook || launch;
+      assert.equal(receipt.installations, 1); assert.equal(receipt.starts, 1);
+      assert.equal(receipt.cliStarts, launch && phase !== "cli-launch-command-error" ? 1 : 0, "one launch attempt at most; preparation failure never spawns");
       assert.equal(receipt.writes, 1, "no failed persistence or consumed startup retry");
       assert.equal(receipt.commands.length, 4); assert.equal(receipt.original_error_identity_retained, true);
       assert.equal(receipt.native_model_requests, 0); assert.equal(receipt.actual_installation_or_CLI_started, false);
-      const hook = phase.startsWith("server-hook-");
-      assert.equal(receipt.hooks, hook ? 1 : 0); assert.equal(receipt.stops, hook ? 1 : 0, "only obtained owned handle; no cleanup retry");
+      assert.equal(receipt.hooks, hook ? 1 : 0); assert.equal(receipt.stops, readyServer ? 1 : 0, "only obtained owned handle; no cleanup retry");
       assert.equal(receipt.rejected.code, "EIO");
-      assert.equal(receipt.rejected.message, hook ? "injected-owned-probe-server-hook" : "injected-owned-probe-server-start");
+      assert.equal(receipt.rejected.message, hook ? "injected-owned-probe-server-hook" : launch
+        ? "injected-owned-sync-probe-cli-start" : "injected-owned-probe-server-start");
       const unavailable = phase.endsWith("persistence-error"), cleanupFailed = phase.includes("cleanup");
       const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
-      assert.equal(result.stopped, hook ? "server-hook-failed" : "server-start-failed");
-      assert.equal(result.stop_observation, hook ? "server-hook" : "server-start");
-      assert.equal((hook ? result.server_hook_error : result.server_error).code, "EIO");
+      assert.equal(result.stopped, hook ? "server-hook-failed" : launch ? "cli-launch-failed" : "server-start-failed");
+      assert.equal(result.stop_observation, hook ? "server-hook" : launch ? "cli-launch" : "server-start");
+      assert.equal((hook ? result.server_hook_error : launch ? result.cli_error : result.server_error).code, "EIO");
       assert.equal(hook ? result.server_error : result.server_hook_error, undefined);
+      if (launch) assert.equal(result.server_error, undefined);
       assert.equal(result.code, null); assert.equal(result.signal, null);
       assert.equal(result.controller_signal, null); assert.equal(result.cli_started, false);
-      assert.equal(result.server_start_attempted, true); assert.equal(result.server_ready, hook);
+      assert.equal(result.server_start_attempted, true); assert.equal(result.server_ready, readyServer);
       assert.equal(result.server_hook_attempted, hook ? true : undefined);
+      assert.equal(result.cli_start_attempted, launch ? true : undefined);
+      assert.equal(result.cli_handle_obtained, launch ? false : undefined);
       assert.equal(result.usage_complete, false); assert.equal(result.known_unpriced_requests, 0);
       assert.equal(result.priced_usd, 0, "known observed sum only, not complete or zero-cost coverage");
       assert.equal(result.unpriced_requests, 1, "unresolved coverage retains a reservation, not an invented observed request");
@@ -67,26 +73,33 @@ for (const phase of ["server-start-error", "server-start-cleanup-error", "server
       assert.deepEqual(budget.probes, [{ project: result.project, charged_usd: 2, reserved_usd: 2, state: "reserved" }]);
       if (cleanupFailed) {
         assert.equal(result.cleanup_complete, false); assert.equal(result.cleanup_errors[0].code, "EACCES");
-        assert.equal(result.server_pid, hook ? undefined : 719000001);
+        assert.equal(result.server_pid, readyServer ? undefined : 719000001);
         assert.equal(result.server_state_directory, join(result.project, ".opencode/v2-service-state"));
-        assert.equal(result.cleanup_errors[0].message, hook ? "injected-owned-probe-hook-cleanup" : "injected-owned-start-cleanup");
+        assert.equal(result.cleanup_errors[0].message, hook ? "injected-owned-probe-hook-cleanup" : launch
+          ? "injected-owned-probe-launch-cleanup" : "injected-owned-start-cleanup");
         assert.match(result.next_action, /Retry teardown only/);
       } else {
-        assert.equal(result.cleanup_complete, hook ? true : undefined);
+        assert.equal(result.cleanup_complete, readyServer ? true : undefined);
         assert.equal(result.cleanup_errors, undefined);
-        if (hook) assert.match(result.next_action, /owned server was stopped/);
+        if (readyServer) assert.match(result.next_action, /owned server was stopped/);
       }
-      if (hook) assert.equal(result.server_url, "http://owned-process-only.invalid");
+      if (readyServer) assert.equal(result.server_url, "http://owned-process-only.invalid");
+      if (launch) {
+        assert.match(result.next_action, /No CLI handle was obtained/);
+        assert.match(result.next_action, /verify any process from the failed launch has stopped/);
+      }
       if (unavailable) {
         assert.equal(receipt.result, undefined);
         const context = receipt.rejected.monitorContext;
         assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
-        assert.equal((hook ? context.serverHookError : context.serverError).code, "EIO");
+        assert.equal((hook ? context.serverHookError : launch ? context.cliError : context.serverError).code, "EIO");
         assert.equal(hook ? context.serverError : context.serverHookError, undefined);
+        if (launch) assert.equal(context.serverError, undefined);
         assert.equal(context.persistenceError.code, "EACCES");
         assert.equal(context.cleanupErrors.length, cleanupFailed ? 1 : 0);
         assert.match(context.nextAction, /retry only failed evidence persistence/);
-        if (hook) assert.match(context.nextAction, cleanupFailed ? /Retry teardown only/ : /owned server was stopped/);
+        if (readyServer) assert.match(context.nextAction, cleanupFailed ? /Retry teardown only/ : /owned server was stopped/);
+        if (launch) assert.match(context.nextAction, /No CLI handle was obtained/);
       } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }
       for (const file of ["cli.stdout.jsonl", "cli.stderr.log"])
         await assert.rejects(readFile(join(directory, "smoke-1", file)), { code: "ENOENT" }, "no invented CLI logs");

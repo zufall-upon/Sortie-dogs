@@ -8,15 +8,17 @@ import vm from 'node:vm';
 // Actual probe source, synthetic installation/git/startup; no native CLI/model.
 const [directory, phase] = process.argv.slice(2);
 const hook = phase.startsWith('server-hook-');
+const launch = phase.startsWith('cli-launch-'), readyServer = hook || launch;
 const run = join(directory, 'smoke-1'), project = join(run, 'project');
 await fs.mkdir(project, { recursive: true });
 const tgz = join(directory, 'seeded-package.tgz'); await fs.writeFile(tgz, 'fixture-only-package-bytes\n');
 const budgetFile = join(directory, 'projected-budget.json');
 await fs.writeFile(budgetFile, JSON.stringify({ prior_priced_usd: 1.7674084, unresolved_prior_reserve_usd: 1,
   limit_usd: 5, new_probe_total_limit_usd: 2, per_probe_limit_usd: 2, probes: [] }));
-const failure = Object.assign(Error(hook ? 'injected-owned-probe-server-hook' : 'injected-owned-probe-server-start'), { code: 'EIO' });
-const cleanupFailure = Object.assign(Error('injected-owned-probe-hook-cleanup'), { code: 'EACCES' });
-if (!hook && phase.includes('cleanup')) failure.serverStartContext = {
+const failure = Object.assign(Error(hook ? 'injected-owned-probe-server-hook' : launch
+  ? 'injected-owned-sync-probe-cli-start' : 'injected-owned-probe-server-start'), { code: 'EIO' });
+const cleanupFailure = Object.assign(Error(launch ? 'injected-owned-probe-launch-cleanup' : 'injected-owned-probe-hook-cleanup'), { code: 'EACCES' });
+if (!readyServer && phase.includes('cleanup')) failure.serverStartContext = {
   serverPID: 719000001, stateDirectory: join(project, '.opencode/v2-service-state'), cleanup_complete: false,
   cleanupErrors: [{ resource: 'server', name: 'Error', code: 'EACCES', message: 'injected-owned-start-cleanup' }],
   nextAction: 'Retry teardown only for the recorded owned server PID/process group; retain unresolved usage holds. Do not automatically replay the consumed startup/task or restart the shared host.' };
@@ -35,12 +37,20 @@ await script.link(async specifier => {
     command: async (exe, args) => { commands.push({ exe, args }); return args[0] === 'rev-parse' ? 'b'.repeat(40) + '\n' : ''; },
     startV2ReleaseServer: async () => {
       starts++;
-      if (!hook) throw failure;
+      if (!readyServer) throw failure;
       return { url: 'http://owned-process-only.invalid', env, stop: async () => {
         stops++; if (phase.includes('cleanup')) throw cleanupFailure;
       } };
     },
-    spawnPromptCLI: () => { cliStarts++; throw Error('must not launch CLI after failed server start'); },
+    nativeCLI: (...args) => {
+      if (phase === 'cli-launch-command-error') throw failure;
+      return release.nativeCLI(...args);
+    },
+    spawnPromptCLI: () => {
+      cliStarts++;
+      if (launch) throw failure;
+      throw Error('must not launch CLI after failed server start/hook');
+    },
   };
   else if (specifier === 'node:fs/promises') values = { ...fs, writeFile: async (file, ...args) => {
     if (String(file) === join(run, 'observation.json')) {
