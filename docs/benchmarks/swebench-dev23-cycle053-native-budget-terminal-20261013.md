@@ -88,6 +88,21 @@ Main subsequently integrated the separate direct-unit settlement correction in
 PR #221 (`e1645a6`). Follow that main before freezing a new practical candidate;
 its effects must not be attributed to this completion-packet correction.
 
+After rebasing onto PR #221, the next full validation continued through the server
+restart and ended with exit 1 (293,814 ms). One legacy fabric-preparation fixture
+returned `denied/state-locked` instead of `prepared`; its enclosing suite also
+failed, and the full runner stopped admission of remaining files. This is not a
+successful full run or evidence of a completed CLI task. The evidence does not
+establish the cause of the lost/unavailable state authority.
+
+Main then integrated version/marker preparation in PR #222 (`08fc0cc`). Rebase
+retained the correction unchanged. Targeted validation of direct execution, V2
+paths and the exact failed legacy fixture passed all 114 selected tests, exit 0,
+57,267 ms including build. No lease, acceptance or test assertion was weakened.
+Retain the full failure and require a successful final integration run before
+claiming that candidate's full validation; do not automatically replay all tests
+merely because the server restarted.
+
 The retained official single remains **0/1**, resolved IDs `[]`; the separate old
 full23 result remains **9/23**, not the current main score. The correction does not
 address the implementation-coupled private-helper mismatch documented in Cycle052.
