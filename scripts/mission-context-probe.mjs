@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { probe } from "./mission-cli-probe.mjs";
 
@@ -56,7 +55,7 @@ export default { id: "sortie-dogs.v010", async setup(ctx) {
 });
 const run = dirname(result.project);
 const events = (await readFile(join(run, "context-observation.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
-const db = new DatabaseSync(join(homedir(), ".local/share/opencode/opencode.db"), { readOnly: true });
+const db = new DatabaseSync(result.database_path, { readOnly: true });
 let tasks, compactions;
 try {
   tasks = db.prepare("select data from session_message where session_id=? and type='assistant' order by seq").all(result.root)

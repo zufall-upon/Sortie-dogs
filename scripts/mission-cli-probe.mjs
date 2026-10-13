@@ -7,14 +7,15 @@ import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, sp
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 import { nativeRunPending, waitForNativeSettlement } from './native-run-settlement.mjs';
 
-const database = () => new DatabaseSync(join(homedir(), '.local/share/opencode/opencode.db'), { readOnly: true });
+export const missionDatabasePath = (env = process.env, cwd = process.cwd()) => resolve(cwd,
+  env.OPENCODE_DB || join(env.XDG_DATA_HOME || join(env.HOME || env.USERPROFILE || homedir(), '.local/share'), 'opencode/opencode.db'));
 export const observationDirectories = project => [project, project.replaceAll('\\', '/')];
 export const probeTaskIdentity = (request, instance, actualBaseCommit) => ({
   task_sha256: createHash('sha256').update(request).digest('hex'),
   instance: instance ? { instance_id: instance.instance_id, repo: instance.repo, base_commit: actualBaseCommit } : null,
 });
-export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator') {
-  const db = database();
+export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator', databasePath = missionDatabasePath(process.env, project)) {
+  const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const sessions = db.prepare('select id, parent_id, agent, time_created from session_v2 where directory in (?, ?) and time_created >= ? order by time_created')
       .all(...observationDirectories(project), since);
@@ -48,7 +49,7 @@ export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator'
       }
       if (first) models.push(first);
     }
-    return { root: root?.id, models, tools, responses, errors, priced_usd: usd, unpriced_requests: unpriced };
+    return { database_path: databasePath, root: root?.id, models, tools, responses, errors, priced_usd: usd, unpriced_requests: unpriced };
   } finally { db.close(); }
 }
 
@@ -99,11 +100,11 @@ export function completeProbeObservations(result, schemaRejected = false) {
 /** Monitor the owned CLI and server through native settlement and evidence persistence.
  * Observation seams let retained lifecycle facts be replayed without model requests. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
-  observe = observeMissionCLI, pending, finish }) {
+  databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish }) {
   let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError;
   let serverStopping;
   const stopServer = () => serverStopping ??= Promise.resolve().then(() => server.stop());
-  const observeNow = () => lastObserved = observe(project, since, rootAgent);
+  const observeNow = () => lastObserved = observe(project, since, rootAgent, databasePath);
   child.stdout.on('data', bytes => { stdout += bytes; });
   child.stderr.on('data', bytes => { stderr += bytes; });
   const stop = (reason, observed, point) => {
@@ -145,14 +146,14 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
       if (reason) stop(reason, observed, 'cli-close');
       if (mode === 'complete' && code === 0 && !stopped) {
         await waitForNativeSettlement({ pending: pending ?? (() => nativeRunPending(project,
-          join(homedir(), '.local/share/opencode/opencode.db'), { since, root: observed.root })), stopped: () => stopped });
+          databasePath, { since, root: observed.root })), stopped: () => stopped });
       }
     } finally {
       clearInterval(timer);
       try { await stopping; } finally { await stopServer(); }
     }
     if (observationError) throw observationError;
-    return await finish({ observed: observeNow(), stdout, stderr,
+    return await finish({ observed: observeNow(), databasePath, stdout, stderr,
       stopped, stopObservation, cutoff, code, signal, controllerSignal });
   } finally {
     // Retain handlers through log/usage persistence, including repeated signals.
@@ -220,7 +221,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     cwd: project, env: { ...server.env, PWD: project }, detached: true,
   });
   return await monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
-    finish: async ({ observed, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal }) => {
+    finish: async ({ observed, databasePath, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal }) => {
       const state = async area => {
         if (!observed.root) return null;
         try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
@@ -233,7 +234,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
           item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
         ...(cutoff ? { errors: cutoff.errors,
         cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
-        project, mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
+        project, database_path: databasePath, mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
         controller_signal: controllerSignal ?? null, elapsed_ms: Date.now() - since,
         ...probeTaskIdentity(request, instance, actualBaseCommit),
         package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
