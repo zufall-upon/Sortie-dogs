@@ -383,6 +383,9 @@ test("default and progress status retain measured checks/terminal and observed G
   assert.ok(proof.started_at && proof.ended_at, "actual timing remains in formal evidence without duplicate history");
   assert.ok(progress.observations.native_declared_validation[0].evidence_ids.includes(proof.evidence_id));
   assert.deepEqual(progress.observations.worker_terminals[0].terminal, (await f.missions.required("root")).attempts[0].terminal);
+  assert.deepEqual(progress.budget, compact.budget, "progress retains computed pricing and its Worker-only scope");
+  assert.deepEqual(progress.attempts, compact.attempts, "progress retains actual model/variant, not only terminal status");
+  assert.deepEqual(progress.accounting_scope, compact.accounting_scope);
   assert.equal(progress.observations.delivery.git_lifecycle, null);
   assert.equal(progress.observations.delivery.clean, (await exec("git", ["status", "--porcelain"], { cwd: f.directory })).stdout === "");
   assert.match(progress.observations.delivery.observation.source, /^host:git status/u);

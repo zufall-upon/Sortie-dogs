@@ -36,6 +36,45 @@ test("post-score diagnosis separates candidate application, test injection, coll
   assert.equal(classifyOfficialTest({ patch: "", report: null, runLog: "", testOutput: "" }).stage, "no-prediction-patch");
 });
 
+test("echoed source is not an import failure and teardown rows do not duplicate tests", () => {
+  const testID = "tests/test_example.py::TestExample::test_case";
+  const report = { patch_successfully_applied: true, resolved: false,
+    tests_status: { FAIL_TO_PASS: { failure: [testID] } } };
+  const diff = "diff --git a/example.py b/example.py\n-except ImportError:\n" +
+    "+    raise ModuleNotFoundError: example\n";
+  const result = classifyOfficialTest({ patch, report, runLog: "",
+    testOutput: diff + "collected 1 item\n" +
+      "___ ERROR at teardown of TestExample.test_case ___\nE   IndexError: list index out of range\n" +
+      `ERROR ${testID} - IndexError\nFAILED ${testID} - assert 1 == 0\n>>>>> Test Exit Code: 1\n` });
+  assert.equal(result.stage, "assertion-or-test-failure");
+  assert.equal(result.tests_observed, 1);
+  assert.deepEqual(result.missing_expected_test_ids, []);
+  assert.equal(classifyOfficialTest({ patch, report, runLog: "",
+    testOutput: diff + ">>>>> Test Exit Code: 1\n" }).stage, "test-command-failed");
+  assert.equal(classifyOfficialTest({ patch, report: { ...report, resolved: true }, runLog: "",
+    testOutput: diff + `PASSED ${testID}\n>>>>> Test Exit Code: 0\n` }).stage, "official-resolved");
+});
+
+test("import errors raised by executed tests are not collection failures", () => {
+  const result = classifyOfficialTest({ patch, report: { resolved: false }, runLog: "",
+    testOutput: "collected 1 item\n___ test_import ___\nE   ImportError: optional backend\n" +
+      "FAILED tests/test_example.py::test_import - ImportError\n>>>>> Test Exit Code: 1\n" });
+  assert.equal(result.stage, "assertion-or-test-failure");
+});
+
+test("explicit collection failures and import tracebacks remain visible", () => {
+  for (const testOutput of [
+    "___ ERROR collecting tests/test_example.py ___\nE   ModuleNotFoundError: backend\n" +
+      "ERROR tests/test_example.py - ModuleNotFoundError\n>>>>> Test Exit Code: 2\n",
+    "E   ModuleNotFoundError: backend\n>>>>> Test Exit Code: 1\n",
+    "AttributeError: `np.Inf` was removed\n>>>>> Test Exit Code: 1\n",
+    "ImportError while loading conftest 'tests/conftest.py'.\n>>>>> Test Exit Code: 4\n",
+  ]) {
+    assert.equal(classifyOfficialTest({ patch, report: { resolved: false }, runLog: "", testOutput }).stage,
+      "collection-or-import");
+  }
+});
+
 test("frozen official run and reset evidence remain separate with bound hashes and inner test exit", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-stage-diagnosis-"));
   try {

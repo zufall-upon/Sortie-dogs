@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { cliCloseStopReason, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
+import { cliCloseStopReason, completeProbeObservations, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { nativeCLI, spawnPromptCLI } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
@@ -90,6 +90,61 @@ test("the start-only Worker deadline does not invalidate a completed native rece
     "a release startup probe has its own deadline, not the benchmark's 60-second target");
   assert.equal(workerStartWithinProbeLimit("start", { started_ms: -1 }, undefined, 180_000), false);
   assert.equal(workerStartWithinProbeLimit("complete", worker), true);
+});
+
+// Public outcome projection from the retained Cycle042 astroid1978 native CLI run.
+// Keep its accepted=false and official FAIL; do not replay inference or embed task solutions.
+const directCompletion = {
+  mode: "complete", stopped: false, code: 0, mission_phase: "completed", receipt_status: "succeeded",
+  models: [root, { sessionID: "coordinator", agent: "dogs-coordinator", model: root.model }],
+  errors: [], accepted: false,
+};
+const worker = { sessionID: "worker", agent: "dog-worker-v010",
+  model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } };
+
+test("a completed direct Mission remains visible without inventing Worker coverage or changing acceptance", () => {
+  const before = structuredClone(directCompletion);
+  assert.deepEqual(completeProbeObservations(directCompletion), {
+    native_completed: true, worker_model_observed: false,
+  });
+  assert.deepEqual(directCompletion, before, "retained observation and route acceptance remain unchanged");
+});
+
+test("actual Worker model coverage neither proves native completion nor hides a completed receipt", () => {
+  assert.deepEqual(completeProbeObservations({ ...directCompletion, accepted: true, models: [root, worker] }), {
+    native_completed: true, worker_model_observed: true,
+  });
+  for (const incomplete of [
+    { mission_phase: "working" }, { receipt_status: null }, { receipt_status: "failed" },
+    { code: 1 }, { code: null }, { stopped: "timeout" }, { stopped: "budget" }, { stopped: undefined },
+  ]) {
+    assert.deepEqual(completeProbeObservations({ ...directCompletion, models: [worker], ...incomplete }), {
+      native_completed: false, worker_model_observed: true,
+    });
+  }
+  assert.deepEqual(completeProbeObservations({ ...directCompletion, models: [worker] }, true), {
+    native_completed: false, worker_model_observed: true,
+  }, "a rejected schema is not successful native completion");
+  assert.equal(completeProbeObservations({ ...directCompletion, errors: [{ tool: "shell" }] }).native_completed, true,
+    "a recovered earlier tool error does not replace the terminal native receipt or add an acceptance gate");
+});
+
+test("Worker coverage requires the actual agent, provider, model and variant, not planned settings", () => {
+  for (const model of [undefined, {}, { ...worker.model, providerID: "other" },
+    { ...worker.model, id: "gpt-6.1-sol" }, { ...worker.model, variant: "high" },
+    { ...worker.model, variant: undefined }]) {
+    assert.equal(completeProbeObservations({ ...directCompletion, models: [{ ...worker, model }] }).worker_model_observed, false);
+  }
+  assert.equal(completeProbeObservations({ ...directCompletion,
+    models: [{ ...worker, agent: "dogs-coordinator" }] }).worker_model_observed, false);
+  assert.equal(completeProbeObservations({ ...directCompletion,
+    expected_model: "openai/gpt-6-luna-fast#max" }).worker_model_observed, false);
+});
+
+test("completion observations leave startup, status and response-only probe output unchanged", () => {
+  for (const mode of ["start", "status", "operator-response", "build-start"]) {
+    assert.deepEqual(completeProbeObservations({ ...directCompletion, mode }), {});
+  }
 });
 
 test("normal CLI close observes an already-started Worker before teardown, not just the next interval", () => {

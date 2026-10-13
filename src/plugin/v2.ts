@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import { isSessionNotFoundError } from "@opencode/client";
 import { completionReportModelMessages } from "./receipt-presentation.js";
 import { modelLiveState } from "./model-live-state.js";
+import { serializeOperatorStatus } from "./operator-status-output.js";
 import { runtimeAssets as reviewerAssets } from "../runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../runtime-mission-assets.js";
 
@@ -617,7 +618,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
           finally { await reconcileCorrectionPermissions(String(execution.sessionID ?? "")); }
           if (name !== "sortie_v010_operator_status") return { content };
           const status: unknown = JSON.parse(content);
-          return { content: record(status) ? JSON.stringify({ ...status,
+          return { content: record(status) ? serializeOperatorStatus({ ...status,
             runtime: { ...loadedAdapter, host_version: context.app?.version ?? null } }) : content };
         } });
     }

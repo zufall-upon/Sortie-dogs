@@ -14,11 +14,12 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalDeclaredValidationMembers, extractWritePaths } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
+import { serializeOperatorStatus } from "./operator-status-output.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
    observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
@@ -589,7 +590,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt),
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory, directories,
           unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt);
-        const members = canonicalDeclaredValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
+        const members = canonicalObservedValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
         return members && validationDirectoryMatches(members, directory, input.directory, directories) ? members : undefined;
       },
       recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),
@@ -1457,6 +1458,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         current_unit: current === undefined ? null : { id: current.unit.id, title: current.unit.title, status: current.status },
         completed_units: units.filter(unit => unit.status === "succeeded").length, total_units: units.length,
         budget_remaining_units: budget?.remaining_units ?? null,
+        budget: packet.budget, accounting_scope: packet.accounting_scope, attempts: packet.attempts,
         next_action: typeof packet.next_action === "string" ? packet.next_action : null,
         ...(record(packet.acceptance_summary) ? { observations: {
           operation: packet.acceptance_summary.operation,
@@ -1479,7 +1481,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const { proposal: _packet, ...identity } = proposals.packet(state) as Record<string, unknown>;
       return identity;
     }
-    tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. Default Mission status preserves measured evidence with persisted detail references, not duplicated protected path arrays; view=full retains the full diagnostic packet. view=progress returns a compact read-only projection with existing formal checks, native observations/terminals and recorded delivery, never inferred clean or success. Existing Mission dispatch reconciliation is unchanged. With no Mission or execution run, proposal/draft status remains unchanged. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
+    tools[status] = { description: "Read the durable root-owned operator outcome and host budget counters (max_units, consumed_units, reserved_units, remaining_units) without claiming acceptance or retrying work. Mission status places existing model observations, scoped cost and next action before bulky evidence, on separate lines so native truncation retains useful facts. Default preserves measured evidence with persisted detail references, not duplicated protected path arrays; view=full retains the full diagnostic packet. view=progress returns a compact read-only projection with the same budget/model observations, existing formal checks, native observations/terminals and recorded delivery, never inferred clean or success. Existing Mission dispatch reconciliation is unchanged. With no Mission or execution run, proposal/draft status remains unchanged. An investigating proposal returns its exact short Task reference only before a Task has been admitted; an existing admission never yields a redispatch Task.",
       args: { view: optionalStringSchema, confirmed_conditions: conditionsSchema as never }, execute: async (args, context) => {
         const view = (args as { view?: unknown }).view;
         const root = await rootFor(context.sessionID);
@@ -1509,8 +1511,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              delete packet.task;
              delete packet.coordinator_dispatch;
            }
-           if (view === "progress") return JSON.stringify(missionProgress(mission, run, budget, packet));
-            return JSON.stringify(view === "full" ? packet : compactMissionEvidence(packet, run, root!));
+           if (view === "progress") return serializeOperatorStatus(missionProgress(mission, run, budget, packet));
+           return serializeOperatorStatus(view === "full" ? packet : compactMissionEvidence(packet, run, root!));
         }
         if (root && context.sessionID !== root) {
           const owned = await operators.read(root);

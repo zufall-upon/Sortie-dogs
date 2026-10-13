@@ -54,7 +54,7 @@ OpenCode完全再起動は手動。`preflight`、`npm test`、`npm run test:full
 ## Ubuntuベンチ改善lane
 
 - 正本は`main`のみ。Ubuntuは`bench/swebench-dev23`系の短命branchで分析、改善、長時間ベンチを担当。Windowsは`fix/<issue>`系branchで実運用バグを修正し、unit test後に早期統合。
-- 双方とも相手branchへ直接mergeせず、`branch → PR/確認 → main`。Ubuntuは各改善サイクル前に最新`main`へ追従。
+- 双方とも相手branchへ直接mergeせず、`branch → PR → main`。検証済み改善のPR作成・mergeは継続承認済み。追加の利用者確認で停止しない。Ubuntuは各改善サイクル前に最新`main`へ追従。
 - Ubuntuの各実行はcommit、package hash、条件、結果を固定。成功結果はbranch上で確定扱いせず、`main`統合後のcommitから23件を再実行。
 - Windows修正がruntime挙動へ影響した場合は23件を再ベンチ。評価candidateは実行途中で更新しない。緊急修正中もUbuntu campaignは停止不要。
 - ベンチ生成物、生ログ、datasetはGitへ入れず、要約と再現条件だけ記録。同じファイル、特に`src/plugin/index.ts`、`gate.ts`、runtime asset周辺の長期並行変更を避ける。

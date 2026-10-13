@@ -20,6 +20,13 @@ operations and report actual denials, not inferred gaps. Stage actual changed de
 for an unchanged file or deleted untracked scratch does not require staging it. Repair a missing in-request
 output via expand_unit, then continue the SAME Task; covered paths need no new grant or dispatch.`;
 
+/** Verify requested side-effect changes at the client-state interaction, without prescribing a new API. */
+export const MISSION_CLIENT_STATE_CHECK = `For requested side-effect changes, check remaining controls with existing client-owned state, not only isolated defaults.
+Judge allowed effects from the original request; preserve authorized opt-in behavior.`;
+
+/** Complete requested scratch cleanup before binding final checks to the candidate. */
+const VALIDATION_CLEANUP_ORDER = "Finish requested scratch cleanup before final formal checks; retain fixtures those checks need.";
+
 export const VALIDATION_WORKFLOW = `## Time-aware validation workflow
 
 Operator/Coordinator: put the known meaningful formal check from the user, project or task context in validation,
@@ -32,11 +39,17 @@ Reuse existing checks that already exercise it. If authorized setup cannot run i
 For direct work with an unknown reproduction recipe, resolve its flags, configuration and cwd with ordinary native diagnostics before formal registration.
 Reuse an already observed failing baseline; do not rerun it merely to plan. A command that never exercises the reported path is not a passing reproduction.
 Use existing project configuration within the original path constraints. Known recipes and Worker-owned investigation need no extra preparation or unit.
+For changed observable behavior, follow relevant search hits in existing public caller tests, including output snapshots.
+Read the matched assertions and select their affected checks; implementation-local fixtures alone may miss a consumer regression.
+Update an affected expectation only when the original request changes its contract; otherwise fix the implementation.
+Do this within the current unit, reusing passed checks; no extra suite, approval or review round.
+${MISSION_CLIENT_STATE_CHECK}
 Keep any user/project-required broad validation for the final integrated candidate,
 not every implementation unit. Do not add a full suite merely as a precaution or create a testing agent.
 Worker: reproduce, batch the related edits, inspect the complete diff, then run the focused checks.
 Fix failures with the smallest exercising check before starting a costly suite. Do not execute the entire
 formal validation list after each patch; run it in declared order when the unit candidate is stable.
+${VALIDATION_CLEANUP_ORDER}
 If broad validation is already declared, defer it until focused checks pass and known edits are finished;
 do not remove it, substitute a tiny check for it, or claim an unrun requirement passed.
 After a late fix, select checks for the affected inputs; repeat broad validation when the requested
@@ -51,12 +64,14 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 
 /** Worker-only projection; planning/review authorities retain the complete shared workflow. */
 export const WORKER_VALIDATION_WORKFLOW = `Batch edits, reconcile requirements/diff, run focused tests, then every registered formal check exactly in order:
-separate foreground native shell calls, no extra tee, redirect or wrapper. Diagnostics are not formal evidence.
-Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation or claim stale/unrun proof.
+separate foreground native shell calls; no tee/redirect/wrapper. Diagnostics lack formal evidence.
+Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation; no stale/unrun proof.
+Check matched caller/output tests.
 `;
 
 /** Correction uses the inherited command identities; diagnostics do not acquire formal evidence. */
-export const REVIEWER_VALIDATION_WORKFLOW = `Run inherited formal commands in order as exact separate foreground native shell calls.
+export const REVIEWER_VALIDATION_WORKFLOW = `${VALIDATION_CLEANUP_ORDER}
+Run inherited formal commands in order as exact separate foreground native shell calls.
 Run formatting and diagnostics separately; do not append undeclared shell commands, tee, redirect or wrapper.
 If a formal recipe is misregistered (for example a valid diagnostic intentionally exits nonzero), the active correction author can call sortie_v010_repair_review with reason, validation and optional validation_cwd to correct the recipe HERE. Preserve all original requirements and behavioral assertions; never suppress a real failure or register unconditional success. Run the newly registered checks before finishing; old outcomes are not proof for a changed recipe. Do not cancel, replace the Task or ask the controller to redispatch merely to fix check registration.`;
 
@@ -275,10 +290,34 @@ existing user authorization and project gates; npm publication remains manual.
 /** Keep representation oracles consistent in direct execution, Worker and Review. */
 export const MISSION_REPRESENTATION_ORACLE = `Same-type representation, not name/visitor analogy; resolve conflicts.`;
 
+/** Coordinator preserves source-backed return semantics in direct work or a Worker's objective. */
+export const MISSION_RETURN_CONTRACT = `For a changed value-producing operation, derive its return contract from public callers and unchanged source/tests.
+Preserve established return type/container, metadata and label alignment unless the original request changes them;
+equal numeric values alone do not prove that contract. Trace which inputs determine result shape and labels,
+including non-primary parameters; a scalar primary input need not yield a scalar result. For a mask or conditional
+replacement, preserve established broadcasting and missing-value propagation; an unknown condition is not proof
+that replacement is intended. Carry the affected contract into direct work or the Worker's objective.
+Reuse an adequate focused assertion; add only the smallest source-backed regression when needed, not an input matrix,
+another unit, validation lane or review.`;
+
+/** Coordinator preserves source-backed mutation semantics in direct work or a Worker's objective. */
+export const MISSION_MUTATION_CONTRACT = `For a changed mutating operation, derive its state and failure contract from public callers and unchanged source/tests.
+Changing a file's write mechanism can change permission failures, link identity and new-file creation/umask behavior;
+preserve those established outcomes unless the original request changes them. Derive regression expectations from
+the original operation, not the new write mechanism. Carry the affected contract into direct work or the Worker's objective.
+Reuse an adequate focused assertion; add only the smallest source-backed regression when needed, not an exhaustive
+matrix, another unit, validation lane or review.`;
+
 /** Coordinator authors and plans regressions without adding another validation/review lane. */
 export const MISSION_REGRESSION_PLACEMENT = `Prefer an existing relevant test suite/subtest or fixture when it can express the regression assertion.
 If a new test module is needed, prefer a distinctive behavior-specific name over automatically mirroring the implementation module.
 Preserve established assertions and project test discovery. This is placement guidance, not another test, unit or review requirement.`;
+
+/** Preserve explicit public behavior and its caller preconditions when removing passive effects. */
+const MISSION_EXPLICIT_EFFECT_PRESERVATION = `When removing implicit initialization effects, preserve established explicit opt-in behavior unless the request changes it.
+Trace its real caller-visible effect from existing source/tests; flags or internal state alone are not that behavior.
+Keep the established caller preconditions in the regression check; added setup can supply the removed effect and mask a regression.
+Reuse adequate checks and include this distinction in the current author's objective/check plan, not another unit or review round.`;
 
 /** Shared by the installed Reviewer and its host-generated mission prompt. */
 export const MISSION_BEHAVIOR_REVIEW = `Establish the test oracle independently of the patch: tests added with the implementation are claims to
@@ -286,6 +325,9 @@ review, not established API behavior. For a changed failure path, compare a pre-
 test and its shared assertion helper, including default expected outputs, with the new case. A new test
 that asserts the implementation's current result can encode the defect rather than catch it. Preserve
 the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
+For changed observable behavior, inspect affected public caller assertions/output snapshots found by search, not only implementation-local fixtures.
+Reconcile expected outputs with the original requirements and reuse adequate checks; no extra review round.
+${MISSION_CLIENT_STATE_CHECK}
 ${MISSION_REPRESENTATION_ORACLE}
 Trace a concrete rejected input through the changed code back to the public caller, checking result,
 error and observable state together, including earlier results that can survive failure. Missing assertions
@@ -499,7 +541,10 @@ If peer source/tests expose a plausible related still-unhandled error, probe its
 before choosing the fix; reuse adequate checks. Include this in the current author's objective/check
 plan, not another unit or review round. Do not invent an exhaustive error matrix.
 ${MISSION_REPRESENTATION_ORACLE}
+${MISSION_RETURN_CONTRACT}
+${MISSION_MUTATION_CONTRACT}
 ${MISSION_REGRESSION_PLACEMENT}
+${MISSION_EXPLICIT_EFFECT_PRESERVATION}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
 do not add a separate setup unit just to prepare them.
@@ -629,11 +674,11 @@ User missing-only: installed/incompatible is not missing.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
 ${WORKER_VALIDATION_WORKFLOW}
-Never fabricate completion.
+No fake success.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.
-No repeated denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
+No repeat denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
 Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;

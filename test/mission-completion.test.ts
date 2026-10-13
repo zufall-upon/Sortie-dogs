@@ -13,6 +13,15 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
+function assertStatusOrder(packet: Record<string, unknown>): void {
+  const keys = Object.keys(packet), summary = keys.indexOf("acceptance_summary"), units = keys.indexOf("units");
+  assert.equal(keys[0], "mission_id", "status leads with actionable identity, not bulky acceptance evidence");
+  for (const key of ["status", "budget", "attempts", "next_action", "completion"]) {
+    assert.ok(keys.indexOf(key) >= 0 && keys.indexOf(key) < summary, `${key} precedes acceptance evidence`);
+  }
+  assert.ok(summary >= 0 && units > summary, "acceptance summary still precedes the full authority packet");
+}
+
 for (const mode of ["implementation", "executed", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
@@ -195,7 +204,8 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
     const submittedText = fast ? await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })
       : await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Validated result, reviewed independently" }, { sessionID: dispatcher });
     assert.notEqual(JSON.parse(submittedText).status, "operation-incomplete", "a terminal failure can be submitted as a collected result");
-    assert.equal(Object.keys(JSON.parse(submittedText))[0], "acceptance_summary", "summary precedes the full authority packet");
+    if (fast) assertStatusOrder(JSON.parse(submittedText));
+    else assert.equal(Object.keys(JSON.parse(submittedText))[0], "acceptance_summary", "submission summary precedes the full authority packet");
     if (failure) {
       const submitted = JSON.parse(submittedText);
       if (fast) {
@@ -215,7 +225,7 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
     const cold = await create();
     const status = async () => JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal((await status()).completion.ready, true);
-    assert.equal(Object.keys(await status())[0], "acceptance_summary");
+    assertStatusOrder(await status());
     if (mode === "implementation") {
       const emptyNative = (await status()).acceptance_summary.native_declared_validation[0];
       assert.equal(emptyNative.status, "recorded-formal-evidence");

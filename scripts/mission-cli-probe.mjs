@@ -84,6 +84,18 @@ export function probeStopReason(observed, { mode, rootModel, capUSD, elapsedMs, 
 export const cliCloseStopReason = (code, stopped, observed, options) =>
   code === 0 && !stopped ? probeStopReason(observed, options) : null;
 
+/** Native Mission completion and exact Worker coverage are independent observations,
+ * not official task correctness or a replacement for the existing probe acceptance. */
+export function completeProbeObservations(result, schemaRejected = false) {
+  if (result.mode !== 'complete') return {};
+  return {
+    native_completed: !schemaRejected && result.stopped === false && result.code === 0 &&
+      result.mission_phase === 'completed' && result.receipt_status === 'succeeded',
+    worker_model_observed: result.models.some(item => item.agent === 'dog-worker-v010' &&
+      item.model?.providerID === 'openai' && item.model.id === 'gpt-6-luna-fast' && item.model.variant === 'max'),
+  };
+}
+
 async function updateBudget(file, update) {
   if (!file) return;
   const lock = `${file}.lock`;
@@ -193,6 +205,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
   const worker = result.models.find(item => item.agent === 'dog-worker-v010');
   const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
+  Object.assign(result, completeProbeObservations(result, schemaRejected));
   result.accepted = statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
     result.mission_phase === null :
     operatorResponse ? !schemaRejected && !result.errors.length &&

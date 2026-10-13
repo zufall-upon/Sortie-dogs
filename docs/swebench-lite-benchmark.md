@@ -54,6 +54,20 @@ wsl.exe --cd /mnt/m/_work/_Sortie-dogs -e bash -ic '<command>'
 Start each improvement cycle from current `main`. Preserve an active branch's edits and run evidence;
 use a separate worktree when it is busy. A new runner does not require rebuilding a published package.
 
+Verified development fixes use `branch -> PR -> main` under standing campaign authority;
+do not request another owner confirmation for PR creation or merge. Preserve accepted
+branch-local CLI evidence and original official failures instead of replaying tasks to
+prepare the PR. A known evaluator/image failure is not an automatic hold on unrelated
+usability fixes. Targeted integration tests cover changed combinations; reuse unchanged
+checks. Integration is not a verified benchmark cycle: freeze the merged candidate and
+collect its matching practical/official evidence before claiming candidate success.
+
+Reserve a new paid operation once with its unique ID, absolute state/observation path
+and maximum exposure. Existing reservations survive restart; inspect/reuse the matching
+reservation rather than seeking another approval. Preserve spent/unknown usage and never
+reuse an attempt as a new run. Publication, releases, tags and global apply remain outside
+development campaign authority.
+
 ```bash
 git fetch origin
 git worktree add --detach /tmp/opencode/swebench-current-main origin/main
@@ -413,6 +427,14 @@ The receipt contains `package/package_sha256`, `manifest/manifest_sha256`,
 `runner_sha256`, and `practical:{observation,task,repo,base_commit,verification}`.
 Verification entries contain `command`, `exit`, `log`, `log_sha256`. The original
 task bytes must match the CLI observation; a READY/seed fixture is not acceptance.
+
+Complete-mode `scripts/mission-cli-probe.mjs` observations report `native_completed`
+(normal CLI exit, completed Mission and succeeded receipt without a stop/schema rejection)
+separately from `worker_model_observed` (actual `dog-worker-v010` on
+`openai/gpt-6-luna-fast#max`). A valid direct Coordinator run can complete without
+Worker coverage. These fields do not change the existing `accepted` predicate or
+CLI exit, prove official correctness, or satisfy missing candidate Worker evidence.
+Retain original observations; do not rerun a completed task just to change its route.
 
 Scheduling, notification, cross-project configs and their tests are host-owned,
 not product tooling. This Ubuntu host keeps them at `/srv/work/hermes/home/autodev/`.
