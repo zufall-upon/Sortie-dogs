@@ -7,12 +7,13 @@ import { spawnPromptCLI, startV2ReleaseServer, stopProcessGroup } from '../../sc
 // Process-only replay of Cycle053: root CLI close can precede native settlement.
 // These are retained lifecycle projections, not a model request or task solution.
 const [directory, phase, serverKind = 'process'] = process.argv.slice(2);
-const launchFailure = phase.startsWith('launch-failure');
-const cleanupFailure = phase.startsWith('cleanup-failure') || phase === 'launch-failure-cleanup';
+const firstPersistence = phase.startsWith('persistence-first');
+const launchFailure = phase.startsWith('launch-failure') || phase === 'persistence-first-launch';
+const cleanupFailure = phase.startsWith('cleanup-failure') || phase === 'launch-failure-cleanup' || phase === 'persistence-first-cleanup';
 const observationFailure = phase.startsWith('observation-failure-');
 const immediateClose = ['settlement', 'observation-failure-close', 'observation-failure-final',
   'observation-failure-pending', 'observation-failure-budget', 'cleanup-failure',
-  'cleanup-failure-budget', 'cleanup-failure-observation'].includes(phase);
+  'cleanup-failure-budget', 'cleanup-failure-observation', 'persistence-normal'].includes(phase) || firstPersistence;
 let server, serverPID;
 if (serverKind === 'native') {
   // Explicit service-only check: no native run/session/provider request.
@@ -32,7 +33,7 @@ if (serverKind === 'native') {
   server = { stop: () => stopProcessGroup(serverChild) };
   serverPID = serverChild.pid;
 }
-let serverStopCalls = 0, pendingCalls = 0;
+let serverStopCalls = 0, pendingCalls = 0, finishCalls = 0;
 const ownedStop = server.stop;
 server.stop = async () => {
   serverStopCalls++;
@@ -51,7 +52,7 @@ if (launchFailure) {
 }
 const result = await monitorMissionCLI({ child, server,
   project: directory, since: Date.now(), rootAgent: 'dog-operator', mode: 'complete',
-  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget', 'cleanup-failure-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
+  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget', 'cleanup-failure-budget', 'persistence-first-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
   observe: () => {
     if (!announced && phase !== 'settlement') {
       announced = true;
@@ -62,7 +63,7 @@ const result = await monitorMissionCLI({ child, server,
       // A post-spawn process/pipe error is not a failed executable launch.
       child.emit('error', Object.assign(Error('injected-cli-process-error'), { code: 'EIO' }));
     }
-    if (phase === 'launch-failure-observation') throw Error('injected-database-read-failure');
+    if (phase === 'launch-failure-observation' || phase === 'persistence-first-observation') throw Error('injected-database-read-failure');
     if (phase === 'cleanup-failure-observation' && reads > 1) throw Error('injected-database-read-failure');
     if (['observation-failure-first', 'observation-failure-close'].includes(phase) ||
       ['observation-failure-interval', 'observation-failure-final', 'observation-failure-budget'].includes(phase) && reads > 1) {
@@ -73,7 +74,7 @@ const result = await monitorMissionCLI({ child, server,
   pending: () => {
     pendingCalls++;
     if (phase === 'observation-failure-pending') throw Error('injected-native-settlement-read-failure');
-    if (observationFailure || cleanupFailure) return false;
+    if (observationFailure || cleanupFailure || firstPersistence || phase === 'persistence-normal') return false;
     if (!announced) {
       announced = true;
       process.send({ phase: 'settlement', serverPID, cliPID: child.pid });
@@ -81,6 +82,7 @@ const result = await monitorMissionCLI({ child, server,
     return true;
   },
   finish: async ({ observed, stdout, stderr, stopped, stopObservation, code, signal, controllerSignal, observationError, cliError, cleanupErrors, nextAction }) => {
+    finishCalls++;
     const result = { ...observed, mode: 'complete', stopped, stop_observation: stopObservation,
       code, signal, controller_signal: controllerSignal ?? null,
       mission_phase: 'completed', receipt_status: 'succeeded', accepted: false,
@@ -88,17 +90,22 @@ const result = await monitorMissionCLI({ child, server,
       ...(cliError ? { cli_error: cliError } : {}),
       ...(cleanupErrors?.length ? { cleanup_complete: false, cleanup_errors: cleanupErrors } : {}),
       ...(nextAction ? { next_action: nextAction } : {}),
-      ...(launchFailure || cleanupFailure || phase === 'cli-process-error' ? { server_stop_calls: serverStopCalls,
-        pending_calls: pendingCalls, cli_started: Boolean(child.pid) } : {}) };
+      ...(launchFailure || cleanupFailure || phase === 'cli-process-error' || firstPersistence || phase === 'persistence-normal'
+        ? { server_stop_calls: serverStopCalls, finish_calls: finishCalls,
+          pending_calls: pendingCalls, cli_started: Boolean(child.pid) } : {}) };
     Object.assign(result, completeProbeObservations(result));
     // A signal during persistence must not truncate the final usage/observation.
-    if (phase === 'persistence') {
+    if (phase === 'persistence' || firstPersistence && phase !== 'persistence-first-after-write') {
       process.send({ phase: 'persistence' });
       await new Promise(resolve => setTimeout(resolve, 150));
     }
     await writeFile(join(directory, 'cli.stdout.jsonl'), stdout);
     await writeFile(join(directory, 'cli.stderr.log'), stderr);
     await writeFile(join(directory, 'observation.json'), JSON.stringify(result));
+    if (phase === 'persistence-first-after-write') {
+      process.send({ phase: 'persistence' });
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
     return result;
   },
 });
