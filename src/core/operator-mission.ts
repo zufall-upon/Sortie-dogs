@@ -61,6 +61,9 @@ export interface MissionAttempt {
   observedVariant?: string;
   failure?: { category: "infrastructure" | "authorization" | "contract" | "cancellation" | "implementation" | "unknown"; code: string };
   resultClass?: string;
+  /** Retained erroneous finish projection; the original goal receipt remains append-only. */
+  registrationRecovery?: { at: string; previousStatus: MissionAttempt["status"]; previousResultClass?: string;
+    previousFailure?: MissionAttempt["failure"] };
   selectedModel?: string;
 }
 export interface MissionTerminalRescue {
