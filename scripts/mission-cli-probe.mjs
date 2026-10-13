@@ -363,24 +363,26 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
   const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6.1-sol#xhigh');
   const serverSince = Date.now();
-  let server;
-  try { server = await startV2ReleaseServer(project, env, { credentialSource: fixture.credentialSource }); }
-  catch (error) {
+  async function persistPrelaunchFailure(error, stage, cleanup = error.serverStartContext) {
     // Admission already reserved this attempt. Persist evidence only; never settle
     // missing coverage as zero, rerun installation/startup, or invent a CLI session.
-    const serverError = { name: error.name, message: String(error.message).slice(0, 1500),
+    const isHook = stage === 'server-hook';
+    const failure = { name: error.name, message: String(error.message).slice(0, 1500),
       ...(error.code === undefined ? {} : { code: error.code }) };
-    const cleanup = error.serverStartContext, cleanupErrors = cleanup?.cleanupErrors ?? [];
+    const cleanupErrors = cleanup?.cleanupErrors ?? [];
     const result = { models: [], tools: [], responses: [], errors: [], priced_usd: 0,
       known_unpriced_requests: 0, unpriced_requests: 1, usage_complete: false,
       project, database_path: missionDatabasePath(env, project), data_home: env.XDG_DATA_HOME,
-      mode, stopped: 'server-start-failed', stop_observation: 'server-start',
+      mode, stopped: isHook ? 'server-hook-failed' : 'server-start-failed', stop_observation: stage,
       code: null, signal: null, controller_signal: null, cli_started: false,
-      server_start_attempted: true, server_ready: false, cap_usd: capUSD,
+      server_start_attempted: true, server_ready: isHook, ...(isHook ? { server_hook_attempted: true } : {}), cap_usd: capUSD,
       budget_settlement_attempted: false, ...(budgetFile ? { budget_file: budgetFile } : {}),
-      elapsed_ms: Date.now() - serverSince, server_error: serverError,
-      ...(cleanup ? { cleanup_complete: false, cleanup_errors: cleanupErrors,
-        server_pid: cleanup.serverPID, server_state_directory: cleanup.stateDirectory } : {}),
+      elapsed_ms: Date.now() - serverSince, ...(isHook ? { server_hook_error: failure } : { server_error: failure }),
+      ...(cleanup ? { cleanup_complete: cleanup.cleanup_complete,
+        ...(cleanupErrors.length ? { cleanup_errors: cleanupErrors } : {}),
+        ...(cleanup.serverPID === undefined ? {} : { server_pid: cleanup.serverPID }),
+        ...(cleanup.serverURL === undefined ? {} : { server_url: cleanup.serverURL }),
+        server_state_directory: cleanup.stateDirectory } : {}),
       ...probeTaskIdentity(request, instance, actualBaseCommit), package_version: fixture.pkg.version,
       runtime_marker: fixture.runtimeMarker, candidate_sha256: candidateSHA256,
       accepted: false, native_completed: false, failure_recorded: true,
@@ -389,16 +391,35 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     try { await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2) + '\n'); }
     catch (persistenceError) {
       error.monitorContext = { observed: { ...result, failure_recorded: false }, databasePath: result.database_path,
-        stdout: '', stderr: '', code: null, signal: null, stopped: result.stopped, stopObservation: 'server-start',
-        serverError, cleanupErrors, persistence_complete: false, failure_recorded: false,
+        stdout: '', stderr: '', code: null, signal: null, stopped: result.stopped, stopObservation: stage,
+        ...(isHook ? { serverHookError: failure } : { serverError: failure }),
+        cleanupErrors, persistence_complete: false, failure_recorded: false,
         persistenceError: { name: persistenceError.name, message: String(persistenceError.message).slice(0, 1500),
           ...(persistenceError.code === undefined ? {} : { code: persistenceError.code }) },
-        nextAction: 'Inspect the recorded owned evidence path and failed server startup/cleanup; verify owned writers stopped, retain unresolved reservation/usage holds, then retry only failed evidence persistence after reconciling fixture/database usage. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+        nextAction: isHook
+          ? `${cleanupErrors.length ? 'Retry teardown only for the recorded owned server and verify all writers stopped; ' : 'The owned server was stopped; '}retain unresolved reservation/usage holds, then retry only failed evidence persistence after reconciling the recorded callback/fixture/database usage. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.`
+          : 'Inspect the recorded owned evidence path and failed server startup/cleanup; verify owned writers stopped, retain unresolved reservation/usage holds, then retry only failed evidence persistence after reconciling fixture/database usage. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
     }
     throw error;
   }
+  let server;
+  try { server = await startV2ReleaseServer(project, env, { credentialSource: fixture.credentialSource }); }
+  catch (error) { await persistPrelaunchFailure(error, 'server-start'); }
   try { await onServer?.({ server, fixture }); }
-  catch (error) { await server.stop(); throw error; }
+  catch (error) {
+    const cleanupErrors = [];
+    try { await server.stop(); }
+    catch (cleanupError) { cleanupErrors.push({ resource: 'server', name: cleanupError.name,
+      message: String(cleanupError.message).slice(0, 1500),
+      ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }); }
+    await persistPrelaunchFailure(error, 'server-hook', {
+      serverURL: server.url, stateDirectory: server.env.XDG_STATE_HOME ?? join(project, '.opencode', 'v2-service-state'),
+      cleanup_complete: cleanupErrors.length === 0, cleanupErrors,
+      nextAction: cleanupErrors.length
+        ? 'Retry teardown only for the recorded owned server and verify all writers stopped; inspect the original server callback failure and reconcile fixture/database usage while retaining unresolved reservation holds. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+        : 'Inspect the recorded server callback failure and fixture/database/package identity; the owned server was stopped. Reconcile session usage while retaining unresolved reservation holds before deciding continuation. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.',
+    });
+  }
   const since = Date.now(); // Keep the successful CLI timing endpoint unchanged.
   const launch = nativeCLI('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel]);
   const child = spawnPromptCLI(launch.executable, launch.args, request, {

@@ -13,7 +13,8 @@ const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
 const status = { agent: "dog-operator", tool: "sortie_v010_operator_status", status: "completed", model: root.model };
 
-for (const phase of ["server-start-error", "server-start-cleanup-error", "server-start-persistence-error", "server-start-cleanup-persistence-error"]) {
+for (const phase of ["server-start-error", "server-start-cleanup-error", "server-start-persistence-error", "server-start-cleanup-persistence-error",
+  "server-hook-error", "server-hook-cleanup-error", "server-hook-persistence-error", "server-hook-cleanup-persistence-error"]) {
   test(`regular probe ${phase} retains reservation and actionable evidence before monitor`,
     { timeout: 20_000, skip: process.platform === "win32" }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "probe-startup-"));
@@ -31,13 +32,20 @@ for (const phase of ["server-start-error", "server-start-cleanup-error", "server
       assert.equal(receipt.writes, 1, "no failed persistence or consumed startup retry");
       assert.equal(receipt.commands.length, 4); assert.equal(receipt.original_error_identity_retained, true);
       assert.equal(receipt.native_model_requests, 0); assert.equal(receipt.actual_installation_or_CLI_started, false);
-      assert.equal(receipt.rejected.code, "EIO"); assert.match(receipt.rejected.message, /injected-owned-probe-server-start/);
+      const hook = phase.startsWith("server-hook-");
+      assert.equal(receipt.hooks, hook ? 1 : 0); assert.equal(receipt.stops, hook ? 1 : 0, "only obtained owned handle; no cleanup retry");
+      assert.equal(receipt.rejected.code, "EIO");
+      assert.equal(receipt.rejected.message, hook ? "injected-owned-probe-server-hook" : "injected-owned-probe-server-start");
       const unavailable = phase.endsWith("persistence-error"), cleanupFailed = phase.includes("cleanup");
       const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
-      assert.equal(result.stopped, "server-start-failed"); assert.equal(result.stop_observation, "server-start");
-      assert.equal(result.server_error.code, "EIO"); assert.equal(result.code, null); assert.equal(result.signal, null);
+      assert.equal(result.stopped, hook ? "server-hook-failed" : "server-start-failed");
+      assert.equal(result.stop_observation, hook ? "server-hook" : "server-start");
+      assert.equal((hook ? result.server_hook_error : result.server_error).code, "EIO");
+      assert.equal(hook ? result.server_error : result.server_hook_error, undefined);
+      assert.equal(result.code, null); assert.equal(result.signal, null);
       assert.equal(result.controller_signal, null); assert.equal(result.cli_started, false);
-      assert.equal(result.server_start_attempted, true); assert.equal(result.server_ready, false);
+      assert.equal(result.server_start_attempted, true); assert.equal(result.server_ready, hook);
+      assert.equal(result.server_hook_attempted, hook ? true : undefined);
       assert.equal(result.usage_complete, false); assert.equal(result.known_unpriced_requests, 0);
       assert.equal(result.priced_usd, 0, "known observed sum only, not complete or zero-cost coverage");
       assert.equal(result.unpriced_requests, 1, "unresolved coverage retains a reservation, not an invented observed request");
@@ -59,16 +67,26 @@ for (const phase of ["server-start-error", "server-start-cleanup-error", "server
       assert.deepEqual(budget.probes, [{ project: result.project, charged_usd: 2, reserved_usd: 2, state: "reserved" }]);
       if (cleanupFailed) {
         assert.equal(result.cleanup_complete, false); assert.equal(result.cleanup_errors[0].code, "EACCES");
-        assert.equal(result.server_pid, 719000001); assert.equal(result.server_state_directory, join(result.project, ".opencode/v2-service-state"));
+        assert.equal(result.server_pid, hook ? undefined : 719000001);
+        assert.equal(result.server_state_directory, join(result.project, ".opencode/v2-service-state"));
+        assert.equal(result.cleanup_errors[0].message, hook ? "injected-owned-probe-hook-cleanup" : "injected-owned-start-cleanup");
         assert.match(result.next_action, /Retry teardown only/);
-      } else assert.equal(result.cleanup_complete, undefined);
+      } else {
+        assert.equal(result.cleanup_complete, hook ? true : undefined);
+        assert.equal(result.cleanup_errors, undefined);
+        if (hook) assert.match(result.next_action, /owned server was stopped/);
+      }
+      if (hook) assert.equal(result.server_url, "http://owned-process-only.invalid");
       if (unavailable) {
         assert.equal(receipt.result, undefined);
         const context = receipt.rejected.monitorContext;
         assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
-        assert.equal(context.serverError.code, "EIO"); assert.equal(context.persistenceError.code, "EACCES");
+        assert.equal((hook ? context.serverHookError : context.serverError).code, "EIO");
+        assert.equal(hook ? context.serverError : context.serverHookError, undefined);
+        assert.equal(context.persistenceError.code, "EACCES");
         assert.equal(context.cleanupErrors.length, cleanupFailed ? 1 : 0);
         assert.match(context.nextAction, /retry only failed evidence persistence/);
+        if (hook) assert.match(context.nextAction, cleanupFailed ? /Retry teardown only/ : /owned server was stopped/);
       } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }
       for (const file of ["cli.stdout.jsonl", "cli.stderr.log"])
         await assert.rejects(readFile(join(directory, "smoke-1", file)), { code: "ENOENT" }, "no invented CLI logs");
