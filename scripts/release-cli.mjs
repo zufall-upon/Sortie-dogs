@@ -122,9 +122,26 @@ export async function command(executable, args, cwd, env, timeoutMs = 600_000) {
   return result.stdout;
 }
 
+async function processGroupRunning(pid) {
+  try { process.kill(-pid, 0); }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  if (process.platform !== 'linux') return true;
+  // An orphan can remain as a zombie until its new parent reaps it. Zombies
+  // cannot write; kill(0) alone would spend the whole timeout on a stopped group.
+  const members = await Promise.all((await readdir('/proc')).filter(name => /^[0-9]+$/.test(name)).map(async name => {
+    try {
+      const stat = await readFile(`/proc/${name}/stat`, 'utf8');
+      const [state, , group] = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+      return Number(group) === pid && state !== 'Z' && state !== 'X';
+    } catch (error) { if (['ENOENT', 'ESRCH'].includes(error.code)) return false; throw error; }
+  }));
+  return members.some(Boolean);
+}
+
 export async function stopProcessGroup(child) {
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  if (!child.pid) return;
   if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null) return;
     await new Promise((resolveStop, rejectStop) => {
       const timer = setTimeout(() => rejectStop(Error(`Owned process ${child.pid} did not stop after taskkill`)), 7_000);
       child.once('close', () => { clearTimeout(timer); resolveStop(); });
@@ -133,16 +150,24 @@ export async function stopProcessGroup(child) {
     });
     return;
   }
-  const signal = name => { try { process.kill(-child.pid, name); } catch { /* exited */ } };
+  const signal = name => {
+    try { process.kill(-child.pid, name); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+  };
+  const started = Date.now();
   signal('SIGTERM');
-  await new Promise(resolve => {
-    const timer = setTimeout(() => {
+  let killed = false;
+  // Root close is not a descendant shutdown barrier. Keep the same 5s graceful
+  // and 2s forced limits, but await the owned group rather than another close event.
+  while (await processGroupRunning(child.pid)) {
+    const elapsed = Date.now() - started;
+    if (elapsed >= 7_000) throw Error(`Owned process group ${child.pid} did not stop after SIGKILL`);
+    if (!killed && elapsed >= 5_000) {
       signal('SIGKILL');
-      const killTimer = setTimeout(resolve, 2_000);
-      child.once('close', () => { clearTimeout(killTimer); resolve(); });
-    }, 5_000);
-    child.once('close', () => { clearTimeout(timer); resolve(); });
-  });
+      killed = true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
 }
 
 export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true, credentialSource } = {}) {
