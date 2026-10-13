@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { CONTRACT_TEXT_LIMITS } from "./contract-limits.js";
+import { CONTRACT_TEXT_LIMITS } from "./contract-limits.ts";
 
 export const VALIDATION_PROFILES = ["fast", "balanced", "assurance"] as const;
 export type ValidationProfile = typeof VALIDATION_PROFILES[number];
