@@ -232,7 +232,15 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
     }
     return { url, env: serverEnv, closed, stop: () => stopProcessGroup(child) };
   } catch (error) {
-    await stopProcessGroup(child);
+    try { await stopProcessGroup(child); }
+    catch (cleanupError) {
+      // Keep the startup failure primary. A failed owned teardown needs its own
+      // identity and next operation, not a replacement cause or another launch.
+      error.serverStartContext = { serverPID: child.pid ?? null, stateDirectory: state, cleanup_complete: false,
+        cleanupErrors: [{ resource: 'server', name: cleanupError.name, message: String(cleanupError.message).slice(0, 1500),
+          ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }],
+        nextAction: 'Retry teardown only for the recorded owned server PID/process group and verify all writers stopped; inspect the original server-start failure and reconcile session usage/retained receipts before deciding continuation. Do not automatically replay the consumed startup/task or restart the shared host.' };
+    }
     throw error;
   }
 }
