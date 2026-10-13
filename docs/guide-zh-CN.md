@@ -61,13 +61,14 @@ OpenCode可以重新加载受监视的配置，但替换已安装dependency可�
 
 ## v0.13.19更新
 
-整合PR #223至#231。显示当前完整请求的`全体作業量 n/100（概算）`，基于具体产物、checks及剩余工作的相对量，
+整合PR #223至#232。显示当前完整请求的`全体作業量 n/100（概算）`，基于具体产物、checks及剩余工作的相对量，
 不是预算、unit计数或固定stage比例。复用已有native观察及settlement，不增加进度专用推理、验证或写入。
 估计更新可降低数值；正式完成前最多99，仅已有完整请求正式完成才到100。
 保留read内容、command stdout、执行契约、model及接受条件；任意metadata错误使用fallback而不拒绝执行。
 init保留local V2 factory wrapper。隔离CLI fixture的session DB，观察及结束等待使用实际所属DB。
 controller中断、观察失败、CLI启动失败或cleanup失败均保存原exit、未知费用、日志和下一步。
 POSIX父进程结束后仍等待实际所属group的子writer停止；不宣称Windows orphan清理或真实请求完成率提升。
+Linux详细proc读取仅针对实际所属group；无关读取拒绝不再阻止清理，保留所属目标的真实错误。
 详见[发布说明](release-v0.13.19.md)和[完整请求工作量进度](work-quantity-progress.md)。
 
 ## v0.13.18更新（保留）

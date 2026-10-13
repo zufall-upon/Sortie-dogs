@@ -1,6 +1,6 @@
 # v0.13.19 — whole-request workload progress and durable native CLI stops
 
-Integrates PR #223 through PR #231.
+Integrates PR #223 through PR #232.
 
 - Show `全体作業量 n/100（概算）` for the complete current request, using a persistent weighted work breakdown rather than budget/unit occupancy or fixed stage percentages. Concrete outputs, shared checks, broad unexpanded work and existing required Review/delivery/acceptance shape the estimate. Optional stable IDs, relative weights and checkpoints travel in the ordinary plan, outside execution contracts.
 - Reuse existing successful native reads/edits/checks/todos and saved settlements. Repeated activity does not accumulate completion; replans retain scope and completed work. Added requirements, targets or findings can lower the estimate with `見積更新`. Before existing formal whole-request completion, cap at99; cancellation is never completion. Invalid optional display metadata falls back without blocking work or adding an acceptance gate.
@@ -8,6 +8,7 @@ Integrates PR #223 through PR #231.
 - Preserve the recognized local V2 factory wrapper during init instead of registering the same plugin ID twice. Isolate default native fixture session databases, copy only the existing OAuth route without printing credentials or copying host conversations, and observe/wait against the actual owning database.
 - Keep controller-interruption, database-observation failure, CLI-launch failure and owned-cleanup failure receipts: original exit/signal, stop reason, logs, partial/unknown usage and actionable next operation. Missing coverage is not zero cost or accepted success. Do not automatically replay the consumed task or restart the shared host.
 - On POSIX, stop and await the exact owned process group even after its parent exits. Retain the existing five-second TERM/two-second KILL bounds, excluding nonwriting Linux zombies from the live-writer barrier. Real cleanup failure follows the durable unknown-usage path. Windows taskkill behavior is unchanged.
+- Select the exact owned Linux group before detailed proc reads, using bounded `pgrep -g`. Unrelated unreadable proc stats cannot abort cleanup; genuine owned read/signal/listing failures remain visible. Empty selection alone does not establish that the group stopped.
 - Retain the CLI-practical benchmark priority: instruction completion, stops/next operation, unnecessary replay/rework, time and cost; official correctness remains separate. One diagnosed stop at a time, not PR/test counts or a routine23-case campaign.
 
 ## Evidence and limits

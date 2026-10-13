@@ -66,7 +66,7 @@ task開始agentとして選択しない。
 
 ## v0.13.19の更新
 
-PR #223〜#231を統合。現在の要求全体を対象に`全体作業量 n/100（概算）`を表示する。
+PR #223〜#232を統合。現在の要求全体を対象に`全体作業量 n/100（概算）`を表示する。
 予算・unit数・固定stage割合ではなく、具体的な成果物・check・残作業の重み付き概算。
 既存native観測とsettlementを再利用し、進捗計算用の推論・再検証・専用writeを追加しない。
 見積更新で値は下がり得る。正式要求完了前は99以下、既存正式完了だけで100。
@@ -74,6 +74,7 @@ read内容・command stdout・execution契約・model・受入条件は保持。
 local V2 factory wrapperをinitで保持し、CLI fixtureのsession DBを隔離、観測・終了待ちは実所有DBを参照する。
 controller中断、観測失敗、CLI起動失敗、cleanup失敗も元exit・費用未知・ログ・次操作を保存。
 POSIX親終了後も実所有groupの子writer停止を待つ。Windows orphan停止や実要求の完遂改善は未実証。
+Linuxの詳細proc読取は実所有groupだけ。無関係な読取拒否で停止せず、所有対象の実エラーは保持する。
 詳細は[release notes](release-v0.13.19.md)と[全体作業量進捗](work-quantity-progress.md)を参照。
 
 ## v0.13.18の更新（継承）
