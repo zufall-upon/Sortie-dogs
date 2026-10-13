@@ -1,5 +1,7 @@
-import { mkdir, writeFile, readFile, lstat, readdir, rm } from 'node:fs/promises';
+import { chmod, mkdir, writeFile, readFile, lstat, readdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve, relative } from 'node:path';
@@ -21,6 +23,34 @@ export const runLocationArgsForOpenCodeVersion = (version, project, serverURL) =
   Number.parseInt(version.split('.')[0], 10) >= 2
     ? serverURL === undefined ? ['--standalone'] : ['--server', serverURL]
     : ['--dir', project];
+
+export const missionDatabasePath = (env = process.env, cwd = process.cwd()) => resolve(cwd,
+  env.OPENCODE_DB || join(env.XDG_DATA_HOME || join(env.HOME || env.USERPROFILE || homedir(), '.local/share'), 'opencode/opencode.db'));
+export const fixtureDataEnvironment = run => ({ XDG_DATA_HOME: resolve(run, 'data'),
+  OPENCODE_DB: resolve(run, 'data/opencode/opencode.db') });
+
+/** Copy only the existing OAuth route, never the host's sessions. Native startup creates the schema. */
+export async function seedIsolatedV2Credential(sourcePath, targetPath, targetDirectory, { ifMissing = false } = {}) {
+  if (ifMissing) {
+    const target = new DatabaseSync(targetPath, { readOnly: true });
+    try {
+      if (target.prepare('SELECT 1 FROM credential WHERE integration_id = ? LIMIT 1').get('openai')) return;
+    } finally { target.close(); }
+  }
+  const source = new DatabaseSync(sourcePath, { readOnly: true });
+  try {
+    const credential = source.prepare('SELECT id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated FROM credential WHERE integration_id = ? ORDER BY time_updated DESC LIMIT 1').get('openai');
+    assert(credential !== undefined && JSON.parse(credential.value).type === 'oauth', 'candidate-openai-credential-unavailable');
+    await chmod(targetDirectory, 0o700);
+    await chmod(targetPath, 0o600);
+    const target = new DatabaseSync(targetPath);
+    try {
+      target.prepare('INSERT INTO credential (id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+        credential.id, credential.integration_id, credential.label, credential.value, credential.connector_id,
+        credential.method_id, credential.active, credential.time_created, credential.time_updated);
+    } finally { target.close(); }
+  } finally { source.close(); }
+}
 
 /** Invoke Windows npm/OpenCode native entrypoints rather than shell-only npm wrappers. */
 export function nativeCLI(executable, args, { platform = process.platform, node = process.execPath,
@@ -115,11 +145,11 @@ export async function stopProcessGroup(child) {
   });
 }
 
-export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true } = {}) {
+export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true, credentialSource } = {}) {
   const password = randomBytes(24).toString('hex');
   // Public history is absent from V2's plugin context. Register this owned server
   // in an isolated state directory so read-only Service.discover reaches its PID,
-  // never the user's shared service. Keep the actual session database unchanged.
+  // never the user's shared service. The caller's explicit data environment owns sessions.
   const state = join(cwd, '.opencode', 'v2-service-state');
   await mkdir(state, { recursive: true });
   const serverEnv = { ...(inheritEnvironment ? process.env : {}), ...env, PWD: cwd,
@@ -161,6 +191,10 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
     assert(registration.url === url, 'Owned V2 service registration does not match its listener');
     if (typeof registration.password === 'string') serverEnv.OPENCODE_SERVER_PASSWORD = registration.password;
     else delete serverEnv.OPENCODE_SERVER_PASSWORD;
+    if (credentialSource) {
+      const databasePath = missionDatabasePath(serverEnv, cwd);
+      await seedIsolatedV2Credential(credentialSource, databasePath, dirname(databasePath), { ifMissing: true });
+    }
     return { url, env: serverEnv, closed, stop: () => stopProcessGroup(child) };
   } catch (error) {
     await stopProcessGroup(child);
@@ -184,6 +218,12 @@ export async function installedFixture(tgz, directory, profileId = 'stable', { n
   const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json') };
   const cliVersion = parseOpenCodeVersion(await command('opencode', ['--version'], project, env));
   assert(cliVersion, 'Cannot identify CLI version');
+  let credentialSource;
+  if (Number.parseInt(cliVersion.split('.')[0], 10) >= 2) {
+    credentialSource = missionDatabasePath();
+    Object.assign(env, fixtureDataEnvironment(run));
+    await mkdir(dirname(env.OPENCODE_DB), { recursive: true, mode: 0o700 });
+  }
   const dependency = `file:${relative(control, tgz).replaceAll('\\', '/')}`;
   const pluginPackage = pluginPackageForOpenCodeVersion(cliVersion);
   await writeFile(join(control, 'package.json'), JSON.stringify({ private: true, type: 'module',
@@ -221,7 +261,7 @@ export async function installedFixture(tgz, directory, profileId = 'stable', { n
   await command('node', [join(installed, 'dist/cli/main.js'), 'init', project,
     ...(profiles ? ['--profile', release.runtimeProfile] : [])], project, env);
   for (const asset of runtimeAssets) assert((await readFile(join(control, asset.installPath), 'utf8')) === asset.content, 'CLI asset mismatch');
-  return { run, project, control, env, installed, pkg, runtime, release, coordinatorAgent, operatorAgent, workerAgent,
+  return { run, project, control, env, credentialSource, installed, pkg, runtime, release, coordinatorAgent, operatorAgent, workerAgent,
     cliVersion, runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight };
 }
 
@@ -253,7 +293,7 @@ export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1,
       workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model, canonicalExit: 0,
       terminal: 'succeeded', artifactMatch: true, priced_usd: result.priced_usd, unpriced_requests: result.unpriced_requests };
   }
-  const { project, env, pkg, runtime, release, coordinatorAgent, workerAgent, cliVersion,
+  const { project, env, credentialSource, pkg, runtime, release, coordinatorAgent, workerAgent, cliVersion,
     runtimeMarker: RUNTIME_ASSET_VERSION, acceptanceContinuityFingerprint, reduceGoalFlight } = await installedFixture(tgz, directory, profileId);
   await writeFile(join(project, 'AGENTS.md'), '# Release fixture\nNative file paths resolve from this workspace. Use the supplied nested manifest. Do not edit contracts, tests, or package files. Workers must not commit.\n');
   await writeFile(join(project, '.gitignore'), `.opencode/\n${runtime.stateDirectory}/\nchild/${runtime.stateDirectory}/\n`);
@@ -274,7 +314,7 @@ export async function inside(tgz, directory, profileId = 'stable', { capUSD = 1,
       'sortie-dogs/acceptance-continuity': { schema_version: '0.1', authority: 'dispatch', task_id: 'recovery', criteria: [criterion], fingerprint, parent_fingerprint: 'none' } } }, null, 2));
   const jsonEvents = text => text.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
   const v2Server = Number.parseInt(cliVersion.split('.')[0], 10) >= 2
-    ? await startV2ReleaseServer(project, env) : undefined;
+    ? await startV2ReleaseServer(project, env, { credentialSource }) : undefined;
   const cliEnv = v2Server?.env ?? env;
   async function cli(prompt, sessionID, timeoutSeconds = RELEASE_SMOKE_RUN_TIMEOUT_SECONDS) {
     // timeout runs in WSL: Windows killing wsl.exe alone does not establish guest process cleanup.

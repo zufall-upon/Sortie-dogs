@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { estimateModelUsageCost } from "./swebench-model-cost.mjs";
-import { startV2ReleaseServer, spawnPromptCLI, v2PluginWrapperSource } from "./release-cli.mjs";
+import { startV2ReleaseServer, spawnPromptCLI, v2PluginWrapperSource, seedIsolatedV2Credential } from "./release-cli.mjs";
 import { nativeRunPending, waitForNativeSettlement } from "./native-run-settlement.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -910,21 +910,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   }
 }
 
-export async function seedIsolatedV2Credential(sourcePath, targetPath, targetDirectory) {
-  const source = new DatabaseSync(sourcePath, { readOnly: true });
-  try {
-    const credential = source.prepare("SELECT id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated FROM credential WHERE integration_id = ? ORDER BY time_updated DESC LIMIT 1").get("openai");
-    ensure(credential !== undefined && JSON.parse(credential.value).type === "oauth", "candidate-openai-credential-unavailable");
-    await chmod(targetDirectory, 0o700);
-    await chmod(targetPath, 0o600);
-    const target = new DatabaseSync(targetPath);
-    try {
-      target.prepare("INSERT INTO credential (id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-        credential.id, credential.integration_id, credential.label, credential.value, credential.connector_id,
-        credential.method_id, credential.active, credential.time_created, credential.time_updated);
-    } finally { target.close(); }
-  } finally { source.close(); }
-}
+export { seedIsolatedV2Credential } from './release-cli.mjs';
 
 /** Keep a credential-free copy of the isolated store so per-role timing can be analyzed after cleanup. */
 export async function retainUsageDatabase(sourcePath, targetPath) {
