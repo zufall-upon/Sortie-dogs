@@ -96,6 +96,71 @@ export function completeProbeObservations(result, schemaRejected = false) {
   };
 }
 
+/** Monitor the owned CLI and server through native settlement and evidence persistence.
+ * Observation seams let retained lifecycle facts be replayed without model requests. */
+export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
+  observe = observeMissionCLI, pending, finish }) {
+  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationError;
+  let serverStopping;
+  const stopServer = () => serverStopping ??= Promise.resolve().then(() => server.stop());
+  const observeNow = () => lastObserved = observe(project, since, rootAgent);
+  child.stdout.on('data', bytes => { stdout += bytes; });
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  const stop = (reason, observed, point) => {
+    if (stopped) return;
+    cutoff = observed;
+    stopped = reason;
+    stopObservation = point;
+    clearInterval(timer);
+    stopping = Promise.all([stopProcessGroup(child), stopServer()]);
+    // Cleanup is awaited below, even if one owned process fails before CLI close.
+    stopping.catch(() => {});
+  };
+  const stopOptions = () => ({ mode, rootModel, capUSD, elapsedMs: Date.now() - since, timeoutMs: timeoutSeconds * 1000 });
+  const timer = setInterval(() => {
+    try {
+      const observed = observeNow();
+      const reason = probeStopReason(observed, stopOptions());
+      if (reason) stop(reason, observed, 'interval');
+    } catch (error) {
+      observationError = error;
+      stop('observation-failed', lastObserved, 'interval');
+    }
+  }, 250);
+  const interrupt = signal => {
+    controllerSignal ??= signal;
+    stop('controller-interrupted', lastObserved, 'signal');
+  };
+  const onInterrupt = () => interrupt('SIGINT'), onTerminate = () => interrupt('SIGTERM');
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onTerminate);
+  let code, signal;
+  try {
+    try {
+      ({ code, signal } = await new Promise((done, reject) => {
+        child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
+      }));
+      const observed = observeNow();
+      const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
+      if (reason) stop(reason, observed, 'cli-close');
+      if (mode === 'complete' && code === 0 && !stopped) {
+        await waitForNativeSettlement({ pending: pending ?? (() => nativeRunPending(project,
+          join(homedir(), '.local/share/opencode/opencode.db'), { since, root: observed.root })), stopped: () => stopped });
+      }
+    } finally {
+      clearInterval(timer);
+      try { await stopping; } finally { await stopServer(); }
+    }
+    if (observationError) throw observationError;
+    return await finish({ observed: observeNow(), stdout, stderr,
+      stopped, stopObservation, cutoff, code, signal, controllerSignal });
+  } finally {
+    // Retain handlers through log/usage persistence, including repeated signals.
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onTerminate);
+  }
+}
+
 async function updateBudget(file, update) {
   if (!file) return;
   const lock = `${file}.lock`;
@@ -154,80 +219,54 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const child = spawnPromptCLI(launch.executable, launch.args, request, {
     cwd: project, env: { ...server.env, PWD: project }, detached: true,
   });
-  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation;
-  child.stdout.on('data', bytes => { stdout += bytes; });
-  child.stderr.on('data', bytes => { stderr += bytes; });
-  const stop = (reason, observed, point) => {
-    if (stopped) return;
-    cutoff = observed;
-    stopped = reason;
-    stopObservation = point;
-    stopping = Promise.all([stopProcessGroup(child), server.stop()]);
-  };
-  const stopOptions = () => ({ mode, rootModel, capUSD, elapsedMs: Date.now() - since, timeoutMs: timeoutSeconds * 1000 });
-  const timer = setInterval(() => {
-    const observed = observeMissionCLI(project, since, rootAgent);
-    const reason = probeStopReason(observed, stopOptions());
-    if (reason) stop(reason, observed, 'interval');
-  }, 250);
-  let code;
-  try {
-    code = await new Promise((done, reject) => { child.once('error', reject); child.once('close', done); });
-    const observed = observeMissionCLI(project, since, rootAgent);
-    const reason = cliCloseStopReason(code, stopped, observed, stopOptions());
-    if (reason) stop(reason, observed, 'cli-close');
-    if (mode === 'complete' && code === 0 && !stopped) {
-      await waitForNativeSettlement({
-        pending: () => nativeRunPending(project, join(homedir(), '.local/share/opencode/opencode.db'), { since, root: observed.root }),
-        stopped: () => stopped,
+  return await monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
+    finish: async ({ observed, stdout, stderr, stopped, stopObservation, cutoff, code, signal, controllerSignal }) => {
+      const state = async area => {
+        if (!observed.root) return null;
+        try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
+          `${createHash('sha256').update(observed.root).digest('hex')}.json`), 'utf8')); }
+        catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+      };
+      const mission = await state('missions'), operator = await state('operators');
+      const result = { ...observed, ...(statusOnly ? { expected_model: rootModel,
+        observed_model: observed.tools.find(item => item.agent === 'dog-operator' && item.tool === 'sortie_v010_operator_status' &&
+          item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
+        ...(cutoff ? { errors: cutoff.errors,
+        cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
+        project, mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
+        controller_signal: controllerSignal ?? null, elapsed_ms: Date.now() - since,
+        ...probeTaskIdentity(request, instance, actualBaseCommit),
+        package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
+        mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
+        review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
+        candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
+      const worker = result.models.find(item => item.agent === 'dog-worker-v010');
+      const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
+      Object.assign(result, completeProbeObservations(result, schemaRejected));
+      result.accepted = statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
+        result.mission_phase === null :
+        operatorResponse ? !schemaRejected && !result.errors.length &&
+        (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
+        result.models.some(item => item.agent === 'dog-operator' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max') :
+        buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
+        result.responses.some(item => item.agent === 'build') &&
+        result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6.1-sol') :
+        !schemaRejected && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
+        workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
+        (mode === 'start' ? stopped === 'worker-started'
+          : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
+      await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
+      await writeFile(join(run, 'cli.stderr.log'), stderr);
+      await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
+      await updateBudget(budgetFile, budget => {
+        const entry = budget.probes.find(item => item.project === project);
+        Object.assign(entry, { state: 'settled', root: result.root, priced_usd: result.priced_usd,
+          unpriced_requests: result.unpriced_requests,
+          charged_usd: result.unpriced_requests ? Math.max(entry.reserved_usd, result.priced_usd) : result.priced_usd });
       });
-    }
-  }
-  finally { clearInterval(timer); await stopping; await server.stop(); }
-  const observed = observeMissionCLI(project, since, rootAgent);
-  const state = async area => {
-    if (!observed.root) return null;
-    try { return JSON.parse(await readFile(join(project, fixture.runtime.stateDirectory, area,
-      `${createHash('sha256').update(observed.root).digest('hex')}.json`), 'utf8')); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  };
-  const mission = await state('missions'), operator = await state('operators');
-  const result = { ...observed, ...(statusOnly ? { expected_model: rootModel,
-    observed_model: observed.tools.find(item => item.agent === 'dog-operator' && item.tool === 'sortie_v010_operator_status' &&
-      item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
-    ...(cutoff ? { errors: cutoff.errors,
-    cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
-    project, mode, stopped, stop_observation: stopObservation ?? null, code, elapsed_ms: Date.now() - since,
-    ...probeTaskIdentity(request, instance, actualBaseCommit),
-    package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,
-    mission_phase: mission?.phase ?? null, receipt_status: operator?.receipt?.status ?? null,
-    review: mission?.review ? { verdict: mission.review.verdict, child: mission.review.child ?? null } : null,
-    candidate_sha256: createHash('sha256').update(await readFile(tgz)).digest('hex') };
-  const worker = result.models.find(item => item.agent === 'dog-worker-v010');
-  const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
-  Object.assign(result, completeProbeObservations(result, schemaRejected));
-  result.accepted = statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
-    result.mission_phase === null :
-    operatorResponse ? !schemaRejected && !result.errors.length &&
-    (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
-    result.models.some(item => item.agent === 'dog-operator' && item.model?.id === 'gpt-6-luna-fast' && item.model.variant === 'max') :
-    buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
-    result.responses.some(item => item.agent === 'build') &&
-    result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6.1-sol') :
-    !schemaRejected && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
-    workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
-    (mode === 'start' ? stopped === 'worker-started'
-      : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
-  await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
-  await writeFile(join(run, 'cli.stderr.log'), stderr);
-  await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
-  await updateBudget(budgetFile, budget => {
-    const entry = budget.probes.find(item => item.project === project);
-    Object.assign(entry, { state: 'settled', root: result.root, priced_usd: result.priced_usd,
-      unpriced_requests: result.unpriced_requests,
-      charged_usd: result.unpriced_requests ? Math.max(entry.reserved_usd, result.priced_usd) : result.priced_usd });
+      return result;
+    },
   });
-  return result;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {

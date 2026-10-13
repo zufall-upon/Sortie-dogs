@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { cliCloseStopReason, completeProbeObservations, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
-import { nativeCLI, spawnPromptCLI } from "../scripts/release-cli.mjs";
+import { nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
@@ -164,3 +167,71 @@ test("normal CLI close observes an already-started Worker before teardown, not j
   assert.equal(cliCloseStopReason(0, false, observed, { ...options, mode: "complete" }), null,
     "startup does not qualify a completion-mode probe");
 });
+
+// Cycle053's original controller exit/signal is unknown. Exercise the smallest
+// reproducible disconnect path, not another paid replay of its completed task.
+for (const [signal, phase] of [["SIGTERM", "active"], ["SIGINT", "settlement"], ["SIGTERM", "persistence"]] as const) {
+  test(`controller ${signal} during ${phase} stops owned writers and persists usage without acceptance`,
+    { skip: process.platform === "win32", timeout: 20_000 }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-controller-signal-"));
+    const observed = { root: "root", models: [root], responses: [], tools: [], errors: [],
+      priced_usd: 1.7674084, unpriced_requests: 0 };
+    await writeFile(join(directory, "retained-observation.json"), JSON.stringify(observed));
+    const child = spawn(process.execPath, [resolve("test/fixtures/mission-probe-controller.mjs"), directory, phase], {
+      detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let stderr = "";
+    child.stderr.on("data", bytes => { stderr += bytes; });
+    child.stdout.resume();
+    const closed = new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+      child.once("error", reject); child.once("close", (code, signal) => done({ code, signal }));
+    });
+    let owned: { serverPID: number; cliPID: number } | undefined;
+    let persistenceSignalSent = false;
+    child.on("message", message => {
+      if ((message as { phase: string }).phase === "persistence") {
+        persistenceSignalSent = true;
+        child.kill("SIGINT");
+      }
+    });
+    try {
+      owned = await new Promise((done, reject) => {
+        child.on("message", message => {
+          const event = message as { phase: string; serverPID: number; cliPID: number };
+          if (["monitoring", "settlement"].includes(event.phase)) done(event);
+        });
+        child.once("close", () => reject(Error(`Controller exited before monitoring: ${stderr}`)));
+      });
+      child.kill(signal);
+      const exit = await closed;
+      assert.equal(exit.signal, null, "the controller must finish cleanup/persistence, not die on the signal");
+      assert.equal(exit.code, 1, stderr);
+      const result = JSON.parse(await readFile(join(directory, "observation.json"), "utf8"));
+      assert.equal(result.stopped, "controller-interrupted");
+      assert.equal(result.stop_observation, "signal");
+      assert.equal(result.controller_signal, signal);
+      assert.equal(result.code, phase === "settlement" ? 0 : null,
+        "the original CLI exit remains separate from the controller's interruption");
+      assert.equal(result.native_completed, false, "a retained succeeded Mission receipt cannot accept an interrupted probe");
+      assert.equal(result.accepted, false);
+      assert.equal(result.priced_usd, observed.priced_usd);
+      assert.equal(result.unpriced_requests, 0);
+      assert.equal(result.worker_model_observed, false, "no invented Worker coverage");
+      assert.equal(persistenceSignalSent, phase === "persistence");
+      for (const pid of [owned.serverPID, owned.cliPID]) {
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "no detached owned writer remains");
+      }
+      assert.match(await readFile(join(directory, "cli.stdout.jsonl"), "utf8"), /CLI_CONNECTED/);
+      assert.match(await readFile(join(directory, "cli.stderr.log"), "utf8"), /CLI_OWNED/);
+      const listeners = JSON.parse(await readFile(join(directory, "listener-counts.json"), "utf8"));
+      assert.deepEqual(listeners.after, listeners.before, "later probes do not inherit stale signal handlers");
+    } finally {
+      await stopProcessGroup(child);
+      // Only exact PIDs created by this fixture; baseline failure leaves them detached.
+      for (const pid of owned ? [owned.serverPID, owned.cliPID] : []) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* already stopped */ }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
