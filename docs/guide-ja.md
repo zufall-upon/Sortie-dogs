@@ -18,10 +18,10 @@ model routingが必要なtaskだけSortieを起動する。
 このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
 Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
 
-**現行release: [v0.13.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.16)**
-（[release notes](release-v0.13.16.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.17](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.17)**
+（[release notes](release-v0.13.17.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.16-practical-continuity-v1`。
+現行asset markerは`0.13.17-handoff-continuity-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -64,7 +64,18 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.16の更新
+## v0.13.17の更新
+
+PR #214・#215を統合。終了済み修正・Git履歴をlive writer所有権と分離し、残りの承認済み開発を
+Worker/direct実行へ継続できる。元文脈を既定で再利用し、別の利用可能Reviewerへのhandoff・任意の独立Reviewも選択可能。
+finding・実author・native check・run archive参照・累計消費を保持。self-recheckを独立PASSへ変更しない。
+live-bound成功checkの宣言済みtail、実command・exit・順序・入力鮮度を保持し、診断前置きだけで再実行させない。
+model・費用・next actionを大容量証跡より先に表示。native完了、Worker-model観測、正式採点は別項目。
+public caller assertion、client state、return/mutation契約のsource-backed指示を統合。追加gate・定例Reviewなし。
+元会話での残り開発は実行できたがMedium finding 2件・製品受入・Goは未完了。公開版の完遂・速度向上とは扱わない。
+詳細は[release notes](release-v0.13.17.md)と[Reviewer継続記録](reviewer-handoff-continuity.md)を参照。
+
+## v0.13.16の更新（継承）
 
 PR #212を統合。Task ID未保存の旧Reviewも元Reviewer文脈へ復帰し、実行中Reviewは再派遣せずjoin。
 native失敗・中断・compactionを回復し、古い検証や前runのfindingは修正開始を妨げない。
@@ -390,7 +401,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.16
+npm install --global sortie-dogs@0.13.17
 sortie-dogs init --global --profile v010
 ```
 
@@ -402,7 +413,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.16
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.17
 sortie-dogs init --global --profile v010
 ```
 
@@ -423,7 +434,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.16-practical-continuity-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.17-handoff-continuity-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
