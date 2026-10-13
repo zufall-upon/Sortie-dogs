@@ -32,6 +32,30 @@ async function validationPin(root: string, read: string[], write: string[], vali
   return pinned;
 }
 
+test("a declared generated output inside a read directory changes inputs, even when Git ignores it", async () => fixture(async root => {
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await mkdir(join(root, "fixtures"));
+  await writeFile(join(root, "fixtures", "input.sql"), "select 1\n");
+  await writeFile(join(root, ".gitignore"), "fixtures/input_fix.sql\n");
+  await exec("git", ["add", "--", ".gitignore", "fixtures/input.sql"], { cwd: root });
+  const pinned = await validationPin(root, ["fixtures/**"], ["fixtures/input_fix.sql"], ["node check.mjs"]);
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  const concrete = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const source = await validatedSourceSnapshot(root, concrete);
+  assert.ok(inputs && source);
+  await writeFile(join(root, "fixtures", "input_fix.sql"), "SELECT 1\n");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs,
+    "a write grant does not remove the generated file from its declared read ancestor");
+  assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, source,
+    "an earlier non-generating check cannot retain proof of an absent concrete output");
+  const currentInputs = await validationInputSnapshot(root, pinned.binding);
+  const currentSource = await validatedSourceSnapshot(root, concrete);
+  await writeFile(join(root, "fixtures", "input_fix.sql"), "SELECT 1\n");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), currentInputs, "stable bytes, not mtimes, allow the next check");
+  assert.equal(await validatedSourceSnapshot(root, concrete), currentSource);
+  assert.equal(JSON.stringify(pinned.binding), saved, "no retroactive exclusion or recapture of the original binding");
+}));
+
 test("concrete validation protects newly tracked source inside old scratch without rewriting its recipe", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await mkdir(join(root, ".tmp"));
