@@ -248,9 +248,11 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
 }
 
 /** Correct terminal evidence only; never retry model work, Mission reads or budget settlement. */
-export async function persistMissionCLIFailure(run, context, metadata = {}) {
+export async function persistMissionCLIFailure(run, context, metadata = {}, {
+  observationFile = 'observation.json', stdoutFile = 'cli.stdout.jsonl', stderrFile = 'cli.stderr.log',
+} = {}) {
   let previous = {}, previousObservationError;
-  try { previous = JSON.parse(await readFile(join(run, 'observation.json'), 'utf8')); }
+  try { previous = JSON.parse(await readFile(join(run, observationFile), 'utf8')); }
   catch (error) {
     if (error.code !== 'ENOENT') previousObservationError = { name: error.name, message: String(error.message).slice(0, 1500),
       ...(error.code === undefined ? {} : { code: error.code }) };
@@ -267,9 +269,9 @@ export async function persistMissionCLIFailure(run, context, metadata = {}) {
     persistence_complete: false, persistence_error: context.persistenceError,
     failure_recorded: true, next_action: context.nextAction, accepted: false };
   Object.assign(result, completeProbeObservations(result), { native_completed: false });
-  await writeFile(join(run, 'cli.stdout.jsonl'), context.stdout);
-  await writeFile(join(run, 'cli.stderr.log'), context.stderr);
-  await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
+  await writeFile(join(run, stdoutFile), context.stdout);
+  await writeFile(join(run, stderrFile), context.stderr);
+  await writeFile(join(run, observationFile), JSON.stringify(result, null, 2));
   return result;
 }
 
