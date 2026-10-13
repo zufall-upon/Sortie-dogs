@@ -6,6 +6,40 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { stopProcessGroup } from '../scripts/release-cli.mjs';
 
+for (const phase of ['registration-error', 'registration-cleanup-error', 'readiness-error', 'readiness-cleanup-error']) {
+  test(`owned V2 server ${phase} preserves startup cause and separate teardown evidence`,
+    { timeout: 20_000, skip: process.platform === 'win32' }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'owned-server-start-'));
+    const child = spawn(process.execPath, ['--experimental-vm-modules', resolve('test/fixtures/release-server-start-controller.mjs'), directory, phase], {
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = ''; child.stdout.resume(); child.stderr.on('data', bytes => { stderr += bytes; });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
+      const receipt = JSON.parse(await readFile(join(directory, 'fixture-receipt.json'), 'utf8'));
+      assert.equal(receipt.starts, 1); assert.equal(receipt.stops, 1, 'never repeat start or owned teardown');
+      assert.equal(receipt.reads, phase.startsWith('readiness-') ? 0 : 1);
+      assert.equal(receipt.original_error_identity_retained, true);
+      assert.equal(receipt.rejected.code, 'EIO');
+      assert.match(receipt.rejected.message, phase.startsWith('readiness-') ? /injected-owned-server-readiness/ : /injected-owned-service-registration-read/);
+      assert.equal(receipt.native_model_requests, 0); assert.equal(receipt.actual_server_or_process_started, false);
+      const context = receipt.rejected.serverStartContext;
+      if (phase.endsWith('cleanup-error')) {
+        assert.equal(context.serverPID, 719000001);
+        assert.equal(context.stateDirectory, join(directory, 'project/.opencode/v2-service-state'));
+        assert.equal(context.cleanup_complete, false); assert.equal(context.cleanupErrors.length, 1);
+        assert.equal(context.cleanupErrors[0].resource, 'server'); assert.equal(context.cleanupErrors[0].code, 'EACCES');
+        assert.match(context.cleanupErrors[0].message, /injected-owned-server-start-cleanup/);
+        assert.match(context.nextAction, /Retry teardown only for the recorded owned server PID\/process group/);
+        assert.match(context.nextAction, /Do not automatically replay/);
+      } else assert.equal(context, undefined, 'successful existing cleanup is not relabelled as a failure');
+    } finally { await stopProcessGroup(child); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 for (const phase of ['baseline-error', 'baseline-unpriced', 'baseline-persistence-error']) {
   test(`cold-resume ${phase} retains the original failure and usage before launching continuation`,
     { timeout: 20_000, skip: process.platform === 'win32' }, async () => {
@@ -55,7 +89,8 @@ for (const phase of ['baseline-error', 'baseline-unpriced', 'baseline-persistenc
   });
 }
 
-for (const phase of ['server-start-error', 'server-start-unpriced', 'server-start-persistence-error']) {
+for (const phase of ['server-start-error', 'server-start-unpriced', 'server-start-persistence-error',
+  'server-start-cleanup-error', 'server-start-cleanup-persistence-error']) {
   test(`cold-resume ${phase} preserves the successful cumulative baseline without replaying startup`,
     { timeout: 20_000, skip: process.platform === 'win32' }, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cold-resume-server-start-'));
@@ -78,7 +113,8 @@ for (const phase of ['server-start-error', 'server-start-unpriced', 'server-star
       assert.equal(receipt.native_model_requests, 0);
       assert.equal(receipt.rejected.code, 'EIO'); assert.match(receipt.rejected.message, /injected-owned-server-start/);
       assert.deepEqual(receipt.observation_arguments.map(args => args[4]), [{ root: 'owned-cold-resume' }]);
-      const unavailable = phase === 'server-start-persistence-error';
+      const unavailable = ['server-start-persistence-error', 'server-start-cleanup-persistence-error'].includes(phase);
+      const cleanupFailed = phase.startsWith('server-start-cleanup-');
       const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
       assert.equal(result.root, 'owned-cold-resume'); assert.equal(result.candidate_sha256, 'fixed-package-projection');
       assert.equal(result.database_path, join(directory, 'owned-lifecycle.db'));
@@ -92,15 +128,22 @@ for (const phase of ['server-start-error', 'server-start-unpriced', 'server-star
       assert.equal(result.code, null); assert.equal(result.signal, null); assert.equal(result.controller_signal, null);
       assert.equal(result.cli_started, false); assert.equal(result.server_start_attempted, true);
       assert.equal(result.resume_server_ready, false); assert.equal(result.resume_server_started, undefined);
-      assert.equal(result.cleanup_complete, undefined, 'do not invent cleanup success before receiving a ready server handle');
+      assert.equal(result.cleanup_complete, cleanupFailed ? false : undefined, 'never invent cleanup success before receiving a ready server handle');
       assert.deepEqual(result.resume_errors, []); assert.equal(result.intentional_interruption_errors.length, 1);
-      assert.match(result.next_action, /verify any process from the failed owned start has stopped/);
+      if (cleanupFailed) {
+        assert.equal(result.server_pid, 719000001);
+        assert.equal(result.server_state_directory, join(directory, 'project/.opencode/v2-service-state'));
+        assert.equal(result.cleanup_errors.length, 1); assert.equal(result.cleanup_errors[0].code, 'EACCES');
+        assert.match(result.cleanup_errors[0].message, /injected-owned-server-start-cleanup/);
+        assert.match(result.next_action, /Retry teardown only for the recorded owned server PID\/process group/);
+      } else { assert.equal(result.cleanup_errors, undefined); assert.match(result.next_action, /verify any process from the failed owned start has stopped/); }
       assert.match(result.next_action, /Do not automatically replay/);
       if (unavailable) {
         assert.equal(receipt.result, undefined, 'unavailable sink does not become a persisted failure');
         const context = receipt.rejected.monitorContext;
         assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
         assert.equal(context.serverError.code, 'EIO'); assert.equal(context.observationError, undefined);
+        assert.equal(context.cleanupErrors.length, cleanupFailed ? 1 : 0);
         assert.equal(context.persistenceError.code, 'EACCES'); assert.match(context.persistenceError.message, /injected-owned-server-start-write/);
         assert.match(context.nextAction, /retry only failed evidence persistence/);
       } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }

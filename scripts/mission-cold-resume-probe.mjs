@@ -27,7 +27,8 @@ async function persistPrelaunchFailure(error, observed, stage, server) {
   // No continuation has launched. Preserve startup evidence and known cumulative
   // usage, but do not settle the unresolved coverage as zero or replay startup.
   const isBaseline = stage === 'baseline', isCLILaunch = stage === 'cli-launch';
-  const cleanupErrors = [];
+  const serverStartContext = stage === 'server-start' ? error.serverStartContext : undefined;
+  const cleanupErrors = [...(serverStartContext?.cleanupErrors ?? [])];
   // A synchronous spawn failure never reaches the shared monitor. Only this
   // caller's already-obtained server handle needs teardown; preserve the launch cause.
   if (isCLILaunch) try { await server.stop(); }
@@ -42,6 +43,8 @@ async function persistPrelaunchFailure(error, observed, stage, server) {
     ...(isBaseline ? { resume_server_started: false } : { server_start_attempted: true, resume_server_ready: isCLILaunch }),
     ...(isCLILaunch ? { cli_start_attempted: true, server_url: server.url ?? null,
       cleanup_complete: cleanupErrors.length === 0, ...(cleanupErrors.length ? { cleanup_errors: cleanupErrors } : {}) } : {}),
+    ...(serverStartContext ? { server_pid: serverStartContext.serverPID, server_state_directory: serverStartContext.stateDirectory,
+      cleanup_complete: false, cleanup_errors: cleanupErrors } : {}),
     usage_complete: false, known_unpriced_requests: observed.known_unpriced_requests ?? observed.unpriced_requests,
     unpriced_requests: Math.max(1, observed.unpriced_requests), accepted: false, native_completed: false,
     ...(isBaseline ? { observation_error: failure } : isCLILaunch ? { cli_error: failure } : { server_error: failure }),
@@ -52,7 +55,7 @@ async function persistPrelaunchFailure(error, observed, stage, server) {
       : isCLILaunch ? cleanupErrors.length
         ? 'Retry teardown only for the recorded owned server and verify it stopped, then inspect the recorded CLI launch error and reconcile cumulative baseline/startup receipt/database usage. No resume CLI handle was obtained. Do not automatically replay the consumed startup/task or restart the shared host.'
         : 'Inspect the recorded CLI launch error, executable and working directory; reconcile cumulative baseline/startup receipt/database usage before deciding continuation. No resume CLI handle was obtained; the owned server was stopped. Do not automatically replay the consumed startup/task or restart the shared host.'
-      : 'Inspect the recorded owned server startup failure and retained cumulative baseline/startup receipt; verify any process from the failed owned start has stopped, then reconcile session usage before deciding continuation. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+      : serverStartContext?.nextAction ?? 'Inspect the recorded owned server startup failure and retained cumulative baseline/startup receipt; verify any process from the failed owned start has stopped, then reconcile session usage before deciding continuation. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   try { await writeFile(join(run, 'cold-resume-observation.json'), JSON.stringify(result, null, 2) + '\n'); }
   catch (persistenceError) {
     // If the sink is unavailable, retain the original failure plus fresh evidence.
@@ -67,7 +70,9 @@ async function persistPrelaunchFailure(error, observed, stage, server) {
         : isCLILaunch ? cleanupErrors.length
           ? 'Retry teardown only for the recorded owned server and verify it stopped, then retain unresolved usage holds and retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI handle was obtained. Do not automatically replay the consumed startup/task or restart the shared host.'
           : 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI handle was obtained; the owned server was stopped. Do not automatically replay the consumed startup/task or restart the shared host.'
-        : 'Inspect the recorded owned evidence path and retain unresolved usage holds; verify any process from the failed owned server start has stopped, then retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+        : serverStartContext
+          ? 'Retry teardown only for the recorded owned server PID/process group and verify all writers stopped; retain unresolved usage holds and retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.'
+          : 'Inspect the recorded owned evidence path and retain unresolved usage holds; verify any process from the failed owned server start has stopped, then retry only failed evidence persistence after reconciling the cumulative baseline/startup receipt/database. No resume CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
   }
   throw error;
 }

@@ -85,7 +85,14 @@ await script.link(async specifier => {
   else if (specifier === './release-cli.mjs') values = {
     startV2ReleaseServer: async () => {
       serverStarts++;
-      if (phase.startsWith('server-start-')) throw Object.assign(Error('injected-owned-server-start'), { code: 'EIO' });
+      if (phase.startsWith('server-start-')) {
+        const error = Object.assign(Error('injected-owned-server-start'), { code: 'EIO' });
+        if (phase.startsWith('server-start-cleanup-')) error.serverStartContext = {
+          serverPID: 719000001, stateDirectory: join(project, '.opencode/v2-service-state'), cleanup_complete: false,
+          cleanupErrors: [{ resource: 'server', name: 'Error', code: 'EACCES', message: 'injected-owned-server-start-cleanup' }],
+          nextAction: 'Retry teardown only for the recorded owned server PID/process group; reconcile retained usage. Do not automatically replay the consumed startup/task or restart the shared host.' };
+        throw error;
+      }
       return { url: 'http://owned-process-only.invalid', env: {}, stop: async () => {
         serverStops++;
         if (phase === 'pending') assert(pendingReleased, 'do not stop the server before inherited native continuation settles');
@@ -119,7 +126,8 @@ await script.link(async specifier => {
   else if (specifier === 'node:fs/promises') values = { mkdir, writeFile: async (file, ...args) => {
     if (phase === 'baseline-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
       throw Object.assign(Error('injected-owned-baseline-write'), { code: 'EACCES' });
-    if (phase === 'server-start-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
+    if (['server-start-persistence-error', 'server-start-cleanup-persistence-error'].includes(phase) &&
+        String(file).endsWith('/cold-resume-observation.json'))
       throw Object.assign(Error('injected-owned-server-start-write'), { code: 'EACCES' });
     if (phase === 'sync-launch-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
       throw Object.assign(Error('injected-owned-sync-cli-write'), { code: 'EACCES' });
