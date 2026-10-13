@@ -8,9 +8,11 @@ import { spawnPromptCLI, startV2ReleaseServer, stopProcessGroup } from '../../sc
 // These are retained lifecycle projections, not a model request or task solution.
 const [directory, phase, serverKind = 'process'] = process.argv.slice(2);
 const launchFailure = phase.startsWith('launch-failure');
+const cleanupFailure = phase.startsWith('cleanup-failure') || phase === 'launch-failure-cleanup';
 const observationFailure = phase.startsWith('observation-failure-');
 const immediateClose = ['settlement', 'observation-failure-close', 'observation-failure-final',
-  'observation-failure-pending', 'observation-failure-budget'].includes(phase);
+  'observation-failure-pending', 'observation-failure-budget', 'cleanup-failure',
+  'cleanup-failure-budget', 'cleanup-failure-observation'].includes(phase);
 let server, serverPID;
 if (serverKind === 'native') {
   // Explicit service-only check: no native run/session/provider request.
@@ -32,7 +34,11 @@ if (serverKind === 'native') {
 }
 let serverStopCalls = 0, pendingCalls = 0;
 const ownedStop = server.stop;
-server.stop = async () => { serverStopCalls++; await ownedStop(); };
+server.stop = async () => {
+  serverStopCalls++;
+  await ownedStop();
+  if (cleanupFailure) throw Object.assign(Error('injected-owned-server-stop-failure'), { code: 'EIO' });
+};
 const observed = JSON.parse(await readFile(join(directory, 'retained-observation.json'), 'utf8'));
 const child = spawnPromptCLI(launchFailure ? join(directory, 'intentionally-absent-cli') : process.execPath, ['-e',
   `process.stdin.resume();console.log('CLI_CONNECTED');console.error('CLI_OWNED');${immediateClose
@@ -45,7 +51,7 @@ if (launchFailure) {
 }
 const result = await monitorMissionCLI({ child, server,
   project: directory, since: Date.now(), rootAgent: 'dog-operator', mode: 'complete',
-  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
+  rootModel: 'openai/gpt-6.1-sol#xhigh', capUSD: ['budget', 'observation-failure-budget', 'cleanup-failure-budget'].includes(phase) ? 1 : 2, timeoutSeconds: 30,
   observe: () => {
     if (!announced && phase !== 'settlement') {
       announced = true;
@@ -57,6 +63,7 @@ const result = await monitorMissionCLI({ child, server,
       child.emit('error', Object.assign(Error('injected-cli-process-error'), { code: 'EIO' }));
     }
     if (phase === 'launch-failure-observation') throw Error('injected-database-read-failure');
+    if (phase === 'cleanup-failure-observation' && reads > 1) throw Error('injected-database-read-failure');
     if (['observation-failure-first', 'observation-failure-close'].includes(phase) ||
       ['observation-failure-interval', 'observation-failure-final', 'observation-failure-budget'].includes(phase) && reads > 1) {
       throw Error('injected-database-read-failure');
@@ -66,21 +73,22 @@ const result = await monitorMissionCLI({ child, server,
   pending: () => {
     pendingCalls++;
     if (phase === 'observation-failure-pending') throw Error('injected-native-settlement-read-failure');
-    if (observationFailure) return false;
+    if (observationFailure || cleanupFailure) return false;
     if (!announced) {
       announced = true;
       process.send({ phase: 'settlement', serverPID, cliPID: child.pid });
     }
     return true;
   },
-  finish: async ({ observed, stdout, stderr, stopped, stopObservation, code, signal, controllerSignal, observationError, cliError, nextAction }) => {
+  finish: async ({ observed, stdout, stderr, stopped, stopObservation, code, signal, controllerSignal, observationError, cliError, cleanupErrors, nextAction }) => {
     const result = { ...observed, mode: 'complete', stopped, stop_observation: stopObservation,
       code, signal, controller_signal: controllerSignal ?? null,
       mission_phase: 'completed', receipt_status: 'succeeded', accepted: false,
       ...(observationError ? { observation_error: observationError } : {}),
       ...(cliError ? { cli_error: cliError } : {}),
+      ...(cleanupErrors?.length ? { cleanup_complete: false, cleanup_errors: cleanupErrors } : {}),
       ...(nextAction ? { next_action: nextAction } : {}),
-      ...(launchFailure || phase === 'cli-process-error' ? { server_stop_calls: serverStopCalls,
+      ...(launchFailure || cleanupFailure || phase === 'cli-process-error' ? { server_stop_calls: serverStopCalls,
         pending_calls: pendingCalls, cli_started: Boolean(child.pid) } : {}) };
     Object.assign(result, completeProbeObservations(result));
     // A signal during persistence must not truncate the final usage/observation.
