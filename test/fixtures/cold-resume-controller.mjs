@@ -36,7 +36,8 @@ if (phase === 'pending') db.prepare('INSERT INTO session_pending VALUES (?)').ru
 db.close();
 const intentional = { sessionID: root, tool: 'subagent', error: 'retained intentional interruption' };
 const newError = { sessionID: root, tool: 'shell', error: 'new resume failure' };
-const observed = { root, models: [], tools: [], responses: [], errors: [intentional], priced_usd: 1.7674084, unpriced_requests: 0 };
+const observed = { root, models: [], tools: [], responses: [], errors: [intentional], priced_usd: 1.7674084,
+  unpriced_requests: phase === 'baseline-unpriced' ? 2 : 0 };
 const started = { ...observed, project, stopped: 'worker-started', models: [{ agent: 'dogs-coordinator' }],
   database_path: database, data_home: join(directory, 'data'), candidate_sha256: 'fixed-package-projection' };
 const source = resolve('scripts/mission-cold-resume-probe.mjs');
@@ -68,7 +69,8 @@ await script.link(async specifier => {
         }
         return value;
       }
-      if (phase === 'observation-error' && observationCalls > 1) throw Object.assign(Error('injected-owned-db-read'), { code: 'EACCES' });
+      if (['baseline-error', 'baseline-unpriced', 'baseline-persistence-error'].includes(phase) ||
+          phase === 'observation-error' && observationCalls > 1) throw Object.assign(Error('injected-owned-db-read'), { code: 'EACCES' });
       return { ...observed, priced_usd: phase === 'budget' && observationCalls > 1 ? 2 : observed.priced_usd,
         errors: phase === 'resume-error' && observationCalls > 1 ? [intentional, newError] : observed.errors };
     },
@@ -105,7 +107,11 @@ await script.link(async specifier => {
     if (phase === 'signal') child.stdout.once('data', () => process.kill(process.pid, 'SIGTERM'));
     return child;
   } };
-  else if (specifier === 'node:fs/promises') values = { mkdir, writeFile, readFile: async (file, ...args) => {
+  else if (specifier === 'node:fs/promises') values = { mkdir, writeFile: async (file, ...args) => {
+    if (phase === 'baseline-persistence-error' && String(file).endsWith('/cold-resume-observation.json'))
+      throw Object.assign(Error('injected-owned-baseline-write'), { code: 'EACCES' });
+    return writeFile(file, ...args);
+  }, readFile: async (file, ...args) => {
     if (phase === 'persistence-error' && String(file).includes('/missions/'))
       throw Object.assign(Error('injected-owned-mission-read'), { code: 'EACCES' });
     return readFile(file, ...args);

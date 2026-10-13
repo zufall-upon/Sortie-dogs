@@ -6,6 +6,53 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { stopProcessGroup } from '../scripts/release-cli.mjs';
 
+for (const phase of ['baseline-error', 'baseline-unpriced', 'baseline-persistence-error']) {
+  test(`cold-resume ${phase} retains the original failure and usage before launching continuation`,
+    { timeout: 20_000, skip: process.platform === 'win32' }, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cold-resume-baseline-'));
+    const child = spawn(process.execPath, ['--experimental-vm-modules', resolve('test/fixtures/cold-resume-controller.mjs'), directory, phase], {
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = ''; child.stdout.resume(); child.stderr.on('data', bytes => { stderr += bytes; });
+    try {
+      const exit = await new Promise<{ code: number | null; signal: string | null }>((done, reject) => {
+        child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
+      });
+      assert.equal(exit.signal, null); assert.equal(exit.code, 0, stderr);
+      const receipt = JSON.parse(await readFile(join(directory, 'fixture-receipt.json'), 'utf8'));
+      assert.equal(receipt.startup_calls, 1); assert.equal(receipt.observation_calls, 1, 'never repeat the known failed read');
+      assert.equal(receipt.monitor_calls, 0); assert.equal(receipt.server_stop_calls, 0); assert.equal(receipt.cli_stop_calls, 0);
+      assert.equal(receipt.writer, undefined, 'no resume process was started');
+      assert.equal(receipt.startup_evidence_preserved, true); assert.equal(receipt.listeners_restored, true);
+      assert.equal(receipt.native_model_requests, 0);
+      assert.equal(receipt.rejected.code, 'EACCES'); assert.match(receipt.rejected.message, /injected-owned-db-read/);
+      assert.deepEqual(receipt.observation_arguments.map(args => args[4]), [{ root: 'owned-cold-resume' }]);
+      const unavailable = phase === 'baseline-persistence-error';
+      const result = unavailable ? receipt.rejected.monitorContext.observed : receipt.result;
+      assert.equal(result.root, 'owned-cold-resume'); assert.equal(result.candidate_sha256, 'fixed-package-projection');
+      assert.equal(result.stopped, 'observation-failed'); assert.equal(result.stop_observation, 'baseline');
+      assert.equal(result.observation_error.code, 'EACCES');
+      assert.equal(result.priced_usd, 1.7674084); assert.equal(result.usage_complete, false);
+      assert.equal(result.known_unpriced_requests, phase === 'baseline-unpriced' ? 2 : 0);
+      assert.equal(result.unpriced_requests, phase === 'baseline-unpriced' ? 2 : 1, 'unknown coverage keeps a hold, not an invented request');
+      assert.equal(result.accepted, false); assert.equal(result.native_completed, false);
+      assert.equal(result.code, null); assert.equal(result.signal, null); assert.equal(result.cli_started, false);
+      assert.equal(result.resume_server_started, false);
+      assert.deepEqual(result.resume_errors, []); assert.equal(result.intentional_interruption_errors.length, 1);
+      assert.match(result.next_action, /Do not automatically replay/);
+      if (unavailable) {
+        assert.equal(receipt.result, undefined, 'do not claim persistence when the sink failed');
+        const context = receipt.rejected.monitorContext;
+        assert.equal(context.failure_recorded, false); assert.equal(context.persistence_complete, false);
+        assert.equal(context.persistenceError.code, 'EACCES'); assert.match(context.persistenceError.message, /injected-owned-baseline-write/);
+        assert.match(context.nextAction, /retry only failed evidence persistence/);
+      } else { assert.equal(result.failure_recorded, true); assert.equal(receipt.rejected.monitorContext, undefined); }
+      for (const file of ['resume.stdout.jsonl', 'resume.stderr.log'])
+        await assert.rejects(readFile(join(directory, file)), { code: 'ENOENT' }, 'no invented resume logs or startup log overwrite');
+    } finally { await stopProcessGroup(child); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 for (const phase of ['closed', 'pending', 'budget', 'signal', 'launch-error', 'observation-error',
   'cleanup-error', 'persistence-error', 'resume-error', 'later-root', 'missing-root']) {
   test(`cold-resume ${phase} uses the shared owned lifecycle without replay or startup-evidence overwrite`,

@@ -22,7 +22,33 @@ const run = dirname(started.project), xdg = join(run, 'xdg');
 const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json'),
   OPENCODE_DB: started.database_path, XDG_DATA_HOME: started.data_home };
 const observe = () => observeMissionCLI(started.project, 0, 'dog-operator', started.database_path, { root: started.root });
-const baseline = observe();
+const baselineSince = Date.now();
+let baseline;
+try { baseline = observe(); }
+catch (error) {
+  // No continuation has launched. Preserve startup evidence and known cumulative
+  // usage, but do not settle the unresolved coverage as zero or replay startup.
+  const result = { ...started, mode: 'complete', stopped: 'observation-failed', stop_observation: 'baseline',
+    code: null, signal: null, controller_signal: null, cli_started: false, resume_server_started: false,
+    usage_complete: false, known_unpriced_requests: started.unpriced_requests,
+    unpriced_requests: Math.max(1, started.unpriced_requests), accepted: false, native_completed: false,
+    observation_error: { name: error.name, message: String(error.message).slice(0, 1500),
+      ...(error.code === undefined ? {} : { code: error.code }) },
+    intentional_interruption_errors: started.errors, resume_errors: [], elapsed_ms: Date.now() - baselineSince,
+    failure_recorded: true,
+    next_action: 'Inspect the recorded owned database read failure and retained startup receipt; reconcile cumulative session usage before deciding continuation. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+  try { await writeFile(join(run, 'cold-resume-observation.json'), JSON.stringify(result, null, 2) + '\n'); }
+  catch (persistenceError) {
+    // If the sink is unavailable, retain the original read error plus fresh evidence.
+    error.monitorContext = { observed: { ...result, failure_recorded: false }, databasePath: started.database_path, stdout: '', stderr: '',
+      code: null, signal: null, stopped: result.stopped, stopObservation: 'baseline', cleanupErrors: [],
+      observationError: result.observation_error, persistence_complete: false, failure_recorded: false,
+      persistenceError: { name: persistenceError.name, message: String(persistenceError.message).slice(0, 1500),
+        ...(persistenceError.code === undefined ? {} : { code: persistenceError.code }) },
+      nextAction: 'Inspect the recorded owned evidence path and retain unresolved usage holds; retry only failed evidence persistence after reconciling the startup receipt/database. No resume CLI/server was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+  }
+  throw error;
+}
 const previousErrors = new Set(baseline.errors.map(error => JSON.stringify(error)));
 const server = await startV2ReleaseServer(started.project, env);
 const since = Date.now();
