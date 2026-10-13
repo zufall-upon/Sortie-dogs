@@ -252,9 +252,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         notBefore === undefined ? undefined : input.directory,
         direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
     }
-    async function reviewMessages(id: string): Promise<readonly Record<string, unknown>[]> {
+    async function reviewMessages(id: string, notBefore?: string): Promise<readonly Record<string, unknown>[]> {
       const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
-        { path: { id }, query: { directory: input.directory } }));
+        { path: { id }, query: { directory: input.directory, ...(notBefore ? { notBefore } : {}) } }));
       return Array.isArray(result) ? result.filter(record) : [];
     }
     async function observedSessionModel(id: string): Promise<{ model?: string; variant?: string; outcome: "completed" | "failed" | "unknown" }> {
@@ -1695,11 +1695,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? "operator-resume-unit-not-recoverable"
             : "operator-resume-acceptance-remediation-required");
         }
-        async function finishedSession(id: string): Promise<void> {
+        async function finishedSession(id: string, fullHistory = false, notBefore?: string): Promise<void> {
           const statuses = payload(await session("status", { query: { directory: input.directory } }));
           const observed = record(statuses) ? statuses[id] : undefined;
           if (record(observed) && observed.type !== "idle") throw new Error("operator-resume-host-still-active");
-          const history = await messages(id);
+          const history = fullHistory ? await reviewMessages(id, notBefore) : await messages(id);
           const assistants = history.filter(message => (record(message.info) ? message.info.role : message.role) === "assistant");
           const last = assistants.at(-1), info = record(last?.info) ? last.info : last;
           const tail = history.at(-1), tailInfo = record(tail?.info) ? tail.info : tail;
@@ -1737,7 +1737,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             // A reusable root executes this very recovery tool. Its native conversation
             // need not end like a Worker Task; other actors still must be inactive.
-            if (direct.actor !== context.sessionID) await finishedSession(direct.actor);
+            if (direct.actor !== context.sessionID) await finishedSession(direct.actor, true, direct.startedAt);
             recovered.set(unit.unit.id, await control!.recoverUnitEvidence(context.sessionID, { unitID: taskID,
               childSessionID: direct.actor, manifestPath: unit.manifestPath, manifestHash: unit.hashes[1]!, goalFingerprint,
               direct: { callID: unit.callID, startedAt: direct.startedAt, finishedAt: direct.finishedAt,

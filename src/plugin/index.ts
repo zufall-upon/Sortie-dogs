@@ -2907,9 +2907,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const identity = await hostSessionIdentity(request.childSessionID);
       if (!identity || request.childSessionID !== root && identity.parentID !== root &&
           coordinatorRootForSession(request.childSessionID) !== root) throw new Error("operator-recovery-direct-owner-mismatch");
-      const messages = input.client?.session?.messages;
+      const sessionAPI = input.client?.session;
+      const historyAPI = sessionAPI as typeof sessionAPI & { reviewMessages?: NonNullable<typeof sessionAPI>["messages"] };
+      const messages = historyAPI?.reviewMessages ?? sessionAPI?.messages;
       if (!messages) throw new Error("operator-recovery-host-evidence-unavailable");
-      const response = await messages.call(input.client!.session, { path: { id: request.childSessionID }, query: { directory: input.directory } });
+      const historyRequest = { path: { id: request.childSessionID }, query: { directory: input.directory,
+        notBefore: new Date(Date.parse(direct.startedAt) - 1000).toISOString() } };
+      const response = await messages.call(input.client!.session, historyRequest);
       const payload: unknown = isRecord(response) && "data" in response ? response.data : response;
       if (!Array.isArray(payload)) throw new Error("operator-recovery-host-evidence-invalid");
       const history = payload.filter(isRecord);

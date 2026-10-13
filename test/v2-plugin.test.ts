@@ -938,6 +938,33 @@ test("V2 review recovery pages past bounded context to a completed initial Revie
   finally { cleanup?.(); }
 });
 
+test("V2 direct recovery reads its native admission window beyond a 100-page controller history", async () => {
+  const fixture = contextFixture(), pages: Record<string, unknown>[] = [];
+  const history = Array.from({ length: 10_050 }, (_, index) => ({ id: `message-${index}`, type: "assistant", agent: "dog-operator",
+    time: { created: index, completed: index + 1 }, content: [] }));
+  const context: OpenCodeV2Context = { ...fixture.context,
+    session: { ...fixture.context.session, get: async () => ({ id: "root", agent: "dog-operator" }), context: async () => history.slice(-1) },
+    message: { list: async request => {
+      pages.push(request);
+      if (request.cursor) assert.equal(request.order, undefined);
+      else assert.equal(request.order, "desc", "start at the current unit, not the first controller turn");
+      const offset = Number(request.cursor ?? 0), newest = [...history].reverse();
+      return { data: newest.slice(offset, offset + 100), cursor: { next: offset + 100 < newest.length ? String(offset + 100) : null } };
+    } },
+  };
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    const session = input.client!.session! as typeof input.client.session & { reviewMessages: typeof input.client.session.messages };
+    const request = { path: { id: "root" }, query: { notBefore: new Date(10_025).toISOString() } };
+    const retained = (await session.reviewMessages!(request) as { data: { info: { id: string } }[] }).data;
+    assert.equal(retained.length, 100, "keep the boundary message/page for tools that ran after its creation");
+    assert.equal(retained[0]!.info.id, "message-9950");
+    assert.equal(retained.at(-1)!.info.id, "message-10049", "return chronological native history");
+    assert.equal(pages.length, 1, "do not traverse the unrelated 10,000-message prefix or trip its page cap");
+    return {};
+  }).setup(context);
+  cleanup?.();
+});
+
 test("V2 Task recovers durable progress without a live settlement sink and retains it at native completion", { timeout: 5000 }, async () => {
   const directory = await mkdtemp(resolve("_testenv/v2-progress-"));
   const fixture = contextFixture();
