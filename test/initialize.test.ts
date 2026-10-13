@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -14,6 +15,8 @@ import {
 import { runtimeAssets } from "../src/runtime-assets.ts";
 import { V010_RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
 import { parse } from "jsonc-parser";
+import { v2PluginWrapperSource } from "../scripts/release-cli.mjs";
+import { V010_RUNTIME_PROFILE } from "../src/core/runtime-profile.ts";
 
 const TEST_ROOT = join(process.cwd(), "_testenv");
 const ENTRY = join(process.cwd(), "src", "cli", "main.ts");
@@ -153,13 +156,15 @@ test("v010 init retains an automatically discovered V2 wrapper without adding a 
     for (const global of [false, true]) {
       const project = join(root, global ? "global" : "project"), config = global ? project : join(project, ".opencode");
       await mkdir(join(config, "plugins", "sortie-dogs"), { recursive: true });
-      const wrapper = 'export { default } from "sortie-dogs/server";\n';
-      await writeFile(join(config, "plugins", "sortie-dogs", "index.js"), wrapper);
-      const contents = '{\n  // fixed local package is loaded by plugins/sortie-dogs\n  "plugins": ["other-plugin"],\n  "experimental": { "subagent_depth": 2 }\n}\n';
-      await writeFile(join(config, "opencode.jsonc"), contents);
-      await (global ? initializeGlobal(project, "v010") : initializeProject(project, "v010"));
-      assert.equal(await readFile(join(config, "opencode.jsonc"), "utf8"), contents);
-      assert.equal(await readFile(join(config, "plugins", "sortie-dogs", "index.js"), "utf8"), wrapper);
+      for (const wrapper of ['export { default } from "sortie-dogs/server";\n',
+        v2PluginWrapperSource(V010_RUNTIME_PROFILE)]) {
+        await writeFile(join(config, "plugins", "sortie-dogs", "index.js"), wrapper);
+        const contents = '{\n  // fixed local package is loaded by plugins/sortie-dogs\n  "plugins": ["other-plugin"],\n  "experimental": { "subagent_depth": 2 }\n}\n';
+        await writeFile(join(config, "opencode.jsonc"), contents);
+        await (global ? initializeGlobal(project, "v010") : initializeProject(project, "v010"));
+        assert.equal(await readFile(join(config, "opencode.jsonc"), "utf8"), contents);
+        assert.equal(await readFile(join(config, "plugins", "sortie-dogs", "index.js"), "utf8"), wrapper);
+      }
     }
   } finally { await clean(root); }
 });
@@ -173,6 +178,46 @@ test("v010 init respects explicitly version-pinned package registrations", async
       await initializeGlobal(root, "v010");
       assert.equal(await readFile(join(root, "opencode.json"), "utf8"), source);
     }
+  } finally { await clean(root); }
+});
+
+test("v010 init preserves an explicitly registered local V2 wrapper instead of adding a second package loader", async () => {
+  const root = await fixtureDirectory();
+  try {
+    for (const global of [false, true]) {
+      const project = join(root, global ? "global with spaces" : "project with spaces");
+      const config = global ? project : join(project, ".opencode");
+      const local = join(config, "plugins", "sortie-dogs");
+      await mkdir(local, { recursive: true });
+      const wrapper = v2PluginWrapperSource(V010_RUNTIME_PROFILE);
+      await writeFile(join(local, "index.js"), wrapper);
+      for (const entry of [pathToFileURL(local).href, local, "./plugins/sortie-dogs",
+        { package: pathToFileURL(local).href, options: { retain: true } }]) {
+        const contents = `// explicit frozen V2 plugin\n${JSON.stringify({ plugins: ["other-plugin", entry],
+          experimental: { subagent_depth: 2 }, default_agent: "build" }, null, 2)}\n`;
+        await writeFile(join(config, "opencode.jsonc"), contents);
+        await (global ? initializeGlobal(project, "v010") : initializeProject(project, "v010"));
+        assert.equal(await readFile(join(config, "opencode.jsonc"), "utf8"), contents);
+        assert.equal(await readFile(join(local, "index.js"), "utf8"), wrapper);
+        const before = await stat(join(config, "opencode.jsonc"));
+        await (global ? initializeGlobal(project, "v010") : initializeProject(project, "v010"));
+        assert.equal((await stat(join(config, "opencode.jsonc"))).mtimeMs, before.mtimeMs);
+      }
+    }
+  } finally { await clean(root); }
+});
+
+test("v010 init does not treat an unrelated local wrapper as its plugin registration", async () => {
+  const root = await fixtureDirectory();
+  try {
+    const local = join(root, ".opencode", "plugins", "sortie-dogs");
+    await mkdir(local, { recursive: true });
+    const wrapper = 'export default { id: "other-plugin", setup() {} };\n';
+    await writeFile(join(local, "index.js"), wrapper);
+    await initializeProject(root, "v010");
+    assert.deepEqual(parse(await readFile(join(root, ".opencode", "opencode.json"), "utf8")).plugins,
+      ["sortie-dogs"]);
+    assert.equal(await readFile(join(local, "index.js"), "utf8"), wrapper);
   } finally { await clean(root); }
 });
 
