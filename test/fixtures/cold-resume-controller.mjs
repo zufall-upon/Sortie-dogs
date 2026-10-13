@@ -22,11 +22,16 @@ await writeFile(join(project, 'result.txt'), 'recovered\n');
 const startupFiles = ['observation.json', 'cli.stdout.jsonl', 'cli.stderr.log'];
 for (const file of startupFiles) await writeFile(join(directory, file), 'retained-startup-evidence\n');
 const database = join(directory, 'owned-lifecycle.db'), db = new DatabaseSync(database);
-db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
-  CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, agent TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+  CREATE TABLE session_message(id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
   CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
-db.prepare('INSERT INTO session_v2 VALUES (?, NULL, ?, 1, 2, ?)').run(root, project, 'succeeded');
-db.prepare("INSERT INTO session_message VALUES (?, 'assistant', 1, ?)").run(root, JSON.stringify({ time: { completed: 2 }, content: [] }));
+db.prepare("INSERT INTO session_v2 VALUES (?, NULL, 'dog-operator', ?, 1, 2, ?)").run(root, project, 'succeeded');
+const realObservation = ['later-root', 'missing-root'].includes(phase);
+const pricedTurn = (input, output, content = []) => ({ model: { providerID: 'openai', id: 'gpt-6.1-sol' },
+  tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 1, completed: 2 }, content });
+db.prepare("INSERT INTO session_message VALUES ('initial', ?, 'assistant', 1, ?)").run(root, JSON.stringify(realObservation
+  ? pricedTurn(0, 60000, [{ type: 'tool', name: 'subagent', state: { status: 'error', error: 'retained intentional interruption' } }])
+  : { time: { completed: 2 }, content: [] }));
 if (phase === 'pending') db.prepare('INSERT INTO session_pending VALUES (?)').run(root);
 db.close();
 const intentional = { sessionID: root, tool: 'subagent', error: 'retained intentional interruption' };
@@ -37,6 +42,7 @@ const started = { ...observed, project, stopped: 'worker-started', models: [{ ag
 const source = resolve('scripts/mission-cold-resume-probe.mjs');
 const beforeListeners = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));
 let child, serverStops = 0, monitorCalls = 0, observationCalls = 0, startupCalls = 0, pendingReleased = false;
+const observationArguments = [];
 let monitorOptions, result, rejected, cliStops = 0;
 const originalKill = process.kill;
 process.kill = (pid, signal) => {
@@ -50,8 +56,18 @@ await script.link(async specifier => {
   let values;
   if (specifier === './mission-cli-probe.mjs') values = { ...probe,
     probe: async () => { startupCalls++; return started; },
-    observeMissionCLI: () => {
+    observeMissionCLI: (...args) => {
       observationCalls++;
+      observationArguments.push(args);
+      if (realObservation) {
+        const value = probe.observeMissionCLI(...args);
+        if (phase === 'missing-root' && observationCalls === 2) {
+          const db = new DatabaseSync(database);
+          db.prepare('DELETE FROM session_v2 WHERE id = ?').run(root);
+          db.close();
+        }
+        return value;
+      }
       if (phase === 'observation-error' && observationCalls > 1) throw Object.assign(Error('injected-owned-db-read'), { code: 'EACCES' });
       return { ...observed, priced_usd: phase === 'budget' && observationCalls > 1 ? 2 : observed.priced_usd,
         errors: phase === 'resume-error' && observationCalls > 1 ? [intentional, newError] : observed.errors };
@@ -70,6 +86,15 @@ await script.link(async specifier => {
     } }),
   };
   else if (specifier === 'node:child_process') values = { spawn: () => {
+    if (realObservation) {
+      const db = new DatabaseSync(database);
+      db.prepare("INSERT INTO session_v2 VALUES ('later-other-root', NULL, 'dog-operator', ?, 3, 4, 'succeeded')").run(project);
+      db.prepare("INSERT INTO session_message VALUES ('foreign', 'later-other-root', 'assistant', 1, ?)")
+        .run(JSON.stringify(pricedTurn(1000, 100)));
+      if (phase === 'later-root') for (let seq = 2; seq <= 4; seq++) db.prepare("INSERT INTO session_message VALUES (?, ?, 'assistant', ?, ?)")
+        .run(`resumed-${seq}`, root, seq, JSON.stringify(pricedTurn(0, 60000)));
+      db.close();
+    }
     child = phase === 'launch-error'
       ? spawn(join(directory, 'missing-executable'), [], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
       : spawn(process.execPath, [resolve('test/fixtures/owned-process-group.mjs'), directory, phase === 'signal' ? 'alive' : 'closed'],
@@ -112,7 +137,8 @@ try {
     .every(bytes => bytes === 'retained-startup-evidence\n');
   await writeFile(join(directory, 'fixture-receipt.json'), JSON.stringify({ phase, result, rejected, writer,
     server_stop_calls: serverStops, cli_stop_calls: cliStops, startup_calls: startupCalls, monitor_calls: monitorCalls,
-    observation_calls: observationCalls, monitor_options: monitorOptions, pending_released: pendingReleased,
+    observation_calls: observationCalls, observation_arguments: observationArguments,
+    monitor_options: monitorOptions, pending_released: pendingReleased,
     listeners_restored: ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal)).join() === beforeListeners.join(),
     startup_evidence_preserved: startupEvidencePreserved, native_model_requests: 0 }, null, 2) + '\n');
 } finally {

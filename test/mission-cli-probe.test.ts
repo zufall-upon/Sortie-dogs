@@ -211,6 +211,57 @@ for (const [order, created] of [
   });
 }
 
+test("explicit observation root keeps cumulative usage when a newer same-project root exists", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-observer-root-"));
+  const path = join(directory, "owned.db"), db = seedObservationDatabase(path, directory, "retained-root", 100);
+  try {
+    const session = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, 500, 'succeeded')");
+    session.run("retained-coordinator", "retained-root", "dogs-coordinator", directory, 110);
+    session.run("retained-worker", "retained-coordinator", "dog-worker-v010", directory, 105);
+    session.run("later-root", null, "dog-operator", directory, 200);
+    session.run("wrong-agent", null, "build", directory, 300);
+    session.run("wrong-directory", null, "dog-operator", join(directory, "foreign"), 300);
+    const message = db.prepare("INSERT INTO session_message VALUES (?, ?, 'assistant', ?, ?)");
+    for (const [id, input, output] of [
+      ["retained-root", 100000, 60000], ["retained-coordinator", 100000, 60000],
+      ["retained-worker", 100000, 60000], ["later-root", 1000, 100],
+    ] as const) message.run(`${id}-priced`, id, 1, JSON.stringify({ model: root.model,
+      tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: 250, completed: 290 }, finish: "stop", content: [{ type: "text", text: "fixture response" }],
+    }));
+    message.run("unknown-error", "retained-worker", 2, JSON.stringify({
+      model: { providerID: "unpriced-fixture", id: "fixture-only-model" }, time: { completed: 290 },
+      content: [{ type: "tool", name: "shell", state: { status: "error", error: "retained-root-error" } }],
+    }));
+    const pinned = observeMissionCLI(directory, 0, "dog-operator", path, { root: "retained-root" });
+    assert.equal(pinned.root, "retained-root");
+    assert.deepEqual(pinned.models.map((item: { sessionID: string }) => item.sessionID),
+      ["retained-root", "retained-worker", "retained-coordinator"]);
+    assert(pinned.models.every((item: { started_ms: number }) => item.started_ms === 150));
+    assert.equal(pinned.responses.length, 3);
+    assert.equal(pinned.unpriced_requests, 1);
+    assert.deepEqual(pinned.errors, [{ sessionID: "retained-worker", tool: "shell", error: '"retained-root-error"' }]);
+    assert(Math.abs(pinned.priced_usd - 2.4) < 1e-12);
+    const options = { mode: "complete", capUSD: 2, elapsedMs: 1, timeoutMs: 1000 };
+    assert.equal(probeStopReason(pinned, options), "budget", "resume does not grant a new root's cheaper allowance");
+    const ordinary = observeMissionCLI(directory, 0, "dog-operator", path);
+    assert.equal(ordinary.root, "later-root", "ordinary callers retain newest matching root selection");
+    assert.deepEqual(ordinary.models.map((item: { sessionID: string }) => item.sessionID), ["later-root"]);
+    assert.equal(ordinary.priced_usd, 0.003);
+    assert.equal(ordinary.unpriced_requests, 0);
+    assert.equal(probeStopReason(ordinary, options), null);
+    for (const id of ["missing", "wrong-agent", "wrong-directory", "retained-worker", ""]) {
+      assert.throws(() => observeMissionCLI(directory, 0, "dog-operator", path, { root: id }),
+        /Observation root .* not found in selected agent\/directory\/since scope/, "never fall back to another root");
+    }
+    assert.throws(() => observeMissionCLI(directory, 101, "dog-operator", path, { root: "retained-root" }),
+      /Observation root/, "an explicit root does not bypass the since filter");
+  } finally {
+    db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("practical monitor freezes the owning server database for observation and native settlement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mission-monitor-db-"));
   const path = join(directory, "owned.db"), since = Date.now();

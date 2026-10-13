@@ -12,13 +12,15 @@ export const probeTaskIdentity = (request, instance, actualBaseCommit) => ({
   task_sha256: createHash('sha256').update(request).digest('hex'),
   instance: instance ? { instance_id: instance.instance_id, repo: instance.repo, base_commit: actualBaseCommit } : null,
 });
-export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator', databasePath = missionDatabasePath(process.env, project)) {
+export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator', databasePath = missionDatabasePath(process.env, project), { root: rootID } = {}) {
   const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const sessions = db.prepare('select id, parent_id, agent, time_created from session_v2 where directory in (?, ?) and time_created >= ? order by time_created')
       .all(...observationDirectories(project), since);
     const roots = sessions.filter(session => !session.parent_id && session.agent === rootAgent);
-    const root = roots.at(-1);
+    const root = rootID === undefined ? roots.at(-1) : roots.find(session => session.id === rootID);
+    // A resumed session keeps its own cumulative usage, not a newer task's root.
+    if (rootID !== undefined && !root) throw new Error(`Observation root ${rootID} not found in selected agent/directory/since scope`);
     const descendants = new Set(root ? [root.id] : []);
     // Creation order need not put a parent before its descendants.
     for (let size = -1; size !== descendants.size;) {
