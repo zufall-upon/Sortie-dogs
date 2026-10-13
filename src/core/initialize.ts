@@ -453,7 +453,10 @@ async function v010Config(root: string, global: boolean): Promise<{ entry: Insta
   const update = (path: (string | number)[], value: unknown) => { content = applyEdits(content, modify(content, path, value, options)); };
   const wrapper = `${prefix}plugins/sortie-dogs/index.js`;
   const wrapperSource = await readFile(resolve(root, wrapper), "utf8").catch(() => "");
-  const localV2Wrapper = /^\s*export\s*\{\s*default\s*\}\s*from\s*["']sortie-dogs\/server["'];?\s*$/u.test(wrapperSource);
+  // Both the package re-export and the release fixture's factory wrapper are
+  // automatically discovered by V2. Adding the package would load the same ID twice.
+  const localV2Wrapper = /^\s*export\s*\{\s*default\s*\}\s*from\s*["']sortie-dogs\/server["'];?\s*$/u.test(wrapperSource) ||
+    /^\s*import\s*\{\s*createSortieDogsV2Plugin\s*\}\s*from\s*["']sortie-dogs\/server["'];?\s*import\s*\{\s*SortieDogsPlugin\s*\}\s*from\s*["']sortie-dogs\/plugin["'];?\s*export\s+default\s+createSortieDogsV2Plugin\s*\(\s*SortieDogsPlugin\s*\);?\s*$/u.test(wrapperSource);
   const registered = (plugins as unknown[] | undefined)?.some(item => {
     const name = typeof item === "string" ? item : item !== null && typeof item === "object" ? (item as Record<string, unknown>).package : undefined;
     return typeof name === "string" && /^sortie-dogs(?:@[^/]+)?$/u.test(name);
