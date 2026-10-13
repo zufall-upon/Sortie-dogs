@@ -6,7 +6,7 @@
 export function serializeOperatorStatus(packet: Record<string, unknown>): string {
   const keys = new Set([
     "profile", "view", "mission_id", "run_id", "phase", "status", "decision", "coordinator_session_id",
-    "budget", "accounting_scope", "attempts", "next_action", "execution_summary", "runtime", "completion",
+    "work_quantity", "budget", "accounting_scope", "attempts", "next_action", "execution_summary", "runtime", "completion",
     ...Object.keys(packet),
   ]);
   const lines = [...keys].flatMap(key => {

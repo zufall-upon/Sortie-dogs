@@ -100,6 +100,8 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
       ...(multi ? [{ ...declaration, title: "Second planned result", objective: "Validate the second planned result",
         validation: ["node check.mjs --second"] }] : [])] }, { sessionID: actor }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+    assert.equal(planned.work_quantity.scope, "whole-request");
+    assert.equal(planned.work_quantity.n, 0);
     assert.equal(planned.task, undefined, "direct author receives no Worker handoff");
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     const before = await readRun();
@@ -127,7 +129,12 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
       await writeFile(args.filePath, content);
       (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "write", callID,
         state: { status: "completed", input: args, time: { end: Date.now() } } }] });
-      await hooks["tool.execute.after"]!({ tool: "write", sessionID: actor, callID, args }, { output: "written" });
+      const output: { output: string; metadata?: Record<string, unknown> } = { output: "written" };
+      await hooks["tool.execute.after"]!({ tool: "write", sessionID: actor, callID, args }, output);
+      if (mode === "correction") {
+        assert.ok(Number((output.metadata?.work_quantity as { n: number })?.n) > 0);
+        if (counter === 1) assert.match(output.output, /全体作業量 \d+\/100（概算）/);
+      }
     };
     const check = async (cwd = externalDirectory ?? directory, command = "node check.mjs") => {
       const callID = `check-${++counter}`, args = { command, workdir: cwd }, start = Date.now();

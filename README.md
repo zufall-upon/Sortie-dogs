@@ -125,6 +125,11 @@ Discovery:  User → Operator → Coordinator → Worker → Validation → Revi
 The default Mission profile is serial. Background responsiveness and status observations do not
 add parallel writers, replay unknown commands or imply completion. More agents are not the goal.
 
+Whole-request workload appears as `全体作業量 n/100（概算）`, using ordinary plans and native
+work observations, not budget consumption or fixed stage shares. Calculation adds no model
+request or verification; formal acceptance still owns `100/100`.
+[Workload estimates, optional weights and runtime cost](docs/work-quantity-progress.md).
+
 For **run-once / result-collection** requests, a terminal failure can be the requested result:
 validate and report it without an unauthorized repair/rerun loop. Acceptance preserves the real
 operation exit and `execution-failed` outcome; it never turns a failed benchmark into a successful

@@ -18,6 +18,8 @@ import { ensureGitManagedStateExcluded } from "./git-managed-state.js";
 import { operatorContractRepairFingerprint, type OperatorContractRepairFileIdentity } from "./operator-contract-repair.js";
 import { classifyUnitResult } from "./unit-result-classification.js";
 import { SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./consultation.js";
+import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState, type WorkQuantityProgress } from "./work-quantity.js";
+import { applyPendingWork, rememberWorkRun } from "./work-quantity-observations.js";
 
 export const OPERATOR_LIMITS = Object.freeze({ units: 32, planBytes: 256 * 1024, packetBytes: 24 * 1024,
   remediationReserve: 32 });
@@ -208,6 +210,8 @@ export interface OperatorAcceptanceAnchor {
   readonly handoffHash: string;
 }
 export interface OperatorState {
+  /** Display metadata only, never part of the immutable execution plan. */
+  workQuantity?: WorkQuantityState;
   readonly schema_version: "0.1";
   readonly profile: string;
   readonly rootSessionID: string;
@@ -257,6 +261,7 @@ export interface OperatorState {
   receipt: GoalTerminalReceipt | null;
 }
 export interface OperatorProgress {
+  readonly work_quantity?: WorkQuantityProgress;
   readonly profile: string;
   readonly view: "progress";
   readonly run_id: string;
@@ -532,13 +537,17 @@ export class OperatorRuntime {
   async read(root: string): Promise<OperatorState | undefined> {
     await this.writes.get(root);
     const cached = this.states.get(root);
-    if (cached) return structuredClone(cached);
+    if (cached) { rememberWorkRun(this.projectRoot, cached); return structuredClone(cached); }
     let source: string;
     try { source = await readFile(this.file(root), "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-    if (Buffer.byteLength(source) > OPERATOR_LIMITS.planBytes * 4) throw new Error("operator-state-too-large");
     const parsed = JSON.parse(source) as OperatorState & { parentRunID?: unknown; priorAcceptedUnits?: unknown; remediationParent?: unknown; gitLifecycle?: unknown;
       contractRepair?: unknown; repairGeneration?: unknown; repairResidualPaths?: unknown };
+    // Display metadata must not turn an otherwise valid execution state into a refusal.
+    if (Buffer.byteLength(source) > OPERATOR_LIMITS.planBytes * 4) {
+      const { workQuantity: _display, ...execution } = parsed;
+      if (Buffer.byteLength(JSON.stringify(execution)) > OPERATOR_LIMITS.planBytes * 4) throw new Error("operator-state-too-large");
+    }
     const repairGeneration = parsed.repairGeneration === undefined ? 0 : parsed.repairGeneration;
     const state = { ...parsed,
       repairResidualPaths: parsed.repairResidualPaths === undefined ? [] : parsed.repairResidualPaths,
@@ -589,9 +598,14 @@ export class OperatorRuntime {
       throw new Error("operator-state-invalid");
     }
     this.states.set(root, state);
+    rememberWorkRun(this.projectRoot, state);
     return structuredClone(state);
   }
   private async save(state: OperatorState): Promise<void> {
+    if (!state.workQuantity || state.workQuantity.planRunID !== state.runID) state.workQuantity = planWorkQuantity({
+      id: state.workQuantity?.scopeID ?? `operator:${state.runID}`, requirements: state.acceptance.map((text, index) =>
+      ({ id: `R${index + 1}`, text })), phase: "running", submission: null }, state.units.map(unit => unit.unit), state, state.workQuantity, undefined, this.projectRoot);
+    syncWorkQuantity(applyPendingWork(this.projectRoot, state.rootSessionID, state.workQuantity), {}, state);
     state.sequence++;
     const serialized = JSON.stringify(state);
     const previous = this.writes.get(state.rootSessionID) ?? Promise.resolve();
@@ -611,6 +625,7 @@ export class OperatorRuntime {
     try {
       await next;
       this.states.set(state.rootSessionID, structuredClone(state));
+      rememberWorkRun(this.projectRoot, state);
     } catch (error) {
       state.sequence--;
       throw error;
@@ -1287,6 +1302,7 @@ export class OperatorRuntime {
       ? { ...structuredClone(previous.gitLifecycle), committedHead: null, commitProvenance: null }
       : await this.createGitLifecycle(plan, remediationHead);
     const state: OperatorState = { schema_version: "0.1", profile: this.profile.id, rootSessionID: root, runID, planHash: validatedPlanHash,
+      ...(parent?.workQuantity ? { workQuantity: structuredClone(parent.workQuantity) } : {}),
       acceptance: plan.acceptance, acceptanceProof: plan.acceptance_proof, acceptanceFingerprint, sourceRefs: plan.source_refs, createdAt: new Date().toISOString(),
       parentRunID: parent?.runID ?? null, ...(superseding ? { supersededRunID: previous!.runID } : {}), priorAcceptedUnits,
       remediationParent: remediationTaskID && remediationHead && parent?.gitLifecycle ? {
@@ -2218,6 +2234,7 @@ export class OperatorRuntime {
     const authoritativeAction = nextAction !== undefined ? nextAction
       : this.continuationNextAction(state);
     return { profile: state.profile, view: "progress", run_id: state.runID, stage: state.phase, decision: state.decision,
+      ...(state.workQuantity ? { work_quantity: projectWorkQuantity(state.workQuantity, state.phase === "completed", state.phase === "cancelled") } : {}),
       current_unit: current === undefined ? null : { id: current.unit.id, title: current.unit.title, status: current.status },
       completed_units: state.units.filter(unit => unit.status === "succeeded").length, total_units: state.units.length,
       budget_remaining_units: budgetRemainingUnits, next_action: typeof authoritativeAction === "string" ? authoritativeAction : null };
@@ -2241,6 +2258,7 @@ export class OperatorRuntime {
       : `call ${this.profile.toolPrefix}cancel_operator, then call ${this.profile.toolPrefix}prepare_operator with an approved replacement plan for the same goal and exact acceptance; start from git_lifecycle.committed_head, keep writes within git_lifecycle.approved_write_union, retain consumed budget, and do not call resume_operator or edit the committed candidate${carriedAction}`;
     const awaitingAcceptanceNextAction = `assess the independent-review requirement and obtain review when required, copying review_dispatch_contract.required_prompt_lines into the reviewer Task prompt with real values; if review PASSes (or policy records an allowed skip), call ${this.profile.toolPrefix}complete_operator with this run_id and acceptance_fingerprint; if review has blocking findings wholly inside the existing exact acceptance, the union of git_lifecycle.approved_write_union and git_lifecycle.remediation_reserve, and remaining cumulative budget, do not complete or ask for user approval: call ${this.profile.toolPrefix}cancel_operator with reason review-blocking, then call ${this.profile.toolPrefix}prepare_operator for one same-goal replacement from git_lifecycle.committed_head targeting only those findings; copy this packet's acceptance array verbatim into the replacement plan without paraphrase, deletion, addition, or reordering, preserve accepted-criteria lineage, and run final canonical validation/review; if the replacement is refused for write scope, report replacement_constraints.blocked_write_paths to the user as the exact paths needing approval and stop, then after the user approves resend the same replacement with git_lifecycle.remediation_scope_expansion set to exactly those paths; if acceptance or budget must increase, stop for the user decision`;
     const packet = { profile: state.profile, run_id: state.runID, root_session_id: state.rootSessionID, generation: state.generation,
+      ...(state.workQuantity ? { work_quantity: projectWorkQuantity(state.workQuantity, state.phase === "completed", state.phase === "cancelled") } : {}),
       sequence: state.sequence, status: state.phase, repair_generation: state.repairGeneration,
       acceptance: state.acceptance, acceptance_fingerprint: state.acceptanceFingerprint,
        next_task_ref: current?.status === "pending" ? (state.units.length > 1

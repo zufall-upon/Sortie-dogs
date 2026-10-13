@@ -93,6 +93,8 @@ export function codexMissionProgress(event: CodexTurnEvent & { threadId: string 
     command: bounded(args.command), workdir: bounded(args.workdir), cwd: bounded(metadata.cwd), reason: bounded(args.reason),
     agent: bounded(args.subagent_type), description: bounded(args.description), child_session_id: bounded(metadata.sessionId),
     outcome: bounded(receipt.status), exit: metadata.exit, executor: metadata.executor,
+    ...(record(receipt.work_quantity ?? metadata.work_quantity) ? { work_quantity: receipt.work_quantity ?? metadata.work_quantity,
+      work_quantity_display: bounded(receipt.work_quantity_display ?? metadata.work_quantity_display) } : {}),
     next_action: bounded(receipt.next_action),
     summary: bounded(args.summary ?? receipt.summary),
     detail: bounded(receipt.reason ?? receipt.error ?? (item.success === false ? text : undefined)) };
