@@ -104,9 +104,9 @@ export function completeProbeObservations(result, schemaRejected = false) {
 /** Monitor the owned CLI and server through native settlement and evidence persistence.
  * Observation seams let retained lifecycle facts be replayed without model requests.
  * finish persists completed evidence idempotently; a first late signal can require a re-save. */
-export async function monitorMissionCLI({ child, server, project, since, rootAgent, mode, rootModel, capUSD, timeoutSeconds,
+export async function monitorMissionCLI({ child, server, project, since, rootAgent, root, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish, persistFailure }) {
-  let stdout = '', stderr = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationRoot, observationError, cliError, usageIncomplete;
+  let stdout = '', stderr = '', identityBuffer = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationRoot = root, observationError, cliError, usageIncomplete;
   const cleanupErrors = [];
   const cleanup = (target, run) => Promise.resolve().then(run).catch(error => {
     cleanupErrors.push({ target, name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
@@ -121,20 +121,43 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   const stopServer = () => serverStopping ??= cleanup('server', () => server.stop());
   // Share one owned teardown across normal close, interruption and final-read failure.
   const stopOwned = () => stopping ??= Promise.all([cleanup('cli', () => stopProcessGroup(child)), stopServer()]);
+  const emptyObservation = () => ({ database_path: databasePath, models: [], tools: [], responses: [], errors: [],
+    priced_usd: 0, unpriced_requests: 0 });
   const observeNow = point => {
     try {
+      // New runs identify their session in the owned CLI's JSON stream. Never adopt
+      // another same-project CLI's root merely because its database row appeared first.
+      if (observationRoot === undefined) {
+        if (point === 'interval') return emptyObservation();
+        throw new Error('Monitored CLI did not report its session identity');
+      }
       lastObserved = observe(project, since, rootAgent, databasePath, { root: observationRoot });
-      // Once observed, this CLI's root owns all later usage and settlement.
-      observationRoot ??= lastObserved.root;
       usageIncomplete = false;
       return lastObserved;
     } catch (error) {
       failObservation(error, point);
-      return lastObserved ?? { database_path: databasePath, models: [], tools: [], responses: [], errors: [],
-        priced_usd: 0, unpriced_requests: 0 };
+      return lastObserved ?? emptyObservation();
     }
   };
-  child.stdout.on('data', bytes => { stdout += bytes; });
+  const identifyRoot = line => {
+    if (observationRoot !== undefined) return;
+    try {
+      const event = JSON.parse(line);
+      if (['step_start', 'step_finish', 'text', 'tool_use', 'error'].includes(event?.type) &&
+          typeof event.sessionID === 'string' && event.sessionID) observationRoot = event.sessionID;
+    } catch { /* Keep non-JSON diagnostic lines in stdout; they cannot identify a run. */ }
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', bytes => {
+    stdout += bytes;
+    if (observationRoot !== undefined) return;
+    identityBuffer += bytes;
+    let newline;
+    while ((newline = identityBuffer.indexOf('\n')) >= 0) {
+      identifyRoot(identityBuffer.slice(0, newline));
+      identityBuffer = identityBuffer.slice(newline + 1);
+    }
+  });
   child.stderr.on('data', bytes => { stderr += bytes; });
   const stop = (reason, observed, point) => {
     if (stopped) return;
@@ -181,6 +204,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
         // real outcome and complete owned cleanup before persisting the receipt.
         child.once('close', (code, signal) => done({ code, signal }));
       }));
+      identifyRoot(identityBuffer); // Accept the last complete JSON event without a trailing newline.
+      if (!stopped && code !== 0 && observationRoot === undefined) stop('cli-exit-failed', lastObserved, 'cli-close');
       const observed = observeNow('cli-close');
       // A failed close need not emit a child error event. Keep its real code/signal
       // and earlier stop, but do not leave this terminal outcome labelled normal.
