@@ -16,9 +16,9 @@
 本页是OpenCode指南。Codex集成也已实现，并记录了Ubuntu／Windows真实Mission的完成与受理。
 Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对Codex使用OpenCode初始化步骤。
 
-**当前release：[v0.13.16](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.16)**
-（[发布说明](release-v0.13.16.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.16-practical-continuity-v1`。
+**当前release：[v0.13.17](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.17)**
+（[发布说明](release-v0.13.17.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.17-handoff-continuity-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -59,7 +59,18 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.16更新
+## v0.13.17更新
+
+整合PR #214、#215。将已终止修正/Git历史与live writer所有权分离，允许继续已授权的剩余Worker/direct开发。
+默认复用原上下文，也可选择其他可用Reviewer进行handoff或有用的独立Review。
+保留finding、真实author、native check、run archive引用与累计消耗；self-recheck不变成独立PASS。
+保留live-bound成功check的已声明tail、实际command、exit、顺序与输入freshness，不因诊断前缀要求重跑。
+在大量证据之前显示model、费用与next action；区分native完成、Worker-model观察及正式评分。
+整合源自既有source/tests的public caller assertion、client state及return/mutation契约指引，不增加gate或例行Review。
+原会话确实继续开发，但仍有2项Medium finding，产品接受和Go未完成；不代表发布版完成或速度提升。
+详见[发布说明](release-v0.13.17.md)和[Reviewer连续性记录](reviewer-handoff-continuity.md)。
+
+## v0.13.16更新（保留）
 
 整合PR #212。未保存Task ID的旧Review也恢复原Reviewer上下文，正在运行的Review直接join而不重新派发。
 恢复native失败、中断及compaction；过期验证或前run的finding不阻止开始修复，正式完成仍要求当前真实验证。
@@ -371,7 +382,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.16
+npm install --global sortie-dogs@0.13.17
 sortie-dogs init --global --profile v010
 ```
 
@@ -383,7 +394,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.16
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.17
 sortie-dogs init --global --profile v010
 ```
 
@@ -404,7 +415,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.16-practical-continuity-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.17-handoff-continuity-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，
