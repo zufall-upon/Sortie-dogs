@@ -7,12 +7,12 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
-  observedMissionValidation, reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
+  observedMissionValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
-import { protectedSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const git = promisify(execFile);
 
@@ -63,6 +63,62 @@ test("later edits do not erase bound native outcomes; missing and failed binding
   for (const checks of [[], [{ ...check, fresh: false }], [{ ...check, exitCode: 1 }], [{ ...check, childSessionID: "other" }]]) {
     assert.match(reviewerCorrectionValidation([command], child, history, 100, checks).reason!, /binding-unavailable/);
   }
+});
+
+test("generated read input needs a new ordered sequence, not relabelled PASS or a suffix-only retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-generated-input-")), child = "author";
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await mkdir(join(root, "fixtures"));
+    await writeFile(join(root, "fixtures", "input.sql"), "select 1\n");
+    await writeFile(join(root, ".gitignore"), "fixtures/input_fix.sql\n");
+    await git("git", ["add", "--", ".gitignore", "fixtures/input.sql"], { cwd: root });
+    const commands = ["node reproduce.mjs", "node tests.mjs", "node format.mjs", "git diff --check"];
+    const manifestPath = join(root, "manifest.json"), manifest = JSON.stringify({ version: "0.1.0", task_id: "unit",
+      read: ["fixtures/**"], write: ["fixtures/input_fix.sql"], validation: commands });
+    await writeFile(manifestPath, manifest);
+    const authorization = { projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(manifest).digest("hex") };
+    const checks: any[] = [], parts: any[] = [];
+    const capture = async (command: string, generate = false) => {
+      const snapshot = await protectedSnapshot(authorization, { command });
+      assert.ok(snapshot);
+      const beforeInputs = await validationInputSnapshot(root, snapshot.binding);
+      if (generate) await writeFile(join(root, "fixtures", "input_fix.sql"), "SELECT 1\n");
+      const after = await refreshProtectedSnapshot(root, snapshot.binding);
+      assert.ok(after);
+      const generated = snapshot.source !== after.source || snapshot.candidate !== after.candidate;
+      const binding = generated ? snapshot.binding
+        : { ...snapshot.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+      const concrete = generated ? undefined : await validatedSourceSnapshot(root, binding);
+      const start = 110 + parts.length * 20, callID = `check-${parts.length}`;
+      checks.push({ childSessionID: child, callID, command: [command], directory: root,
+        startedAt: new Date(start).toISOString(), endedAt: new Date(start + 10).toISOString(), exitCode: 0,
+        binding, source: concrete ?? after.source, candidate: concrete ?? after.candidate,
+        fresh: beforeInputs === await validationInputSnapshot(root, snapshot.binding),
+        ...(generated ? { generatedInputs: beforeInputs } : {}) });
+      parts.push({ type: "tool", tool: "shell", callID, state: { status: "completed", input: { command, workdir: root },
+        metadata: { exit: 0 }, time: { start, end: start + 10 } } });
+    };
+    const history = () => [{ info: { role: "assistant", sessionID: child }, parts }];
+    const compare = () => reviewerCorrectionValidation(commands, child, history(), 100, checks, root);
+    for (const [i, command] of commands.entries()) await capture(command, i === 1);
+    const saved = JSON.stringify(checks[1]);
+    assert.equal(checks[1].exitCode, 0);
+    assert.equal(checks[1].fresh, false, "native success and unchanged validation inputs are separate outcomes");
+    assert.match(compare().reason!, /binding-unavailable/);
+    assert.notEqual((await refreshProtectedSnapshot(root, checks[0].binding))?.source, checks[0].source,
+      "the preceding reproduction also pinned the generated output's absent state");
+    for (const command of commands.slice(1)) await capture(command);
+    assert(checks.slice(4).every(check => check.fresh));
+    assert.match(compare().reason!, /binding-unavailable/, "a fresh suffix cannot borrow the old prefix");
+    for (const command of commands) await capture(command);
+    const fresh = await reviewerCorrectionValidationFresh(commands, child, history(), 100, checks, root);
+    assert.equal(fresh.ready, true, JSON.stringify(fresh));
+    assert.deepEqual(fresh.matched?.map(item => item.callID), ["check-7", "check-8", "check-9", "check-10"]);
+    assert.equal(JSON.stringify(checks[1]), saved, "historical fresh=false proof is never rebound");
+    await writeFile(join(root, "fixtures", "input.sql"), "select changed\n");
+    assert.match((await reviewerCorrectionValidationFresh(commands, child, history(), 100, checks, root)).reason!, /validation-stale/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("external cwd requires its original native binding; registration keeps unaffected ordered checks", () => {
