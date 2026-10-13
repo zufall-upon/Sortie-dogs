@@ -354,10 +354,6 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         charged + capUSD > budget.new_probe_total_limit_usd) throw Error('Campaign budget/reservations cannot admit this probe');
     probes.push({ project, charged_usd: capUSD, reserved_usd: capUSD, state: 'reserved' });
   });
-  const server = await startV2ReleaseServer(project, env, { credentialSource: fixture.credentialSource });
-  try { await onServer?.({ server, fixture }); }
-  catch (error) { await server.stop(); throw error; }
-  const since = Date.now();
   const buildStart = mode === 'build-start';
   const operatorResponse = mode === 'operator-response';
   const statusOnly = mode === 'status';
@@ -366,6 +362,44 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
     buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
   const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6.1-sol#xhigh');
+  const serverSince = Date.now();
+  let server;
+  try { server = await startV2ReleaseServer(project, env, { credentialSource: fixture.credentialSource }); }
+  catch (error) {
+    // Admission already reserved this attempt. Persist evidence only; never settle
+    // missing coverage as zero, rerun installation/startup, or invent a CLI session.
+    const serverError = { name: error.name, message: String(error.message).slice(0, 1500),
+      ...(error.code === undefined ? {} : { code: error.code }) };
+    const cleanup = error.serverStartContext, cleanupErrors = cleanup?.cleanupErrors ?? [];
+    const result = { models: [], tools: [], responses: [], errors: [], priced_usd: 0,
+      known_unpriced_requests: 0, unpriced_requests: 1, usage_complete: false,
+      project, database_path: missionDatabasePath(env, project), data_home: env.XDG_DATA_HOME,
+      mode, stopped: 'server-start-failed', stop_observation: 'server-start',
+      code: null, signal: null, controller_signal: null, cli_started: false,
+      server_start_attempted: true, server_ready: false, cap_usd: capUSD,
+      budget_settlement_attempted: false, ...(budgetFile ? { budget_file: budgetFile } : {}),
+      elapsed_ms: Date.now() - serverSince, server_error: serverError,
+      ...(cleanup ? { cleanup_complete: false, cleanup_errors: cleanupErrors,
+        server_pid: cleanup.serverPID, server_state_directory: cleanup.stateDirectory } : {}),
+      ...probeTaskIdentity(request, instance, actualBaseCommit), package_version: fixture.pkg.version,
+      runtime_marker: fixture.runtimeMarker, candidate_sha256: candidateSHA256,
+      accepted: false, native_completed: false, failure_recorded: true,
+      next_action: cleanup?.nextAction ?? 'Inspect the recorded owned server startup failure, fixture/database path and package/runtime identity; verify any process from the failed owned start has stopped and reconcile session usage while retaining unresolved reservation holds. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+    Object.assign(result, completeProbeObservations(result), { native_completed: false });
+    try { await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2) + '\n'); }
+    catch (persistenceError) {
+      error.monitorContext = { observed: { ...result, failure_recorded: false }, databasePath: result.database_path,
+        stdout: '', stderr: '', code: null, signal: null, stopped: result.stopped, stopObservation: 'server-start',
+        serverError, cleanupErrors, persistence_complete: false, failure_recorded: false,
+        persistenceError: { name: persistenceError.name, message: String(persistenceError.message).slice(0, 1500),
+          ...(persistenceError.code === undefined ? {} : { code: persistenceError.code }) },
+        nextAction: 'Inspect the recorded owned evidence path and failed server startup/cleanup; verify owned writers stopped, retain unresolved reservation/usage holds, then retry only failed evidence persistence after reconciling fixture/database usage. No CLI was launched. Do not automatically replay the consumed startup/task or restart the shared host.' };
+    }
+    throw error;
+  }
+  try { await onServer?.({ server, fixture }); }
+  catch (error) { await server.stop(); throw error; }
+  const since = Date.now(); // Keep the successful CLI timing endpoint unchanged.
   const launch = nativeCLI('opencode', ['run', '--server', server.url, '--format', 'json', '--agent', rootAgent, '--model', rootModel]);
   const child = spawnPromptCLI(launch.executable, launch.args, request, {
     cwd: project, env: { ...server.env, PWD: project }, detached: true,
