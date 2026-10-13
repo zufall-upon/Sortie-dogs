@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
-import { nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
+import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
@@ -93,6 +93,17 @@ test("practical database paths respect explicit, XDG and home settings with serv
   assert.equal(missionDatabasePath({ XDG_DATA_HOME: join(home, "data") }, project), join(home, "data/opencode/opencode.db"));
   assert.equal(missionDatabasePath({ HOME: home }, project), join(home, ".local/share/opencode/opencode.db"));
   assert.equal(missionDatabasePath({ USERPROFILE: home }, project), join(home, ".local/share/opencode/opencode.db"));
+});
+
+test("installed V2 fixture data settings replace the inherited host DB and remain stable across restart", () => {
+  const run = resolve("_testenv", "owned-run"), host = resolve("_testenv", "host-data");
+  const env = { OPENCODE_DB: join(host, "opencode.db"), XDG_DATA_HOME: host, ...fixtureDataEnvironment(run) };
+  const selected = join(run, "data/opencode/opencode.db");
+  assert.equal(env.OPENCODE_DB, selected);
+  assert.equal(env.XDG_DATA_HOME, join(run, "data"));
+  assert.equal(missionDatabasePath(env, join(run, "project")), selected);
+  assert.equal(missionDatabasePath({ ...env }, join(run, "project")), selected);
+  assert.notEqual(fixtureDataEnvironment(resolve("_testenv", "other-run")).OPENCODE_DB, selected);
 });
 
 function seedObservationDatabase(path: string, project: string, root: string, since: number, pending = false) {

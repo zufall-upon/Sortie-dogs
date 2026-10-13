@@ -1,14 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, spawnPromptCLI, command } from './release-cli.mjs';
+import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, spawnPromptCLI, command, missionDatabasePath } from './release-cli.mjs';
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 import { nativeRunPending, waitForNativeSettlement } from './native-run-settlement.mjs';
 
-export const missionDatabasePath = (env = process.env, cwd = process.cwd()) => resolve(cwd,
-  env.OPENCODE_DB || join(env.XDG_DATA_HOME || join(env.HOME || env.USERPROFILE || homedir(), '.local/share'), 'opencode/opencode.db'));
+export { missionDatabasePath } from './release-cli.mjs';
 export const observationDirectories = project => [project, project.replaceAll('\\', '/')];
 export const probeTaskIdentity = (request, instance, actualBaseCommit) => ({
   task_sha256: createHash('sha256').update(request).digest('hex'),
@@ -204,7 +202,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         charged + capUSD > budget.new_probe_total_limit_usd) throw Error('Campaign budget/reservations cannot admit this probe');
     probes.push({ project, charged_usd: capUSD, reserved_usd: capUSD, state: 'reserved' });
   });
-  const server = await startV2ReleaseServer(project, env);
+  const server = await startV2ReleaseServer(project, env, { credentialSource: fixture.credentialSource });
   try { await onServer?.({ server, fixture }); }
   catch (error) { await server.stop(); throw error; }
   const since = Date.now();
@@ -234,7 +232,8 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
           item.status === 'completed')?.model ?? observed.models.find(item => item.sessionID === observed.root)?.model ?? null } : {}),
         ...(cutoff ? { errors: cutoff.errors,
         cancellation_errors: observed.errors.filter(error => /"type":"aborted"/.test(error.error)) } : {}),
-        project, database_path: databasePath, mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
+        project, database_path: databasePath, data_home: env.XDG_DATA_HOME,
+        mode, stopped, stop_observation: stopObservation ?? null, code, signal: signal ?? null,
         controller_signal: controllerSignal ?? null, elapsed_ms: Date.now() - since,
         ...probeTaskIdentity(request, instance, actualBaseCommit),
         package_version: fixture.pkg.version, runtime_marker: fixture.runtimeMarker,

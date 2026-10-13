@@ -19,7 +19,7 @@ assert.equal(started.stopped, 'worker-started', JSON.stringify(started));
 assert.ok(started.models.some(item => item.agent === 'dogs-coordinator'), 'Exercise nested native dispatch');
 const run = dirname(started.project), xdg = join(run, 'xdg');
 const env = { XDG_CONFIG_HOME: xdg, OPENCODE_CONFIG_DIR: join(xdg, 'opencode'), OPENCODE_CONFIG: join(xdg, 'opencode/opencode.json'),
-  OPENCODE_DB: started.database_path };
+  OPENCODE_DB: started.database_path, XDG_DATA_HOME: started.data_home };
 const observe = () => observeMissionCLI(started.project, 0, 'dog-operator', started.database_path);
 const baseline = observe();
 const previousErrors = new Set(baseline.errors.map(error => JSON.stringify(error)));

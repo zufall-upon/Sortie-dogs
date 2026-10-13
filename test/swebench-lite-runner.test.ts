@@ -107,6 +107,33 @@ test("isolated V2 runtime copies only its OAuth route into a private credential 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("owned V2 server restart keeps the private refreshed route without rereading host credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "v2-credential-restart-"));
+  const directory = join(root, "isolated"), sourcePath = join(root, "source.db"), targetPath = join(directory, "opencode.db");
+  const schema = "CREATE TABLE credential (id TEXT, integration_id TEXT, label TEXT, value TEXT, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)";
+  try {
+    await mkdir(directory);
+    for (const path of [sourcePath, targetPath]) {
+      const db = new DatabaseSync(path);
+      try {
+        db.exec(schema);
+        if (path === sourcePath) db.prepare("INSERT INTO credential VALUES (?, 'openai', 'fixture', ?, NULL, NULL, 1, 1, 1)")
+          .run("openai-route", JSON.stringify({ type: "oauth", access: "original" }));
+      } finally { db.close(); }
+    }
+    await seedIsolatedV2Credential(sourcePath, targetPath, directory, { ifMissing: true });
+    const db = new DatabaseSync(targetPath);
+    try { db.prepare("UPDATE credential SET value = ?").run(JSON.stringify({ type: "oauth", access: "refreshed" })); }
+    finally { db.close(); }
+    await seedIsolatedV2Credential(join(root, "absent-source.db"), targetPath, directory, { ifMissing: true });
+    const reopened = new DatabaseSync(targetPath, { readOnly: true });
+    try {
+      assert.equal(reopened.prepare("SELECT COUNT(*) AS n FROM credential").get()!.n, 1);
+      assert.equal(JSON.parse(reopened.prepare("SELECT value FROM credential").get()!.value as string).access, "refreshed");
+    } finally { reopened.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("V2 usage reader charges owned sessions including Luna Fast and retains missing usage", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-v2-usage-"));
   const path = join(root, "opencode.db"), workspace = join(root, "workspace");
