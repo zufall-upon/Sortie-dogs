@@ -126,6 +126,39 @@ test("review follow-up: broad aliases do not credit untouched concrete checkpoin
   assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.fraction, 0);
 });
 
+test("PR249 follow-up: broad checkpoints retain concrete alias observations in either order", () => {
+  for (const changed of ["src/a.ts", "src/b.ts"]) {
+    const m = mission(), raw = [work()], r = run(raw);
+    const declared = { id: "feature", kind: "artifact", bindings: { paths: raw[0]!.write }, relative_weight: 16 };
+    const prior = planWorkQuantity(m, raw, r, undefined, [declared]);
+    observeWorkQuantity(prior, { kind: "change", paths: [changed] });
+    const next = planWorkQuantity(m, raw, r, prior, [{ ...declared, checkpoints: [{ id: "all", paths: ["src/**"] }] }]);
+    const checkpoint = next.items.find(item => item.id.endsWith("/checkpoint:all"))!;
+    assert.equal(checkpoint.fraction, 0.55 / 2);
+    assert.deepEqual(checkpoint.observation.changedTargets, [changed]);
+    assert.equal(next.estimatedTotal, prior.estimatedTotal);
+    observeWorkQuantity(next, { kind: "change", paths: [changed === "src/a.ts" ? "src/b.ts" : "src/a.ts"] });
+    assert.equal(checkpoint.fraction, 0.55);
+  }
+});
+
+test("PR249 follow-up: deleted child owners stay deleted across repeated Mission and run reads", () => {
+  const directory = "fixture:deleted-child-cache", m = mission(), r = run();
+  m.attempts = [{ childSessionID: "worker" }] as never;
+  m.review = { child: "reviewer" } as never;
+  m.workQuantity = planWorkQuantity(m, [work()], r);
+  try {
+    rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+    for (const actor of ["worker", "reviewer"]) {
+      forgetWorkSession(directory, actor);
+      rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+      assert.equal(workRootForActor(directory, actor), undefined);
+      assert.equal(observeActorWork(directory, actor, { kind: "change", paths: ["src/a.ts"] }), undefined);
+      assert.equal(workRootForActor(directory, "coordinator"), "root");
+    }
+  } finally { forgetWorkDirectory(directory); }
+});
+
 test("malformed optional estimates cannot reject execution or duplicate aliases", () => {
   const m = mission(), raw = [work()], r = run(raw), fallback = planWorkQuantity(m, raw, r);
   for (const invalid of [null, {}, "bad", [null, { id: "x", bindings: { paths: ["unknown"] } }]]) {

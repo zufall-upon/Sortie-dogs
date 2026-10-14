@@ -17,7 +17,8 @@ import V2Plugin, {
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 import { buildDebrief, renderDebrief } from "../dist/plugin/sortie-debrief.js";
-import { cachedWorkProgress, rememberWorkMission } from "../dist/core/work-quantity-observations.js";
+import { applyPendingWork, cachedWorkProgress, observeActorWork, rememberWorkMission, workRootForActor } from "../dist/core/work-quantity-observations.js";
+import { planWorkQuantity } from "../dist/core/work-quantity.js";
 import { publishMissionProgress } from "../dist/plugin/mission-progress.js";
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -133,6 +134,25 @@ test("V2 session deletion and plugin disposal release workload observations", as
     cleanup?.();
     assert.equal(cachedWorkProgress(directory, "another-root"), undefined);
   } finally { cleanup?.(); }
+});
+
+test("PR249 follow-up: disposing an overlapping V2 instance preserves the live instance's pending work", async () => {
+  const directory = "fixture:v2-overlapping-workload", first = contextFixture(), second = contextFixture();
+  const a = await createSortieDogsV2Plugin(async () => ({})).setup({ ...first.context, location: { directory } });
+  const b = await createSortieDogsV2Plugin(async () => ({})).setup({ ...second.context, location: { directory } });
+  const mission = { version: "0.12", id: "mission", root: "root", coordinator: "worker", phase: "running",
+    runID: null, kind: "implementation", requirements: [{ id: "R1", text: "Result" }], attempts: [] } as never;
+  const state = planWorkQuantity(mission, [{ title: "Result", read: [], write: ["src/a.ts"], validation: [] }]);
+  try {
+    rememberWorkMission(directory, { ...mission as object, workQuantity: state } as never);
+    observeActorWork(directory, "worker", { kind: "change", paths: ["src/a.ts"] });
+    a?.(); a?.();
+    assert.equal(workRootForActor(directory, "worker"), "root");
+    assert.equal(applyPendingWork(directory, "root", structuredClone(state)).items.find(item => item.id === "artifact:src/a.ts")?.fraction, 0.55);
+    b?.();
+    assert.equal(cachedWorkProgress(directory, "root"), undefined);
+    assert.equal(workRootForActor(directory, "worker"), undefined);
+  } finally { a?.(); b?.(); }
 });
 
 test("V2 optional condition objects admit omission without manufacturing provenance or erasing fixed facts", async () => {

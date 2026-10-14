@@ -2,7 +2,7 @@ import { toolSchema, legacyToolArgs } from "./tool-schema.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
-import { cachedWorkProgress, forgetWorkDirectory, forgetWorkSession, workRootForActor } from "../core/work-quantity-observations.js";
+import { cachedWorkProgress, forgetWorkSession, retainWorkDirectory, workRootForActor } from "../core/work-quantity-observations.js";
 import { formatWorkQuantity } from "../core/work-quantity.js";
 import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive } from "./v2-session-history.js";
 import { nativeContractReadSnapshot } from "./native-contract-read.js";
@@ -853,80 +853,83 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
   return {
     id: "sortie-dogs.v010",
     async setup(context) {
-      let hooks: OpenCodeHooks;
-      const liveState = new Map<string, unknown>();
-      const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
-        if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
-        const output = { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
-          output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } };
-        await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
-          args: legacyToolInput("subagent", dispatch.input) }, output);
-        if (dispatch.child) await syncReviewerCorrectionPermissions(context, hooks, dispatch.child);
-        // Inline Review already has a compact provenance receipt; retain the full diagnostic packet in its ordinary tool route.
-        try {
-          const packet: unknown = JSON.parse(output.output);
-          if (record(packet) && record(packet.completion_receipt)) return JSON.stringify(packet.completion_receipt);
-        } catch { /* Ordinary native outputs are not necessarily JSON. */ }
-        return output.output;
-      }, (callID, restore) => hooks.backgroundOwner?.(callID, restore),
-      (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
-      hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
-        nativeBackground: background, returnReportTransport: "tool-result",
-        reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
-      await registerV2Hooks(context, hooks, background, liveState);
-      // Recreate exact durable correction profiles at plugin setup, before resumed native Steps
-      // resolve their agent/tool snapshots. Storage.scan is part of Plugin 2.0.18's public domain.
-      if (context.storage?.scan) {
-        let after: string | undefined;
-        do {
-          const page = await context.storage.scan({ prefix: correctionStoragePrefix, ...(after ? { after } : {}) });
-          for (const entry of page.entries) await syncReviewerCorrectionPermissions(context, hooks, entry.key.slice(correctionStoragePrefix.length));
-          after = page.next;
-        } while (after);
-      }
-      const finalize = createV2ReturnReportFinalizer(context, hooks);
-      const controller = new AbortController();
-      const eventOperations = new Map<string, Promise<void>>();
-      const handleEvent = async (event: JsonObject): Promise<void> => {
-        const data = record(event.data) ? event.data : {};
-        const id = string(data.sessionID);
-        if (event.type === "filesystem.changed" && typeof data.file === "string") {
-          await hooks.event?.({ event: { type: "file.edited", properties: { file: data.file } } });
-          return;
+      const releaseWork = retainWorkDirectory(context.location.directory);
+      try {
+        let hooks: OpenCodeHooks;
+        const liveState = new Map<string, unknown>();
+        const background = new NativeBackgroundLifecycle(context, async (dispatch, text) => {
+          if (dispatch.owner) hooks.backgroundOwner?.(dispatch.callID, dispatch.owner);
+          const output = { status: dispatch.terminal === "succeeded" ? "completed" : dispatch.terminal === "interrupted" ? "cancelled" : "error",
+            output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } };
+          await hooks["tool.execute.after"]?.({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
+            args: legacyToolInput("subagent", dispatch.input) }, output);
+          if (dispatch.child) await syncReviewerCorrectionPermissions(context, hooks, dispatch.child);
+          // Inline Review already has a compact provenance receipt; retain the full diagnostic packet in its ordinary tool route.
+          try {
+            const packet: unknown = JSON.parse(output.output);
+            if (record(packet) && record(packet.completion_receipt)) return JSON.stringify(packet.completion_receipt);
+          } catch { /* Ordinary native outputs are not necessarily JSON. */ }
+          return output.output;
+        }, (callID, restore) => hooks.backgroundOwner?.(callID, restore),
+        (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
+        hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
+          nativeBackground: background, returnReportTransport: "tool-result",
+          reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
+        await registerV2Hooks(context, hooks, background, liveState);
+        // Recreate exact durable correction profiles at plugin setup, before resumed native Steps
+        // resolve their agent/tool snapshots. Storage.scan is part of Plugin 2.0.18's public domain.
+        if (context.storage?.scan) {
+          let after: string | undefined;
+          do {
+            const page = await context.storage.scan({ prefix: correctionStoragePrefix, ...(after ? { after } : {}) });
+            for (const entry of page.entries) await syncReviewerCorrectionPermissions(context, hooks, entry.key.slice(correctionStoragePrefix.length));
+            after = page.next;
+          } while (after);
         }
-        if (id === undefined) return;
-        try {
-          if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
-          if (event.type === "session.deleted") {
-            await context.storage?.remove?.(childSelectionKey(id));
-            liveState.delete(id);
-            await context.storage?.remove?.(liveStateKey(id));
-            // This native event is definite deletion, unlike a transient session.get failure.
-            await disposeCorrectionPermissions(context, id);
-          }
-          if (event.type === "session.execution.succeeded") await finalize(id);
-          if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
-            const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
-            await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
-            for (const child of await hooks.reviewerCorrectionSessions?.(id) ?? []) await syncReviewerCorrectionPermissions(context, hooks, child);
-            if (event.type !== "session.deleted") await syncReviewerCorrectionPermissions(context, hooks, id);
-          }
-          if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
-        } finally { if (event.type === "session.deleted") forgetWorkSession(context.location.directory, id); }
-      };
-      void (async () => {
-        for await (const event of context.event.subscribe({ signal: controller.signal })) {
+        const finalize = createV2ReturnReportFinalizer(context, hooks);
+        const controller = new AbortController();
+        const eventOperations = new Map<string, Promise<void>>();
+        const handleEvent = async (event: JsonObject): Promise<void> => {
           const data = record(event.data) ? event.data : {};
-          const lane = string(data.sessionID) ?? "filesystem";
-          const operation = (eventOperations.get(lane) ?? Promise.resolve()).then(() => handleEvent(event)).catch(error => {
-            console.warn("[sortie-dogs-v010] V2 event handling failed", error instanceof Error ? error.message : "unknown");
-          }).finally(() => { if (eventOperations.get(lane) === operation) eventOperations.delete(lane); });
-          eventOperations.set(lane, operation);
-        }
-      })().catch(error => {
-        if (!controller.signal.aborted) console.warn("[sortie-dogs-v010] V2 event adapter stopped", error instanceof Error ? error.message : "unknown");
-      });
-      return () => { controller.abort(); forgetWorkDirectory(context.location.directory); };
+          const id = string(data.sessionID);
+          if (event.type === "filesystem.changed" && typeof data.file === "string") {
+            await hooks.event?.({ event: { type: "file.edited", properties: { file: data.file } } });
+            return;
+          }
+          if (id === undefined) return;
+          try {
+            if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
+            if (event.type === "session.deleted") {
+              await context.storage?.remove?.(childSelectionKey(id));
+              liveState.delete(id);
+              await context.storage?.remove?.(liveStateKey(id));
+              // This native event is definite deletion, unlike a transient session.get failure.
+              await disposeCorrectionPermissions(context, id);
+            }
+            if (event.type === "session.execution.succeeded") await finalize(id);
+            if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
+              const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
+              await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
+              for (const child of await hooks.reviewerCorrectionSessions?.(id) ?? []) await syncReviewerCorrectionPermissions(context, hooks, child);
+              if (event.type !== "session.deleted") await syncReviewerCorrectionPermissions(context, hooks, id);
+            }
+            if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
+          } finally { if (event.type === "session.deleted") forgetWorkSession(context.location.directory, id); }
+        };
+        void (async () => {
+          for await (const event of context.event.subscribe({ signal: controller.signal })) {
+            const data = record(event.data) ? event.data : {};
+            const lane = string(data.sessionID) ?? "filesystem";
+            const operation = (eventOperations.get(lane) ?? Promise.resolve()).then(() => handleEvent(event)).catch(error => {
+              console.warn("[sortie-dogs-v010] V2 event handling failed", error instanceof Error ? error.message : "unknown");
+            }).finally(() => { if (eventOperations.get(lane) === operation) eventOperations.delete(lane); });
+            eventOperations.set(lane, operation);
+          }
+        })().catch(error => {
+          if (!controller.signal.aborted) console.warn("[sortie-dogs-v010] V2 event adapter stopped", error instanceof Error ? error.message : "unknown");
+        });
+        return () => { controller.abort(); releaseWork(); };
+      } catch (error) { releaseWork(); throw error; }
     },
   };
 }

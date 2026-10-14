@@ -5,9 +5,10 @@ import { observeWorkQuantity, planWorkQuantity, projectWorkQuantity, syncWorkQua
   type WorkQuantityEvent, type WorkQuantityState, type WorkQuantityProgress } from "./work-quantity.js";
 
 interface View { mission?: OperatorMission; run?: OperatorState; sequence: number;
-  events: Map<string, { sequence: number; event: WorkQuantityEvent }>; progress?: WorkQuantityProgress }
+  events: Map<string, { sequence: number; event: WorkQuantityEvent }>; deleted: Set<string>; progress?: WorkQuantityProgress }
 const views = new Map<string, View>();
 const owners = new Map<string, string>();
+const instances = new Map<string, number>();
 // Terminal UI snapshots contain no Mission/run/events and cannot grow with history.
 const terminals = new Map<string, { progress: WorkQuantityProgress; runID?: string }>();
 const identity = (directory: string, root: string) => `${directory.replaceAll("\\", "/").replace(/\/$/u, "")}\0${root}`;
@@ -19,11 +20,31 @@ function forgetRoot(directory: string, root: string): void {
 export function forgetWorkSession(directory: string, actor: string): void {
   const id = identity(directory, actor);
   if (views.has(id) || terminals.has(id) || owners.get(id) === actor) forgetRoot(directory, actor);
-  else owners.delete(id);
+  else {
+    const root = owners.get(id);
+    if (root) views.get(identity(directory, root))?.deleted.add(actor);
+    owners.delete(id);
+  }
 }
 export function forgetWorkDirectory(directory: string): void {
   const prefix = identity(directory, "");
   for (const cache of [views, owners, terminals]) for (const id of cache.keys()) if (id.startsWith(prefix)) cache.delete(id);
+}
+/** Module-global observations remain live until the last overlapping Location setup unloads. */
+export function retainWorkDirectory(directory: string): () => void {
+  const id = identity(directory, "");
+  instances.set(id, (instances.get(id) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (instances.get(id) ?? 1) - 1;
+    if (remaining) instances.set(id, remaining);
+    else { instances.delete(id); forgetWorkDirectory(directory); }
+  };
+}
+function own(directory: string, root: string, actor: string, value: View): void {
+  if (!value.deleted.has(actor)) owners.set(identity(directory, actor), root);
 }
 function finishView(directory: string, root: string, value: View): void {
   const mission = value.mission, run = value.run;
@@ -39,7 +60,7 @@ function view(directory: string, root: string): View {
   const id = identity(directory, root);
   terminals.delete(id);
   let value = views.get(id);
-  if (!value) { value = { sequence: 0, events: new Map() }; views.set(id, value); }
+  if (!value) { value = { sequence: 0, events: new Map(), deleted: new Set() }; views.set(id, value); }
   owners.set(id, root);
   return value;
 }
@@ -48,9 +69,9 @@ export function rememberWorkMission(directory: string, mission: OperatorMission)
   if (value.mission?.id !== mission.id && value.mission?.workQuantity?.scopeID !== mission.workQuantity?.scopeID) value.events.clear();
   value.mission = mission;
   value.sequence = Math.max(value.sequence, mission.workQuantity?.observationSequence ?? 0); delete value.progress;
-  if (mission.coordinator) owners.set(identity(directory, mission.coordinator), mission.root);
-  if (mission.review?.child) owners.set(identity(directory, mission.review.child), mission.root);
-  for (const attempt of mission.attempts ?? []) if (attempt.childSessionID) owners.set(identity(directory, attempt.childSessionID), mission.root);
+  if (mission.coordinator) own(directory, mission.root, mission.coordinator, value);
+  if (mission.review?.child) own(directory, mission.root, mission.review.child, value);
+  for (const attempt of mission.attempts ?? []) if (attempt.childSessionID) own(directory, mission.root, attempt.childSessionID, value);
   if (["completed", "cancelled"].includes(mission.phase)) finishView(directory, mission.root, value);
 }
 export function rememberWorkRun(directory: string, run: OperatorState): void {
@@ -59,8 +80,8 @@ export function rememberWorkRun(directory: string, run: OperatorState): void {
   const value = view(directory, run.rootSessionID);
   value.run = run;
   value.sequence = Math.max(value.sequence, run.workQuantity?.observationSequence ?? 0); delete value.progress;
-  if (run.operatorSessionID) owners.set(identity(directory, run.operatorSessionID), run.rootSessionID);
-  for (const unit of run.units) if (unit.childSessionID) owners.set(identity(directory, unit.childSessionID), run.rootSessionID);
+  if (run.operatorSessionID) own(directory, run.rootSessionID, run.operatorSessionID, value);
+  for (const unit of run.units) if (unit.childSessionID) own(directory, run.rootSessionID, unit.childSessionID, value);
   if (!value.mission && ["completed", "cancelled"].includes(run.phase)) finishView(directory, run.rootSessionID, value);
 }
 export function rememberedWorkRun(directory: string, root: string): OperatorState | undefined {

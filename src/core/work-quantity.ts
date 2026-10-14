@@ -62,6 +62,7 @@ function pathMatches(actual: string, binding: string): boolean {
   const a = key(actual), b = key(binding).replace(/\/\*\*$/u, "");
   return a === b || broad(binding) && ([".", "**"].includes(b) || a.startsWith(`${b}/`));
 }
+const pathsOverlap = (a: string, b: string) => pathMatches(a, b) || pathMatches(b, a);
 function fraction(item: WorkQuantityItem): number {
   const o = item.observation;
   if (item.removed) return 0;
@@ -201,7 +202,7 @@ export function planWorkQuantity(mission: Pick<OperatorMission, "id" | "requirem
     const units = unique(aliases.flatMap(entry => entry.units));
     if (units.length) declared.units = units;
     for (const child of state.items.filter(entry => entry.parentID === declared.id && !entry.removed)) {
-      const matched = aliases.filter(entry => !child.paths.length && !child.commands.length || entry.paths.some(path => child.paths.includes(path)) ||
+      const matched = aliases.filter(entry => !child.paths.length && !child.commands.length || entry.paths.some(path => child.paths.some(binding => pathsOverlap(path, binding))) ||
         entry.commands.some(command => child.commands.includes(command)));
       const units = unique(matched.flatMap(entry => entry.units));
       if (units.length) child.units = units;
@@ -264,10 +265,10 @@ function applyDeclaredWork(state: WorkQuantityState, raw: unknown, generated: Ma
             strings(point.paths), strings(point.commands), parent.units);
           child.units = parent.units; child.paths = strings(point.paths).map(pathKey); child.commands = strings(point.commands).map(commandKey);
           if (!state.items.includes(child)) {
-            const observations = matches.filter(alias =>
-              child.paths.some(path => alias.paths.some(binding => pathMatches(path, binding))) ||
-              child.commands.some(command => alias.commands.includes(command)))
-              .map(alias => {
+            const aliases = matches.filter(alias =>
+              child.paths.some(path => alias.paths.some(binding => pathsOverlap(path, binding))) ||
+              child.commands.some(command => alias.commands.includes(command)));
+            const observations = aliases.map(alias => {
                 const saved = state.items.find(entry => entry.id === alias.id)!.observation;
                 if (!alias.targetEstimate || child.paths.some(path => alias.paths.includes(path))) return saved;
                 const projected = { ...saved };
@@ -285,6 +286,14 @@ function applyDeclaredWork(state: WorkQuantityState, raw: unknown, generated: Ma
             child.observation = !child.paths.length && !child.commands.length ? { ...parent.observation }
               : Object.fromEntries(Object.entries(observations[0] ?? {}).filter(([field, value]) =>
                 observations.every(observation => JSON.stringify(observation[field as keyof WorkObservation]) === JSON.stringify(value))));
+            if (child.paths.some(broad) && aliases.length && aliases.every(alias => !alias.targetEstimate && alias.paths.length)) {
+              const targets = unique(aliases.flatMap(alias => alias.paths).filter(path => child.paths.some(binding => pathMatches(path, binding))));
+              child.targetEstimate = targets.length;
+              child.observation.changedTargets = unique(aliases.flatMap((alias, i) => observations[i]!.changed ? alias.paths : [])
+                .filter(path => targets.includes(path)));
+              child.observation.changed = child.observation.changedTargets.length > 0;
+              if (observations.some(observation => observation.read)) child.observation.read = true;
+            }
           }
           child.parentID = parent.id; child.weight = amount * quantities[index]! / sum; child.basis = "declared"; child.removed = false;
           if (!state.items.includes(child)) state.items.push(child);
