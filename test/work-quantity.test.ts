@@ -114,6 +114,18 @@ test("review follow-up: new validation checkpoints retain only their matching co
   assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.observation.callID, "b-check");
 });
 
+test("review follow-up: broad aliases do not credit untouched concrete checkpoints", () => {
+  const m = mission(), unit = work(["src/**"]), r = run([unit]);
+  const declared = { id: "feature", kind: "implementation", bindings: { paths: ["src/**"] }, relative_weight: 16 };
+  const prior = planWorkQuantity(m, [unit], r, undefined, [declared]);
+  observeWorkQuantity(prior, { kind: "read", paths: ["src/a.ts"] });
+  observeWorkQuantity(prior, { kind: "change", paths: ["src/a.ts"] });
+  const next = planWorkQuantity(m, [unit], r, prior, [{ ...declared,
+    checkpoints: [{ id: "a", paths: ["src/a.ts"] }, { id: "b", paths: ["src/b.ts"] }] }]);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:a"))?.fraction, 0.55);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.fraction, 0);
+});
+
 test("malformed optional estimates cannot reject execution or duplicate aliases", () => {
   const m = mission(), raw = [work()], r = run(raw), fallback = planWorkQuantity(m, raw, r);
   for (const invalid of [null, {}, "bad", [null, { id: "x", bindings: { paths: ["unknown"] } }]]) {

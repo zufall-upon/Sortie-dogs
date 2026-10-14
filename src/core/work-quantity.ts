@@ -267,7 +267,19 @@ function applyDeclaredWork(state: WorkQuantityState, raw: unknown, generated: Ma
             const observations = matches.filter(alias =>
               child.paths.some(path => alias.paths.some(binding => pathMatches(path, binding))) ||
               child.commands.some(command => alias.commands.includes(command)))
-              .map(alias => state.items.find(entry => entry.id === alias.id)!.observation);
+              .map(alias => {
+                const saved = state.items.find(entry => entry.id === alias.id)!.observation;
+                if (!alias.targetEstimate || child.paths.some(path => alias.paths.includes(path))) return saved;
+                const projected = { ...saved };
+                // A broad alias's changed-target list identifies concrete edits;
+                // its scalar read flag does not identify which child was read.
+                delete projected.read;
+                if (saved.changed) {
+                  projected.changedTargets = (saved.changedTargets ?? []).filter(path => child.paths.some(binding => pathMatches(path, binding)));
+                  projected.changed = projected.changedTargets.length > 0;
+                }
+                return projected;
+              });
             // Bound checkpoints inherit only matching aliases. Multiple aliases retain
             // common observations conservatively; an unbound checkpoint covers its parent.
             child.observation = !child.paths.length && !child.commands.length ? { ...parent.observation }
