@@ -978,7 +978,8 @@ export async function probeCandidateV2Agents(root, environment, primary, agentNa
 export function candidateFailureMessage(error) {
   const context = error?.candidateRuntimeContext ?? error?.candidateProbeContext ?? error?.serverStartContext;
   return `${error.message}\n${context?.cleanup_complete === false
-    ? `${JSON.stringify({ candidate_runtime_cleanup: context })}\n` : ""}`;
+    ? `${JSON.stringify({ candidate_runtime_cleanup: context })}\n` : ""}${error?.candidateFailurePersistenceError
+    ? `${JSON.stringify({ candidate_failure_persistence_error: error.candidateFailurePersistenceError })}\n` : ""}`;
 }
 
 async function killProcessGroup(pid, force = false) {
@@ -1461,8 +1462,42 @@ export async function runLive(value, options, dependencies = {}) {
     plan.candidate.package_tgz);
   const prepareCandidate = dependencies.prepareCandidate ?? prepareCandidateRuntime;
   ensure(options.coordinatorModel === undefined || MODEL_ROUTE_PATTERN.test(options.coordinatorModel), "invalid-coordinator-model");
-  const candidateRuntime = await prepareCandidate(plan.candidate, packagePath, runRoot,
-    options.coordinatorModel ? { coordinatorModel: options.coordinatorModel } : {});
+  let candidateRuntime;
+  try {
+    candidateRuntime = await prepareCandidate(plan.candidate, packagePath, runRoot,
+      options.coordinatorModel ? { coordinatorModel: options.coordinatorModel } : {});
+  } catch (error) {
+    // Preparation precedes task execution, but its failure must reach the parent
+    // through the same durable result path. Unknown usage is not a zero-cost run.
+    const context = error?.candidateRuntimeContext ?? error?.candidateProbeContext ?? error?.serverStartContext;
+    const nextAction = context?.nextAction ?? "Inspect the saved candidate preparation failure and owned CLI logs; verify owned writers stopped and reconcile usage before continuation. Retain unresolved reservation holds. Do not automatically replay the consumed task or restart the shared host.";
+    const results = plan.instances.map((instance, index) => ({
+      instance_id: instance.instance_id,
+      status: index === 0 ? "candidate-preparation-failed" : "not-run-candidate-preparation-failed",
+      failure_stage: "candidate-runtime-preparation",
+      failure: String(error?.message ?? error),
+      ...(error?.code === undefined ? {} : { failure_code: error.code }),
+      task_execution_started: false, exit_code: null, patch_bytes: 0, patch_sha256: null,
+      usage_complete: false, next_action: nextAction,
+      ...(context?.cleanup_complete === false ? { candidate_runtime_cleanup: context } : {}),
+    }));
+    const metadata = { schema_version: 1, mode: plan.mode, dataset: plan.dataset,
+      candidate: { package_sha256: plan.candidate.sha256, preparation_complete: false },
+      policy: { ...plan.policy, live_process_started: false },
+      execution: { ...plan.execution, task_execution_started: false, live_process_started: false,
+        provider_requests_started: false, spent_usd: null, usage_complete: false, usage_database: null },
+      results };
+    try {
+      const predictions = plan.instances.map(instance => formatPrediction({ instance_id: instance.instance_id,
+        model_name_or_path: options.modelNameOrPath ?? `sortie-dogs@${plan.candidate.version}+${plan.candidate.sha256.slice(0, 12)}`,
+        model_patch: "" }));
+      await writeRunOutputs(outputPath, `${predictions.join("\n")}\n`, metadataPath,
+        `${JSON.stringify(metadata, null, 2)}\n`, dependencies.remove ?? rm);
+    } catch (persistenceError) {
+      error.candidateFailurePersistenceError = String(persistenceError?.message ?? persistenceError);
+    }
+    throw error;
+  }
   let usageDatabase = null;
   const remove = dependencies.remove ?? rm;
   if (!record(candidateRuntime) || !record(candidateRuntime.environment) || !record(candidateRuntime.evidence) ||
