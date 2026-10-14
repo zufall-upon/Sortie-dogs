@@ -36,8 +36,85 @@ CLIとrunnerは`root_turn_terminal`、`owned_tasks_settled`、`mission_accepted`
   記録：`_testenv/wsl-*/source.json`、`result.json`、stdout／stderr。
   初回局所60件もexit0。host transport-loss後のlate-send防止とrunner変更をまとめた後だけ125件／fullを実施。
 
-## 単件と配送
+## 固定candidateと単件結果
 
-実行前にsource commitとlocal `.tgz`を固定し、既存replay entrypointから同じparameterized driverを使う。
-新規arm1回のみ。実結果、Task終端、検証、Review／受理、時間／累積費用、停止理由／次操作を追記してPRへ配送する。
-正式採点なし。課題完遂と終了管理の効果を分け、未確認を成功扱いしない。
+- source commit：`484f8ea3b86356199abdcbcf4ece166c25ff2833`。
+- version：`0.13.21`、runtime marker：`0.13.21-operation-recovery-v1`。
+  公開release版と同versionだが**local修正candidate**であり、release／publish／global applyは行っていない。
+- archive：`_testenv/codex-owned-task-candidate/sortie-dogs-0.13.21.tgz`。
+  SHA-256：`69852ef9ba43dcc1ed8802c713b28067b85b800667030dc55c186b9876a13972`。
+  `test:windows`でbuild済みの固定sourceから`npm pack --ignore-scripts`。receiptとSHA256SUMSを保持。
+- 実driver：`scripts/anko-codex-runner.mjs`、revision `484f8ea3...`、
+  SHA-256：`94186972dc9ed89f84a2ccf75786841f8cbedadbdebb85cdb0329ea175f59aa9`。
+  元公開entrypoint `_testenv/anko-codex-replay-20261014/runner.mjs`は同driverへのshim。
+- 原文SHA-256：`96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe`、1,825 bytes。
+  base `3f269a72ff69398b1250c584171f32d12c0d8085`、旧fixture／Goを再利用した新clone。
+  pre-arm baseline：exit0、42,290 ms。既存CLI `0.162.0-alpha.17.2`とGo1.27.1、認証／permission設定は不変。
+- record：`M:/_work/_Sortie-dogs-artifacts/records/anko-codex/owned-task-lifecycle-20261014/20261014T072854315Z-e0e3f757/`。
+- outer arm **1**、native inference turns開始 **3**（Root／Worker／Reviewer各1）、
+  Worker派遣 **1**、同Reviewerの直接修正 **1**。代替Worker、追加arm、無修正リトライなし。
+  provider内部の総request件数は未確認。outer arm数と内側Task／修正unit数を混同しない。
+
+実foreground command：
+
+```text
+node _testenv/anko-codex-replay-20261014/runner.mjs run --version 0.13.21 --candidate-receipt _testenv/codex-owned-task-candidate/candidate-receipt.json
+```
+
+- host native開始 `2026-10-14T07:29:45.094Z`、終端 `08:07:33.270Z`、**exit0／2,268,176 ms**。
+  runner wallは`07:29:45.797Z`→`08:07:33.141Z`、**2,267,344 ms（37分47.344秒）**。
+- Root：`01a13951-39c9-7230-a69a-c821866faf7f`、`gpt-6.1-sol`／`xhigh`／`default`。
+- Worker：`01a13952-0a89-7270-9d6c-ba458f3679e4`、`gpt-6-luna`／`max`／`priority`。
+- Reviewer：`01a13964-5683-7550-bac2-1009be7921cc`、`gpt-6.1-sol`／`xhigh`／`default`。
+- Anko Mission：`mission-9a529ddb-b100-490c-9c16-c715402c77e7`、phase `completed`、SDK accepted **true**。
+  `root_turn_terminal:true`、`owned_tasks_settled:true`、`mission_accepted:true`、`mission_terminal:true`。
+- Worker native終端 `07:50:12.032Z`→同Task復帰 `07:50:12.727Z`。
+  Reviewer native終端 `08:05:28.483Z`→同Task復帰 `08:05:29.496Z`。
+  Root native終端 `08:07:32.959Z`。両Task復帰後、同Rootで検証結果・commit・Review修正を確認して正式受理。
+
+## 修正効果と未確認
+
+今回の実armではRootがTask未復帰のまま早期終了するeventは**再発しなかった**。
+`sortie/continuation`は0件。したがって、live armが新しい遅延結果続行分岐を実際に踏んだとは主張しない。
+未完了Task→早期Root終了→host保持→同Root続行の効果は保存event由来の注入回帰で確認した。
+実armは固定candidateで指示完遂／受理できたことを確認したが、改善の因果や再発率、速度優位は単発から断定しない。
+
+比較：v0.13.11対応完遂armは43分31.535秒／17,999,005 tokens、
+未修正v0.13.21は13分52.956秒／未受理／Worker未終端。
+今回37分47.344秒を前者比の性能向上とは扱わず、後者の短時間も高速化とは扱わない。
+v0.13.11とのCLI差、provider条件不完全一致は旧比較文書のまま保持。
+
+## 課題成果・検証・Review
+
+- Anko branch：`feature/typed-variable-bindings`。local commits：
+  `6cfbd7c109dcd878ff9403d152ae194bef96cc7a`、
+  最終 `2949bbf802f5fb1684239315d83b9e6e7ecf0032`。tracked files clean、推し対象なし／pushなし。
+  未trackedはbenchmark／Mission／Go cache等の生成物。完遂を全面的なgit cleanと混同しない。
+- 全体validator `& ".benchmark/validate.ps1"`：command139 exit1（9,252 ms、test import cycle）
+  →同Worker修正後148 exit0（9,413 ms）→最終Worker candidate153 exit0（8,847 ms）。
+- 初回独立Reviewerはpointer write-back、callback option、type resolution、multiline parsing、
+  lexical error位置、newline後annotation消失の**Medium6件**を指摘し、同Reviewerが修正。
+  最終validator244 exit0（9,379 ms）。著者self-recheckは`unresolved_findings:[]`、`residual_major:null`。
+  **著者self-recheckを独立した最終PASSへ読み替えない**。Rootの正式受理とは別観測。
+- 正式採点は`none`。reward／hidden gradeはunknown。過去の別commit向けreward1を転記しない。
+- host commands258（read117／bash105／write36）、全258終端、pending0。
+  command区間単純合計217,605 ms。純推論時間や節約額ではない。
+
+## 費用・累積・保存
+
+- 今回SDK thread累積：14,592,263 tokens（input14,453,482、cached13,771,136、output138,781、reasoning97,248）。
+  cached／reasoningは内訳であり、totalへ再加算しない。
+- 対応v0.13.11＋未修正v0.13.21＋今回の観測小計：**37,295,298 tokens**。
+  未修正armのWorker未終端snapshotを含むため、3 armの確定最終総量ではない。過去armは保持。
+- native subscription USD請求／推定／残額はunknown。別Linux／OpenCode campaignの$15上限を転用しない。
+  外側修正Missionの直接authorはOpenCode `ses_ec6c3dc43ffenm80kj0exR63h4`／`openai/gpt-6.1-sol#xhigh`。
+  外側費用は内側Anko token小計に含めない。host ledgerのusage欠測を0へ変換しない。
+- result／conditions／events／commands／usage／quality／cleanup／run-once.lockと固定tgzを保持。
+  元製品の既存Mission／override、dataset、global C／O／npm配置、旧結果は不変。
+- 停止理由：今回`accepted`。次操作はSortie修正の独立ReviewとPR配送。追加Anko／23件／release／publish／再起動なし。
+
+結果整合性check（同runの収集、再armなし）：
+
+```text
+node _testenv/anko-codex-replay-20261014/runner.mjs verify --version 0.13.21 --candidate-receipt _testenv/codex-owned-task-candidate/candidate-receipt.json
+```
