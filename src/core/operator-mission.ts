@@ -302,8 +302,9 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
   // Recovery may discover an older call after a newer live/failed observation was saved.
   const ordered = [...execution.observations].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)).reverse();
   const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
+  if (latest.some(item => item?.conflicting)) return "not-started";
   if (latest.some(item => item && !item.completedAt)) return "running";
-  if (latest.some(item => !item || item.conflicting || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
+  if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";
 }
@@ -336,12 +337,18 @@ export function missionOperationDirectoryMatch(actual: string, declared: string)
 function sameNodeOperation(declared: string, actual: string, directory: string): boolean {
   const expected = missionCommandTokens(declared), observed = missionCommandTokens(actual);
   if (!expected || !observed || expected.length !== observed.length || expected.length < 2) return false;
-  const name = (value: string) => value.split(/[\\/]/u).at(-1)?.toLowerCase();
-  if (!new Set(["node", "node.exe"]).has(name(expected[0]!) ?? "") ||
-      !new Set(["node", "node.exe"]).has(name(observed[0]!) ?? "")) return false;
+  const windows = missionWindowsPath(directory);
+  const name = (value: string) => {
+    const basename = value.split(windows ? /[\\/]/u : /\//u).at(-1) ?? "";
+    return windows ? basename.toLowerCase() : basename;
+  };
+  const nodeNames = windows ? ["node", "node.exe"] : ["node"];
+  if (!nodeNames.includes(name(expected[0]!)) || !nodeNames.includes(name(observed[0]!))) return false;
+  const executablePath = (value: string) => windows ? /[\\/]/u.test(value) : value.includes("/");
+  if (executablePath(expected[0]!) && (!executablePath(observed[0]!) ||
+      missionPathIdentity(expected[0]!, directory, windows) !== missionPathIdentity(observed[0]!, directory, windows))) return false;
   const script = expected[1]!;
   if (!/\.(?:cjs|mjs|js)$/iu.test(script) || !/\.(?:cjs|mjs|js)$/iu.test(observed[1]!)) return false;
-  const windows = missionWindowsPath(directory) || [...expected, ...observed].some(missionWindowsPath);
   if (missionPathIdentity(script, directory, windows) !== missionPathIdentity(observed[1]!, directory, windows)) return false;
   for (let index = 2; index < expected.length; index += 1) {
     const left = expected[index]!, right = observed[index]!;

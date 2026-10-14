@@ -317,7 +317,8 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
 });
 
 for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery",
-  "older-after-failure", "older-after-running", "direct-before-admission", "direct-after-admission", "cancel-during-recovery", "complete-during-recovery"] as const)
+  "older-after-failure", "older-after-running", "newer-unseen-conflict", "newer-unseen-input-conflict", "newer-unseen-reversed-input-conflict", "newer-unseen-status-conflict", "delegated-after-completion",
+  "direct-before-admission", "direct-after-admission", "cancel-during-recovery", "complete-during-recovery"] as const)
 test(`saved native operation calls recover through Mission APIs without replay or acceptance: ${recoveryMode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-native-operation-recovery-"));
@@ -392,6 +393,26 @@ test(`saved native operation calls recover through Mission APIs without replay o
     assert.deepEqual(beforeRecovery.execution!.observations, [], "legacy state lacks the exact-match observations");
     assert.equal(missionExecutionStatus(beforeRecovery), "not-started");
 
+    if (recoveryMode === "delegated-after-completion") {
+      // Disposable legacy state models a completed reusable correction admission;
+      // its original native calls precede settlement, but a later turn shares the actor.
+      const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE), run = await runtime.required(rootID);
+      run.units[0]!.reviewerCorrection = { author: worker, reviewIdentity: "fixture-review", writeUnion: [],
+        admittedAt: run.createdAt, promptID: "fixture-prompt" };
+      await writeFile(runtime.statePath(rootID), JSON.stringify(run));
+      await missions.update(rootID, current => {
+        current.progress.at(-1)!.at = new Date(start + 12_000).toISOString();
+      });
+      history[worker]!.push({ info: { role: "assistant", sessionID: worker }, parts: [{ type: "tool", tool: "bash",
+        callID: "later-self-recheck", state: { status: "completed", input: { command: nativeApply, workdir: root },
+          metadata: { exit: 1, status: "completed" }, time: { start: start + 20_000, end: start + 20_001 } } }] });
+      const laterInputConflict = structuredClone(history[worker]![1]!);
+      const laterPart = (laterInputConflict as { parts: { state: { input: { command: string }; time: { start: number; end: number } } }[] }).parts[0]!;
+      laterPart.state.input.command += " later-turn";
+      laterPart.state.time = { start: start + 20_000, end: start + 20_001 };
+      history[worker]!.push(laterInputConflict);
+    }
+
     hooks = await create();
     if (recoveryMode === "cancel-during-recovery" || recoveryMode === "complete-during-recovery") {
       duringRecoveryRead = async () => {
@@ -424,10 +445,31 @@ test(`saved native operation calls recover through Mission APIs without replay o
         ...(recoveryMode === "older-after-failure" ? { completedAt: new Date(start + 21_000).toISOString(),
           status: "completed" as const, exit: 1, outcome: "execution-failed" as const } : { status: "running" as const }) }); });
     }
+    if (recoveryMode.startsWith("newer-unseen-")) {
+      const later = structuredClone(history[worker]![1]!) as { parts: { callID: string; state: { status: string; input: { command: string }; metadata: { exit: number; status: string }; time: { start: number; end: number } } }[] };
+      later.parts[0]!.callID = recoveryMode;
+      later.parts[0]!.state.time = { start: start + 20_000, end: start + 20_100 };
+      if (recoveryMode === "newer-unseen-status-conflict") {
+        later.parts[0]!.state.status = "error";
+        later.parts[0]!.state.metadata.status = "running";
+        history[worker]!.push(later);
+      } else {
+        const failed = structuredClone(later); failed.parts[0]!.state.metadata.exit = 1;
+        if (recoveryMode.includes("input-conflict")) failed.parts[0]!.state.input.command += " unexpected";
+        history[worker]!.push(...(recoveryMode === "newer-unseen-reversed-input-conflict" ? [failed, later] : [later, failed]));
+      }
+    }
     const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
     if (recoveryMode === "direct-before-admission") {
       assert.equal(submitted.acceptance_summary.operation.status, "not-started", "boundary-page calls before direct admission belong to earlier work");
       assert.deepEqual((await missions.required(rootID)).execution!.observations, []);
+      return;
+    }
+    if (recoveryMode.startsWith("newer-unseen-")) {
+      assert.equal(submitted.acceptance_summary.operation.status, "not-started", "a newer ambiguous call must not fall back to old success");
+      assert.equal(submitted.acceptance_summary.operation.terminal_complete, false);
+      const conflict = submitted.acceptance_summary.operation.observations.find((item: { callID: string }) => item.callID === recoveryMode);
+      assert.equal(conflict?.conflicting, true, "retain previously unseen contradictory native records");
       return;
     }
     if (["missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery"].includes(recoveryMode)) {
@@ -466,6 +508,11 @@ test(`saved native operation calls recover through Mission APIs without replay o
     assert.deepEqual(repeated.budget, recovered.budget, "read-only recovery consumes no unit or additional budget");
     assert.equal((await missions.required(rootID)).execution!.observations.length, 2, "native call IDs prevent duplicate records");
     assert.notEqual(recovered.phase, "completed", "operation recovery is not formal validation, Review or acceptance");
+    if (recoveryMode === "delegated-after-completion") {
+      assert.equal(recovered.acceptance_summary.operation.status, "executed");
+      assert.equal(recovered.acceptance_summary.operation.observations.some((item: { callID: string }) => item.callID === "later-self-recheck"), false);
+      return;
+    }
     if (direct) return;
     history[worker]!.push(structuredClone(history[worker]![1]!));
     assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed", "identical terminal records are not contradictory");
@@ -499,8 +546,8 @@ test(`saved native operation calls recover through Mission APIs without replay o
     const conflictingAt = failedAt + 10;
     history[worker]!.push(nativeRecord("call_conflict", "error", undefined, conflictingAt, "running"));
     const conflicting = await tool("operator_status", rootID);
-    assert.equal(conflicting.acceptance_summary.operation.status, "execution-failed", "contradictory native status cannot promote a failed result");
-    assert.equal(conflicting.acceptance_summary.operation.observations.some((item: { callID: string }) => item.callID === "call_conflict"), false);
+    assert.equal(conflicting.acceptance_summary.operation.status, "not-started", "the newer contradictory native call cannot fall back to an earlier result");
+    assert.equal(conflicting.acceptance_summary.operation.observations.find((item: { callID: string }) => item.callID === "call_conflict")?.conflicting, true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

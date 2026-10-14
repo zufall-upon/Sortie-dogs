@@ -2351,8 +2351,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // A reusable correction author belongs to this admission, not every earlier turn
         // since the conversation was created. Ordinary Workers have a new native session.
         const admittedAt = Date.parse(unit.reviewerCorrection?.admittedAt ?? run.createdAt);
+        const settled = unit.reviewerCorrection && ["succeeded", "failed", "cancelled"].includes(unit.status)
+          ? [...mission.progress].reverse().find(item => item.unit === `${run.runID}/${unit.unit.id}` &&
+            ["succeeded", "failed", "cancelled"].includes(item.status) && Number.isFinite(Date.parse(item.at)))?.at
+          : undefined;
+        // The correction session is reusable after settlement; its later turns are
+        // not this unit's operation. Reuse the existing recorded settlement boundary.
+        if (unit.reviewerCorrection && unit.status !== "running" && !settled) continue;
         if (Number.isFinite(createdAt) && Number.isFinite(admittedAt)) {
-          addOwner(child, { notBefore: new Date(Math.max(createdAt, admittedAt)).toISOString() });
+          addOwner(child, { notBefore: new Date(Math.max(createdAt, admittedAt)).toISOString(),
+            ...(settled ? { notAfter: settled } : {}) });
         }
       }
       if (owners.size === 0) return mission;
@@ -2379,6 +2387,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const state = part.state as Record<string, unknown>;
             const nativeInput = state.input as Record<string, unknown>;
             if (typeof nativeInput.command !== "string") continue;
+            const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
+            const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
+              : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
+            const startedAt = date(time.start ?? time.ran);
+            if (!startedAt) continue;
+            // A boundary page may include tools from a later reusable-session turn.
+            // Ignore them before comparing call input or terminal state as well.
+            if (!windows.some(window => Date.parse(startedAt) >= Date.parse(window.notBefore) &&
+                (!window.notAfter || Date.parse(startedAt) <= Date.parse(window.notAfter)))) continue;
             const nativeDirectory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
             const directory = missionOperationDirectoryMatch(nativeDirectory, execution.directory) ? execution.directory : nativeDirectory;
             const key = part.callID;
@@ -2386,8 +2403,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const priorInput = nativeInputs.get(key);
             if (priorInput && (priorInput.command !== nativeInput.command || priorInput.directory !== directory)) {
               conflicts.add(key);
-              calls.delete(key);
-              continue;
             }
             nativeInputs.set(key, nativeInputIdentity);
             if (directory !== execution.directory) continue;
@@ -2398,18 +2413,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const resultStatus = String(metadata.status ?? "").toLowerCase();
             if ((nativeStatus === "error" && resultStatus === "running") || (nativeStatus === "running" && resultStatus === "error")) {
               conflicts.add(key);
-              calls.delete(key);
-              continue;
             }
-            const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
-            const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
-              : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
-            const startedAt = date(time.start ?? time.ran);
-            if (!startedAt) continue;
-            // The paginated reader retains a whole boundary message. Only native tools
-            // within a current-unit admission window belong to this run.
-            if (!windows.some(window => Date.parse(startedAt) >= Date.parse(window.notBefore) &&
-                (!window.notAfter || Date.parse(startedAt) <= Date.parse(window.notAfter)))) continue;
             const running = nativeStatus === "running" || resultStatus === "running";
             const failed = nativeStatus === "error" || resultStatus === "error";
             if (!["completed", "error", "running"].includes(nativeStatus)) continue;
@@ -2419,7 +2423,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
             const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
-            const outcome = running || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
+            const outcome = conflicts.has(key) || running || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
             // A completed tool envelope without an exit/result does not prove a successful
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
@@ -2433,7 +2437,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   prior.observation.exit !== undefined && exit !== undefined && prior.observation.exit !== exit ||
                   prior.observation.outcome !== undefined && observation.outcome !== undefined && JSON.stringify(prior.observation) !== JSON.stringify(observation)))) {
               conflicts.add(key);
-            } else if (!conflicts.has(key) && (prior?.observation.outcome === undefined || observation.outcome !== undefined)) {
+            } else if (!prior || !conflicts.has(key) && (prior.observation.outcome === undefined || observation.outcome !== undefined)) {
               calls.set(key, { command, directory, observation });
             }
           }

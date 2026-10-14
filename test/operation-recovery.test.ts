@@ -59,6 +59,23 @@ test("saved v0.13.20 native commands match only the same operation across PowerS
     "URL and option values retain their literal identity, not Windows filesystem case rules");
 });
 
+test("Node operation spelling retains pinned executable and platform identity", () => {
+  const posix = "/trusted/work";
+  assert.equal(missionOperationCommandMatch("/other/node /trusted/work/apply.mjs plan.json",
+    ["/trusted/node apply.mjs plan.json"], posix), undefined, "a different pinned executable is not an observed run of the declared binary");
+  assert.equal(missionOperationCommandMatch("node.exe /trusted/work/apply.mjs plan.json",
+    ["node apply.mjs plan.json"], posix), undefined, "node.exe is not a POSIX node alias");
+  assert.equal(missionOperationCommandMatch("node /trusted/work/apply.mjs plan.json",
+    ["/trusted/node apply.mjs plan.json"], posix), undefined, "a bare native binary does not prove the declared pinned executable");
+  assert.equal(missionOperationCommandMatch("/trusted/node /trusted/work/apply.mjs plan.json",
+    ["node apply.mjs plan.json"], posix), "node apply.mjs plan.json", "bare node still accepts its native resolved spelling");
+  const windows = "M:\\Work\\Repo";
+  assert.equal(missionOperationCommandMatch("& 'm:/Tools/Node.exe' 'm:/Work/Repo/apply.mjs' plan.json",
+    ["'M:/Tools/node.exe' apply.mjs plan.json"], windows), "'M:/Tools/node.exe' apply.mjs plan.json");
+  assert.equal(missionOperationCommandMatch("& 'm:/Other/Node.exe' 'm:/Work/Repo/apply.mjs' plan.json",
+    ["'M:/Tools/node.exe' apply.mjs plan.json"], windows), undefined);
+});
+
 test("native mission directory scope survives creation, archive, protected validation and review", async () => fixture(async root => {
   const git = (...args: string[]) => exec("git", args, { cwd: root });
   await git("init", "-q");
