@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -168,6 +168,96 @@ test("early root response drains the existing Task then continues the same Missi
     assert.equal(transports[1].turnStarts, 1);
     assert.equal(events.filter(event => event.method === "sortie/continuation").length, 1);
     assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Fix result");
+    const missionDirectory = join(directory, V010_RUNTIME_PROFILE.stateDirectory, "missions");
+    const captures = (await readdir(missionDirectory)).filter(name => name.endsWith(".request.json"));
+    assert.equal(captures.length, 1);
+    assert.equal(JSON.parse(await readFile(join(missionDirectory, captures[0]), "utf8")).text, "Original instruction: fix result and validate",
+      "host continuation is not captured as a new user request");
+  } finally { release(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const initialExit of [0, 7]) test(`owned Worker continues its admitted Task after an early native response and delayed command exit ${initialExit}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-owned-worker-continuation-"));
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  let entered!: () => void, release!: () => void, ended!: () => void;
+  const entry = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const terminal = new Promise<void>(resolve => { ended = resolve; });
+  const transports: ScriptedTransport[] = [], events: Json[] = [];
+  let delayed = false;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await exec("git", ["config", "user.name", "Lifecycle fixture"], { cwd: directory });
+    await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
+    await writeFile(join(directory, "result.txt"), initialExit === 0 ? "fixed" : "broken");
+    await writeFile(join(directory, "check.mjs"), "import{readFileSync}from'node:fs';console.log('retained command result');process.exit(readFileSync('result.txt','utf8')==='fixed'?0:7)");
+    adapter = await CodexMissionSession.create({ projectRoot: directory,
+      onEvent: event => { events.push(event); if (event.method === "turn/completed" && event.threadId === "worker") ended(); },
+      executeCommand: async request => {
+        if (!delayed) { delayed = true; entered(); await pending; }
+        try { return { status: "completed", exitCode: 0, ...await exec(request.command[0], request.command.slice(1), { cwd: request.cwd }) }; }
+        catch (error: any) { return { status: "completed", exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
+      }, transportFactory: () => {
+        const root = transports.length === 0;
+        const native = new ScriptedTransport(root ? "root" : "worker", async host => {
+          try {
+            if (root) {
+              const started = await host.call("sortie_v010_start_mission", { requirements: ["Fix result and validate"], unit: {
+                title: "Fix result", objective: "Fix result and validate", read: ["check.mjs", "result.txt"], write: ["result.txt"], validation: ["node check.mjs"] } });
+              const task = await host.call("task", started.task);
+              assert.equal(task.metadata.status, "completed");
+              const status = await host.call("sortie_v010_operator_status", {});
+              assert.equal(status.budget.consumed_units, 1);
+              assert.equal(status.budget.reserved_units, 0);
+              await host.call("sortie_v010_review_mission", { risk_tags: [] });
+              assert.equal((await host.call("sortie_v010_complete_mission", {})).status, "succeeded");
+              return;
+            }
+            if (host.turnStarts === 1) {
+              const command = host.call("bash", { command: "node check.mjs" });
+              await entry;
+              host.finishTurn("completed", "Waiting for the existing command");
+              assert.equal((await command).metadata.exit, initialExit);
+              return;
+            }
+            assert.equal(host.turnStarts, 2);
+            const text = host.turnRequests[1].input[0].text;
+            assert.match(text, /retained command result/);
+            assert(text.includes(`\\"exit\\":${initialExit}`), "continuation preserves the actual command exit");
+            assert(!text.includes("Original instruction"), "internal continuation does not resend the Task");
+            if (initialExit !== 0) await host.call("write", { filePath: "result.txt", content: "fixed" });
+            assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+            await host.call("bash", { command: 'git add result.txt; git commit -m "Fix retained Worker result"' });
+            return "DONE: Existing Task validated and committed";
+          } catch (error) { failure = error; release(); }
+        });
+        transports.push(native); return native;
+      } });
+    let returned = false;
+    const running = adapter.run("Original instruction: fix result and validate").then(value => { returned = true; return value; });
+    const observed = running.then(value => ({ value }), error => ({ error }));
+    await Promise.race([terminal, observed.then(value => { throw failure ?? ("error" in value ? value.error : new Error("Worker terminal not reached")); })]);
+    assert.equal(returned, false);
+    assert.equal(transports[1].turnStarts, 1, "no inference while the command is pending");
+    const before = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    release();
+    const result = await running;
+    if (failure) throw failure;
+    const after = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(after.id, before.id);
+    assert.equal(after.codexOwner?.generation, before.codexOwner?.generation);
+    assert.equal(after.attempts?.length, 1, "same Task reservation, no replacement author");
+    assert.equal(after.attempts?.[0]?.childSessionID, "worker");
+    assert.equal(result.accepted, true);
+    assert.equal(result.lifecycle.owned_tasks_settled, true);
+    assert.equal(transports.length, 2);
+    assert.equal(transports[0].turnStarts, 1);
+    assert.equal(transports[1].turnStarts, 2);
+    for (const setting of ["model", "effort", "serviceTier"]) assert.equal(transports[1].turnRequests[1][setting], transports[1].turnRequests[0][setting],
+      `continuation retains the admitted Worker's ${setting}`);
+    assert.equal(events.filter(event => event.method === "sortie/continuation").length, 1);
+    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "fixed");
+    assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Fix retained Worker result");
   } finally { release(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

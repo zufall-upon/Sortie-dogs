@@ -477,17 +477,21 @@ export class CodexMissionSession {
         "The previous native response ended while existing host tools were still running. Those exact calls have now returned:\n" +
         JSON.stringify(result.deferredToolResults) +
         "\nContinue this same Mission from these results through the remaining validation, delivery, review and root acceptance. " +
-        "Do not resend the original request or redispatch the completed Tasks. Preserve failures, ownership and cumulative budget; use existing Mission status for the next action.");
+        "Do not resend the original request or redispatch the completed Tasks. Preserve failures, ownership and cumulative budget; use existing Mission status for the next action.",
+        undefined, true);
     }
     return result;
   }
 
-  private async promptTurn(session: NativeSession, prompt: string, onDispatch?: (messageID: string) => Promise<void>): Promise<CodexTurnResult> {
+  private async promptTurn(session: NativeSession, prompt: string, onDispatch?: (messageID: string) => Promise<void>, continuation = false): Promise<CodexTurnResult> {
     const startedAt = Date.now();
     const messageID = randomUUID();
     const message = { id: messageID, agent: session.agent, model: { ...session.model } };
-    const parts = [{ type: "text", text: prompt }];
-    await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
+    const parts = [{ type: "text", text: prompt, ...(continuation ? { synthetic: true } : {}) }];
+    // Only this host's drained results can continue an already-admitted execution.
+    // Reclaiming that Task with the result prompt rejects Workers' exact handoff;
+    // treating it as a real root request also grants spurious user-turn authority.
+    if (!continuation) await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
     // Shared Task routing may select a model; explicit adapter overrides still govern every native turn.
     if (message.model.providerID !== "openai") throw new Error("Codex Mission cannot use a non-OpenAI model route.");
     message.model = this.modelRoute(session.agent, { ...message.model,

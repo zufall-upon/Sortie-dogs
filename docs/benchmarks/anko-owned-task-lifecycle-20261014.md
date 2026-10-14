@@ -118,3 +118,31 @@ v0.13.11とのCLI差、provider条件不完全一致は旧比較文書のまま�
 ```text
 node _testenv/anko-codex-replay-20261014/runner.mjs verify --version 0.13.21 --candidate-receipt _testenv/codex-owned-task-candidate/candidate-receipt.json
 ```
+
+## 独立Review後の同Task修正
+
+実armの終了後、Sortie修正の独立ReviewでMediumを1件再現した。
+既存Workerがcommand結果待ち中にnative応答を終了すると、遅延commandは正常に復帰するが、
+内部続行文を初回Task admissionへ渡すため`operator-worker-task-reference-mismatch`となり、全hostが停止していた。
+Rootの保存event回帰と今回の実arm（continuation 0件）だけでは、この子Task経路を検証できていなかった。
+
+host起因の結果続行だけを初回Task再claim／新しい実user要求と分離した。
+同session、既存admission、モデル／effort／service tier、Mission owner、消費済みbudgetを維持し、
+既存のclose・失敗・transport loss経路は変更しない。新しいpublic optionや権限gateは追加しない。
+公開Mission harnessにcommand exit0／exit7のWorker回帰を追加し、失敗exitは同Taskへそのまま渡し、
+同Taskの修正・正式check・commit・Root Review／受理まで確認する。
+修正前の限定checkは37 PASS／2 FAIL、修正後の同checkは39 PASS（ともに`test/codex-mission-session.test.ts`）。
+
+修正後の統合候補では以下を順次実施し、native exitとsource snapshotは既存check記録に残す。
+
+```text
+npm run test:targeted -- test/codex-app-server.test.ts test/codex-mission-session.test.ts test/codex-run-mission.test.ts test/anko-benchmark-runner.test.mjs
+npm run test:full
+npm run test:windows
+node _testenv/anko-codex-replay-20261014/runner.mjs verify --version 0.13.21 --candidate-receipt _testenv/codex-owned-task-candidate/candidate-receipt.json
+```
+
+この追加修正は上記実armの**後**であり、固定`484f8ea3`／tgz hashを差し替えない。
+実armの結果を修正後sourceのlive実証へ読み替えず、追加Anko／23件評価／release／publish／global applyは行わない。
+独立調査から同Reviewerによる修正・著者self-recheckへ移行したため、修正後の報告は独立PASSではない。
+次操作は統合候補の著者self-recheckとRootによる要求比較・PR配送。
