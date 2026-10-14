@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
-import { normalizeCommand } from "../plugin/gate.js";
+import { normalizeCommand, shellCommandBase, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
@@ -83,8 +83,16 @@ export interface MissionTerminalRescue {
 export interface MissionExecution {
   commands: string[];
   directory: string;
+  /** History-service availability is not a process outcome or an execution permission. */
+  recovery?: { status: "unavailable"; errors: { sessionID: string; reason: string }[] };
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
+    /** Actual native execution start, distinct from a live hook's admission clock. */
+    nativeStartedAt?: string;
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
+    /** Contradictory native records retained for this same call, not a process outcome. */
+    conflicting?: boolean;
+    /** Latest actual start reported for a conflicting call; original startedAt is retained. */
+    latestConflictingStartedAt?: string;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
 export interface MissionLaunchConditions {
@@ -293,21 +301,119 @@ export function missionSelfRecheckReport(text: string, source: string, hostBound
   } catch { return undefined; }
 }
 
-export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
+export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "recovery-unavailable" | "recovery-blocked" | "running" | "execution-failed" | "executed" {
   if (mission.kind !== "operation") return "not-required";
   const execution = mission.execution;
-  if (!execution || execution.commands.length === 0 || execution.observations.length === 0) return "not-started";
-  const latest = execution.commands.map(command => [...execution.observations].reverse().find(item => item.command === command && item.directory === execution.directory));
+  if (!execution || execution.commands.length === 0) return "not-started";
+  if (execution.observations.length === 0) return execution.recovery ? "recovery-unavailable" : "not-started";
+  // Recovery may discover an older call after a newer live/failed observation was saved.
+  const orderingTime = (item: MissionExecution["observations"][number]) => Math.max(Date.parse(item.nativeStartedAt ?? item.startedAt),
+    Date.parse(item.latestConflictingStartedAt ?? item.nativeStartedAt ?? item.startedAt));
+  const ordered = [...execution.observations].sort((left, right) => orderingTime(left) - orderingTime(right)).reverse();
+  const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
+  if (latest.some(item => item?.conflicting || item && ["completed", "error"].includes(item.status ?? "") &&
+      !["executed", "execution-failed", "not-started"].includes(item.outcome ?? ""))) return "recovery-blocked";
   if (latest.some(item => item && !item.completedAt)) return "running";
+  if (latest.some(item => !item) && execution.recovery) return "recovery-unavailable";
   if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";
+}
+
+function stripMissionPowerShellPrefix(command: string): string {
+  return command.trim().replace(/^\$ErrorActionPreference\s*=\s*(['"])Stop\1\s*;\s*/iu, "");
+}
+
+function missionCommandTokens(command: string): string[] | undefined {
+  const tokens = shellCommandWords(stripMissionPowerShellPrefix(command));
+  if (tokens[0] === "&") tokens.shift();
+  return tokens.length ? tokens : undefined;
+}
+
+function missionWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith("\\\\");
+}
+
+function missionPathIdentity(value: string, directory: string, windows: boolean): string {
+  if (!windows) return resolve(directory, value);
+  return win32.normalize(win32.resolve(directory, value)).toLowerCase();
+}
+
+/** Native Windows cwd case/separator spelling is not a different operation directory. */
+export function missionOperationDirectoryMatch(actual: string, declared: string): boolean {
+  const windows = missionWindowsPath(actual) || missionWindowsPath(declared);
+  return missionPathIdentity(actual, declared, windows) === missionPathIdentity(declared, declared, windows);
+}
+
+function sameNodeOperation(declared: string, actual: string, directory: string): boolean {
+  const expected = missionCommandTokens(declared), observed = missionCommandTokens(actual);
+  if (!expected || !observed || expected.length !== observed.length || expected.length < 2) return false;
+  const windows = missionWindowsPath(directory);
+  const name = (value: string) => {
+    const basename = value.split(windows ? /[\\/]/u : /\//u).at(-1) ?? "";
+    return windows ? basename.toLowerCase() : basename;
+  };
+  const nodeNames = windows ? ["node", "node.exe"] : ["node"];
+  if (!nodeNames.includes(name(expected[0]!)) || !nodeNames.includes(name(observed[0]!))) return false;
+  const executablePath = (value: string) => windows ? /[\\/]/u.test(value) : value.includes("/");
+  if (executablePath(expected[0]!) && (!executablePath(observed[0]!) ||
+      missionPathIdentity(expected[0]!, directory, windows) !== missionPathIdentity(observed[0]!, directory, windows))) return false;
+  const script = expected[1]!;
+  if (!/\.(?:cjs|mjs|js)$/iu.test(script) || !/\.(?:cjs|mjs|js)$/iu.test(observed[1]!)) return false;
+  if (missionPathIdentity(script, directory, windows) !== missionPathIdentity(observed[1]!, directory, windows)) return false;
+  for (let index = 2; index < expected.length; index += 1) {
+    const left = expected[index]!, right = observed[index]!;
+    if (left === right) continue;
+    // Options and URI values are script inputs, not filesystem paths with Windows case rules.
+    const literal = (value: string) => value.startsWith("-") || !missionWindowsPath(value) && /^[A-Za-z][A-Za-z\d+.-]*:/u.test(value);
+    if (literal(left) || literal(right)) return false;
+    // Only the supported absolute-path substitution can change a positional argument.
+    // Two different relative opaque values must not collapse via path normalization.
+    const absolute = (value: string) => missionWindowsPath(value) || value.startsWith("/");
+    const pathArgument = absolute(left) !== absolute(right) || windows && missionWindowsPath(left) && missionWindowsPath(right);
+    if (pathArgument
+      ? missionPathIdentity(left, directory, windows) !== missionPathIdentity(right, directory, windows)
+      : left !== right) return false;
+  }
+  return true;
+}
+
+/** Match only the same declared operation, allowing its native PowerShell envelope and
+ * an absolute Node/script/path spelling resolved from the unchanged operation cwd. */
+export function missionOperationCommandMatch(command: string, declared: readonly string[], directory: string): string | undefined {
+  const normalized = normalizeCommand(stripMissionPowerShellPrefix(command));
+  const exact = declared.filter(item => normalizeCommand(stripMissionPowerShellPrefix(item)) === normalized);
+  if (exact.length === 1) return normalizeCommand(exact[0]!);
+  if (exact.length > 1) return undefined;
+  const equivalent = declared.filter(item => sameNodeOperation(item, command, directory));
+  return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
+}
+
+/** Apply the existing no-decoration operation check to the same accepted native spelling. */
+export function missionOperationCommandDecorated(command: string, declared: readonly string[], directory: string): boolean {
+  if (missionOperationCommandMatch(command, declared, directory) !== undefined) return false;
+  const stripped = stripMissionPowerShellPrefix(command), actual = normalizeCommand(stripped);
+  if (declared.some(item => {
+    const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
+    return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
+  })) return true;
+  const base = shellCommandBase(stripped, stripped !== command.trim() || stripped.startsWith("&") ? "powershell" : "posix");
+  return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
 }
 
 /** A terminal failure is a collected result, not a successful operation. Required success
  * remains in the declared formal checks and Operator's original-request comparison. */
 export function missionExecutionComplete(mission: OperatorMission): boolean {
   return ["not-required", "executed", "execution-failed"].includes(missionExecutionStatus(mission));
+}
+
+/** Missing history cannot justify replay; adequate collected results remain usable. */
+export function missionExecutionRecoveryAction(mission: OperatorMission): string | undefined {
+  if (missionExecutionStatus(mission) === "recovery-blocked") return "An admitted operation has missing or contradictory terminal evidence. Preserve existing observations; inspect the same native call's shell/progress and recover its actual result. " +
+    "Do not replay or rerun the operation. Report the actual recovery blocker if its result remains unknown.";
+  if (!mission.execution?.recovery || missionExecutionComplete(mission)) return undefined;
+  return "Native operation history could not be read. Preserve existing observations; inspect the admitted session's existing shell/progress or restore the history reader. " +
+    "Do not replay or rerun the operation. Report the actual recovery blocker if history remains unavailable.";
 }
 
 /** Projection of existing observations only; never another check or inferred success. */
@@ -938,6 +1044,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
             : "Correction ready; reuse the native author for explicit self-recheck or select an independent Reviewer with review_mission when useful. Remaining authorized implementation may proceed with plan_units without acceptance. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
+      : missionExecutionRecoveryAction(mission) !== undefined ? missionExecutionRecoveryAction(mission)!
       : run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")
         ? "Correction validation or native execution failed. Reuse its context with repair_review, select another available Reviewer, or plan_units for Worker/direct correction. Retain findings, affected checks, requested delivery and cumulative spend. Failure is never acceptance."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)

@@ -9,7 +9,7 @@ import test from "node:test";
 import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
-import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
+import { missionOperationCommandMatch, OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime, operatorGitPathAuthorized } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 
@@ -33,6 +33,48 @@ async function fixture(run: (root: string) => Promise<void>) {
   const root = await mkdtemp(resolve("_testenv/operation-recovery-"));
   try { await run(root); } finally { await rm(root, { recursive: true, force: true }); }
 }
+
+test("saved v0.13.20 native commands match only the same operation across PowerShell and absolute Node paths", () => {
+  const directory = "M:\\_work\\_Sortie-dogs-artifacts\\worktrees\\global-apply-v0.13.15-20261012";
+  const pull = "git pull --ff-only origin main";
+  const apply = "node '_testenv/global-apply-v0.13.16/apply.mjs' '../work-quantity-progress-20261013/_testenv/global-apply-v0.13.20/plan.json'";
+  const nativePull = "$ErrorActionPreference='Stop'; git pull --ff-only origin main";
+  const nativeApply = "& 'M:/@HyperV/node-v22.14.0-win-x64/node.exe' " +
+    "'M:/_work/_Sortie-dogs-artifacts/worktrees/global-apply-v0.13.15-20261012/_testenv/global-apply-v0.13.16/apply.mjs' " +
+    "'M:/_work/_Sortie-dogs-artifacts/worktrees/work-quantity-progress-20261013/_testenv/global-apply-v0.13.20/plan.json'";
+  assert.equal(missionOperationCommandMatch(nativePull, [pull, apply], directory), pull);
+  assert.equal(missionOperationCommandMatch(nativeApply, [pull, apply], directory), apply);
+  assert.equal(missionOperationCommandMatch(nativeApply.replace("plan.json", "other-plan.json"), [pull, apply], directory), undefined,
+    "a same-named helper with a different input is not the declared operation");
+  assert.equal(missionOperationCommandMatch(`${nativePull}; Write-Output done`, [pull], directory), undefined,
+    "an appended native command remains unmatched");
+  assert.equal(missionOperationCommandMatch(nativeApply, [pull, apply, apply], directory), undefined,
+    "conflicting declarations remain ambiguous");
+  for (const [declared, actual] of [
+    ["node apply.mjs https://example.test/Plan", "node apply.mjs https://example.test/plan"],
+    ["node apply.mjs --mode=A/B", "node apply.mjs --mode=a/b"],
+    ["node apply.mjs tenant/a/../b", "node apply.mjs tenant/b"],
+    ["node apply.mjs /Route", "node apply.mjs /route"],
+  ]) assert.equal(missionOperationCommandMatch(actual!, [declared!], directory), undefined,
+    "URL and option values retain their literal identity, not Windows filesystem case rules");
+});
+
+test("Node operation spelling retains pinned executable and platform identity", () => {
+  const posix = "/trusted/work";
+  assert.equal(missionOperationCommandMatch("/other/node /trusted/work/apply.mjs plan.json",
+    ["/trusted/node apply.mjs plan.json"], posix), undefined, "a different pinned executable is not an observed run of the declared binary");
+  assert.equal(missionOperationCommandMatch("node.exe /trusted/work/apply.mjs plan.json",
+    ["node apply.mjs plan.json"], posix), undefined, "node.exe is not a POSIX node alias");
+  assert.equal(missionOperationCommandMatch("node /trusted/work/apply.mjs plan.json",
+    ["/trusted/node apply.mjs plan.json"], posix), undefined, "a bare native binary does not prove the declared pinned executable");
+  assert.equal(missionOperationCommandMatch("/trusted/node /trusted/work/apply.mjs plan.json",
+    ["node apply.mjs plan.json"], posix), "node apply.mjs plan.json", "bare node still accepts its native resolved spelling");
+  const windows = "M:\\Work\\Repo";
+  assert.equal(missionOperationCommandMatch("& 'm:/Tools/Node.exe' 'm:/Work/Repo/apply.mjs' plan.json",
+    ["'M:/Tools/node.exe' apply.mjs plan.json"], windows), "'M:/Tools/node.exe' apply.mjs plan.json");
+  assert.equal(missionOperationCommandMatch("& 'm:/Other/Node.exe' 'm:/Work/Repo/apply.mjs' plan.json",
+    ["'M:/Tools/node.exe' apply.mjs plan.json"], windows), undefined);
+});
 
 test("native mission directory scope survives creation, archive, protected validation and review", async () => fixture(async root => {
   const git = (...args: string[]) => exec("git", args, { cwd: root });

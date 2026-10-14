@@ -14,10 +14,12 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
-  missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
+  missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
+  missionOperationCommandDecorated, missionOperationDirectoryMatch,
+  missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
 import { cachedWorkProgress, forgetWorkSession, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
@@ -254,9 +256,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         notBefore === undefined ? undefined : input.directory,
         direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
     }
-    async function reviewMessages(id: string, notBefore?: string): Promise<readonly Record<string, unknown>[]> {
-      const result = payload(await session(typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages",
-        { path: { id }, query: { directory: input.directory, ...(notBefore ? { notBefore } : {}) } }));
+    async function reviewMessages(id: string, notBefore?: string, requireAvailable = false): Promise<readonly Record<string, unknown>[]> {
+      const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
+      if (requireAvailable && typeof nativeSession?.[method] !== "function") throw new Error("native-operation-history-api-unavailable");
+      const response = await session(method, { path: { id }, query: { directory: input.directory, ...(notBefore ? { notBefore } : {}) } });
+      const result = payload(response);
+      if (requireAvailable && (record(response) && response.error || !Array.isArray(result))) throw new Error("native-operation-history-response-unavailable");
       return Array.isArray(result) ? result.filter(record) : [];
     }
     async function observedSessionModel(id: string): Promise<{ model?: string; variant?: string; outcome: "completed" | "failed" | "unknown" }> {
@@ -1497,6 +1502,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (mission) {
           const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
+          mission = await reconcileMissionExecution(root!, mission, run);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
            const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
@@ -1513,8 +1519,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                ? `Continue implementation/correction and declared checks HERE, then ${finishDirectUnit}. No Worker handoff needed.`
                : "Continue this SAME active Task: implement/correct, run declared checks and finish requested delivery. Then return to your caller; parent owns Review and Mission acceptance. No Coordinator dispatch or repeated status reads are needed.";
              delete packet.task;
-             delete packet.coordinator_dispatch;
-           }
+              delete packet.coordinator_dispatch;
+            }
+            const recoveryAction = missionExecutionRecoveryAction(mission);
+            if (recoveryAction) packet.next_action = recoveryAction;
            if (view === "progress") return serializeOperatorStatus(missionProgress(mission, run, budget, packet));
            return serializeOperatorStatus(view === "full" ? packet : compactMissionEvidence(packet, run, root!));
         }
@@ -1635,9 +1643,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await requireRoot(context.sessionID);
         const state = await operators.required(context.sessionID);
         let mission = await missions.read(context.sessionID);
+        if (mission) mission = await reconcileMissionExecution(context.sessionID, mission, state);
         if (mission?.kind === "operation" && !missionExecutionComplete(mission)) return JSON.stringify({
           status: "not-ready", operation_status: missionExecutionStatus(mission),
-          next_action: "The requested operation has not completed. Preserve its real outcome; auxiliary checks and a bounded review do not complete it. Continue the declared operation or report its blocker.",
+          next_action: missionExecutionRecoveryAction(mission) ?? "The requested operation has not completed. Preserve its real outcome; auxiliary checks and a bounded review do not complete it. Continue the declared operation or report its blocker.",
           packet: missionPacket(mission, state) });
         if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionReview(context.sessionID, mission);
         if (args.run_id !== state.runID || args.acceptance_fingerprint !== state.acceptanceFingerprint) throw new Error("operator-completion-identity-mismatch");
@@ -2318,6 +2327,199 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
       return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
     }
+    async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined): Promise<OperatorMission> {
+      const execution = mission.execution;
+      if (mission.kind !== "operation" || !execution || !run || run.runID !== mission.runID ||
+          ["completed", "cancelled"].includes(mission.phase)) return mission;
+
+      // Only read the native session admitted for this exact run/unit. This is result recovery,
+      // not a scan of unrelated sessions and not a new operation authorization.
+      type OperationWindow = { notBefore: string; notAfter?: string };
+      const owners = new Map<string, OperationWindow[]>();
+      const recoveryErrors: { sessionID: string; reason: string }[] = [];
+      const addOwner = (actor: string, window: OperationWindow) => owners.set(actor, [...(owners.get(actor) ?? []), window]);
+      for (const unit of run.units) {
+        if (unit.directExecution?.actor) {
+          addOwner(unit.directExecution.actor, { notBefore: unit.directExecution.startedAt,
+            ...(unit.directExecution.finishedAt ? { notAfter: unit.directExecution.finishedAt } : {}) });
+          continue;
+        }
+        const child = unit.childSessionID;
+        if (!child || !unit.callID) continue;
+        const attempt = mission.attempts?.find(item => item.runID === run.runID && item.unitID === unit.unit.id &&
+          item.callID === unit.callID && item.childSessionID === child);
+        if (!attempt || attempt.status === "pending") continue;
+        let info: Record<string, unknown>;
+        try {
+          const response = await session("get", { path: { id: child }, query: { directory: input.directory } });
+          const value = payload(response);
+          if (!record(value) || record(response) && response.error) throw new Error("native-operation-session-unavailable");
+          info = value;
+        } catch (error) {
+          recoveryErrors.push({ sessionID: child, reason: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        if (info.id !== undefined && info.id !== child || info.parentID !== (run.operatorSessionID ?? root)) continue;
+        const created = record(info.time) ? info.time.created : undefined;
+        const createdAt = typeof created === "number" && Number.isFinite(created) ? created
+          : typeof created === "string" ? Date.parse(created) : NaN;
+        // A reusable correction author belongs to this admission, not every earlier turn
+        // since the conversation was created. Ordinary Workers have a new native session.
+        const admittedAt = Date.parse(unit.reviewerCorrection?.admittedAt ?? run.createdAt);
+        const settled = unit.reviewerCorrection && ["succeeded", "failed", "cancelled"].includes(unit.status)
+          ? [...mission.progress].reverse().find(item => item.unit === `${run.runID}/${unit.unit.id}` &&
+            ["succeeded", "failed", "cancelled"].includes(item.status) && Number.isFinite(Date.parse(item.at)))?.at
+          : undefined;
+        // The correction session is reusable after settlement; its later turns are
+        // not this unit's operation. Reuse the existing recorded settlement boundary.
+        if (unit.reviewerCorrection && unit.status !== "running" && !settled) continue;
+        if (Number.isFinite(createdAt) && Number.isFinite(admittedAt)) {
+          addOwner(child, { notBefore: new Date(Math.max(createdAt, admittedAt)).toISOString(),
+            ...(settled ? { notAfter: settled } : {}) });
+        }
+      }
+      if (owners.size === 0 && recoveryErrors.length === 0) return mission;
+
+      const recovered: NonNullable<OperatorMission["execution"]>["observations"] = [];
+      const observedInputs: { sessionID: string; callID: string; command?: string; directory: string; startedAt: string }[] = [];
+      const conflictingCalls: { sessionID: string; callID: string; latestConflictingStartedAt: string }[] = [];
+      const laterStart = (saved: string | undefined, observed: string) =>
+        !saved || Date.parse(observed) > Date.parse(saved) ? observed : saved;
+      for (const [sessionID, windows] of owners) {
+        // A direct session has its own native admission time; a delegated session is bounded
+        // by its native creation time when exposed by the existing session API.
+        const notBefore = windows.map(window => window.notBefore).sort()[0];
+        if (!notBefore) continue;
+        let history: readonly Record<string, unknown>[];
+        try { history = await reviewMessages(sessionID, notBefore, true); }
+        catch (error) {
+          recoveryErrors.push({ sessionID, reason: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        const calls = new Map<string, { command: string; directory: string; observation: NonNullable<OperatorMission["execution"]>["observations"][number] }>();
+        const conflicts = new Set<string>();
+        const nativeStarts = new Map<string, string>();
+        const nativeInputs = new Map<string, { command: string; directory: string }>();
+        for (const message of history) {
+          const info = record(message.info) ? message.info : message;
+          if (info.role !== "assistant" || info.sessionID !== sessionID || !Array.isArray(message.parts)) continue;
+          for (const part of message.parts) {
+            if (!record(part) || part.type !== "tool" || !isShellTool(String(part.tool)) ||
+                (part.sessionID !== undefined && part.sessionID !== sessionID) || typeof part.callID !== "string" ||
+                !record(part.state) || !record(part.state.input)) continue;
+            const state = part.state as Record<string, unknown>;
+            const nativeInput = state.input as Record<string, unknown>;
+            if (typeof nativeInput.command !== "string") continue;
+            const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
+            const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
+              : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
+            const startedAt = date(time.start ?? time.ran);
+            if (!startedAt) continue;
+            // A boundary page may include tools from a later reusable-session turn.
+            // Ignore them before comparing call input or terminal state as well.
+            if (!windows.some(window => Date.parse(startedAt) >= Date.parse(window.notBefore) &&
+                (!window.notAfter || Date.parse(startedAt) <= Date.parse(window.notAfter)))) continue;
+            const nativeDirectory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
+            const directory = missionOperationDirectoryMatch(nativeDirectory, execution.directory) ? execution.directory : nativeDirectory;
+            const key = part.callID;
+            nativeStarts.set(key, laterStart(nativeStarts.get(key), startedAt));
+            const nativeInputIdentity = { command: nativeInput.command, directory };
+            const priorInput = nativeInputs.get(key);
+            if (priorInput && (priorInput.command !== nativeInput.command || priorInput.directory !== directory)) {
+              conflicts.add(key);
+            }
+            nativeInputs.set(key, nativeInputIdentity);
+            const command = missionOperationCommandMatch(nativeInput.command, execution.commands, execution.directory);
+            // Compare admitted inputs with persisted same-call observations even when this
+            // record is no longer a matching command/cwd and will not yield a new result.
+            observedInputs.push({ sessionID, callID: key, command, directory, startedAt });
+            if (directory !== execution.directory) continue;
+            if (!command) continue;
+            const metadata = record(state.metadata) ? state.metadata : {};
+            const nativeStatus = String(state.status ?? "").toLowerCase();
+            const resultStatus = String(metadata.status ?? "").toLowerCase();
+            if ((nativeStatus === "error" && resultStatus === "running") || (nativeStatus === "running" && resultStatus === "error")) {
+              conflicts.add(key);
+            }
+            const running = nativeStatus === "running" || resultStatus === "running";
+            const failed = nativeStatus === "error" || resultStatus === "error";
+            if (!["completed", "error", "running"].includes(nativeStatus)) continue;
+            if (!running && !failed && nativeStatus !== "completed") continue;
+            const completedAt = running ? undefined : date(time.end ?? time.completed);
+            const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
+            const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
+            const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
+            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
+            // A completed tool envelope without an exit/result does not prove a successful
+            // process. Keep it unclassified instead of turning missing metadata into success.
+            if (nativeInput.background === true && !running) continue;
+            const observation = { command, directory: execution.directory, callID: key, sessionID, startedAt, nativeStartedAt: startedAt,
+              ...(completedAt ? { completedAt } : {}), ...(exit === undefined ? {} : { exit }), status,
+              ...(typeof metadata.shellID === "string" ? { shellID: metadata.shellID } : {}), ...(outcome ?? {}) };
+            const prior = calls.get(key);
+            if (prior && (prior.command !== command || prior.directory !== directory || prior.observation.startedAt !== startedAt ||
+                prior.observation.completedAt && observation.completedAt && (prior.observation.status !== status ||
+                  prior.observation.completedAt !== observation.completedAt ||
+                  prior.observation.exit !== undefined && exit !== undefined && prior.observation.exit !== exit ||
+                  prior.observation.outcome !== undefined && observation.outcome !== undefined && JSON.stringify(prior.observation) !== JSON.stringify(observation)))) {
+              conflicts.add(key);
+            } else if (!prior || !conflicts.has(key) && (prior.observation.outcome === undefined || observation.outcome !== undefined)) {
+              calls.set(key, { command, directory, observation });
+            }
+          }
+        }
+        for (const [callID, item] of calls) recovered.push({ ...item.observation, ...(conflicts.has(callID)
+          ? { conflicting: true, latestConflictingStartedAt: nativeStarts.get(callID)! } : {}) });
+        for (const callID of conflicts) conflictingCalls.push({ sessionID, callID, latestConflictingStartedAt: nativeStarts.get(callID)! });
+      }
+      if (recovered.length === 0 && conflictingCalls.length === 0 && observedInputs.length === 0 && recoveryErrors.length === 0 && !execution.recovery) return mission;
+
+      return missions.update(root, current => {
+        if (current.runID !== mission.runID || current.kind !== "operation" || !current.execution ||
+            ["completed", "cancelled"].includes(current.phase) ||
+            current.execution.directory !== execution.directory || JSON.stringify(current.execution.commands) !== JSON.stringify(execution.commands)) return;
+        if (recoveryErrors.length) current.execution.recovery = { status: "unavailable", errors: recoveryErrors };
+        else delete current.execution.recovery;
+        for (const nativeInput of observedInputs) {
+          const prior = current.execution.observations.find(item => item.callID === nativeInput.callID && item.sessionID === nativeInput.sessionID);
+          if (prior && (prior.command !== nativeInput.command || prior.directory !== nativeInput.directory)) {
+            prior.conflicting = true;
+            prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.nativeStartedAt, nativeInput.startedAt);
+          }
+        }
+        for (const observation of recovered) {
+          const prior = current.execution.observations.find(item => item.callID === observation.callID && item.sessionID === observation.sessionID);
+          if (!prior) {
+            current.execution.observations.push(observation);
+            continue;
+          }
+          if (prior.command !== observation.command || prior.directory !== observation.directory) continue;
+          if (observation.conflicting || prior.nativeStartedAt !== undefined && prior.nativeStartedAt !== observation.nativeStartedAt ||
+              prior.completedAt && observation.completedAt && (prior.status !== observation.status ||
+              prior.exit !== undefined && observation.exit !== undefined && prior.exit !== observation.exit ||
+              prior.outcome !== undefined && observation.outcome !== undefined && prior.outcome !== observation.outcome)) {
+            prior.conflicting = true;
+          }
+          if (prior.conflicting) prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.nativeStartedAt,
+            observation.latestConflictingStartedAt ?? observation.nativeStartedAt!);
+          prior.nativeStartedAt ??= observation.nativeStartedAt;
+          if (prior.outcome !== undefined) continue;
+          const latestConflictingStartedAt = prior.latestConflictingStartedAt;
+          const nativeStartedAt = prior.nativeStartedAt;
+          delete prior.completedAt; delete prior.exit; delete prior.outcome; delete prior.result;
+          Object.assign(prior, observation, { startedAt: prior.startedAt,
+            ...(nativeStartedAt ? { nativeStartedAt } : {}),
+            ...(latestConflictingStartedAt ? { latestConflictingStartedAt } : {}) });
+        }
+        for (const conflict of conflictingCalls) {
+          const prior = current.execution.observations.find(item => item.callID === conflict.callID && item.sessionID === conflict.sessionID);
+          if (prior) {
+            prior.conflicting = true;
+            prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.nativeStartedAt, conflict.latestConflictingStartedAt);
+          }
+        }
+      });
+    }
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
@@ -2911,13 +3113,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
         const { root } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, async () => {
-          const mission = await missions.required(root);
+          let mission = await missions.required(root);
+          mission = await reconcileMissionExecution(root, mission, await operators.read(root));
           if (args.status === "ready") {
             if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
               return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
-                next_action: missionExecutionStatus(mission) === "running"
+                next_action: missionExecutionRecoveryAction(mission) ?? (missionExecutionStatus(mission) === "running"
                   ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
-                  : "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready." });
+                  : "Continue the requested operation or submit its actual blocker. A successful setup/NO_START check does not authorize ready.") });
             }
             const run = await operators.required(root);
             if (run.phase !== "awaiting-acceptance") throw new Error("mission-units-incomplete");
@@ -2935,7 +3138,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...compactMissionEvidence(missionPacket(updated, submittedRun), submittedRun, root),
             next_action: args.status === "ready"
               ? "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt."
-              : "Return the saved blocker or user-only decision to Operator now. This is incomplete delivery, not acceptance; retain the candidate, failed checks and cumulative spend. Do not repeat unchanged work or dispatch a replacement merely to finalize this result." });
+              : ["Return the saved blocker or user-only decision to Operator now. This is incomplete delivery, not acceptance; retain the candidate, failed checks and cumulative spend. Do not repeat unchanged work or dispatch a replacement merely to finalize this result.",
+                missionExecutionRecoveryAction(updated)].filter(Boolean).join(" ") });
         });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. A collected terminal failure can satisfy a run-once/report request, not a request for successful execution. Returns operation outcome separately from the measured 🐾 Mission receipt; never treat Worker start, CORRECTION_READY or one passing check as completion.",
@@ -3505,17 +3709,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const operationArgs = record(mapped.args) ? mapped.args : {};
           // A decorated launch would spend on the real operation but leave the native mission observation empty.
           // Ask the same Worker to correct its shell input before that expensive side effect.
-          if (writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && mission?.execution &&
+          if (writer && isShellTool(request.tool) && mission?.execution &&
               typeof operationArgs.command === "string" &&
-              resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : ".") === mission.execution.directory) {
-            const actual = normalizeCommand(operationArgs.command);
-            if (operationArgs.background === true && mission.execution.commands.includes(actual)) {
+              missionOperationDirectoryMatch(resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : "."), mission.execution.directory)) {
+            const declaredOperation = missionOperationCommandMatch(operationArgs.command, mission.execution.commands, mission.execution.directory);
+            if (operationArgs.background === true && declaredOperation !== undefined) {
               throw new Error("mission-operation-background: run the declared command in foreground with a suitable timeout. " +
                 "A background shell reports only launch, not process exit; no run was started by this refused call. " +
                 "Correct this same Worker command without a new plan or approval.");
             }
-            const decorated = mission.execution.commands.some(declared => actual.startsWith(declared) &&
-              /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(declared.length)));
+            const decorated = missionOperationCommandDecorated(operationArgs.command, mission.execution.commands, mission.execution.directory);
             if (decorated) throw new Error("mission-operation-command-not-observed: run the declared operation command exactly; " +
               "do not append a pipe, tee, redirection or chained command. Capture its tool output or write a separate result file afterward. " +
               "No new plan or approval is needed; if the run already started, inspect its existing state instead of starting another one.");
@@ -3551,11 +3754,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // Keep the caller-visible/native Task input as the opaque reference. The
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
-          if (writer && ["bash", "shell"].includes(request.tool) && mission?.execution &&
-              typeof args.command === "string" && mission.execution.commands.includes(normalizeCommand(args.command)) &&
-              resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === mission.execution.directory) {
-            const command = normalizeCommand(args.command);
-            await missions.update(root, item => {
+          if (writer && isShellTool(request.tool) && mission?.execution &&
+              typeof args.command === "string" && missionOperationDirectoryMatch(resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."), mission.execution.directory)) {
+            const command = missionOperationCommandMatch(args.command, mission.execution.commands, mission.execution.directory);
+            if (command !== undefined) await missions.update(root, item => {
               if (!item.execution!.observations.some(observation => observation.callID === request.callID)) {
                 item.execution!.observations.push({ command, directory: item.execution!.directory,
                   callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });
@@ -3798,7 +4000,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
-        if (!ownership && ["bash", "shell"].includes(request.tool.toLowerCase())) {
+        if (!ownership && isShellTool(request.tool)) {
           const root = await rootFor(id);
           const mission = root ? await missions.read(root) : undefined;
           if (root && mission?.execution?.observations.some(item => item.callID === request.callID && item.sessionID === id)) {
@@ -3815,7 +4017,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               observation.completedAt = new Date().toISOString();
               observation.status = output.status === "error" || metadata.status === "error" ? "error" : "completed";
               if (Number.isSafeInteger(metadata.exit)) observation.exit = metadata.exit as number;
-              Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status));
+              if (Number.isSafeInteger(metadata.exit)) {
+                Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status));
+              }
             });
           }
         }

@@ -172,6 +172,11 @@ function words(command: string): string[] {
   return command.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)?.map(unquote) ?? [];
 }
 
+/** Reuse the write-gate's quoted shell tokenization for non-authorizing command identity checks. */
+export function shellCommandWords(command: string): string[] {
+  return words(command);
+}
+
 function operands(tokens: readonly string[]): string[] {
   const result: string[] = [];
   for (let index = 1; index < tokens.length; index += 1) {
@@ -458,6 +463,18 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
   }
   segments.push(command.slice(start));
   return segments;
+}
+
+/** The command before an unquoted shell suffix, reusing the gate's existing syntax scanner. */
+export function shellCommandBase(command: string, dialect: ShellDialect): string | undefined {
+  const masked = scanShellSyntax(command, dialect).masked;
+  for (let index = 0; index < masked.length; index += 1) {
+    const character = masked[index]!;
+    if (!";|><\r\n".includes(character) && !(character === "&" && masked.slice(0, index).trim())) continue;
+    const base = command.slice(0, index);
+    return (character === ">" || character === "<" ? base.replace(/(?:^|\s)\d+$/u, "") : base).trim();
+  }
+  return undefined;
 }
 
 function depthOnePowerShellLiteral(source: string): string | undefined {
@@ -766,6 +783,11 @@ export function describeUnclassifiedCommand(tool: string, args: unknown): string
   return extracted.ambiguous && extracted.issue !== undefined ? issuePath(extracted.issue) : undefined;
 }
 
+/** Shell tool names already supported by the write gate, including native suffixes. */
+export function isShellTool(tool: string): boolean {
+  return /^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(tool.toLowerCase());
+}
+
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
 export function extractWritePaths(tool: string, args: unknown, toolDirectory?: string): Extraction {
   const name = tool.toLowerCase();
@@ -778,7 +800,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
     const extracted = patch === undefined ? [] : patchPaths(patch);
     return { applies: true, ambiguous: extracted.length === 0, paths: [...paths, ...extracted] };
   }
-  if (/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) {
+  if (isShellTool(tool)) {
     const command = isRecord(args) && typeof args.command === "string" ? args.command : undefined;
     if (command === undefined) {
       const ambiguous = paths.length === 0;
@@ -1010,7 +1032,7 @@ export function isKnownReadOnlyTool(
 ): boolean {
   const name = tool.toLowerCase();
   if (READ_ONLY_TOOLS.has(name) || additionalReadOnlyTools.has(name)) return true;
-  if (!/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) return false;
+  if (!isShellTool(tool)) return false;
   const extraction = extractWritePaths(tool, args);
   return !extraction.applies && !extraction.ambiguous && extraction.remoteMutation !== true;
 }
