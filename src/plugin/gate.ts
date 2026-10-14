@@ -172,6 +172,11 @@ function words(command: string): string[] {
   return command.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)?.map(unquote) ?? [];
 }
 
+/** Reuse the write-gate's quoted shell tokenization for non-authorizing command identity checks. */
+export function shellCommandWords(command: string): string[] {
+  return words(command);
+}
+
 function operands(tokens: readonly string[]): string[] {
   const result: string[] = [];
   for (let index = 1; index < tokens.length; index += 1) {

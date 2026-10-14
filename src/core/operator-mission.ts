@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
-import { normalizeCommand } from "../plugin/gate.js";
+import { normalizeCommand, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
@@ -302,6 +302,56 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
   if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";
+}
+
+function stripMissionPowerShellPrefix(command: string): string {
+  return command.trim().replace(/^\$ErrorActionPreference\s*=\s*(['"])Stop\1\s*;\s*/iu, "");
+}
+
+function missionCommandTokens(command: string): string[] | undefined {
+  const tokens = shellCommandWords(stripMissionPowerShellPrefix(command));
+  if (tokens[0] === "&") tokens.shift();
+  return tokens.length ? tokens : undefined;
+}
+
+function missionWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith("\\\\");
+}
+
+function missionPathIdentity(value: string, directory: string, windows: boolean): string {
+  if (!windows) return resolve(directory, value);
+  return win32.normalize(win32.resolve(directory, value)).toLowerCase();
+}
+
+function sameNodeOperation(declared: string, actual: string, directory: string): boolean {
+  const expected = missionCommandTokens(declared), observed = missionCommandTokens(actual);
+  if (!expected || !observed || expected.length !== observed.length || expected.length < 2) return false;
+  const name = (value: string) => value.split(/[\\/]/u).at(-1)?.toLowerCase();
+  if (!new Set(["node", "node.exe"]).has(name(expected[0]!) ?? "") ||
+      !new Set(["node", "node.exe"]).has(name(observed[0]!) ?? "")) return false;
+  const script = expected[1]!;
+  if (!/\.(?:cjs|mjs|js)$/iu.test(script) || !/\.(?:cjs|mjs|js)$/iu.test(observed[1]!)) return false;
+  const windows = missionWindowsPath(directory) || [...expected, ...observed].some(missionWindowsPath);
+  if (missionPathIdentity(script, directory, windows) !== missionPathIdentity(observed[1]!, directory, windows)) return false;
+  for (let index = 2; index < expected.length; index += 1) {
+    const left = expected[index]!, right = observed[index]!;
+    const pathArgument = missionWindowsPath(left) || missionWindowsPath(right) || /[\\/]/u.test(left) || /[\\/]/u.test(right);
+    if (pathArgument
+      ? missionPathIdentity(left, directory, windows) !== missionPathIdentity(right, directory, windows)
+      : left !== right) return false;
+  }
+  return true;
+}
+
+/** Match only the same declared operation, allowing its native PowerShell envelope and
+ * an absolute Node/script/path spelling resolved from the unchanged operation cwd. */
+export function missionOperationCommandMatch(command: string, declared: readonly string[], directory: string): string | undefined {
+  const normalized = normalizeCommand(stripMissionPowerShellPrefix(command));
+  const exact = declared.filter(item => normalizeCommand(stripMissionPowerShellPrefix(item)) === normalized);
+  if (exact.length === 1) return normalizeCommand(exact[0]!);
+  if (exact.length > 1) return undefined;
+  const equivalent = declared.filter(item => sameNodeOperation(item, command, directory));
+  return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
 }
 
 /** A terminal failure is a collected result, not a successful operation. Required success

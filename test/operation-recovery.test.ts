@@ -9,7 +9,7 @@ import test from "node:test";
 import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
-import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
+import { missionOperationCommandMatch, OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime, operatorGitPathAuthorized } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 
@@ -33,6 +33,24 @@ async function fixture(run: (root: string) => Promise<void>) {
   const root = await mkdtemp(resolve("_testenv/operation-recovery-"));
   try { await run(root); } finally { await rm(root, { recursive: true, force: true }); }
 }
+
+test("saved v0.13.20 native commands match only the same operation across PowerShell and absolute Node paths", () => {
+  const directory = "M:\\_work\\_Sortie-dogs-artifacts\\worktrees\\global-apply-v0.13.15-20261012";
+  const pull = "git pull --ff-only origin main";
+  const apply = "node '_testenv/global-apply-v0.13.16/apply.mjs' '../work-quantity-progress-20261013/_testenv/global-apply-v0.13.20/plan.json'";
+  const nativePull = "$ErrorActionPreference='Stop'; git pull --ff-only origin main";
+  const nativeApply = "& 'M:/@HyperV/node-v22.14.0-win-x64/node.exe' " +
+    "'M:/_work/_Sortie-dogs-artifacts/worktrees/global-apply-v0.13.15-20261012/_testenv/global-apply-v0.13.16/apply.mjs' " +
+    "'M:/_work/_Sortie-dogs-artifacts/worktrees/work-quantity-progress-20261013/_testenv/global-apply-v0.13.20/plan.json'";
+  assert.equal(missionOperationCommandMatch(nativePull, [pull, apply], directory), pull);
+  assert.equal(missionOperationCommandMatch(nativeApply, [pull, apply], directory), apply);
+  assert.equal(missionOperationCommandMatch(nativeApply.replace("plan.json", "other-plan.json"), [pull, apply], directory), undefined,
+    "a same-named helper with a different input is not the declared operation");
+  assert.equal(missionOperationCommandMatch(`${nativePull}; Write-Output done`, [pull], directory), undefined,
+    "an appended native command remains unmatched");
+  assert.equal(missionOperationCommandMatch(nativeApply, [pull, apply, apply], directory), undefined,
+    "conflicting declarations remain ambiguous");
+});
 
 test("native mission directory scope survives creation, archive, protected validation and review", async () => fixture(async root => {
   const git = (...args: string[]) => exec("git", args, { cwd: root });

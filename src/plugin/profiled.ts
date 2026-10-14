@@ -17,7 +17,8 @@ import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
-  missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
+  missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationCommandMatch,
+  missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
 import { cachedWorkProgress, forgetWorkSession, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
@@ -1497,6 +1498,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (mission) {
           const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
+          mission = await reconcileMissionExecution(root!, mission, run);
           const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
            const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
@@ -1635,6 +1637,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await requireRoot(context.sessionID);
         const state = await operators.required(context.sessionID);
         let mission = await missions.read(context.sessionID);
+        if (mission) mission = await reconcileMissionExecution(context.sessionID, mission, state);
         if (mission?.kind === "operation" && !missionExecutionComplete(mission)) return JSON.stringify({
           status: "not-ready", operation_status: missionExecutionStatus(mission),
           next_action: "The requested operation has not completed. Preserve its real outcome; auxiliary checks and a bounded review do not complete it. Continue the declared operation or report its blocker.",
@@ -2318,6 +2321,122 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
       return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
     }
+    async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined): Promise<OperatorMission> {
+      const execution = mission.execution;
+      if (mission.kind !== "operation" || !execution || !run || run.runID !== mission.runID ||
+          ["completed", "cancelled"].includes(mission.phase)) return mission;
+
+      // Only read the native session admitted for this exact run/unit. This is result recovery,
+      // not a scan of unrelated sessions and not a new operation authorization.
+      const owners = new Map<string, { info?: Record<string, unknown>; notBefore?: string }>();
+      for (const unit of run.units) {
+        if (unit.directExecution?.actor) {
+          const startedAt = unit.directExecution.startedAt;
+          owners.set(unit.directExecution.actor, { notBefore: startedAt });
+          continue;
+        }
+        const child = unit.childSessionID;
+        if (!child || !unit.callID) continue;
+        const attempt = mission.attempts?.find(item => item.runID === run.runID && item.unitID === unit.unit.id &&
+          item.callID === unit.callID && item.childSessionID === child);
+        if (!attempt || attempt.status === "pending") continue;
+        const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+        if (!record(info) || info.id !== undefined && info.id !== child || info.parentID !== (run.operatorSessionID ?? root)) continue;
+        const created = record(info.time) ? info.time.created : undefined;
+        const notBefore = typeof created === "number" && Number.isFinite(created) ? new Date(created).toISOString()
+          : typeof created === "string" && Number.isFinite(Date.parse(created)) ? new Date(created).toISOString() : undefined;
+        owners.set(child, { info, ...(notBefore ? { notBefore } : {}) });
+      }
+      if (owners.size === 0) return mission;
+
+      const recovered: NonNullable<OperatorMission["execution"]>["observations"] = [];
+      for (const [sessionID, owner] of owners) {
+        // A direct session has its own native admission time; a delegated session is bounded
+        // by its native creation time when exposed by the existing session API.
+        if (!owner.notBefore) continue;
+        let history: readonly Record<string, unknown>[];
+        try { history = await reviewMessages(sessionID, owner.notBefore); } catch { continue; }
+        const calls = new Map<string, { command: string; directory: string; observation: NonNullable<OperatorMission["execution"]>["observations"][number] }>();
+        const conflicts = new Set<string>();
+        const nativeInputs = new Map<string, { command: string; directory: string }>();
+        for (const message of history) {
+          const info = record(message.info) ? message.info : message;
+          if (info.role !== "assistant" || info.sessionID !== sessionID || !Array.isArray(message.parts)) continue;
+          for (const part of message.parts) {
+            if (!record(part) || part.type !== "tool" || !["bash", "shell"].includes(String(part.tool).toLowerCase()) ||
+                (part.sessionID !== undefined && part.sessionID !== sessionID) || typeof part.callID !== "string" ||
+                !record(part.state) || !record(part.state.input)) continue;
+            const state = part.state as Record<string, unknown>;
+            const nativeInput = state.input as Record<string, unknown>;
+            if (typeof nativeInput.command !== "string") continue;
+            const directory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
+            const key = part.callID;
+            const nativeInputIdentity = { command: nativeInput.command, directory };
+            const priorInput = nativeInputs.get(key);
+            if (priorInput && (priorInput.command !== nativeInput.command || priorInput.directory !== directory)) {
+              conflicts.add(key);
+              calls.delete(key);
+              continue;
+            }
+            nativeInputs.set(key, nativeInputIdentity);
+            if (directory !== execution.directory) continue;
+            const command = missionOperationCommandMatch(nativeInput.command, execution.commands, execution.directory);
+            if (!command) continue;
+            const metadata = record(state.metadata) ? state.metadata : {};
+            const nativeStatus = String(state.status ?? "").toLowerCase();
+            const resultStatus = String(metadata.status ?? "").toLowerCase();
+            if ((nativeStatus === "error" && resultStatus === "running") || (nativeStatus === "running" && resultStatus === "error")) {
+              conflicts.add(key);
+              calls.delete(key);
+              continue;
+            }
+            const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
+            const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
+              : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
+            const startedAt = date(time.start ?? time.ran);
+            if (!startedAt) continue;
+            const running = nativeStatus === "running" || resultStatus === "running";
+            const failed = nativeStatus === "error" || resultStatus === "error";
+            if (!["completed", "error", "running"].includes(nativeStatus)) continue;
+            if (!running && !failed && nativeStatus !== "completed") continue;
+            const completedAt = running ? undefined : date(time.end ?? time.completed);
+            if (!running && !completedAt) continue;
+            const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
+            const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
+            const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
+            const outcome = running ? undefined : missionCommandOutcome(output, exit, status);
+            // A completed tool envelope without an exit/result does not prove a successful
+            // process. Keep it unclassified instead of turning missing metadata into success.
+            if (outcome?.outcome === "executed" && exit === undefined) continue;
+            if (nativeInput.background === true && !running) continue;
+            const observation = { command, directory: execution.directory, callID: key, sessionID, startedAt,
+              ...(completedAt ? { completedAt } : {}), ...(exit === undefined ? {} : { exit }), status,
+              ...(typeof metadata.shellID === "string" ? { shellID: metadata.shellID } : {}), ...(outcome ?? {}) };
+            const prior = calls.get(key);
+            if (prior && (prior.command !== command || prior.directory !== directory)) {
+              conflicts.add(key);
+              calls.delete(key);
+            } else if (!conflicts.has(key)) calls.set(key, { command, directory, observation });
+          }
+        }
+        for (const [callID, item] of calls) if (!conflicts.has(callID)) recovered.push(item.observation);
+      }
+      if (recovered.length === 0) return mission;
+
+      return missions.update(root, current => {
+        if (current.runID !== mission.runID || current.kind !== "operation" || !current.execution ||
+            current.execution.directory !== execution.directory || JSON.stringify(current.execution.commands) !== JSON.stringify(execution.commands)) return;
+        for (const observation of recovered) {
+          const prior = current.execution.observations.find(item => item.callID === observation.callID && item.sessionID === observation.sessionID);
+          if (!prior) {
+            current.execution.observations.push(observation);
+            continue;
+          }
+          if (prior.command !== observation.command || prior.directory !== observation.directory || prior.completedAt) continue;
+          Object.assign(prior, observation, { startedAt: prior.startedAt });
+        }
+      });
+    }
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
       await control!.currentBudget(root);
       mission = await missions.required(root);
@@ -2911,7 +3030,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
         const { root } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, async () => {
-          const mission = await missions.required(root);
+          let mission = await missions.required(root);
+          mission = await reconcileMissionExecution(root, mission, await operators.read(root));
           if (args.status === "ready") {
             if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
               return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",
@@ -3509,7 +3629,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               typeof operationArgs.command === "string" &&
               resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : ".") === mission.execution.directory) {
             const actual = normalizeCommand(operationArgs.command);
-            if (operationArgs.background === true && mission.execution.commands.includes(actual)) {
+            const declaredOperation = missionOperationCommandMatch(operationArgs.command, mission.execution.commands, mission.execution.directory);
+            if (operationArgs.background === true && declaredOperation !== undefined) {
               throw new Error("mission-operation-background: run the declared command in foreground with a suitable timeout. " +
                 "A background shell reports only launch, not process exit; no run was started by this refused call. " +
                 "Correct this same Worker command without a new plan or approval.");
@@ -3551,11 +3672,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // Keep the caller-visible/native Task input as the opaque reference. The
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
-          if (writer && ["bash", "shell"].includes(request.tool) && mission?.execution &&
-              typeof args.command === "string" && mission.execution.commands.includes(normalizeCommand(args.command)) &&
-              resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === mission.execution.directory) {
-            const command = normalizeCommand(args.command);
-            await missions.update(root, item => {
+          if (writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && mission?.execution &&
+              typeof args.command === "string" && resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === mission.execution.directory) {
+            const command = missionOperationCommandMatch(args.command, mission.execution.commands, mission.execution.directory);
+            if (command !== undefined) await missions.update(root, item => {
               if (!item.execution!.observations.some(observation => observation.callID === request.callID)) {
                 item.execution!.observations.push({ command, directory: item.execution!.directory,
                   callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });

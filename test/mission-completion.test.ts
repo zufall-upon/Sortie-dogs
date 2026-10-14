@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
-import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { missionExecutionStatus, OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE, profileAgent } from "../dist/core/runtime-profile.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
@@ -309,6 +309,114 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
     assert.equal(ledger.state.outstanding_reservations.length, 0);
     assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.admission").length, 1, "review and acceptance must not require a second successful check");
     assert.equal(await readFile(join(root, "result.txt"), "utf8"), "ready\n");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("saved native operation calls recover through Mission APIs without replay or acceptance", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/mission-native-operation-recovery-"));
+  const rootID = "ses_eea93a19dffdxZz9nRa10N2N3R", coordinator = "ses_ec815701fffeFp40d2WOjl6yU8";
+  const worker = "ses_ec823140dffeGYr1ZirFUyDC6Z";
+  const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
+    [rootID]: { agent: "dog-operator" },
+    [coordinator]: { agent: "dogs-coordinator", parentID: rootID },
+    [worker]: { agent: "dog-worker-v010", parentID: coordinator, outcome: "succeeded", time: { created: Date.now() - 10_000 } },
+  };
+  const history: Record<string, Record<string, unknown>[]> = {};
+  const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+      .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+    messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), abort: async () => ({ data: true }),
+  } } } as never);
+  let hooks: Awaited<ReturnType<typeof create>>;
+  let turn = 0;
+  const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-user-${++turn}`, agent: identities[id]!.agent }, {
+    message: { id: `${id}-user-${turn}`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
+    parts: [{ type: "text", text }],
+  });
+  const tool = async (name: string, id: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+  const before = (id: string, callID: string, task: object) => hooks["tool.execute.before"]!({ tool: "task", sessionID: id, callID }, { args: structuredClone(task) });
+  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "check.mjs"), 'console.log("PASS");\n');
+    hooks = await create();
+    const declaredCommands = ["git pull --ff-only origin main", "node 'apply.mjs' 'plan.json'"];
+    await chat(rootID, "Run the registered release operation once and report its result.");
+    const started = await tool("start_mission", rootID, { requirements: ["Run the registered release operation once and report its result"],
+      kind: "operation", execution: { commands: declaredCommands, directory: root } });
+    await before(rootID, "coordinator-call", started.task);
+    await chat(coordinator, started.task.prompt);
+    const planned = await tool("plan_units", coordinator, { units: [{ title: "Collect operation result", objective: "Record the run result",
+      read: ["check.mjs"], write: ["result.json"], validation: ["node check.mjs"] }] });
+    await before(coordinator, "call_9bf3a49fc67c463f98b241ede95a5cbc", planned.task);
+    await chat(worker, planned.task.prompt);
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: coordinator, callID: "call_9bf3a49fc67c463f98b241ede95a5cbc" },
+      { output: "completed", metadata: { sessionId: worker } });
+
+    const nativePull = "$ErrorActionPreference='Stop'; git pull --ff-only origin main";
+    const nativeApply = `$ErrorActionPreference='Stop'; & ${quote(process.execPath)} ${quote(join(root, "apply.mjs"))} ${quote(join(root, "plan.json"))}`;
+    const start = Date.now() - 4_000;
+    history[worker] = [
+      { info: { role: "assistant", sessionID: worker, time: { created: start } }, parts: [{ type: "tool", tool: "bash",
+        callID: "call_7c9218e8ae644cec9bfd4125081d2d16", state: { status: "completed", input: { command: nativePull, workdir: root },
+          output: "Already up to date.", metadata: { exit: 0, status: "completed" }, time: { start, end: start + 1_812 } } }] },
+      { info: { role: "assistant", sessionID: worker, time: { created: start + 10 } }, parts: [{ type: "tool", tool: "bash",
+        callID: "call_c2320cce5c63457eae3553a5ab6d1f1c", state: { status: "completed", input: { command: nativeApply, workdir: root },
+          output: "applied-and-matched", metadata: { exit: 0, status: "completed" }, time: { start: start + 10, end: start + 11_378 } } }] },
+      { info: { role: "assistant", sessionID: worker, time: { created: start + 20 } }, parts: [{ type: "tool", tool: "bash",
+        callID: "call_foreign_owner", sessionID: "ses_other_worker", state: { status: "completed",
+          input: { command: nativeApply, workdir: root }, output: "not-this-session", metadata: { exit: 0, status: "completed" },
+          time: { start: start + 20, end: start + 21 } } }] },
+    ];
+    const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+    const beforeRecovery = await missions.required(rootID);
+    assert.deepEqual(beforeRecovery.execution!.observations, [], "legacy state lacks the exact-match observations");
+    assert.equal(missionExecutionStatus(beforeRecovery), "not-started");
+
+    hooks = await create();
+    const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
+    assert.equal(submitted.acceptance_summary.operation.status, "executed");
+    assert.equal(submitted.acceptance_summary.operation.process_succeeded, true);
+    assert.deepEqual(submitted.acceptance_summary.operation.observations.map((item: { callID: string }) => item.callID), [
+      "call_7c9218e8ae644cec9bfd4125081d2d16", "call_c2320cce5c63457eae3553a5ab6d1f1c",
+    ]);
+    assert.ok(submitted.acceptance_summary.operation.observations.every((item: { sessionID: string; exit: number }) => item.sessionID === worker && item.exit === 0));
+    assert.equal((await missions.required(rootID)).execution!.observations.length, 2);
+
+    const recovered = await tool("operator_status", rootID);
+    const repeated = await tool("operator_status", rootID);
+    assert.equal(recovered.acceptance_summary.operation.status, "executed");
+    assert.deepEqual(repeated.budget, recovered.budget, "read-only recovery consumes no unit or additional budget");
+    assert.equal((await missions.required(rootID)).execution!.observations.length, 2, "native call IDs prevent duplicate records");
+    assert.notEqual(recovered.phase, "completed", "operation recovery is not formal validation, Review or acceptance");
+
+    const nativeRecord = (callID: string, status: string, exit: number | undefined, at: number, resultStatus = status, background = false) => ({
+      info: { role: "assistant", sessionID: worker, time: { created: at } },
+      parts: [{ type: "tool", tool: "bash", callID, state: { status,
+        input: { command: nativeApply, workdir: root, ...(background ? { background: true } : {}) }, output: exit === undefined ? "still running" : "apply result",
+        metadata: { ...(exit === undefined ? {} : { exit }), status: resultStatus },
+        time: { start: at, ...(status === "running" ? {} : { end: at + 5 }) } } }],
+    });
+    const runningAt = start + 20_000;
+    history[worker]!.push(nativeRecord("call_running", "completed", undefined, runningAt, "running", true));
+    const running = await tool("operator_status", rootID);
+    assert.equal(running.acceptance_summary.operation.status, "running", "a later native launch stays running, not completed");
+    assert.equal(running.acceptance_summary.operation.observations.at(-1).callID, "call_running");
+
+    const failedAt = runningAt + 10;
+    history[worker]!.push(nativeRecord("call_failed", "completed", 1, failedAt));
+    const failed = await tool("operator_status", rootID);
+    assert.equal(failed.acceptance_summary.operation.status, "execution-failed", "a later nonzero native exit stays failed");
+    assert.equal(failed.acceptance_summary.operation.observations.at(-1).callID, "call_failed");
+    assert.equal(failed.acceptance_summary.operation.observations.at(-1).exit, 1);
+
+    const conflictingAt = failedAt + 10;
+    history[worker]!.push(nativeRecord("call_conflict", "error", undefined, conflictingAt, "running"));
+    const conflicting = await tool("operator_status", rootID);
+    assert.equal(conflicting.acceptance_summary.operation.status, "execution-failed", "contradictory native status cannot promote a failed result");
+    assert.equal(conflicting.acceptance_summary.operation.observations.some((item: { callID: string }) => item.callID === "call_conflict"), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

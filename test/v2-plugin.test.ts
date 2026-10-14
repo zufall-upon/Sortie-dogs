@@ -506,6 +506,12 @@ test("V2 native shell results retain build→test exits and timestamps through t
   const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
   try {
     const history = (await client.session.messages({ path: { id: "worker" } })).data;
+    const nativeCall = history.find((message: any) => message.info.id === "msg_worker").parts[0];
+    assert.equal(nativeCall.sessionID, "worker");
+    assert.equal(nativeCall.callID, "call_build");
+    assert.equal(nativeCall.state.input.command, "npm run build");
+    assert.deepEqual(nativeCall.state.time, { start: 100, end: 200 },
+      "the native V2 call ID, command, session owner and terminal times survive the existing adapter");
     assert.deepEqual(observedMissionValidation(["npm run build", "node check.mjs"], "worker", history), {
       attempts: [
         { command: "npm run build", exit_code: 0, started_ms: 100, completed_ms: 200 },
