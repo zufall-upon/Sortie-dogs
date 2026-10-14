@@ -14,7 +14,7 @@ import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
@@ -2404,7 +2404,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const info = record(message.info) ? message.info : message;
           if (info.role !== "assistant" || info.sessionID !== sessionID || !Array.isArray(message.parts)) continue;
           for (const part of message.parts) {
-            if (!record(part) || part.type !== "tool" || !["bash", "shell"].includes(String(part.tool).toLowerCase()) ||
+            if (!record(part) || part.type !== "tool" || !isShellTool(String(part.tool)) ||
                 (part.sessionID !== undefined && part.sessionID !== sessionID) || typeof part.callID !== "string" ||
                 !record(part.state) || !record(part.state.input)) continue;
             const state = part.state as Record<string, unknown>;
@@ -2446,11 +2446,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (!["completed", "error", "running"].includes(nativeStatus)) continue;
             if (!running && !failed && nativeStatus !== "completed") continue;
             const completedAt = running ? undefined : date(time.end ?? time.completed);
-            if (!running && !completedAt) continue;
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
             const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
-            const outcome = conflicts.has(key) || running || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
+            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
             // A completed tool envelope without an exit/result does not prove a successful
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
@@ -3139,7 +3138,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ...compactMissionEvidence(missionPacket(updated, submittedRun), submittedRun, root),
             next_action: args.status === "ready"
               ? "Return this result and acceptance_summary to Operator now. Compare the original requests with the candidate and actual evidence; inspect concrete gaps only, then complete_mission if satisfied. No routine archive search or full source reread. Completion still requires its final comparison and complete_mission receipt."
-              : "Return the saved blocker or user-only decision to Operator now. This is incomplete delivery, not acceptance; retain the candidate, failed checks and cumulative spend. Do not repeat unchanged work or dispatch a replacement merely to finalize this result." });
+              : ["Return the saved blocker or user-only decision to Operator now. This is incomplete delivery, not acceptance; retain the candidate, failed checks and cumulative spend. Do not repeat unchanged work or dispatch a replacement merely to finalize this result.",
+                missionExecutionRecoveryAction(updated)].filter(Boolean).join(" ") });
         });
       } };
     tools[completeMission] = { description: "Operator only: after comparing the original request, source, actual checks and current review disposition (explicit native author self-recheck is not independent PASS), explicitly accept the whole mission. A collected terminal failure can satisfy a run-once/report request, not a request for successful execution. Returns operation outcome separately from the measured 🐾 Mission receipt; never treat Worker start, CORRECTION_READY or one passing check as completion.",
@@ -3709,7 +3709,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const operationArgs = record(mapped.args) ? mapped.args : {};
           // A decorated launch would spend on the real operation but leave the native mission observation empty.
           // Ask the same Worker to correct its shell input before that expensive side effect.
-          if (writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && mission?.execution &&
+          if (writer && isShellTool(request.tool) && mission?.execution &&
               typeof operationArgs.command === "string" &&
               missionOperationDirectoryMatch(resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : "."), mission.execution.directory)) {
             const declaredOperation = missionOperationCommandMatch(operationArgs.command, mission.execution.commands, mission.execution.directory);
@@ -3754,7 +3754,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // Keep the caller-visible/native Task input as the opaque reference. The
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
-          if (writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && mission?.execution &&
+          if (writer && isShellTool(request.tool) && mission?.execution &&
               typeof args.command === "string" && missionOperationDirectoryMatch(resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."), mission.execution.directory)) {
             const command = missionOperationCommandMatch(args.command, mission.execution.commands, mission.execution.directory);
             if (command !== undefined) await missions.update(root, item => {
@@ -4000,7 +4000,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
-        if (!ownership && ["bash", "shell"].includes(request.tool.toLowerCase())) {
+        if (!ownership && isShellTool(request.tool)) {
           const root = await rootFor(id);
           const mission = root ? await missions.read(root) : undefined;
           if (root && mission?.execution?.observations.some(item => item.callID === request.callID && item.sessionID === id)) {

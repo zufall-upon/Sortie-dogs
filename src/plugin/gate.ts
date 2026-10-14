@@ -783,6 +783,11 @@ export function describeUnclassifiedCommand(tool: string, args: unknown): string
   return extracted.ambiguous && extracted.issue !== undefined ? issuePath(extracted.issue) : undefined;
 }
 
+/** Shell tool names already supported by the write gate, including native suffixes. */
+export function isShellTool(tool: string): boolean {
+  return /^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(tool.toLowerCase());
+}
+
 /** Extract known write destinations; unknown shell executables fail closed as ambiguous. */
 export function extractWritePaths(tool: string, args: unknown, toolDirectory?: string): Extraction {
   const name = tool.toLowerCase();
@@ -795,7 +800,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
     const extracted = patch === undefined ? [] : patchPaths(patch);
     return { applies: true, ambiguous: extracted.length === 0, paths: [...paths, ...extracted] };
   }
-  if (/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) {
+  if (isShellTool(tool)) {
     const command = isRecord(args) && typeof args.command === "string" ? args.command : undefined;
     if (command === undefined) {
       const ambiguous = paths.length === 0;
@@ -1027,7 +1032,7 @@ export function isKnownReadOnlyTool(
 ): boolean {
   const name = tool.toLowerCase();
   if (READ_ONLY_TOOLS.has(name) || additionalReadOnlyTools.has(name)) return true;
-  if (!/^(?:bash|shell|powershell|pwsh)(?:$|[_-])/u.test(name)) return false;
+  if (!isShellTool(tool)) return false;
   const extraction = extractWritePaths(tool, args);
   return !extraction.applies && !extraction.ambiguous && extraction.remoteMutation !== true;
 }

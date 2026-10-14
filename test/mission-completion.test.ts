@@ -126,8 +126,9 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "launched" },
         { sessionID: "coordinator" }));
       assert.equal(submitted.status, "operation-incomplete");
-      assert.equal(submitted.operation.status, mode === "legacy-background" ? "running" : "not-started");
+      assert.equal(submitted.operation.status, mode === "legacy-background" ? "running" : "recovery-blocked");
       if (mode === "legacy-background") assert.match(submitted.next_action, /do not (?:relaunch|start another)/iu);
+      else assert.match(submitted.next_action, /do not replay or rerun/iu);
       return;
     }
     if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
@@ -195,7 +196,7 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       assert.equal((await status()).acceptance_summary.operation.status, "executed", "an identical native read is idempotent");
       record.parts[0]!.state.time = { start: nativeStart + 20_000, end: nativeEnd + 20_000 };
       const conflict = (await status()).acceptance_summary.operation;
-      assert.equal(conflict.status, "not-started", "a second, contradictory actual native start still invalidates completion");
+      assert.equal(conflict.status, "recovery-blocked", "a second, contradictory actual native start still invalidates completion");
       assert.equal(conflict.terminal_complete, false);
       assert.equal(conflict.observations[0].nativeStartedAt, new Date(nativeStart).toISOString());
       assert.equal(conflict.observations[0].latestConflictingStartedAt, new Date(nativeStart + 20_000).toISOString());
@@ -343,7 +344,7 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery",
+for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "missing-terminal-time", "conflicting-terminals", "conflict-after-recovery",
   "older-after-failure", "older-after-running", "newer-unseen-conflict", "newer-unseen-input-conflict", "newer-unseen-reversed-input-conflict", "newer-unseen-status-conflict", "delegated-after-completion",
   "conflicting-starts", "conflicting-starts-reversed", "conflicting-starts-partial", "conflicting-starts-after-recovery",
   "persisted-command-conflict", "persisted-cwd-conflict", "persisted-unmatched-input-conflict",
@@ -504,6 +505,7 @@ test(`saved native operation calls recover through Mission APIs without replay o
       delete (history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state.metadata.exit;
       if (recoveryMode === "missing-error-exit") Object.assign((history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state, { status: "error" });
     }
+    if (recoveryMode === "missing-terminal-time") delete (history[nativeOwner]![1] as { parts: { state: { time: { end?: number } } }[] }).parts[0]!.state.time.end;
     if (recoveryMode === "conflict-after-recovery") {
       assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed");
     }
@@ -551,7 +553,7 @@ test(`saved native operation calls recover through Mission APIs without replay o
     const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
     if (recoveryMode.startsWith("persisted-")) {
       const operation = submitted.acceptance_summary.operation;
-      assert.equal(operation.status, "not-started", "a persisted same-call input contradiction cannot be silently filtered");
+      assert.equal(operation.status, "recovery-blocked", "a persisted same-call input contradiction cannot be silently filtered");
       assert.equal(operation.terminal_complete, false);
       assert.equal(operation.process_succeeded, null);
       const conflict = operation.observations.find((item: { callID: string }) => item.callID === "call_7c9218e8ae644cec9bfd4125081d2d16");
@@ -568,7 +570,7 @@ test(`saved native operation calls recover through Mission APIs without replay o
       return;
     }
     if (recoveryMode.startsWith("newer-unseen-")) {
-      assert.equal(submitted.acceptance_summary.operation.status, "not-started", "a newer ambiguous call must not fall back to old success");
+      assert.equal(submitted.acceptance_summary.operation.status, "recovery-blocked", "a newer ambiguous call must not fall back to old success");
       assert.equal(submitted.acceptance_summary.operation.terminal_complete, false);
       const conflict = submitted.acceptance_summary.operation.observations.find((item: { callID: string }) => item.callID === recoveryMode);
       assert.equal(conflict?.conflicting, true, "retain previously unseen contradictory native records");
@@ -576,7 +578,7 @@ test(`saved native operation calls recover through Mission APIs without replay o
     }
     if (recoveryMode.startsWith("conflicting-starts")) {
       const operation = submitted.acceptance_summary.operation;
-      assert.equal(operation.status, "not-started", "a later conflicting native start cannot be hidden by another successful call");
+      assert.equal(operation.status, "recovery-blocked", "a later conflicting native start cannot be hidden by another successful call");
       assert.equal(operation.terminal_complete, false);
       assert.equal(operation.process_succeeded, null);
       const conflict = operation.observations.find((item: { callID: string }) => item.callID === "conflicting-native-start");
@@ -587,19 +589,21 @@ test(`saved native operation calls recover through Mission APIs without replay o
       if (recoveryMode === "conflicting-starts-partial") {
         history[worker]!.pop(); // A later read exposes only the older conflicting fragment.
         const partial = (await tool("operator_status", rootID)).acceptance_summary.operation;
-        assert.equal(partial.status, "not-started", "partial history cannot regress the saved latest conflicting bound");
+        assert.equal(partial.status, "recovery-blocked", "partial history cannot regress the saved latest conflicting bound");
         assert.equal(partial.observations.find((item: { callID: string }) => item.callID === "conflicting-native-start").latestConflictingStartedAt,
           new Date(start + 20_000).toISOString());
       }
       return;
     }
-    if (["missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery"].includes(recoveryMode)) {
+    if (["missing-exit", "missing-error-exit", "missing-terminal-time", "conflicting-terminals", "conflict-after-recovery"].includes(recoveryMode)) {
       const operation = submitted.acceptance_summary.operation;
-      assert.equal(operation.status, "not-started", "missing or contradictory native exits cannot establish terminal completion");
+      assert.equal(operation.status, "recovery-blocked", "missing or contradictory native exits cannot establish terminal completion");
+      assert.match(submitted.next_action, /do not replay or rerun/iu);
       assert.equal(operation.terminal_complete, false);
       assert.equal(operation.process_succeeded, null);
       const repeated = await tool("operator_status", rootID);
-      assert.equal(repeated.acceptance_summary.operation.status, "not-started");
+      assert.equal(repeated.acceptance_summary.operation.status, "recovery-blocked");
+      assert.match(repeated.next_action, /do not replay or rerun/iu);
       if (recoveryMode === "missing-exit") {
         const incomplete = operation.observations.find((item: { callID: string }) => item.callID === "call_c2320cce5c63457eae3553a5ab6d1f1c");
         assert.equal(incomplete?.outcome, undefined, "no exit is not a real execution-failed outcome");
@@ -667,7 +671,7 @@ test(`saved native operation calls recover through Mission APIs without replay o
     const conflictingAt = failedAt + 10;
     history[worker]!.push(nativeRecord("call_conflict", "error", undefined, conflictingAt, "running"));
     const conflicting = await tool("operator_status", rootID);
-    assert.equal(conflicting.acceptance_summary.operation.status, "not-started", "the newer contradictory native call cannot fall back to an earlier result");
+    assert.equal(conflicting.acceptance_summary.operation.status, "recovery-blocked", "the newer contradictory native call cannot fall back to an earlier result");
     assert.equal(conflicting.acceptance_summary.operation.observations.find((item: { callID: string }) => item.callID === "call_conflict")?.conflicting, true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -97,4 +97,14 @@ Correction author/model: the independently investigating Reviewer, `openai/gpt-6
 
 ## Explicitly out of scope
 
+### Release integration review follow-up
+
+Before integrating PR #250, the release operator collected all existing PR-body, ordinary, review and inline comments. The 13 earlier findings are valid and already corrected in the retained source history; their original commits and regression evidence remain separate from this release. Three remaining valid findings are corrected before integration:
+
+- `4266702436`: compare two drive-qualified or UNC positional arguments by Windows path identity. Differing opaque relative values, URLs/options and ambiguous POSIX-looking route values retain literal identity.
+- `4266702438`: reuse the write gate's supported shell-tool predicate for operation admission, terminal observation and saved-history recovery, including PowerShell/pwsh and supported suffix spellings. Validation, permission and model routes are unchanged.
+- `4266816127`: distinguish an admitted call with missing or contradictory terminal evidence as `recovery-blocked`, not `not-started`. Retain an observed terminal call even without its terminal time, without inventing execution success/failure. Status, ready submission and explicit blocked submission all direct callers to inspect the same existing call and explicitly prohibit replay. Explicit native `NO_START`, running calls, known process outcomes and unavailable-reader diagnostics remain distinct.
+
+Ten same-condition path, unclassified-result and public live/saved shell-tool regressions failed before repair (exit 1, 8.298 seconds including build). The initial related six-file check passed 134 tests; five blocked-submission route assertions exposed an omitted explicit no-replay instruction, and one pure packet fixture needed its normal `runID: null`. After those corrections, only the affected six-test scope was rerun (6 passed, exit 0, 8.905 seconds including build); unchanged successful checks are reused until the mandatory integrated fixed-candidate release full. No original operation, external Mission ledger, campaign or installation was replayed for this review repair. Shell-tool fixtures exercise the public hook/history contract with disposable real Node results; they do not claim an actual PowerShell process ran on Ubuntu.
+
 No package reinstallation, operation replay, extra validation, budget reset, native-proof fabrication, direct old-ledger edit, global/config change, source-Mission change, Location override change, release, publish, push-side publication changes, or automatic OpenCode restart.

@@ -301,7 +301,7 @@ export function missionSelfRecheckReport(text: string, source: string, hostBound
   } catch { return undefined; }
 }
 
-export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "recovery-unavailable" | "running" | "execution-failed" | "executed" {
+export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "recovery-unavailable" | "recovery-blocked" | "running" | "execution-failed" | "executed" {
   if (mission.kind !== "operation") return "not-required";
   const execution = mission.execution;
   if (!execution || execution.commands.length === 0) return "not-started";
@@ -311,7 +311,8 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
     Date.parse(item.latestConflictingStartedAt ?? item.nativeStartedAt ?? item.startedAt));
   const ordered = [...execution.observations].sort((left, right) => orderingTime(left) - orderingTime(right)).reverse();
   const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
-  if (latest.some(item => item?.conflicting)) return "not-started";
+  if (latest.some(item => item?.conflicting || item && ["completed", "error"].includes(item.status ?? "") &&
+      !["executed", "execution-failed", "not-started"].includes(item.outcome ?? ""))) return "recovery-blocked";
   if (latest.some(item => item && !item.completedAt)) return "running";
   if (latest.some(item => !item) && execution.recovery) return "recovery-unavailable";
   if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
@@ -369,7 +370,7 @@ function sameNodeOperation(declared: string, actual: string, directory: string):
     // Only the supported absolute-path substitution can change a positional argument.
     // Two different relative opaque values must not collapse via path normalization.
     const absolute = (value: string) => missionWindowsPath(value) || value.startsWith("/");
-    const pathArgument = absolute(left) !== absolute(right);
+    const pathArgument = absolute(left) !== absolute(right) || windows && missionWindowsPath(left) && missionWindowsPath(right);
     if (pathArgument
       ? missionPathIdentity(left, directory, windows) !== missionPathIdentity(right, directory, windows)
       : left !== right) return false;
@@ -408,6 +409,8 @@ export function missionExecutionComplete(mission: OperatorMission): boolean {
 
 /** Missing history cannot justify replay; adequate collected results remain usable. */
 export function missionExecutionRecoveryAction(mission: OperatorMission): string | undefined {
+  if (missionExecutionStatus(mission) === "recovery-blocked") return "An admitted operation has missing or contradictory terminal evidence. Preserve existing observations; inspect the same native call's shell/progress and recover its actual result. " +
+    "Do not replay or rerun the operation. Report the actual recovery blocker if its result remains unknown.";
   if (!mission.execution?.recovery || missionExecutionComplete(mission)) return undefined;
   return "Native operation history could not be read. Preserve existing observations; inspect the admitted session's existing shell/progress or restore the history reader. " +
     "Do not replay or rerun the operation. Report the actual recovery blocker if history remains unavailable.";
