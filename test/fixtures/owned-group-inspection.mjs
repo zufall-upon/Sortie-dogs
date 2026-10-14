@@ -38,6 +38,23 @@ try {
     return originalKill(pid, signal);
   };
   if (fault === 'listing-unavailable') process.env.PATH = directory;
+  if (fault === 'listing-timeout' || fault.startsWith('listing-interrupt-')) {
+    // Match the retained first-wave pgrep timeout once, then allow the existing
+    // owned-group selector to observe the same writer. No native CLI or model.
+    await fs.writeFile(join(directory, 'pgrep'), `#!${process.execPath}
+(async () => {
+const fs = await import('node:fs'), { spawnSync } = await import('node:child_process');
+const directory = ${JSON.stringify(directory)};
+const interrupt = ${JSON.stringify(fault.startsWith('listing-interrupt-') ? fault.slice('listing-interrupt-'.length) : null)};
+fs.appendFileSync(directory + '/pgrep-calls.log', 'selected\\n');
+const run = () => process.exit(spawnSync('/usr/bin/pgrep', process.argv.slice(2), { stdio: 'inherit' }).status ?? 2);
+if (interrupt) { process.kill(process.ppid, interrupt); setTimeout(run, 1500); }
+else if (fs.existsSync(directory + '/pgrep-delayed')) run();
+else { fs.writeFileSync(directory + '/pgrep-delayed', 'once'); setTimeout(run, 1500); }
+})();
+`, { mode: 0o755 });
+    process.env.PATH = `${directory}:${originalPath}`;
+  }
   syncBuiltinESMExports();
   const { stopProcessGroup } = await import('../../scripts/release-cli.mjs');
   const started = Date.now();
@@ -57,6 +74,7 @@ try {
     writer_state: writerState, bytes_at_cleanup_return: snapshot.length, bytes_later: later.length,
     writer_frozen: snapshot.equals(later), writer_stopped: ['absent', 'Z', 'X'].includes(writerState),
     new_model_requests: 0, native_runtime_loaded: false };
+  if (fault === 'listing-timeout' || fault.startsWith('listing-interrupt-')) result.selector_calls = (await fs.readFile(join(directory, 'pgrep-calls.log'), 'utf8')).trim().split('\n').length;
   await fs.writeFile(join(directory, 'root.stdout.log'), stdout); await fs.writeFile(join(directory, 'root.stderr.log'), stderr);
   await fs.writeFile(join(directory, 'result.json'), JSON.stringify(result, null, 2) + '\n');
   console.log(JSON.stringify(result));

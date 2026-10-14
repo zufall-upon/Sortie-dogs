@@ -4,14 +4,14 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
 import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const instance = (instance_id: string, extra: Record<string, unknown> = {}) => ({
   instance_id,
@@ -29,6 +29,39 @@ const fakeReadyServer = {
   }),
   waitForModelRoute: async () => undefined,
 };
+
+for (const phase of ["probe-and-cleanup-failure", "probe-failure", "cleanup-failure"] as const) {
+  test(`candidate agent probe preserves ${phase} without retrying setup`, async () => {
+    const primary = Object.assign(Error("retained-candidate-probe-failure"), { code: "EIO" });
+    const cleanup = Error("Could not inspect owned process group 719000001: pgrep failed (exit -1)");
+    let starts = 0, stops = 0, requests = 0;
+    const rejected = await probeCandidateV2Agents("/owned-candidate", {}, "dog-operator", [], {}, {
+      startServer: async () => {
+        starts++;
+        return { url: "http://owned-candidate.invalid", pid: 719000001, env: {}, stop: async () => {
+          stops++;
+          if (phase !== "probe-failure") throw cleanup;
+        } };
+      },
+      fetch: async (url: string) => {
+        requests++;
+        if (phase !== "cleanup-failure") throw primary;
+        return { ok: true, status: 200, json: async () => ({ data: url.endsWith("/api/session")
+          ? { id: "configuration-only" } : url.endsWith("/api/plugin") ? [{ id: "sortie-dogs.v010" }] : [] }) };
+      },
+    }).then(() => null, (error: Error & { candidateProbeContext?: Record<string, unknown> }) => error);
+    assert.equal(rejected, phase === "cleanup-failure" ? cleanup : primary, "keep the first actual failure identity");
+    assert.equal(starts, 1); assert.equal(stops, 1);
+    assert.equal(requests, phase === "cleanup-failure" ? 4 : 1, "configuration API only; no prompt/model request or retry");
+    if (phase !== "probe-failure") {
+      assert.equal(rejected!.candidateProbeContext!.serverPID, 719000001);
+      assert.equal(rejected!.candidateProbeContext!.cleanup_complete, false);
+      assert.equal(rejected!.candidateProbeContext!.stateDirectory, "/owned-candidate/.opencode/v2-service-state");
+      assert.deepEqual(rejected!.candidateProbeContext!.cleanupErrors, [{ resource: "server", name: "Error", message: cleanup.message }]);
+      assert.match(String(rejected!.candidateProbeContext!.nextAction), /Retry teardown only/);
+    } else assert.equal(rejected!.candidateProbeContext, undefined);
+  });
+}
 
 test("runner starts without a dist build, even after its script is moved to an isolated directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-runner-no-dist-"));
@@ -737,6 +770,80 @@ test("candidate setup uses a short owned temporary directory and removes it on f
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const phase of ["probe-and-cleanup-failure", "cleanup-failure"] as const) {
+  test(`candidate preflight retains registration and surfaces ${phase} without seeding or inference`, { skip: process.platform === "win32" }, async () => {
+    const root = await mkdtemp(join(tmpdir(), "swebench-unresolved-probe-"));
+    const previousDataHome = process.env.XDG_DATA_HOME;
+    const primary = Error("retained-candidate-probe-failure"), cleanup = Error("retained-owned-teardown-failure");
+    let temporaryRoot: string | undefined, requests = 0, stops = 0;
+    try {
+      const hostData = join(root, "host-data");
+      await mkdir(join(hostData, "opencode"), { recursive: true });
+      await writeFile(join(hostData, "opencode", "auth.json"), "{}\n");
+      process.env.XDG_DATA_HOME = hostData;
+      const bytes = Buffer.from("configuration-only candidate fixture");
+      const fixtureCandidate = { ...candidate, sha256: createHash("sha256").update(bytes).digest("hex") };
+      const manifestPath = join(root, "manifest.json"), runRoot = join(root, "runtime");
+      const packagePath = join(root, candidate.package_tgz);
+      await writeFile(manifestPath, "{}\n"); await writeFile(packagePath, bytes);
+      const candidateRoot = join(runRoot, "candidate-runtime"), configRoot = join(candidateRoot, "opencode");
+      const registration = join(candidateRoot, ".opencode/v2-service-state/opencode/service.json");
+      const error = await runCandidatePreflight(manifestPath, runRoot, {
+        createPlan: () => ({ candidate: fixtureCandidate }),
+        prepareCandidate: (value: unknown, archive: string, target: string) => prepareCandidateRuntime(value, archive, target, {
+          execute: async (command: string, _args: string[], options: { env: Record<string, string> }) => {
+            temporaryRoot = options.env.TMPDIR;
+            if (command === "opencode") return { stdout: "2.0.26\n" };
+            if (command === "npm") {
+              const installed = join(configRoot, "node_modules/sortie-dogs");
+              await mkdir(join(installed, "dist"), { recursive: true });
+              await writeFile(join(installed, "package.json"), JSON.stringify({ type: "module", version: candidate.version }));
+              await writeFile(join(installed, "dist/asset-version.js"), `export const V010_RUNTIME_ASSET_VERSION = ${JSON.stringify(candidate.runtime_marker)};`);
+              await writeFile(join(installed, "dist/runtime-assets-v010.js"), `export const runtimeAssets = ${JSON.stringify([
+                { name: "dog-operator", version: candidate.runtime_marker, installPath: "agent/dog-operator.md", content: "configuration-only fixture\n" },
+              ])};`);
+            } else {
+              await mkdir(join(configRoot, "agent"), { recursive: true });
+              await writeFile(join(configRoot, "agent/dog-operator.md"), "configuration-only fixture\n");
+            }
+            return { stdout: "" };
+          },
+          probeAgents: (directory: string, environment: unknown, agent: string) => probeCandidateV2Agents(directory, environment, agent, [], {}, {
+            startServer: async () => {
+              await mkdir(dirname(registration), { recursive: true });
+              await writeFile(registration, "retained-owned-registration\n");
+              return { url: "http://owned-candidate.invalid", pid: 719000001,
+                env: { OPENCODE_SERVER_PASSWORD: "fixture-secret-not-for-diagnostics" }, stop: async () => { stops++; throw cleanup; } };
+            },
+            fetch: async (url: string) => {
+              requests++;
+              if (phase === "probe-and-cleanup-failure") throw primary;
+              return { ok: true, status: 200, json: async () => ({ data: url.endsWith("/api/session")
+                ? { id: "configuration-only" } : url.endsWith("/api/plugin") ? [{ id: "sortie-dogs.v010" }] : [] }) };
+            },
+          }),
+        }),
+      }).then(() => null, (failure: Error & { candidateRuntimeContext?: Record<string, unknown> }) => failure);
+      assert.equal(error, phase === "probe-and-cleanup-failure" ? primary : cleanup);
+      assert.equal(stops, 1); assert.equal(requests, phase === "probe-and-cleanup-failure" ? 1 : 4);
+      assert.equal(await readFile(registration, "utf8"), "retained-owned-registration\n");
+      assert.equal((await stat(temporaryRoot!)).isDirectory(), true, "unresolved writer may still use TMPDIR");
+      const diagnostic = candidateFailureMessage(error);
+      assert.equal(diagnostic.includes("fixture-secret-not-for-diagnostics"), false);
+      const context = JSON.parse(diagnostic.trim().split("\n")[1]).candidate_runtime_cleanup;
+      assert.equal(context.cleanup_complete, false); assert.equal(context.serverPID, 719000001);
+      assert.equal(context.runtimeRoot, candidateRoot); assert.equal(context.temporaryRoot, temporaryRoot);
+      assert.match(context.nextAction, /Retry teardown only/);
+      // No host credential DB was created: reaching credential seeding would fail.
+      assert.equal(await readFile(join(hostData, "opencode/auth.json"), "utf8"), "{}\n");
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousDataHome;
+      if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("preflight removes its separately owned temporary directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-preflight-tmp-"));

@@ -5,7 +5,7 @@ export async function runProcess(executable, args, { cwd, env = process.env, tim
   return await new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true,
       detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '', overflow = false, timedOut = false;
+    let stdout = '', stderr = '', overflow = false, timedOut = false, interrupted;
     const limit = 32 * 1024 * 1024;
     const capture = (name, data) => {
       if (stdout.length + stderr.length + data.length > limit) { overflow = true; terminate(); return; }
@@ -23,12 +23,14 @@ export async function runProcess(executable, args, { cwd, env = process.env, tim
     child.stdout.on('data', data => capture('stdout', data));
     child.stderr.on('data', data => capture('stderr', data));
     const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
-    const abort = () => { timedOut = true; terminate(); };
-    process.once('SIGINT', abort);
-    process.once('SIGTERM', abort);
-    const cleanup = () => { clearTimeout(timer); process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); };
+    const abort = signal => { interrupted ??= signal; timedOut = true; terminate(); };
+    const onInterrupt = () => abort('SIGINT'), onTerminate = () => abort('SIGTERM');
+    process.once('SIGINT', onInterrupt);
+    process.once('SIGTERM', onTerminate);
+    const cleanup = () => { clearTimeout(timer); process.removeListener('SIGINT', onInterrupt); process.removeListener('SIGTERM', onTerminate); };
     child.on('error', error => { cleanup(); reject(error); });
-    child.on('close', code => { cleanup(); resolve({ code: code ?? -1, stdout, stderr, timedOut, overflow }); });
+    child.on('close', code => { cleanup(); resolve({ code: code ?? -1, stdout, stderr, timedOut, overflow,
+      ...(interrupted ? { interrupted } : {}) }); });
   });
 }
 

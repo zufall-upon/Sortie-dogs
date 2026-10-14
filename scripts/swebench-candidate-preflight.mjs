@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupCandidateRuntime, createDryRunPlan, prepareCandidateRuntime } from "./swebench-lite-runner.mjs";
+import { candidateFailureMessage, cleanupCandidateRuntime, createDryRunPlan, prepareCandidateRuntime } from "./swebench-lite-runner.mjs";
 
 export async function runCandidatePreflight(manifestArgument, runRootArgument, dependencies = {}) {
   if (!manifestArgument || !runRootArgument) {
@@ -14,6 +14,7 @@ export async function runCandidatePreflight(manifestArgument, runRootArgument, d
   const packagePath = resolve(dirname(manifestPath), plan.candidate.package_tgz);
   let ownsRunRoot = false;
   let prepared;
+  let unresolvedRuntime = false;
   try {
     try { await mkdir(runRoot); ownsRunRoot = true; }
     catch (error) {
@@ -22,8 +23,11 @@ export async function runCandidatePreflight(manifestArgument, runRootArgument, d
     }
     prepared = await (dependencies.prepareCandidate ?? prepareCandidateRuntime)(plan.candidate, packagePath, runRoot);
     return { candidate: prepared.evidence, config_verified: true, provider_requests_started: false };
+  } catch (error) {
+    unresolvedRuntime = error?.candidateRuntimeContext?.cleanup_complete === false;
+    throw error;
   } finally {
-    if (ownsRunRoot) {
+    if (ownsRunRoot && !unresolvedRuntime) {
       try { await cleanupCandidateRuntime(prepared); }
       finally { await rm(runRoot, { recursive: true, force: true }); }
     }
@@ -31,6 +35,8 @@ export async function runCandidatePreflight(manifestArgument, runRootArgument, d
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await runCandidatePreflight(...process.argv.slice(2));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  try {
+    const result = await runCandidatePreflight(...process.argv.slice(2));
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } catch (error) { process.stderr.write(candidateFailureMessage(error)); process.exitCode = 1; }
 }

@@ -905,7 +905,12 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     },
   };
   } catch (error) {
-    await cleanupCandidateRuntime({ runtimeRoot: candidateRoot, temporaryRoot });
+    const context = error?.candidateProbeContext ?? error?.serverStartContext;
+    if (context?.cleanup_complete === false) {
+      // The registered server can still own writers. Preserve its registration,
+      // data and temporary files for the recorded teardown, not another launch.
+      error.candidateRuntimeContext = { ...context, runtimeRoot: candidateRoot, temporaryRoot };
+    } else await cleanupCandidateRuntime({ runtimeRoot: candidateRoot, temporaryRoot });
     throw error;
   }
 }
@@ -928,13 +933,14 @@ export async function retainUsageDatabase(sourcePath, targetPath) {
   } finally { target.close(); }
 }
 
-async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}) {
-  const server = await startV2ReleaseServer(root, environment);
+export async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}, dependencies = {}) {
+  const server = await (dependencies.startServer ?? startV2ReleaseServer)(root, environment);
+  let probeError;
   try {
     const headers = { "content-type": "application/json",
       authorization: `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}` };
     const request = async (path, method = "GET", body) => {
-      const response = await fetch(`${server.url}${path}`, { method, headers,
+      const response = await (dependencies.fetch ?? fetch)(`${server.url}${path}`, { method, headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(25_000) });
       ensure(response.ok, `candidate-v2-api-failed:${method}:${path.split("/").slice(0, 3).join("/")}:${response.status}`);
       return response.status === 204 ? undefined : response.json();
@@ -953,7 +959,25 @@ async function probeCandidateV2Agents(root, environment, primary, agentNames, mo
     ensure(plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010"), "candidate-plugin-not-loaded");
     const agents = await request("/api/agent");
     for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name), modelOverrides[name]);
-  } finally { await server.stop(); }
+  } catch (error) { probeError = error; throw error; }
+  finally {
+    try { await server.stop(); }
+    catch (cleanupError) {
+      const error = probeError ?? cleanupError;
+      error.candidateProbeContext = { serverPID: server.pid ?? null, stateDirectory: join(root, ".opencode", "v2-service-state"),
+        cleanup_complete: false,
+        cleanupErrors: [{ resource: "server", name: cleanupError.name, message: String(cleanupError.message).slice(0, 1500),
+          ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }],
+        nextAction: "Retry teardown only for the recorded owned server registration and verify its writers stopped; inspect the original candidate-probe failure before continuation. Retain unresolved usage holds; do not automatically replay the task or restart the shared host." };
+      if (!probeError) throw cleanupError;
+    }
+  }
+}
+
+export function candidateFailureMessage(error) {
+  const context = error?.candidateRuntimeContext ?? error?.candidateProbeContext ?? error?.serverStartContext;
+  return `${error.message}\n${context?.cleanup_complete === false
+    ? `${JSON.stringify({ candidate_runtime_cleanup: context })}\n` : ""}`;
 }
 
 async function killProcessGroup(pid, force = false) {
@@ -1727,5 +1751,5 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     : runDryRun(options.manifest, options.output);
   run
     .then(plan => process.stdout.write(`${JSON.stringify(plan)}\n`))
-    .catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
+    .catch(error => { process.stderr.write(candidateFailureMessage(error)); process.exitCode = 1; });
 }
