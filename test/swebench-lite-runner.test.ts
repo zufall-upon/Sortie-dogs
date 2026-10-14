@@ -9,6 +9,7 @@ import fsPromises from "node:fs/promises";
 import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
+import { runSupervisor } from "../scripts/swebench-lite-supervisor.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
 import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
@@ -827,6 +828,100 @@ test("candidate setup uses a short owned temporary directory and removes it on f
     if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
+});
+
+for (const unresolvedCleanup of [false, true]) {
+  test(`live preparation failure persists primary cause and next operation (unresolved cleanup: ${unresolvedCleanup})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "swebench-preparation-receipt-"));
+    const value = manifest(), output = join(root, "predictions.jsonl"), runRoot = join(root, "run");
+    const primary = Object.assign(Error("retained-candidate-probe-failure"), { code: "EIO",
+      ...(unresolvedCleanup ? { candidateRuntimeContext: { cleanup_complete: false, serverPID: 719000001,
+        runtimeRoot: join(runRoot, "candidate-runtime"), temporaryRoot: join(root, "owned-tmp"),
+        stateDirectory: join(runRoot, "candidate-runtime/.opencode/v2-service-state"),
+        cleanupErrors: [{ resource: "server", message: "pgrep failed (exit -1)" }],
+        nextAction: "Retry teardown only for the recorded owned server; retain unresolved reservation holds; do not automatically replay the consumed task." } } : {}) });
+    let preparations = 0;
+    try {
+      await assert.rejects(runTestLive(value, { runRoot, output, costLimitUsd: 2 }, {
+        prepareCandidate: async () => { preparations++; throw primary; },
+        clone: async () => assert.fail("no task clone before successful preparation"),
+        execute: async () => assert.fail("no inference before successful preparation"),
+      }), error => error === primary);
+      const metadata = JSON.parse(await readFile(`${output}.metadata.json`, "utf8"));
+      assert.equal(preparations, 1);
+      assert.deepEqual(metadata.results.map((result: { status: string }) => result.status),
+        ["candidate-preparation-failed", "not-run-candidate-preparation-failed"]);
+      assert.equal(metadata.execution.spent_usd, null); assert.equal(metadata.execution.usage_complete, false);
+      assert.equal(metadata.execution.live_process_started, false); assert.equal(metadata.execution.provider_requests_started, false);
+      assert.equal(metadata.candidate.preparation_complete, false); assert.equal(metadata.replay, undefined);
+      for (const result of metadata.results) {
+        assert.equal(result.failure, primary.message); assert.equal(result.failure_code, "EIO");
+        assert.equal(result.failure_stage, "candidate-runtime-preparation");
+        assert.equal(result.task_execution_started, false); assert.equal(result.exit_code, null);
+        assert.equal(result.patch_sha256, null); assert.equal(result.usage_complete, false);
+        assert.equal(result.usage, undefined, "missing usage is not invented as zero");
+        assert.match(result.next_action, /retain unresolved reservation holds/i);
+        assert.match(result.next_action, /not automatically replay/i);
+        assert.deepEqual(result.candidate_runtime_cleanup, primary.candidateRuntimeContext);
+      }
+      const predictions = (await readFile(output, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(predictions.length, 2); assert(predictions.every(item => item.model_patch === ""));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("preparation failure reaches supervisor admission without zero-cost accounting or consumed-task resend", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-preparation-admission-"));
+  const value = manifest();
+  const primary = Error("Could not inspect owned process group 719000001: pgrep failed (exit -1)");
+  const options = { manifestPath: join(root, "manifest.json"), runRoot: join(root, "supervisor"),
+    output: join(root, "predictions.jsonl"), costLimitUsd: 2, perInstanceUsd: 2, workers: 1, watchdog: false };
+  let attempts = 0;
+  const dependencies = {
+    allowWindows: true,
+    spawnRunner: async (_state: unknown, entry: { index: number }, paths: { root: string; output: string; metadata: string }) => {
+      attempts++;
+      const child = { ...value, instances: [value.instances[entry.index]!] };
+      await assert.rejects(runTestLive(child, { runRoot: paths.root,
+        output: paths.output, metadata: paths.metadata, costLimitUsd: 2 }, {
+        prepareCandidate: async () => { throw primary; },
+      }), error => error === primary);
+      return { identity: { pid: 99999999, starttime: null } };
+    },
+    waitForChild: async () => ({ exit: 1, signal: null }),
+  };
+  try {
+    const state = await runSupervisor(value, options, dependencies);
+    assert.equal(state.status, "completed", "the supervisor is terminal, not a task-completion claim");
+    assert.deepEqual(state.instances.map((entry: { status: string }) => entry.status),
+      ["candidate-preparation-failed", "not-run-cost-limit"]);
+    assert.equal(state.instances[0].result.failure, primary.message);
+    assert.equal(state.instances[0].result.task_execution_started, false);
+    assert.equal(state.instances[0].usage_usd, null); assert.equal(state.held_unknown_usd, 2);
+    assert.equal(state.reserved_usd, 0); assert.equal(state.instances[0].attempt, 1);
+    assert.equal(state.instances[1].attempt, 0, "an unknown hold is not available for later admission");
+    const aggregate = JSON.parse(await readFile(`${options.output}.metadata.json`, "utf8"));
+    assert.equal(aggregate.results[0].failure, primary.message);
+    assert.match(aggregate.results[0].next_action, /Do not automatically replay/);
+    await runSupervisor(value, options, dependencies);
+    assert.equal(attempts, 1, "terminal restart must not resend preparation or the consumed operation");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("preparation failure remains primary if its receipt cannot be persisted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-preparation-write-failure-"));
+  const primary = Object.assign(Error("retained-primary-preparation-failure"), { candidateFailurePersistenceError: undefined as string | undefined });
+  const value = manifest();
+  try {
+    await assert.rejects(runTestLive(value, { runRoot: join(root, "run"),
+      output: join(root, "absent-parent/predictions.jsonl"), costLimitUsd: 2 }, {
+      prepareCandidate: async () => { throw primary; },
+    }), error => error === primary);
+    assert.match(primary.candidateFailurePersistenceError!, /run-output-write-failed/);
+    const diagnostic = candidateFailureMessage(primary);
+    assert.equal(diagnostic.split("\n")[0], primary.message);
+    assert.match(diagnostic, /candidate_failure_persistence_error/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 for (const phase of ["probe-and-cleanup-failure", "cleanup-failure"] as const) {
