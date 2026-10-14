@@ -9800,8 +9800,13 @@ isolated("root task watchdog defers and rearms for a running parallel task with 
     }));
     const aborts: string[] = [];
     const logs: Array<{ message: string; extra?: Record<string, unknown> }> = [];
+    let deferredTwiceObserved!: () => void;
+    const deferredTwice = new Promise<void>((resolve) => { deferredTwiceObserved = resolve; });
     const hooks = await SortieDogsPlugin({ directory, client: {
-      app: { log: ({ body }) => { logs.push({ message: body.message, extra: body.extra }); } },
+      app: { log: ({ body }) => {
+        logs.push({ message: body.message, extra: body.extra });
+        if (logs.filter(({ message }) => message === "batch-watchdog.deferred").length >= 2) deferredTwiceObserved();
+      } },
       session: {
         abort: async ({ path }) => { aborts.push(path.id); return true; },
         promptAsync: async () => true,
@@ -9830,7 +9835,16 @@ isolated("root task watchdog defers and rearms for a running parallel task with 
       { args: { subagent_type: "dog-worker", prompt } },
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    // Durable snapshot I/O and sibling fixtures can delay a sweep. Observe the actual
+    // second deferral rather than assuming two sweeps finish within a fixed 500ms.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([deferredTwice, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("second parallel watchdog deferral was not observed")), 5_000);
+      })]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
     assert.deepEqual(aborts, []);
     const deferred = logs.find(({ message, extra }) => message === "batch-watchdog.deferred" &&
       Array.isArray(extra?.reasons) && extra.reasons.includes("parallel-running"));
