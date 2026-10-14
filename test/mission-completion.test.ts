@@ -318,6 +318,7 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
 
 for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery",
   "older-after-failure", "older-after-running", "newer-unseen-conflict", "newer-unseen-input-conflict", "newer-unseen-reversed-input-conflict", "newer-unseen-status-conflict", "delegated-after-completion",
+  "conflicting-starts", "conflicting-starts-reversed", "conflicting-starts-partial", "conflicting-starts-after-recovery",
   "direct-before-admission", "direct-after-admission", "cancel-during-recovery", "complete-during-recovery"] as const)
 test(`saved native operation calls recover through Mission APIs without replay or acceptance: ${recoveryMode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -459,6 +460,22 @@ test(`saved native operation calls recover through Mission APIs without replay o
         history[worker]!.push(...(recoveryMode === "newer-unseen-reversed-input-conflict" ? [failed, later] : [later, failed]));
       }
     }
+    if (recoveryMode.startsWith("conflicting-starts")) {
+      const earlier = structuredClone(history[worker]![1]!) as { parts: { callID: string; state: { metadata: { exit: number }; time: { start: number; end: number } } }[] };
+      earlier.parts[0]!.callID = "conflicting-native-start";
+      earlier.parts[0]!.state.time = { start: start + 5, end: start + 6 };
+      const later = structuredClone(earlier);
+      later.parts[0]!.state.metadata.exit = 1;
+      later.parts[0]!.state.time = { start: start + 20_000, end: start + 20_100 };
+      if (recoveryMode === "conflicting-starts-after-recovery") {
+        history[worker]!.push(earlier);
+        assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed");
+        history[worker]!.pop();
+        history[worker]!.push(later);
+      } else {
+        history[worker]!.push(...(recoveryMode === "conflicting-starts-reversed" ? [later, earlier] : [earlier, later]));
+      }
+    }
     const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
     if (recoveryMode === "direct-before-admission") {
       assert.equal(submitted.acceptance_summary.operation.status, "not-started", "boundary-page calls before direct admission belong to earlier work");
@@ -470,6 +487,25 @@ test(`saved native operation calls recover through Mission APIs without replay o
       assert.equal(submitted.acceptance_summary.operation.terminal_complete, false);
       const conflict = submitted.acceptance_summary.operation.observations.find((item: { callID: string }) => item.callID === recoveryMode);
       assert.equal(conflict?.conflicting, true, "retain previously unseen contradictory native records");
+      return;
+    }
+    if (recoveryMode.startsWith("conflicting-starts")) {
+      const operation = submitted.acceptance_summary.operation;
+      assert.equal(operation.status, "not-started", "a later conflicting native start cannot be hidden by another successful call");
+      assert.equal(operation.terminal_complete, false);
+      assert.equal(operation.process_succeeded, null);
+      const conflict = operation.observations.find((item: { callID: string }) => item.callID === "conflicting-native-start");
+      assert.equal(conflict.conflicting, true);
+      assert.equal(conflict.startedAt, new Date(start + (recoveryMode === "conflicting-starts-reversed" ? 20_000 : 5)).toISOString(),
+        "the original observed start is retained, not rewritten");
+      assert.equal(conflict.latestConflictingStartedAt, new Date(start + 20_000).toISOString());
+      if (recoveryMode === "conflicting-starts-partial") {
+        history[worker]!.pop(); // A later read exposes only the older conflicting fragment.
+        const partial = (await tool("operator_status", rootID)).acceptance_summary.operation;
+        assert.equal(partial.status, "not-started", "partial history cannot regress the saved latest conflicting bound");
+        assert.equal(partial.observations.find((item: { callID: string }) => item.callID === "conflicting-native-start").latestConflictingStartedAt,
+          new Date(start + 20_000).toISOString());
+      }
       return;
     }
     if (["missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery"].includes(recoveryMode)) {

@@ -2366,7 +2366,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (owners.size === 0) return mission;
 
       const recovered: NonNullable<OperatorMission["execution"]>["observations"] = [];
-      const conflictingCalls: { sessionID: string; callID: string }[] = [];
+      const conflictingCalls: { sessionID: string; callID: string; latestConflictingStartedAt: string }[] = [];
+      const laterStart = (saved: string | undefined, observed: string) =>
+        !saved || Date.parse(observed) > Date.parse(saved) ? observed : saved;
       for (const [sessionID, windows] of owners) {
         // A direct session has its own native admission time; a delegated session is bounded
         // by its native creation time when exposed by the existing session API.
@@ -2376,6 +2378,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         try { history = await reviewMessages(sessionID, notBefore); } catch { continue; }
         const calls = new Map<string, { command: string; directory: string; observation: NonNullable<OperatorMission["execution"]>["observations"][number] }>();
         const conflicts = new Set<string>();
+        const nativeStarts = new Map<string, string>();
         const nativeInputs = new Map<string, { command: string; directory: string }>();
         for (const message of history) {
           const info = record(message.info) ? message.info : message;
@@ -2399,6 +2402,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const nativeDirectory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
             const directory = missionOperationDirectoryMatch(nativeDirectory, execution.directory) ? execution.directory : nativeDirectory;
             const key = part.callID;
+            nativeStarts.set(key, laterStart(nativeStarts.get(key), startedAt));
             const nativeInputIdentity = { command: nativeInput.command, directory };
             const priorInput = nativeInputs.get(key);
             if (priorInput && (priorInput.command !== nativeInput.command || priorInput.directory !== directory)) {
@@ -2442,8 +2446,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
           }
         }
-        for (const [callID, item] of calls) recovered.push({ ...item.observation, ...(conflicts.has(callID) ? { conflicting: true } : {}) });
-        for (const callID of conflicts) conflictingCalls.push({ sessionID, callID });
+        for (const [callID, item] of calls) recovered.push({ ...item.observation, ...(conflicts.has(callID)
+          ? { conflicting: true, latestConflictingStartedAt: nativeStarts.get(callID)! } : {}) });
+        for (const callID of conflicts) conflictingCalls.push({ sessionID, callID, latestConflictingStartedAt: nativeStarts.get(callID)! });
       }
       if (recovered.length === 0 && conflictingCalls.length === 0) return mission;
 
@@ -2458,18 +2463,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             continue;
           }
           if (prior.command !== observation.command || prior.directory !== observation.directory) continue;
-          if (observation.conflicting || prior.completedAt && observation.completedAt && (prior.status !== observation.status ||
+          if (observation.conflicting || prior.startedAt !== observation.startedAt || prior.completedAt && observation.completedAt && (prior.status !== observation.status ||
               prior.exit !== undefined && observation.exit !== undefined && prior.exit !== observation.exit ||
               prior.outcome !== undefined && observation.outcome !== undefined && prior.outcome !== observation.outcome)) {
             prior.conflicting = true;
           }
+          if (prior.conflicting) prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.startedAt,
+            observation.latestConflictingStartedAt ?? observation.startedAt);
           if (prior.outcome !== undefined) continue;
+          const latestConflictingStartedAt = prior.latestConflictingStartedAt;
           delete prior.completedAt; delete prior.exit; delete prior.outcome; delete prior.result;
-          Object.assign(prior, observation, { startedAt: prior.startedAt });
+          Object.assign(prior, observation, { startedAt: prior.startedAt,
+            ...(latestConflictingStartedAt ? { latestConflictingStartedAt } : {}) });
         }
         for (const conflict of conflictingCalls) {
           const prior = current.execution.observations.find(item => item.callID === conflict.callID && item.sessionID === conflict.sessionID);
-          if (prior) prior.conflicting = true;
+          if (prior) {
+            prior.conflicting = true;
+            prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.startedAt, conflict.latestConflictingStartedAt);
+          }
         }
       });
     }

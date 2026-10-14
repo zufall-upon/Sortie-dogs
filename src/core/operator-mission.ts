@@ -87,6 +87,8 @@ export interface MissionExecution {
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     /** Contradictory native records retained for this same call, not a process outcome. */
     conflicting?: boolean;
+    /** Latest actual start reported for a conflicting call; original startedAt is retained. */
+    latestConflictingStartedAt?: string;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
 export interface MissionLaunchConditions {
@@ -300,7 +302,9 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
   const execution = mission.execution;
   if (!execution || execution.commands.length === 0 || execution.observations.length === 0) return "not-started";
   // Recovery may discover an older call after a newer live/failed observation was saved.
-  const ordered = [...execution.observations].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)).reverse();
+  const orderingTime = (item: MissionExecution["observations"][number]) => Math.max(Date.parse(item.startedAt),
+    Date.parse(item.latestConflictingStartedAt ?? item.startedAt));
+  const ordered = [...execution.observations].sort((left, right) => orderingTime(left) - orderingTime(right)).reverse();
   const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
   if (latest.some(item => item?.conflicting)) return "not-started";
   if (latest.some(item => item && !item.completedAt)) return "running";
