@@ -4,7 +4,7 @@ import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
-import { normalizeCommand, shellCommandWords } from "../plugin/gate.js";
+import { normalizeCommand, shellCommandBase, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
@@ -85,6 +85,8 @@ export interface MissionExecution {
   directory: string;
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
+    /** Contradictory native records retained for this same call, not a process outcome. */
+    conflicting?: boolean;
     outcome?: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown> }[];
 }
 export interface MissionLaunchConditions {
@@ -297,9 +299,11 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
   if (mission.kind !== "operation") return "not-required";
   const execution = mission.execution;
   if (!execution || execution.commands.length === 0 || execution.observations.length === 0) return "not-started";
-  const latest = execution.commands.map(command => [...execution.observations].reverse().find(item => item.command === command && item.directory === execution.directory));
+  // Recovery may discover an older call after a newer live/failed observation was saved.
+  const ordered = [...execution.observations].sort((left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt)).reverse();
+  const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
   if (latest.some(item => item && !item.completedAt)) return "running";
-  if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
+  if (latest.some(item => !item || item.conflicting || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";
 }
@@ -323,6 +327,12 @@ function missionPathIdentity(value: string, directory: string, windows: boolean)
   return win32.normalize(win32.resolve(directory, value)).toLowerCase();
 }
 
+/** Native Windows cwd case/separator spelling is not a different operation directory. */
+export function missionOperationDirectoryMatch(actual: string, declared: string): boolean {
+  const windows = missionWindowsPath(actual) || missionWindowsPath(declared);
+  return missionPathIdentity(actual, declared, windows) === missionPathIdentity(declared, declared, windows);
+}
+
 function sameNodeOperation(declared: string, actual: string, directory: string): boolean {
   const expected = missionCommandTokens(declared), observed = missionCommandTokens(actual);
   if (!expected || !observed || expected.length !== observed.length || expected.length < 2) return false;
@@ -335,7 +345,14 @@ function sameNodeOperation(declared: string, actual: string, directory: string):
   if (missionPathIdentity(script, directory, windows) !== missionPathIdentity(observed[1]!, directory, windows)) return false;
   for (let index = 2; index < expected.length; index += 1) {
     const left = expected[index]!, right = observed[index]!;
-    const pathArgument = missionWindowsPath(left) || missionWindowsPath(right) || /[\\/]/u.test(left) || /[\\/]/u.test(right);
+    if (left === right) continue;
+    // Options and URI values are script inputs, not filesystem paths with Windows case rules.
+    const literal = (value: string) => value.startsWith("-") || !missionWindowsPath(value) && /^[A-Za-z][A-Za-z\d+.-]*:/u.test(value);
+    if (literal(left) || literal(right)) return false;
+    // Only the supported absolute-path substitution can change a positional argument.
+    // Two different relative opaque values must not collapse via path normalization.
+    const absolute = (value: string) => missionWindowsPath(value) || value.startsWith("/");
+    const pathArgument = absolute(left) !== absolute(right);
     if (pathArgument
       ? missionPathIdentity(left, directory, windows) !== missionPathIdentity(right, directory, windows)
       : left !== right) return false;
@@ -352,6 +369,18 @@ export function missionOperationCommandMatch(command: string, declared: readonly
   if (exact.length > 1) return undefined;
   const equivalent = declared.filter(item => sameNodeOperation(item, command, directory));
   return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
+}
+
+/** Apply the existing no-decoration operation check to the same accepted native spelling. */
+export function missionOperationCommandDecorated(command: string, declared: readonly string[], directory: string): boolean {
+  if (missionOperationCommandMatch(command, declared, directory) !== undefined) return false;
+  const stripped = stripMissionPowerShellPrefix(command), actual = normalizeCommand(stripped);
+  if (declared.some(item => {
+    const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
+    return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
+  })) return true;
+  const base = shellCommandBase(stripped, stripped !== command.trim() || stripped.startsWith("&") ? "powershell" : "posix");
+  return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
 }
 
 /** A terminal failure is a collected result, not a successful operation. Required success

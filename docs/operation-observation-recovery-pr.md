@@ -18,6 +18,11 @@ The avoidable handoff/status round trips followed from that missing observation 
 - Use that identity at the existing shell admission/observation point so the call's canonical declared command keeps its actual native call ID and session owner.
 - On existing status, submission and completion APIs, inspect only the native session admitted to the current Mission run/unit. Require exact session ownership, shell call ID, command identity, cwd and native terminal metadata. Record only native timestamps and outcomes. A still-running call remains running; a failed call remains failed; missing exit/time, conflicting input, ambiguous declaration, wrong cwd or unavailable history remains unclassified and cannot become success.
 - Persist recovered observations through `OperatorMissionRuntime.update`, idempotently by `(sessionID, callID)`. Do not modify the operator/run-flight ledger, spend, validation evidence, Review or requirements.
+- Apply the current unit's native start cutoff to each tool, not just its boundary-page fetch. Retained direct actors keep all their current-run admission windows, and reusable correction actors use their correction admission rather than conversation creation.
+- Select the latest operation by its actual start time, not the order in which recovery discovered it. Keep incomplete exits unclassified, allow normal running-to-terminal and missing-to-known metadata updates, and retain a `conflicting` marker when the same native call has contradictory terminal records. That marker is observation data, not a fabricated process failure or a new authorization layer.
+- Keep URL, option and opaque values literal. Only the supported relative-to-absolute positional path substitution may change an argument; two differing relative values (or two differing absolute-looking route values) cannot collapse via path normalization. Script and Windows cwd identities retain the same case/separator rules.
+- Recheck terminal Mission phase inside the serialized recovery update, after awaiting history. A delayed reader cannot append results after cancellation or completion.
+- Apply the existing decorated-operation refusal to the recognized base command after its permitted native wrapper/path spelling. Reuse the existing quote-aware shell scanner, so quoted suffix characters remain input data. This fixes the existing observation/preflight boundary, not another permission layer.
 - Keep the existing protected-snapshot blocker independent. Recovered operation completion is not a `PASS` and cannot bypass current source/candidate freshness.
 
 ## Three-principle review
@@ -37,6 +42,24 @@ The avoidable handoff/status round trips followed from that missing observation 
 ## Validation
 
 The PR description records the final registered checks with their exact commands, exits and elapsed times, plus any diagnostic rerun and its reason. Keeping those native results in the PR description avoids copying stale evidence into this design proposal.
+
+## Initial independent review and same-Task correction
+
+The Reviewer (`openai/gpt-6.1-sol`) reproduced five Medium defects through the existing public Mission harness before source correction: pre-admission calls counted as current execution; missing exits classified as failure; contradictory same-call terminals selected by last-write order; old recovered success replacing a newer failure/running result; and URL/option arguments compared with Windows path case rules. These are corrected in the same native Task, with regressions derived from the existing operation/result separation contract. This correction's own recheck is not independent approval of its edits.
+
+The pre-fix focused diagnostic used the candidate's existing `dist` and the added public regressions: seven requirement assertions failed as expected (the direct-enabled control additionally exposed a fixture-only tail owner mismatch, corrected without changing its oracle). Disposable diagnostic fixtures were removed. Final integrated checks use the normal router/build boundary and remain separate from recovery of the old external operation.
+
+PR #250's body, review submissions and regular/line comments were retrieved. At the initial read only the bot's running notification existed. Its later review on `167a7e0` supplied seven concrete comments, all classified **valid**, none false-positive or deferred:
+
+- `4266226012`: admission timestamp; covered by the existing pre-admission regression and per-tool cutoff.
+- `4266226023`: chronological selection; covered by newer-failed/running preservation regressions.
+- `4266226031`: tool error without a process exit; extend the missing-exit correction to error envelopes too. The native error stays visible, but does not fabricate process execution/failure.
+- `4266226043`: Windows cwd case; additional Medium finding, fixed at native admission and recovery with a real Windows public-API regression.
+- `4266226055`: terminal-phase race; additional Medium finding, fixed with in-update phase reconciliation. Regressions use public cancellation during the history read and a completed-phase fault injection; the latter is not a claim of real Mission acceptance.
+- `4266226063`: decorated native wrappers; additional Medium finding, fixed at the existing refusal point with prefixed and absolute-Node regression inputs. No operation is launched by these refusal tests.
+- `4266226070`: opaque slash-bearing arguments; extend the argument-identity correction to reject relative-value/route normalization, while retaining the saved relative/absolute helper and plan substitution.
+
+The additional pre-fix diagnostics failed on the concrete error-envelope, phase-race, wrapper/suffix and Windows-case requirements. The Windows fixture initially lacked its standard model field; supplying that field exposed the expected case-identity failure without changing the oracle. All diagnostics used disposable fixtures; no old operation, package or external ledger was modified. Final check/delivery observations are recorded on the PR. CI success is not treated as resolution of a code finding, and no new review/approval wait is required for this correction's explicit author self-recheck.
 
 ## Explicitly out of scope
 

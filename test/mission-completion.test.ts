@@ -22,7 +22,7 @@ function assertStatusOrder(packet: Record<string, unknown>): void {
   assert.ok(summary >= 0 && units > summary, "acceptance summary still precedes the full authority packet");
 }
 
-for (const mode of ["implementation", "executed", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
+for (const mode of ["implementation", "executed", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background", "missing-foreground-exit", "missing-error-exit"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
   const failure = ["execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation"].includes(mode);
@@ -108,22 +108,24 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
       const binding = JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: "worker" }));
       assert.equal(binding.status, "bound", JSON.stringify(binding));
     } finally { Date.now = clock; }
-    if (mode === "legacy-background") {
+    if (mode === "legacy-background" || mode.startsWith("missing-")) {
       // V2 returns a completed tool call for a launched background shell, with no process exit.
       // This is the metadata captured by the real Anko run, not an operation result.
       await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
         { args: { command: "node check.mjs", workdir: root } });
       await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "background-launch" },
-        { output: "", metadata: { status: "running", shellID: "sh_anko" } });
+        { output: "", ...(mode === "missing-error-exit" ? { status: "error" } : {}),
+          metadata: mode === "legacy-background" ? { status: "running", shellID: "sh_anko" } : { status: mode === "missing-error-exit" ? "error" : "completed" } });
       const observed = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
-      assert.equal(observed.execution?.observations[0]?.completedAt, undefined,
+      assert.equal(observed.execution?.observations[0]?.outcome, undefined, "without a process exit there is no successful/failed process outcome");
+      if (mode === "legacy-background") assert.equal(observed.execution?.observations[0]?.completedAt, undefined,
         "a background launch must not be recorded as a terminal failure or success");
-      assert.equal(observed.execution?.observations[0]?.status, "running");
+      assert.equal(observed.execution?.observations[0]?.status, mode === "legacy-background" ? "running" : mode === "missing-error-exit" ? "error" : "completed");
       const submitted = JSON.parse(await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "launched" },
         { sessionID: "coordinator" }));
       assert.equal(submitted.status, "operation-incomplete");
-      assert.equal(submitted.operation.status, "running");
-      assert.match(submitted.next_action, /do not (?:relaunch|start another)/iu);
+      assert.equal(submitted.operation.status, mode === "legacy-background" ? "running" : "not-started");
+      if (mode === "legacy-background") assert.match(submitted.next_action, /do not (?:relaunch|start another)/iu);
       return;
     }
     if (mode === "implementation") await writeFile(join(root, "result.txt"), "ready\n");
@@ -132,7 +134,9 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
         { args: { command: "node check.mjs", workdir: root, background: true, timeout: 0 } }),
       /mission-operation-background: run the declared command in foreground/);
       for (const command of ["node check.mjs | tee result.txt", "node check.mjs > result.txt",
-        "node check.mjs 2> result.txt", "node check.mjs && echo done"]) {
+        "node check.mjs 2> result.txt", "node check.mjs && echo done",
+        "$ErrorActionPreference='Stop'; node check.mjs; echo done",
+        `& '${process.execPath}' '${join(root, "check.mjs")}' > result.txt`]) {
         await assert.rejects(hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: `decorated-${command}` },
           { args: { command } }), /mission-operation-command-not-observed: run the declared operation command exactly/);
       }
@@ -312,22 +316,33 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("saved native operation calls recover through Mission APIs without replay or acceptance", async () => {
+for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery",
+  "older-after-failure", "older-after-running", "direct-before-admission", "direct-after-admission", "cancel-during-recovery", "complete-during-recovery"] as const)
+test(`saved native operation calls recover through Mission APIs without replay or acceptance: ${recoveryMode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-native-operation-recovery-"));
   const rootID = "ses_eea93a19dffdxZz9nRa10N2N3R", coordinator = "ses_ec815701fffeFp40d2WOjl6yU8";
   const worker = "ses_ec823140dffeGYr1ZirFUyDC6Z";
+  const direct = recoveryMode.startsWith("direct-");
+  const nativeOwner = direct ? coordinator : worker;
   const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
     [rootID]: { agent: "dog-operator" },
     [coordinator]: { agent: "dogs-coordinator", parentID: rootID },
     [worker]: { agent: "dog-worker-v010", parentID: coordinator, outcome: "succeeded", time: { created: Date.now() - 10_000 } },
   };
   const history: Record<string, Record<string, unknown>[]> = {};
+  let duringRecoveryRead: (() => Promise<void>) | undefined;
   const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
     children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
       .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-    messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), abort: async () => ({ data: true }),
+    messages: async ({ path }: { path: { id: string } }) => {
+      if (path.id === nativeOwner && duringRecoveryRead) {
+        const transition = duringRecoveryRead; duringRecoveryRead = undefined;
+        await transition();
+      }
+      return { data: history[path.id] ?? [] };
+    }, abort: async () => ({ data: true }),
   } } } as never);
   let hooks: Awaited<ReturnType<typeof create>>;
   let turn = 0;
@@ -348,24 +363,26 @@ test("saved native operation calls recover through Mission APIs without replay o
       kind: "operation", execution: { commands: declaredCommands, directory: root } });
     await before(rootID, "coordinator-call", started.task);
     await chat(coordinator, started.task.prompt);
-    const planned = await tool("plan_units", coordinator, { units: [{ title: "Collect operation result", objective: "Record the run result",
+    const planned = await tool("plan_units", coordinator, { ...(direct ? { executor: "self" } : {}), units: [{ title: "Collect operation result", objective: "Record the run result",
       read: ["check.mjs"], write: ["result.json"], validation: ["node check.mjs"] }] });
-    await before(coordinator, "call_9bf3a49fc67c463f98b241ede95a5cbc", planned.task);
-    await chat(worker, planned.task.prompt);
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: coordinator, callID: "call_9bf3a49fc67c463f98b241ede95a5cbc" },
-      { output: "completed", metadata: { sessionId: worker } });
+    if (!direct) {
+      await before(coordinator, "call_9bf3a49fc67c463f98b241ede95a5cbc", planned.task);
+      await chat(worker, planned.task.prompt);
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: coordinator, callID: "call_9bf3a49fc67c463f98b241ede95a5cbc" },
+        { output: "completed", metadata: { sessionId: worker } });
+    }
 
     const nativePull = "$ErrorActionPreference='Stop'; git pull --ff-only origin main";
     const nativeApply = `$ErrorActionPreference='Stop'; & ${quote(process.execPath)} ${quote(join(root, "apply.mjs"))} ${quote(join(root, "plan.json"))}`;
-    const start = Date.now() - 4_000;
-    history[worker] = [
-      { info: { role: "assistant", sessionID: worker, time: { created: start } }, parts: [{ type: "tool", tool: "bash",
+    const start = Date.now() - (recoveryMode === "direct-before-admission" ? 4_000 : 0);
+    history[nativeOwner] = [
+      { info: { role: "assistant", sessionID: nativeOwner, time: { created: start } }, parts: [{ type: "tool", tool: "bash",
         callID: "call_7c9218e8ae644cec9bfd4125081d2d16", state: { status: "completed", input: { command: nativePull, workdir: root },
           output: "Already up to date.", metadata: { exit: 0, status: "completed" }, time: { start, end: start + 1_812 } } }] },
-      { info: { role: "assistant", sessionID: worker, time: { created: start + 10 } }, parts: [{ type: "tool", tool: "bash",
+      { info: { role: "assistant", sessionID: nativeOwner, time: { created: start + 10 } }, parts: [{ type: "tool", tool: "bash",
         callID: "call_c2320cce5c63457eae3553a5ab6d1f1c", state: { status: "completed", input: { command: nativeApply, workdir: root },
           output: "applied-and-matched", metadata: { exit: 0, status: "completed" }, time: { start: start + 10, end: start + 11_378 } } }] },
-      { info: { role: "assistant", sessionID: worker, time: { created: start + 20 } }, parts: [{ type: "tool", tool: "bash",
+      { info: { role: "assistant", sessionID: nativeOwner, time: { created: start + 20 } }, parts: [{ type: "tool", tool: "bash",
         callID: "call_foreign_owner", sessionID: "ses_other_worker", state: { status: "completed",
           input: { command: nativeApply, workdir: root }, output: "not-this-session", metadata: { exit: 0, status: "completed" },
           time: { start: start + 20, end: start + 21 } } }] },
@@ -376,13 +393,71 @@ test("saved native operation calls recover through Mission APIs without replay o
     assert.equal(missionExecutionStatus(beforeRecovery), "not-started");
 
     hooks = await create();
+    if (recoveryMode === "cancel-during-recovery" || recoveryMode === "complete-during-recovery") {
+      duringRecoveryRead = async () => {
+        if (recoveryMode === "cancel-during-recovery") await tool("cancel_operator", rootID, { reason: "plain" });
+        // Fault injection models the same phase write made by concurrent successful completion.
+        else await missions.update(rootID, current => { current.phase = "completed"; });
+      };
+      await tool("operator_status", rootID);
+      const terminal = await missions.required(rootID);
+      assert.equal(terminal.phase, recoveryMode === "cancel-during-recovery" ? "cancelled" : "completed");
+      assert.deepEqual(terminal.execution!.observations, [], "a late history response cannot rewrite a terminal Mission");
+      return;
+    }
+    type NativeFixtureRecord = { parts: { state: { metadata: { exit?: number } } }[] };
+    if (recoveryMode === "missing-exit" || recoveryMode === "missing-error-exit") {
+      delete (history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state.metadata.exit;
+      if (recoveryMode === "missing-error-exit") Object.assign((history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state, { status: "error" });
+    }
+    if (recoveryMode === "conflict-after-recovery") {
+      assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed");
+    }
+    if (recoveryMode === "conflicting-terminals" || recoveryMode === "conflict-after-recovery") {
+      const failed = structuredClone(history[nativeOwner]![1]) as NativeFixtureRecord;
+      failed.parts[0]!.state.metadata.exit = 1;
+      history[nativeOwner]!.splice(1, 0, failed);
+    }
+    if (recoveryMode === "older-after-failure" || recoveryMode === "older-after-running") {
+      await missions.update(rootID, current => { current.execution!.observations.push({ command: declaredCommands[1]!, directory: root,
+        callID: "later-native-call", sessionID: nativeOwner, startedAt: new Date(start + 20_000).toISOString(),
+        ...(recoveryMode === "older-after-failure" ? { completedAt: new Date(start + 21_000).toISOString(),
+          status: "completed" as const, exit: 1, outcome: "execution-failed" as const } : { status: "running" as const }) }); });
+    }
     const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
+    if (recoveryMode === "direct-before-admission") {
+      assert.equal(submitted.acceptance_summary.operation.status, "not-started", "boundary-page calls before direct admission belong to earlier work");
+      assert.deepEqual((await missions.required(rootID)).execution!.observations, []);
+      return;
+    }
+    if (["missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery"].includes(recoveryMode)) {
+      const operation = submitted.acceptance_summary.operation;
+      assert.equal(operation.status, "not-started", "missing or contradictory native exits cannot establish terminal completion");
+      assert.equal(operation.terminal_complete, false);
+      assert.equal(operation.process_succeeded, null);
+      const repeated = await tool("operator_status", rootID);
+      assert.equal(repeated.acceptance_summary.operation.status, "not-started");
+      if (recoveryMode === "missing-exit") {
+        const incomplete = operation.observations.find((item: { callID: string }) => item.callID === "call_c2320cce5c63457eae3553a5ab6d1f1c");
+        assert.equal(incomplete?.outcome, undefined, "no exit is not a real execution-failed outcome");
+        (history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state.metadata.exit = 0;
+        assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed",
+          "retrieving an actual exit completes the same call without a retry or false conflict");
+      }
+      return;
+    }
+    if (recoveryMode === "older-after-failure" || recoveryMode === "older-after-running") {
+      assert.equal(submitted.acceptance_summary.operation.status, recoveryMode === "older-after-failure" ? "execution-failed" : "running",
+        "an older recovered success cannot replace a newer native failure or live process");
+      assert.ok((await missions.required(rootID)).execution!.observations.some(item => item.callID === "later-native-call"), "retain the original native record");
+      return;
+    }
     assert.equal(submitted.acceptance_summary.operation.status, "executed");
     assert.equal(submitted.acceptance_summary.operation.process_succeeded, true);
     assert.deepEqual(submitted.acceptance_summary.operation.observations.map((item: { callID: string }) => item.callID), [
       "call_7c9218e8ae644cec9bfd4125081d2d16", "call_c2320cce5c63457eae3553a5ab6d1f1c",
     ]);
-    assert.ok(submitted.acceptance_summary.operation.observations.every((item: { sessionID: string; exit: number }) => item.sessionID === worker && item.exit === 0));
+    assert.ok(submitted.acceptance_summary.operation.observations.every((item: { sessionID: string; exit: number }) => item.sessionID === nativeOwner && item.exit === 0));
     assert.equal((await missions.required(rootID)).execution!.observations.length, 2);
 
     const recovered = await tool("operator_status", rootID);
@@ -391,6 +466,9 @@ test("saved native operation calls recover through Mission APIs without replay o
     assert.deepEqual(repeated.budget, recovered.budget, "read-only recovery consumes no unit or additional budget");
     assert.equal((await missions.required(rootID)).execution!.observations.length, 2, "native call IDs prevent duplicate records");
     assert.notEqual(recovered.phase, "completed", "operation recovery is not formal validation, Review or acceptance");
+    if (direct) return;
+    history[worker]!.push(structuredClone(history[worker]![1]!));
+    assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed", "identical terminal records are not contradictory");
 
     const nativeRecord = (callID: string, status: string, exit: number | undefined, at: number, resultStatus = status, background = false) => ({
       info: { role: "assistant", sessionID: worker, time: { created: at } },
@@ -404,6 +482,12 @@ test("saved native operation calls recover through Mission APIs without replay o
     const running = await tool("operator_status", rootID);
     assert.equal(running.acceptance_summary.operation.status, "running", "a later native launch stays running, not completed");
     assert.equal(running.acceptance_summary.operation.observations.at(-1).callID, "call_running");
+
+    const foregroundAt = runningAt + 1;
+    history[worker]!.push(nativeRecord("call_foreground", "running", undefined, foregroundAt));
+    assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "running");
+    history[worker]!.push(nativeRecord("call_foreground", "completed", 0, foregroundAt));
+    assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed", "normal running-to-terminal transition is not a conflict");
 
     const failedAt = runningAt + 10;
     history[worker]!.push(nativeRecord("call_failed", "completed", 1, failedAt));

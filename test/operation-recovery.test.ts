@@ -50,6 +50,13 @@ test("saved v0.13.20 native commands match only the same operation across PowerS
     "an appended native command remains unmatched");
   assert.equal(missionOperationCommandMatch(nativeApply, [pull, apply, apply], directory), undefined,
     "conflicting declarations remain ambiguous");
+  for (const [declared, actual] of [
+    ["node apply.mjs https://example.test/Plan", "node apply.mjs https://example.test/plan"],
+    ["node apply.mjs --mode=A/B", "node apply.mjs --mode=a/b"],
+    ["node apply.mjs tenant/a/../b", "node apply.mjs tenant/b"],
+    ["node apply.mjs /Route", "node apply.mjs /route"],
+  ]) assert.equal(missionOperationCommandMatch(actual!, [declared!], directory), undefined,
+    "URL and option values retain their literal identity, not Windows filesystem case rules");
 });
 
 test("native mission directory scope survives creation, archive, protected validation and review", async () => fixture(async root => {
