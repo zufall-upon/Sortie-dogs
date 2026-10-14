@@ -131,6 +131,8 @@ async function processGroupRunning(pid) {
   // Select the owned group first. An unrelated process's unreadable stat must
   // not prevent stopping this group, while an owned stat/read failure still matters.
   const selected = await runProcess('pgrep', ['-g', String(pid)], { timeoutMs: 1_000 });
+  if (selected.interrupted) throw Object.assign(Error(`Owned process group ${pid} inspection interrupted by ${selected.interrupted}`),
+    { code: 'ABORT_ERR', signal: selected.interrupted });
   // A slow selector proves neither a stopped group nor a failed signal. Keep the
   // existing bounded teardown loop alive so it can still escalate to SIGKILL.
   if (selected.timedOut && !selected.overflow) return true;
@@ -233,7 +235,7 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
       const databasePath = missionDatabasePath(serverEnv, cwd);
       await seedIsolatedV2Credential(credentialSource, databasePath, dirname(databasePath), { ifMissing: true });
     }
-    return { url, env: serverEnv, closed, stop: () => stopProcessGroup(child) };
+    return { url, env: serverEnv, pid: child.pid, closed, stop: () => stopProcessGroup(child) };
   } catch (error) {
     try { await stopProcessGroup(child); }
     catch (cleanupError) {

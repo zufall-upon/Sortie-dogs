@@ -905,7 +905,12 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
     },
   };
   } catch (error) {
-    await cleanupCandidateRuntime({ runtimeRoot: candidateRoot, temporaryRoot });
+    const context = error?.candidateProbeContext ?? error?.serverStartContext;
+    if (context?.cleanup_complete === false) {
+      // The registered server can still own writers. Preserve its registration,
+      // data and temporary files for the recorded teardown, not another launch.
+      error.candidateRuntimeContext = { ...context, runtimeRoot: candidateRoot, temporaryRoot };
+    } else await cleanupCandidateRuntime({ runtimeRoot: candidateRoot, temporaryRoot });
     throw error;
   }
 }
@@ -958,14 +963,21 @@ export async function probeCandidateV2Agents(root, environment, primary, agentNa
   finally {
     try { await server.stop(); }
     catch (cleanupError) {
-      if (!probeError) throw cleanupError;
-      probeError.candidateProbeContext = { stateDirectory: join(root, ".opencode", "v2-service-state"),
+      const error = probeError ?? cleanupError;
+      error.candidateProbeContext = { serverPID: server.pid ?? null, stateDirectory: join(root, ".opencode", "v2-service-state"),
         cleanup_complete: false,
         cleanupErrors: [{ resource: "server", name: cleanupError.name, message: String(cleanupError.message).slice(0, 1500),
           ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }],
         nextAction: "Retry teardown only for the recorded owned server registration and verify its writers stopped; inspect the original candidate-probe failure before continuation. Retain unresolved usage holds; do not automatically replay the task or restart the shared host." };
+      if (!probeError) throw cleanupError;
     }
   }
+}
+
+export function candidateFailureMessage(error) {
+  const context = error?.candidateRuntimeContext ?? error?.candidateProbeContext ?? error?.serverStartContext;
+  return `${error.message}\n${context?.cleanup_complete === false
+    ? `${JSON.stringify({ candidate_runtime_cleanup: context })}\n` : ""}`;
 }
 
 async function killProcessGroup(pid, force = false) {
@@ -1739,5 +1751,5 @@ if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(proce
     : runDryRun(options.manifest, options.output);
   run
     .then(plan => process.stdout.write(`${JSON.stringify(plan)}\n`))
-    .catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
+    .catch(error => { process.stderr.write(candidateFailureMessage(error)); process.exitCode = 1; });
 }
