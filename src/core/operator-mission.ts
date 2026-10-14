@@ -83,7 +83,11 @@ export interface MissionTerminalRescue {
 export interface MissionExecution {
   commands: string[];
   directory: string;
+  /** History-service availability is not a process outcome or an execution permission. */
+  recovery?: { status: "unavailable"; errors: { sessionID: string; reason: string }[] };
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
+    /** Actual native execution start, distinct from a live hook's admission clock. */
+    nativeStartedAt?: string;
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     /** Contradictory native records retained for this same call, not a process outcome. */
     conflicting?: boolean;
@@ -297,17 +301,19 @@ export function missionSelfRecheckReport(text: string, source: string, hostBound
   } catch { return undefined; }
 }
 
-export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "running" | "execution-failed" | "executed" {
+export function missionExecutionStatus(mission: OperatorMission): "not-required" | "not-started" | "recovery-unavailable" | "running" | "execution-failed" | "executed" {
   if (mission.kind !== "operation") return "not-required";
   const execution = mission.execution;
-  if (!execution || execution.commands.length === 0 || execution.observations.length === 0) return "not-started";
+  if (!execution || execution.commands.length === 0) return "not-started";
+  if (execution.observations.length === 0) return execution.recovery ? "recovery-unavailable" : "not-started";
   // Recovery may discover an older call after a newer live/failed observation was saved.
-  const orderingTime = (item: MissionExecution["observations"][number]) => Math.max(Date.parse(item.startedAt),
-    Date.parse(item.latestConflictingStartedAt ?? item.startedAt));
+  const orderingTime = (item: MissionExecution["observations"][number]) => Math.max(Date.parse(item.nativeStartedAt ?? item.startedAt),
+    Date.parse(item.latestConflictingStartedAt ?? item.nativeStartedAt ?? item.startedAt));
   const ordered = [...execution.observations].sort((left, right) => orderingTime(left) - orderingTime(right)).reverse();
   const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
   if (latest.some(item => item?.conflicting)) return "not-started";
   if (latest.some(item => item && !item.completedAt)) return "running";
+  if (latest.some(item => !item) && execution.recovery) return "recovery-unavailable";
   if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";
@@ -398,6 +404,13 @@ export function missionOperationCommandDecorated(command: string, declared: read
  * remains in the declared formal checks and Operator's original-request comparison. */
 export function missionExecutionComplete(mission: OperatorMission): boolean {
   return ["not-required", "executed", "execution-failed"].includes(missionExecutionStatus(mission));
+}
+
+/** Missing history cannot justify replay; adequate collected results remain usable. */
+export function missionExecutionRecoveryAction(mission: OperatorMission): string | undefined {
+  if (!mission.execution?.recovery || missionExecutionComplete(mission)) return undefined;
+  return "Native operation history could not be read. Preserve existing observations; inspect the admitted session's existing shell/progress or restore the history reader. " +
+    "Do not replay or rerun the operation. Report the actual recovery blocker if history remains unavailable.";
 }
 
 /** Projection of existing observations only; never another check or inferred success. */
@@ -1028,6 +1041,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
             : "Correction ready; reuse the native author for explicit self-recheck or select an independent Reviewer with review_mission when useful. Remaining authorized implementation may proceed with plan_units without acceptance. Known Major/Medium defects still require correction. Do not restart unchanged checks or investigation; CORRECTION_READY alone is not acceptance."
       : mission.kind === "operation" && operationStatus === "running"
         ? "The declared operation is already running. Inspect its native shell/progress; do not start another Worker or run. Wait for a terminal result, or report the existing run as blocked if its completion cannot be observed."
+      : missionExecutionRecoveryAction(mission) !== undefined ? missionExecutionRecoveryAction(mission)!
       : run?.phase === "awaiting-decision" && mission.corrections?.some(item => item.runID === run.runID && item.status === "failed")
         ? "Correction validation or native execution failed. Reuse its context with repair_review, select another available Reviewer, or plan_units for Worker/direct correction. Retain findings, affected checks, requested delivery and cumulative spend. Failure is never acceptance."
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)

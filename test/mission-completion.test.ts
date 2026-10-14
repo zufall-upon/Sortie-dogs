@@ -22,7 +22,7 @@ function assertStatusOrder(packet: Record<string, unknown>): void {
   assert.ok(summary >= 0 && units > summary, "acceptance summary still precedes the full authority packet");
 }
 
-for (const mode of ["implementation", "executed", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background", "missing-foreground-exit", "missing-error-exit"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
+for (const mode of ["implementation", "executed", "live-history-clock", "execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation", "NO_START", "legacy-background", "missing-foreground-exit", "missing-error-exit"] as const) test(`mission completion keeps checks, review and operation outcomes separate: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-completion-"));
   const failure = ["execution-failed", "fast-lane-failure", "registered-operation", "failed-result-validation"].includes(mode);
@@ -46,16 +46,18 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
       'writeFileSync("operation.json", JSON.stringify(result));\nconsole.log(JSON.stringify(result));\nprocess.exitCode = 1;\n');
     await exec("git", ["add", "check.mjs"], { cwd: root });
     await exec("git", ["commit", "--quiet", "-m", "validator"], { cwd: root });
-    const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
       root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
-      worker: { agent: "dog-worker-v010", parentID: dispatcher }, reviewer: { agent: "dog-reviewer-v010", parentID: dispatcher },
+      worker: { agent: "dog-worker-v010", parentID: dispatcher, ...(mode === "live-history-clock" ? { time: { created: Date.now() } } : {}) },
+      reviewer: { agent: "dog-reviewer-v010", parentID: dispatcher },
     };
+    const nativeHistory: Record<string, Record<string, unknown>[]> = {};
     let latestSession: Record<string, unknown>;
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: latestSession = {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
         .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-      messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: nativeHistory[path.id] ?? [] }), abort: async () => ({ data: true }),
     } } } as never);
     const hooks = await create();
     const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-user`, agent: identities[id]!.agent }, {
@@ -172,6 +174,31 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
       const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
       assert.equal(mission.execution!.observations.length, 1);
       assert.equal(mission.execution!.observations[0]!.exit, 1);
+      return;
+    }
+    if (mode === "live-history-clock") {
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      const live = structuredClone((await missions.required("root")).execution!.observations[0]!);
+      // The hook admission clock precedes the native part's actual execution clock.
+      const nativeStart = Date.parse(live.startedAt) + 1;
+      const nativeEnd = Date.parse(live.completedAt!);
+      const record = { info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "shell", callID: live.callID,
+        state: { status: "completed", input: { command: "node check.mjs", workdir: root }, output: checked.stdout,
+          metadata: { exit: 0, status: "completed" }, time: { start: nativeStart, end: nativeEnd } } }] };
+      nativeHistory.worker = [record];
+      const status = async () => JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+      const recovered = (await status()).acceptance_summary.operation;
+      assert.equal(recovered.status, "executed", "admission and execution clocks are not contradictory native starts");
+      assert.equal(recovered.observations[0].conflicting, undefined);
+      assert.equal(recovered.observations[0].startedAt, live.startedAt, "retain the original live observation");
+      assert.equal(recovered.observations[0].nativeStartedAt, new Date(nativeStart).toISOString());
+      assert.equal((await status()).acceptance_summary.operation.status, "executed", "an identical native read is idempotent");
+      record.parts[0]!.state.time = { start: nativeStart + 20_000, end: nativeEnd + 20_000 };
+      const conflict = (await status()).acceptance_summary.operation;
+      assert.equal(conflict.status, "not-started", "a second, contradictory actual native start still invalidates completion");
+      assert.equal(conflict.terminal_complete, false);
+      assert.equal(conflict.observations[0].nativeStartedAt, new Date(nativeStart).toISOString());
+      assert.equal(conflict.observations[0].latestConflictingStartedAt, new Date(nativeStart + 20_000).toISOString());
       return;
     }
     const validatedUnits = structuredClone((await runtime.required("root")).units);
@@ -319,6 +346,9 @@ for (const mode of ["implementation", "executed", "execution-failed", "fast-lane
 for (const recoveryMode of ["saved", "missing-exit", "missing-error-exit", "conflicting-terminals", "conflict-after-recovery",
   "older-after-failure", "older-after-running", "newer-unseen-conflict", "newer-unseen-input-conflict", "newer-unseen-reversed-input-conflict", "newer-unseen-status-conflict", "delegated-after-completion",
   "conflicting-starts", "conflicting-starts-reversed", "conflicting-starts-partial", "conflicting-starts-after-recovery",
+  "persisted-command-conflict", "persisted-cwd-conflict", "persisted-unmatched-input-conflict",
+  "history-unavailable", "history-error-envelope", "history-invalid", "history-api-missing", "history-owner-unavailable",
+  "history-unavailable-after-recovery", "history-unavailable-after-failure", "history-unavailable-after-running",
   "direct-before-admission", "direct-after-admission", "cancel-during-recovery", "complete-during-recovery"] as const)
 test(`saved native operation calls recover through Mission APIs without replay or acceptance: ${recoveryMode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -333,18 +363,25 @@ test(`saved native operation calls recover through Mission APIs without replay o
     [worker]: { agent: "dog-worker-v010", parentID: coordinator, outcome: "succeeded", time: { created: Date.now() - 10_000 } },
   };
   const history: Record<string, Record<string, unknown>[]> = {};
+  let historyFailure: "throw" | "error" | "invalid" | "missing" | "owner" | undefined;
   let duringRecoveryRead: (() => Promise<void>) | undefined;
   const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
-    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    get: async ({ path }: { path: { id: string } }) => {
+      if (path.id === nativeOwner && historyFailure === "owner") throw new Error("native-session-service-unavailable");
+      return { data: { id: path.id, ...identities[path.id] } };
+    },
     children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
       .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
-    messages: async ({ path }: { path: { id: string } }) => {
+    ...(historyFailure === "missing" ? {} : { messages: async ({ path }: { path: { id: string } }) => {
+      if (path.id === nativeOwner && historyFailure === "throw") throw new Error("native-history-service-unavailable");
+      if (path.id === nativeOwner && historyFailure === "error") return { error: { message: "native-history-service-unavailable" } };
+      if (path.id === nativeOwner && historyFailure === "invalid") return { data: {} };
       if (path.id === nativeOwner && duringRecoveryRead) {
         const transition = duringRecoveryRead; duringRecoveryRead = undefined;
         await transition();
       }
       return { data: history[path.id] ?? [] };
-    }, abort: async () => ({ data: true }),
+    } }), abort: async () => ({ data: true }),
   } } } as never);
   let hooks: Awaited<ReturnType<typeof create>>;
   let turn = 0;
@@ -428,6 +465,41 @@ test(`saved native operation calls recover through Mission APIs without replay o
       return;
     }
     type NativeFixtureRecord = { parts: { state: { metadata: { exit?: number } } }[] };
+    if (recoveryMode.startsWith("history-")) {
+      const alreadyRecovered = recoveryMode.includes("after-");
+      const expectedStatus = recoveryMode === "history-unavailable-after-failure" ? "execution-failed"
+        : recoveryMode === "history-unavailable-after-running" ? "running" : "executed";
+      if (recoveryMode === "history-unavailable-after-failure") (history[worker]![1] as NativeFixtureRecord).parts[0]!.state.metadata.exit = 1;
+      if (recoveryMode === "history-unavailable-after-running") Object.assign((history[worker]![1] as NativeFixtureRecord).parts[0]!.state, { status: "running" });
+      if (alreadyRecovered) assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, expectedStatus);
+      historyFailure = recoveryMode === "history-error-envelope" ? "error" : recoveryMode === "history-invalid" ? "invalid"
+        : recoveryMode === "history-api-missing" ? "missing" : recoveryMode === "history-owner-unavailable" ? "owner" : "throw";
+      if (historyFailure === "missing") hooks = await create();
+      const unavailable = alreadyRecovered ? (await tool("operator_status", rootID)).acceptance_summary
+        : await tool("submit_mission", coordinator, { status: "ready", summary: "Recorded calls completed; history cannot currently be read." });
+      const operation = unavailable.operation;
+      assert.equal(operation.status, alreadyRecovered ? expectedStatus : "recovery-unavailable");
+      assert.equal(operation.terminal_complete, alreadyRecovered && expectedStatus !== "running");
+      assert.equal(operation.process_succeeded, alreadyRecovered && expectedStatus !== "running" ? expectedStatus === "executed" : null);
+      assert.equal(operation.recovery.status, "unavailable");
+      assert.equal(operation.recovery.errors[0].sessionID, worker);
+      if (!alreadyRecovered) assert.match(unavailable.next_action, /do not replay or rerun/iu, "history unavailability is not permission to repeat the operation");
+      historyFailure = undefined;
+      hooks = await create();
+      const recovered = (await tool("operator_status", rootID)).acceptance_summary.operation;
+      assert.equal(recovered.status, alreadyRecovered ? expectedStatus : "executed", "restored history recovers without another operation run");
+      assert.equal(recovered.recovery, undefined, "clear the transient reader diagnostic after a successful read");
+      assert.equal(recovered.observations.length, 2);
+      return;
+    }
+    if (recoveryMode.startsWith("persisted-")) {
+      assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.status, "executed");
+      const first = history[worker]![0] as { parts: { state: { input: { command: string; workdir: string }; time: { start: number; end: number } } }[] };
+      if (recoveryMode === "persisted-command-conflict") first.parts[0]!.state.input.command = nativeApply;
+      else if (recoveryMode === "persisted-cwd-conflict") first.parts[0]!.state.input.workdir = join(root, "other-directory");
+      else first.parts[0]!.state.input.command += " unexpected";
+      first.parts[0]!.state.time = { start: start + 20_000, end: start + 20_010 };
+    }
     if (recoveryMode === "missing-exit" || recoveryMode === "missing-error-exit") {
       delete (history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state.metadata.exit;
       if (recoveryMode === "missing-error-exit") Object.assign((history[nativeOwner]![1] as NativeFixtureRecord).parts[0]!.state, { status: "error" });
@@ -477,6 +549,19 @@ test(`saved native operation calls recover through Mission APIs without replay o
       }
     }
     const submitted = await tool("submit_mission", coordinator, { status: "blocked", summary: "Existing native operation completed; other evidence remains separate." });
+    if (recoveryMode.startsWith("persisted-")) {
+      const operation = submitted.acceptance_summary.operation;
+      assert.equal(operation.status, "not-started", "a persisted same-call input contradiction cannot be silently filtered");
+      assert.equal(operation.terminal_complete, false);
+      assert.equal(operation.process_succeeded, null);
+      const conflict = operation.observations.find((item: { callID: string }) => item.callID === "call_7c9218e8ae644cec9bfd4125081d2d16");
+      assert.equal(conflict.conflicting, true);
+      assert.equal(conflict.command, declaredCommands[0]);
+      assert.equal(conflict.startedAt, new Date(start).toISOString());
+      assert.equal(conflict.latestConflictingStartedAt, new Date(start + 20_000).toISOString());
+      assert.equal((await tool("operator_status", rootID)).acceptance_summary.operation.terminal_complete, false);
+      return;
+    }
     if (recoveryMode === "direct-before-admission") {
       assert.equal(submitted.acceptance_summary.operation.status, "not-started", "boundary-page calls before direct admission belong to earlier work");
       assert.deepEqual((await missions.required(rootID)).execution!.observations, []);
