@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { codexMissionProgress } from "../dist/cli/codex-mission.js";
 
+test("native turn completion and settled-tool continuation do not claim Mission acceptance", () => {
+  const terminal = codexMissionProgress({ method: "turn/completed", threadId: "root", params: { turn: { id: "early", status: "completed" } } });
+  assert.deepEqual(terminal, { thread_id: "root", turn_id: "early", phase: "native-turn-terminal", native_status: "completed" });
+  const continuation = codexMissionProgress({ method: "sortie/continuation", threadId: "root", params: {
+    turnId: "early", phase: "owned-tools-settled", calls: [{ callId: "task", tool: "task", success: true }] } });
+  assert.equal(continuation?.phase, "owned-tools-settled");
+  assert.equal(continuation?.mission_accepted, undefined);
+});
+
 test("native model route progress exposes role, model, effort and separate Fast tier", () => {
   assert.deepEqual(codexMissionProgress({ method: "sortie/modelRoute", threadId: "worker", params: {
     agent: "dog-luna-worker-v010", model: "gpt-6-luna", effort: "max", serviceTier: "priority",

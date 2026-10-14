@@ -1,0 +1,11 @@
+{
+  "source": "M:/_work/_Sortie-dogs-artifacts/records/anko-codex/v0.13.21/20261014T061359203Z-95f23b92/native-events.jsonl",
+  "sha256": "d4ff192f73595b382aeeb5ab37474c4b56d3a68e4d5caec5c74341f9def25f8e",
+  "projection": "Lifecycle fields from saved events only. No child terminal was observed; late child completion in tests is an injected regression outcome, not historical evidence.",
+  "events": [
+    {"at":"2026-10-14T06:17:36.560Z","method":"turn/started","params":{"threadId":"01a1390f-232e-77d2-b62f-509d30733d83","turn":{"id":"01a1390f-2456-7592-bb32-c18052824231","status":"inProgress"}}},
+    {"at":"2026-10-14T06:18:21.570Z","method":"item/started","params":{"threadId":"01a1390f-232e-77d2-b62f-509d30733d83","turnId":"01a1390f-2456-7592-bb32-c18052824231","item":{"id":"exec-79fd141b-4c75-47fc-b06c-c870424a2354","type":"dynamicToolCall","tool":"task","status":"inProgress"}}},
+    {"at":"2026-10-14T06:18:23.327Z","method":"turn/started","params":{"threadId":"01a1390f-da81-7c40-94ab-96bbd9f1fe54","turn":{"id":"01a1390f-db74-7c53-a25c-4812322fb87b","status":"inProgress"}}},
+    {"at":"2026-10-14T06:31:25.389Z","method":"turn/completed","params":{"threadId":"01a1390f-232e-77d2-b62f-509d30733d83","turn":{"id":"01a1390f-2456-7592-bb32-c18052824231","status":"completed"}}}
+  ]
+}

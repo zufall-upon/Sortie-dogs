@@ -70,12 +70,9 @@ class ScriptedTransport implements CodexAppServerTransport {
         items: [{ type: "userMessage", id: `user-${this.turnStarts}`, clientId: message.params.clientUserMessageId, content: message.params.input }] };
       this.turns.push(this.currentTurn);
       this.push({ id: message.id, result: { turn: { id: this.currentTurnID } } });
+      const turn = this.currentTurn;
       setImmediate(() => void this.script(this).then(text => {
-        const item = { type: "agentMessage", text: text ?? "done", phase: null };
-        Object.assign(this.currentTurn!, { status: "completed", completedAt: Date.now() / 1000 });
-        this.currentTurn!.items.push(item);
-        this.push({ method: "item/completed", params: { threadId: this.id, turnId: this.currentTurnID, item } });
-        this.push({ method: "turn/completed", params: { threadId: this.id, turn: { id: this.currentTurnID, status: "completed" } } });
+        if (turn.status === "inProgress") this.finishTurn("completed", text ?? "done", turn);
       }).catch(error => this.push({ id: message.id, error: { message: String(error) } })));
     } else if (message.method === "command/exec") {
       this.commandExecutions++;
@@ -98,7 +95,81 @@ class ScriptedTransport implements CodexAppServerTransport {
     return JSON.parse(value.contentItems[0].text);
   }
   async close(): Promise<void> { this.ended = true; this.waiting?.({ value: undefined, done: true }); }
+  finishTurn(status = "completed", text = "Waiting for existing Task", turn = this.currentTurn!): void {
+    const item = { type: "agentMessage", text, phase: null };
+    Object.assign(turn, { status, completedAt: Date.now() / 1000 });
+    turn.items.push(item);
+    this.push({ method: "item/completed", params: { threadId: this.id, turnId: turn.id, item } });
+    this.push({ method: "turn/completed", params: { threadId: this.id, turn: { id: turn.id, status } } });
+  }
 }
+
+test("early root response drains the existing Task then continues the same Mission to commit, review and acceptance", { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-owned-task-"));
+  let adapter: CodexMissionSession | undefined, failure: unknown, created = 0;
+  let entered!: () => void, release!: () => void, rootEnded!: () => void;
+  const entry = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const terminal = new Promise<void>(resolve => { rootEnded = resolve; });
+  const transports: ScriptedTransport[] = [];
+  const events: Json[] = [];
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await exec("git", ["config", "user.name", "Lifecycle fixture"], { cwd: directory });
+    await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "import{readFileSync}from'node:fs';if(readFileSync('result.txt','utf8')!=='fixed')process.exit(7)");
+    adapter = await CodexMissionSession.create({ projectRoot: directory, onEvent: event => { events.push(event); }, transportFactory: () => {
+      const root = created++ === 0;
+      const native = new ScriptedTransport(root ? "root" : "coordinator", async host => {
+        try {
+          if (!root) {
+            entered(); await pending;
+            await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Fix result", objective: "Fix result and validate",
+              read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+            await host.call("write", { filePath: "result.txt", content: "fixed" });
+            await host.call("bash", { command: "node check.mjs" });
+            await host.call("bash", { command: 'git add result.txt; git commit -m "Fix result"' });
+            await host.call("sortie_v010_finish_direct_unit", {});
+            await host.call("sortie_v010_review_mission", { risk_tags: [] });
+            await host.call("sortie_v010_submit_mission", { status: "ready", summary: "Validated and committed existing result" });
+            return "Existing Task completed validation, commit and review";
+          }
+          if (host.turnStarts === 1) {
+            const started = await host.call("sortie_v010_start_mission", { requirements: ["Fix result and validate"] });
+            const task = host.call("task", started.task);
+            await entry;
+            host.finishTurn(); rootEnded();
+            await task;
+          } else {
+            assert.equal(host.turnStarts, 2);
+            const text = host.turnRequests[1].input[0].text;
+            assert.match(text, /Existing Task completed validation, commit and review/);
+            assert(!text.includes("Original instruction"), "continuation does not resend the task");
+            assert.equal((await host.call("sortie_v010_complete_mission", {})).status, "succeeded");
+          }
+        } catch (error) { failure = error; release(); }
+      });
+      transports.push(native); return native;
+    } });
+    let returned = false;
+    const running = adapter.run("Original instruction: fix result and validate").then(result => { returned = true; return result; });
+    await terminal; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(returned, false);
+    assert.equal(transports[0].turnStarts, 1, "no inference while waiting for the existing child");
+    const before = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    release();
+    const result = await running;
+    if (failure) throw failure;
+    const after = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(after.id, before.id);
+    assert.equal(result.accepted, true);
+    assert.deepEqual(result.lifecycle, { root_turn_terminal: true, owned_tasks_settled: true, mission_phase: "completed", mission_accepted: true });
+    assert.equal(created, 2, "no replacement child");
+    assert.equal(transports[1].turnStarts, 1);
+    assert.equal(events.filter(event => event.method === "sortie/continuation").length, 1);
+    assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Fix result");
+  } finally { release(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 for (const delegated of [false, true]) test(`large literal writes retain ${delegated ? "host" : "native"} execution and clean their transport payload`, { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex literal write 日本語 "));
