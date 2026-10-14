@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
+import { syncBuiltinESMExports } from "node:module";
+import fsPromises from "node:fs/promises";
 import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
@@ -324,13 +327,68 @@ test("a transient terminal usage gap does not kill the run, but a persistent one
       readUsage: () => ++calls === 1 ? { usd: 0.1, requests: 1, unpriced: ["missing-usage"] } : { usd: 0.1, requests: 2, unpriced: [] },
     });
     assert.equal(transient.reason, "completed");
+    assert.equal(transient.next_action, undefined, "a recovered gap does not suggest a stopped task");
     const persistent = await runOpenCode(options({ timeoutSeconds: 8, unpricedGraceSeconds: 1 }), {
       ...fakeReadyServer,
       readUsage: () => ({ usd: 0.1, requests: 1, unpriced: ["missing-usage"] }),
     });
     assert.equal(persistent.reason, "pricing-coverage-missing");
     assert.equal(persistent.usageComplete, false);
+    assert.match(persistent.next_action, /Reconcile session usage\/pricing/);
+    assert.match(persistent.next_action, /retain unresolved reservation holds/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("retained transport usage gaps after CLI close keep an actionable stop without replay", { skip: process.platform === "win32" }, async context => {
+  const { root, options } = await fakeOpenCode("exit 0");
+  const usage = { usd: 0.9729048, requests: 47, unpriced: ["missing-usage"], unpriced_count: 2,
+    unpriced_details: [
+      { reason: "missing-usage", session_id: "coordinator", agent: "dogs-coordinator", model: "openai/gpt-6.1-sol",
+        error_type: "provider.transport", transport_code: 1000, completed_at_ms: 1791975179769 },
+      { reason: "missing-usage", session_id: "coordinator", agent: "dogs-coordinator", model: "openai/gpt-6.1-sol",
+        error_type: "provider.transport", completed_at_ms: 1791975210196 },
+    ] };
+  let starts = 0, stops = 0, pendingReads = 0;
+  // Force the retained CLI-close/background-work condition across the first
+  // asynchronous watchdog write, rather than relying on scheduler timing.
+  const originalSpawn = childProcess.spawn, originalAppend = fsPromises.appendFile;
+  let closedBeforeWatchdogWrite = false, resolveClosed!: () => void;
+  const closed = new Promise<void>(done => { resolveClosed = done; });
+  const spawnMock = context.mock.method(childProcess, "spawn", (...args: Parameters<typeof originalSpawn>) => {
+    const child = originalSpawn(...args);
+    if (args[0] === "bash") child.once("close", () => resolveClosed());
+    return child;
+  });
+  const appendMock = context.mock.method(fsPromises, "appendFile", async (...args: Parameters<typeof originalAppend>) => {
+    if (args[0] === join(root, "watchdog.jsonl") && String(args[1]).includes('"event":"started"')) {
+      await closed;
+      closedBeforeWatchdogWrite = true;
+    }
+    return originalAppend(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    const result = await runOpenCode(options({ timeoutSeconds: 8, costLimitUsd: 2, unpricedGraceSeconds: 0,
+      watchdogPath: join(root, "watchdog.jsonl") }), {
+      startServer: async () => { starts++; return { url: "http://127.0.0.1:12345", env: {}, stop: async () => { stops++; } }; },
+      waitForModelRoute: async () => {},
+      nativeRunPending: () => { pendingReads++; return true; },
+      readUsage: () => usage,
+    });
+    assert.equal(result.reason, "pricing-coverage-missing");
+    assert.equal(result.exit, 1, "root exit zero is not a completed Mission or complete cost coverage");
+    assert.equal(result.usageComplete, false); assert.equal(result.cleanupEstablished, true);
+    assert.deepEqual(result.usage, usage, "retain known usage and both unknown transport rows");
+    assert.equal(closedBeforeWatchdogWrite, true, "close happened before started-watchdog persistence completed");
+    assert.equal(starts, 1); assert.equal(stops, 1); assert.ok(pendingReads > 0);
+    assert.match(result.next_action, /provider transport failure/);
+    assert.match(result.next_action, /retain unresolved reservation holds/);
+    assert.match(result.next_action, /Mission receipt and final response independently/);
+    assert.match(result.next_action, /Do not automatically replay the consumed task or restart the shared host/);
+  } finally {
+    spawnMock.mock.restore(); appendMock.mock.restore(); syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a timeout keeps its cause when usage is incomplete, and a failed exit is not completed", { skip: process.platform === "win32" }, async () => {
@@ -1454,6 +1512,7 @@ test("cost enforcement failures stop later instances with deterministic replay e
           assert.deepEqual(result.results[0]!.usage, gapUsage);
           const metadata = JSON.parse(await readFile(join(root, "predictions.jsonl.metadata.json"), "utf8"));
           assert.deepEqual(metadata.results[0].usage, gapUsage, "the diagnostic survives into durable run metadata");
+          assert.match(metadata.results[0].next_action, /provider transport failure/);
         }
         const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
         assert.deepEqual(replayManifest.artifacts.map((item: { status: string }) => item.status), [reason, notRunStatus]);
@@ -1461,6 +1520,10 @@ test("cost enforcement failures stop later instances with deterministic replay e
         const skippedArtifact = JSON.parse(await readFile(join(runRoot, "replay", replayManifest.artifacts[1].path), "utf8"));
         assert.equal(failedArtifact.status, reason);
         assert.equal(failedArtifact.execution.reason, reason);
+        assert.equal(failedArtifact.execution.next_action, result.results[0]!.next_action,
+          "the same next operation survives metadata and replay serialization");
+        assert.match(failedArtifact.execution.next_action, /retain unresolved reservation holds/);
+        assert.match(failedArtifact.execution.next_action, /Do not automatically replay/);
         assert.equal(skippedArtifact.status, notRunStatus);
         assert.equal(skippedArtifact.execution.reason, notRunStatus);
         assert.equal(skippedArtifact.execution.exit_code, null);

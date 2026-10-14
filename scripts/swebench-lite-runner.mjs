@@ -370,6 +370,7 @@ function replayExecution(value) {
     stdout_bytes: Buffer.byteLength(stdout),
     stderr_bytes: Buffer.byteLength(stderr),
     reason: execution.reason ?? null,
+    ...(execution.next_action === undefined ? {} : { next_action: text(execution.next_action, "replay.execution.next_action") }),
   };
 }
 
@@ -1179,6 +1180,12 @@ export async function runOpenCode(options, dependencies = {}) {
     detached: true,
     shell: false,
   });
+  // The CLI can close while the first watchdog write is pending. Subscribe before
+  // that await so limits can still settle a run whose native work outlives its CLI.
+  const cliClosed = new Promise(resolveClose => {
+    child.once("error", error => resolveClose({ exit: 127, signal: error.code, spawnFailed: true }));
+    child.once("close", (exit, signal) => resolveClose({ exit, signal }));
+  });
   let stdoutBytes = 0;
   let stderrBytes = 0;
   const stdoutChunks = [];
@@ -1296,8 +1303,8 @@ export async function runOpenCode(options, dependencies = {}) {
         command,
       });
     };
-    child.once("error", error => { stopReason = "spawn-failed"; finish(127, error.code); });
-    child.once("close", (exit, signal) => {
+    void cliClosed.then(({ exit, signal, spawnFailed }) => {
+      if (spawnFailed) { stopReason = "spawn-failed"; finish(exit, signal); return; }
       finishAfterClose = () => finish(exit, signal);
       if (exit !== 0 || signal || stopping) { finish(exit, signal); return; }
       void waitForNativeSettlement({
@@ -1390,9 +1397,11 @@ export async function runOpenCode(options, dependencies = {}) {
       : usage.requests === 0 ? "usage-unverified"
       : options.costLimitUsd !== undefined && usage.usd >= options.costLimitUsd ? "cost-limit"
       : result.exit !== 0 ? "agent-failed" : "completed";
+  const nextAction = costEnforcementNextAction({ reason: finalReason, usage });
   return { ...result, exit: finalReason === "completed" ? result.exit : result.exit === 0 ? 1 : result.exit,
     reason: finalReason, usage, usageComplete: usage.unpriced.length === 0 && usage.requests > 0,
-    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity, progressDecision };
+    cleanupEstablished, watchdogEvents, lastActivityAgeMs: Date.now() - lastActivity, progressDecision,
+    ...(nextAction ? { next_action: nextAction } : {}) };
 }
 
 function emptyLiveResult(instance, status) {
@@ -1418,6 +1427,12 @@ function costEnforcementStopReason(execution) {
   }
   if ((execution?.usage?.unpriced?.length ?? 0) > 0) return "pricing-coverage-missing";
   return undefined;
+}
+
+function costEnforcementNextAction(execution) {
+  if (costEnforcementStopReason(execution) === undefined) return undefined;
+  const transport = execution.usage?.unpriced_details?.some(item => item.error_type === "provider.transport");
+  return `${transport ? "Inspect the recorded provider transport failure and reconcile" : "Reconcile"} session usage/pricing in the retained owned database and CLI logs; retain unresolved reservation holds. Check the saved Mission receipt and final response independently of this cost stop, and verify owned writers stopped before deciding continuation. Do not automatically replay the consumed task or restart the shared host.`;
 }
 
 export async function runLive(value, options, dependencies = {}) {
@@ -1581,7 +1596,9 @@ export async function runLive(value, options, dependencies = {}) {
     const monitoringFailure = costEnforcementStopReason(execution);
     if (monitoringFailure !== undefined) stopRemainingReason = monitoringFailure;
     else if (plan.execution.cost_limit_usd !== undefined && spentUsd >= plan.execution.cost_limit_usd) stopRemainingReason = "cost-limit";
-    const artifactExecution = execution === undefined ? undefined : { ...execution, output_limit_exceeded: false };
+    const nextAction = costEnforcementNextAction(execution);
+    const artifactExecution = execution === undefined ? undefined : { ...execution, output_limit_exceeded: false,
+      ...(nextAction ? { next_action: nextAction } : {}) };
     const artifact = createInstanceReplayArtifact({
       dataset: plan.dataset,
       instance,
@@ -1624,6 +1641,7 @@ export async function runLive(value, options, dependencies = {}) {
       watchdog_idle_ms: execution?.lastActivityAgeMs ?? 0,
       progress_decision: execution?.progressDecision ?? "not-reached",
       replay_artifact: storedArtifact,
+      ...(nextAction ? { next_action: nextAction } : {}),
       ...(failure === undefined ? {} : { failure }),
       ...(preparedEnvironment ? { prepared_environment: preparedEnvironment } : {}),
       ...(cleanupError ? { cleanup_error: String(cleanupError.message ?? cleanupError) } : {}),
