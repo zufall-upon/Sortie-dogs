@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
@@ -29,6 +29,38 @@ const fakeReadyServer = {
   }),
   waitForModelRoute: async () => undefined,
 };
+
+for (const phase of ["probe-and-cleanup-failure", "probe-failure", "cleanup-failure"] as const) {
+  test(`candidate agent probe preserves ${phase} without retrying setup`, async () => {
+    const primary = Object.assign(Error("retained-candidate-probe-failure"), { code: "EIO" });
+    const cleanup = Error("Could not inspect owned process group 719000001: pgrep failed (exit -1)");
+    let starts = 0, stops = 0, requests = 0;
+    const rejected = await probeCandidateV2Agents("/owned-candidate", {}, "dog-operator", [], {}, {
+      startServer: async () => {
+        starts++;
+        return { url: "http://owned-candidate.invalid", env: {}, stop: async () => {
+          stops++;
+          if (phase !== "probe-failure") throw cleanup;
+        } };
+      },
+      fetch: async (url: string) => {
+        requests++;
+        if (phase !== "cleanup-failure") throw primary;
+        return { ok: true, status: 200, json: async () => ({ data: url.endsWith("/api/session")
+          ? { id: "configuration-only" } : url.endsWith("/api/plugin") ? [{ id: "sortie-dogs.v010" }] : [] }) };
+      },
+    }).then(() => null, (error: Error & { candidateProbeContext?: Record<string, unknown> }) => error);
+    assert.equal(rejected, phase === "cleanup-failure" ? cleanup : primary, "keep the first actual failure identity");
+    assert.equal(starts, 1); assert.equal(stops, 1);
+    assert.equal(requests, phase === "cleanup-failure" ? 4 : 1, "configuration API only; no prompt/model request or retry");
+    if (phase === "probe-and-cleanup-failure") {
+      assert.equal(rejected!.candidateProbeContext!.cleanup_complete, false);
+      assert.equal(rejected!.candidateProbeContext!.stateDirectory, "/owned-candidate/.opencode/v2-service-state");
+      assert.deepEqual(rejected!.candidateProbeContext!.cleanupErrors, [{ resource: "server", name: "Error", message: cleanup.message }]);
+      assert.match(String(rejected!.candidateProbeContext!.nextAction), /Retry teardown only/);
+    } else assert.equal(rejected!.candidateProbeContext, undefined);
+  });
+}
 
 test("runner starts without a dist build, even after its script is moved to an isolated directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-runner-no-dist-"));

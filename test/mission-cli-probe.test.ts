@@ -1121,7 +1121,7 @@ for (const phase of ["closed", "closed-stubborn", "signalled", "active"] as cons
   });
 }
 
-for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-unavailable"] as const) {
+for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-unavailable", "listing-timeout"] as const) {
   test(`owned group inspection handles ${fault} without hiding an uncertain cleanup`,
     { skip: process.platform !== "linux", timeout: 20_000 }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-group-inspection-"));
@@ -1130,12 +1130,13 @@ for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-una
         [resolve("test/fixtures/owned-group-inspection.mjs"), directory, fault], { encoding: "utf8", timeout: 15_000 }));
       assert.deepEqual(result.root_exit, { code: 0, signal: null }, "retain the actual closed root outcome");
       assert.equal(result.new_model_requests, 0);
-      if (fault === "foreign-read") {
-        assert.equal(result.cleanup_error, null, "unrelated denied metadata must not abort the owned cleanup");
+      if (fault === "foreign-read" || fault === "listing-timeout") {
+        assert.equal(result.cleanup_error, null, "an unrelated denied read or transient selector timeout must not abort the owned cleanup");
         assert.equal(result.denied_reads, 0, "read detailed metadata only for the selected owned group");
         assert.equal(result.writer_frozen, true, "no descendant writes after the cleanup barrier");
         assert.equal(result.writer_stopped, true);
         assert(result.signals.includes("SIGKILL"), "still escalate a stubborn owned writer after the existing grace");
+        if (fault === "listing-timeout") assert(result.selector_calls > 1, "a timed-out selection is uncertain, not a teardown failure or proof of stop");
       } else {
         const expected = fault === "owned-read" ? "EACCES" : fault === "signal-denied" ? "EPERM" : "ENOENT";
         assert.equal(result.cleanup_error?.code, expected, "genuine owned cleanup failures remain actionable errors");

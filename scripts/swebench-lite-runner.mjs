@@ -928,13 +928,14 @@ export async function retainUsageDatabase(sourcePath, targetPath) {
   } finally { target.close(); }
 }
 
-async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}) {
-  const server = await startV2ReleaseServer(root, environment);
+export async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}, dependencies = {}) {
+  const server = await (dependencies.startServer ?? startV2ReleaseServer)(root, environment);
+  let probeError;
   try {
     const headers = { "content-type": "application/json",
       authorization: `Basic ${Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString("base64")}` };
     const request = async (path, method = "GET", body) => {
-      const response = await fetch(`${server.url}${path}`, { method, headers,
+      const response = await (dependencies.fetch ?? fetch)(`${server.url}${path}`, { method, headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(25_000) });
       ensure(response.ok, `candidate-v2-api-failed:${method}:${path.split("/").slice(0, 3).join("/")}:${response.status}`);
       return response.status === 204 ? undefined : response.json();
@@ -953,7 +954,18 @@ async function probeCandidateV2Agents(root, environment, primary, agentNames, mo
     ensure(plugins.data?.some(plugin => plugin.id === "sortie-dogs.v010"), "candidate-plugin-not-loaded");
     const agents = await request("/api/agent");
     for (const name of agentNames) verifyCandidateAgent(name, agents.data?.find(agent => agent.id === name), modelOverrides[name]);
-  } finally { await server.stop(); }
+  } catch (error) { probeError = error; throw error; }
+  finally {
+    try { await server.stop(); }
+    catch (cleanupError) {
+      if (!probeError) throw cleanupError;
+      probeError.candidateProbeContext = { stateDirectory: join(root, ".opencode", "v2-service-state"),
+        cleanup_complete: false,
+        cleanupErrors: [{ resource: "server", name: cleanupError.name, message: String(cleanupError.message).slice(0, 1500),
+          ...(cleanupError.code === undefined ? {} : { code: cleanupError.code }) }],
+        nextAction: "Retry teardown only for the recorded owned server registration and verify its writers stopped; inspect the original candidate-probe failure before continuation. Retain unresolved usage holds; do not automatically replay the task or restart the shared host." };
+    }
+  }
 }
 
 async function killProcessGroup(pid, force = false) {

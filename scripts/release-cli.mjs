@@ -131,6 +131,9 @@ async function processGroupRunning(pid) {
   // Select the owned group first. An unrelated process's unreadable stat must
   // not prevent stopping this group, while an owned stat/read failure still matters.
   const selected = await runProcess('pgrep', ['-g', String(pid)], { timeoutMs: 1_000 });
+  // A slow selector proves neither a stopped group nor a failed signal. Keep the
+  // existing bounded teardown loop alive so it can still escalate to SIGKILL.
+  if (selected.timedOut && !selected.overflow) return true;
   if (![0, 1].includes(selected.code) || selected.timedOut || selected.overflow) {
     throw Error(`Could not inspect owned process group ${pid}: pgrep failed (exit ${selected.code})`);
   }
