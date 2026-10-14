@@ -911,7 +911,8 @@ test("operation completion requires every declared command's terminal result, no
   mission.execution.observations[1] = { ...second, exit: 0, ...missionCommandOutcome('{"attempts":1,"reward":0}', 0, "completed") };
   assert.equal(missionExecutionStatus(mission), "execution-failed", "mixed exits keep the failure visible while both commands are terminal");
   mission.execution.observations[1] = { ...second, outcome: undefined };
-  assert.equal(missionExecutionStatus(mission), "not-started", "unclassified legacy metadata cannot become a collected result");
+  assert.equal(missionExecutionStatus(mission), "recovery-blocked", "observed unclassified legacy metadata is not never-started or a collected result");
+  assert.equal((missionPacket(mission).review as { permits_submission: boolean }).permits_submission, false);
   mission.execution.observations[1] = { ...second, directory: join(directory, "other") };
   assert.equal(missionExecutionStatus(mission), "not-started", "a terminal command in another cwd is not the declared operation");
   mission.execution.observations[1] = second;
