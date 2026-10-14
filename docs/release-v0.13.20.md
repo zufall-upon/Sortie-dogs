@@ -1,0 +1,30 @@
+# v0.13.20 — durable CLI lifecycle and existing review follow-up
+
+Integrates PR #234 through #248 and follows up the three existing findings on PR #230.
+
+- Share the owned CLI/server lifecycle between normal completion, controller interruption and cold resume. Await owned descendant writer shutdown even after a successful parent close; preserve the original close code/signal and an actionable next operation for abnormal close.
+- Reconcile controller signals arriving during evidence persistence without repeating observations, teardown, model work or budget settlement. Persist structured failures through the evidence-only sink; unavailable sinks surface the original cause and unrecorded evidence rather than accepted success or a zero-cost claim.
+- Associate observations, native settlement and cumulative usage with the actual root emitted by the owned CLI JSON stream. Resumes pass their explicit retained root. Do not select a concurrent same-project root before CLI identity is known. Descendant discovery does not depend on session creation order.
+- Retain baseline read failure and pre-monitor server startup, callback and synchronous CLI launch failures. Stop only the obtained owned server; preserve the primary cause, secondary cleanup failure, package/task/database identity, unknown coverage and unresolved reservation holds. Do not automatically replay the consumed task or restart the shared host.
+- Release heavy workload Mission/run/event caches and child ownership on terminal transitions. Retain at most 128 lightweight terminal scalar snapshots for final UI progress. Delete session-local observations on definitive session deletion and location-local caches on plugin disposal, without changing durable ledgers or execution authority.
+- Retain derived-alias observations without double-counting their workload. Newly added checkpoint bindings inherit only matching aliases; multiple aliases conservatively retain common observations rather than copying the parent's progress to untouched paths or commands. Existing checkpoint identities and quantities remain stable.
+- Exclude dynamic workload from the profiled interruption/compaction recovery checkpoint as well as the existing compaction context route. Ordinary status still shows progress; progress-only observations do not change recovery packet bytes.
+- Commit the requested concise `AGENTS.md` review rule: collect existing PR body/ordinary/inline review comments, record validity/disposition reasons, and correct valid findings with related tests. CI success and completed review status are not evidence that findings were resolved. No extra review inference or approval gate is introduced.
+
+## Existing review disposition
+
+The existing bodies, ordinary comments, reviews and inline comments for PR #230 and #234–#248 were collected, not requested again.
+
+- [#230 cache lifecycle](https://github.com/zufall-upon/Sortie-dogs/pull/230#discussion_r4256665608): **valid, corrected**; terminal retained-run/child-owner regression failed before repair, then passed with bounded snapshot/session/directory cleanup coverage.
+- [#230 checkpoint inheritance](https://github.com/zufall-upon/Sortie-dogs/pull/230#discussion_r4256665619): **valid, corrected**; path and command subdivisions incorrectly credited untouched bindings before repair. The same regressions now retain only matching observations, including declaration before or after native work.
+- [#230 recovery packet](https://github.com/zufall-upon/Sortie-dogs/pull/230#discussion_r4256665625): **valid, corrected**; the checkpoint route now passes `false`. Its route contract and packet-byte invariance under a workload-only change are covered.
+- [#241 foreign root](https://github.com/zufall-upon/Sortie-dogs/pull/241#discussion_r4258435387): **valid, already corrected** in source head `2358a3bca949577e9cec75c064f9aa5df9963d7f`; the retained reply, owning-CLI identity code and existing scoped regression are reused, not replayed as another source task.
+- PR #241's later head and PR #243/#245 have Codex usage-limit notices. These are **unavailable external review**, not clean findings or a reason to buy credits, rerun review or stop ordinary validation. Other collected source comments contain review-status summaries, not additional inline findings. This is a disposition of available evidence, not a vulnerability-free certification.
+
+## Verification boundaries
+
+Retain the four before-fix failing assertions and the initial targeted result (101 passing/one asynchronous fixture timing failure). The fixture now uses the existing event-queue drain convention; the affected regression scope passed **6/6** without repeating the other successful checks. Mandatory release full validation covers the integrated fixed candidate; historical source-PR full results are not relabeled as this release's measurements.
+
+Freeze one integrated `main` commit and tarball before candidate preflight, mandatory Linux full tests, fixed-commit native Windows CI and one actual Worker startup/model check. Use that same archive for existing global/config-local installations, GitHub Release and one npm publication. No new SWE-bench/Anko campaign, original product replay, campaign candidate replacement or acceptance claim is part of release.
+
+Mission marker: `0.13.20-review-followup-v1`; unchanged Codex skill marker: `0.13.11-codex-skill-v2`. Installed bytes and isolated startup do not prove that an already-running user service loaded the new code. Completely restart OpenCode manually for loaded-version confirmation. The original Location-only recovery override, saved configuration, conversations and product ledger remain separate and preserved.

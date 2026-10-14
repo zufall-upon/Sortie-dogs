@@ -17,7 +17,7 @@ import V2Plugin, {
 import type { OpenCodeHooks, OpenCodePlugin } from "../dist/plugin/index.js";
 import { collectRunMetrics } from "../dist/plugin/run-metrics.js";
 import { buildDebrief, renderDebrief } from "../dist/plugin/sortie-debrief.js";
-import { rememberWorkMission } from "../dist/core/work-quantity-observations.js";
+import { cachedWorkProgress, rememberWorkMission } from "../dist/core/work-quantity-observations.js";
 import { publishMissionProgress } from "../dist/plugin/mission-progress.js";
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -117,6 +117,22 @@ test("generated Mission Worker assets expose same-Task scope repair, not Coordin
     assert.match(content, /sortie_v010_expand_unit: true/);
     assert.doesNotMatch(content, /sortie_v010_(?:plan_units|complete_mission|cancel_operator): true/);
   }
+});
+
+test("V2 session deletion and plugin disposal release workload observations", async () => {
+  const fixture = contextFixture(), directory = "fixture:v2-workload-cleanup";
+  const cleanup = await createSortieDogsV2Plugin(async () => ({})).setup({ ...fixture.context, location: { directory } });
+  const remember = (root: string) => rememberWorkMission(directory, { version: "0.12", id: root, root,
+    phase: "running", runID: null, kind: "implementation", requirements: [{ id: "R1", text: "Result" }], attempts: [] } as never);
+  try {
+    remember("root"); assert.ok(cachedWorkProgress(directory, "root"));
+    await fixture.emit({ type: "session.deleted", data: { sessionID: "root" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(cachedWorkProgress(directory, "root"), undefined);
+    remember("another-root"); assert.ok(cachedWorkProgress(directory, "another-root"));
+    cleanup?.();
+    assert.equal(cachedWorkProgress(directory, "another-root"), undefined);
+  } finally { cleanup?.(); }
 });
 
 test("V2 optional condition objects admit omission without manufacturing provenance or erasing fixed facts", async () => {

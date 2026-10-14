@@ -8,9 +8,36 @@ interface View { mission?: OperatorMission; run?: OperatorState; sequence: numbe
   events: Map<string, { sequence: number; event: WorkQuantityEvent }>; progress?: WorkQuantityProgress }
 const views = new Map<string, View>();
 const owners = new Map<string, string>();
+// Terminal UI snapshots contain no Mission/run/events and cannot grow with history.
+const terminals = new Map<string, { progress: WorkQuantityProgress; runID?: string }>();
 const identity = (directory: string, root: string) => `${directory.replaceAll("\\", "/").replace(/\/$/u, "")}\0${root}`;
+function forgetRoot(directory: string, root: string): void {
+  const id = identity(directory, root), prefix = identity(directory, "");
+  views.delete(id); terminals.delete(id);
+  for (const [actor, owner] of owners) if (actor.startsWith(prefix) && owner === root) owners.delete(actor);
+}
+export function forgetWorkSession(directory: string, actor: string): void {
+  const id = identity(directory, actor);
+  if (views.has(id) || terminals.has(id) || owners.get(id) === actor) forgetRoot(directory, actor);
+  else owners.delete(id);
+}
+export function forgetWorkDirectory(directory: string): void {
+  const prefix = identity(directory, "");
+  for (const cache of [views, owners, terminals]) for (const id of cache.keys()) if (id.startsWith(prefix)) cache.delete(id);
+}
+function finishView(directory: string, root: string, value: View): void {
+  const mission = value.mission, run = value.run;
+  const progress = mission ? projectWorkQuantity(missionWorkState(directory, mission, run),
+    mission.phase === "completed", mission.phase === "cancelled")
+    : run?.workQuantity ? projectWorkQuantity(syncWorkQuantity(applyPendingWork(directory, root,
+      structuredClone(run.workQuantity)), {}, run), run.phase === "completed", run.phase === "cancelled") : undefined;
+  forgetRoot(directory, root);
+  if (progress) terminals.set(identity(directory, root), { progress, runID: mission?.runID ?? run?.runID });
+  if (terminals.size > 128) terminals.delete(terminals.keys().next().value!);
+}
 function view(directory: string, root: string): View {
   const id = identity(directory, root);
+  terminals.delete(id);
   let value = views.get(id);
   if (!value) { value = { sequence: 0, events: new Map() }; views.set(id, value); }
   owners.set(id, root);
@@ -24,13 +51,17 @@ export function rememberWorkMission(directory: string, mission: OperatorMission)
   if (mission.coordinator) owners.set(identity(directory, mission.coordinator), mission.root);
   if (mission.review?.child) owners.set(identity(directory, mission.review.child), mission.root);
   for (const attempt of mission.attempts ?? []) if (attempt.childSessionID) owners.set(identity(directory, attempt.childSessionID), mission.root);
+  if (["completed", "cancelled"].includes(mission.phase)) finishView(directory, mission.root, value);
 }
 export function rememberWorkRun(directory: string, run: OperatorState): void {
+  const terminal = terminals.get(identity(directory, run.rootSessionID));
+  if (terminal && terminal.runID === run.runID) return;
   const value = view(directory, run.rootSessionID);
   value.run = run;
   value.sequence = Math.max(value.sequence, run.workQuantity?.observationSequence ?? 0); delete value.progress;
   if (run.operatorSessionID) owners.set(identity(directory, run.operatorSessionID), run.rootSessionID);
   for (const unit of run.units) if (unit.childSessionID) owners.set(identity(directory, unit.childSessionID), run.rootSessionID);
+  if (!value.mission && ["completed", "cancelled"].includes(run.phase)) finishView(directory, run.rootSessionID, value);
 }
 export function rememberedWorkRun(directory: string, root: string): OperatorState | undefined {
   return views.get(identity(directory, root))?.run;
@@ -65,6 +96,8 @@ export function missionWorkState(directory: string, mission: OperatorMission, ru
   return syncWorkQuantity(applyPendingWork(directory, mission.root, structuredClone(state)), mission, run);
 }
 export function cachedWorkProgress(directory: string, actor: string) {
+  const terminal = terminals.get(identity(directory, actor));
+  if (terminal) return terminal.progress;
   const root = owners.get(identity(directory, actor));
   const value = root && views.get(identity(directory, root));
   if (!value) return undefined;

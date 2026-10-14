@@ -2,7 +2,7 @@ import { toolSchema, legacyToolArgs } from "./tool-schema.js";
 import type { OpenCodeHooks, OpenCodePlugin } from "./index.js";
 import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
-import { cachedWorkProgress, workRootForActor } from "../core/work-quantity-observations.js";
+import { cachedWorkProgress, forgetWorkDirectory, forgetWorkSession, workRootForActor } from "../core/work-quantity-observations.js";
 import { formatWorkQuantity } from "../core/work-quantity.js";
 import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive } from "./v2-session-history.js";
 import { nativeContractReadSnapshot } from "./native-contract-read.js";
@@ -895,22 +895,24 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
           return;
         }
         if (id === undefined) return;
-        if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
-        if (event.type === "session.deleted") {
-          await context.storage?.remove?.(childSelectionKey(id));
-          liveState.delete(id);
-          await context.storage?.remove?.(liveStateKey(id));
-          // This native event is definite deletion, unlike a transient session.get failure.
-          await disposeCorrectionPermissions(context, id);
-        }
-        if (event.type === "session.execution.succeeded") await finalize(id);
-        if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
-          const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
-          await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
-          for (const child of await hooks.reviewerCorrectionSessions?.(id) ?? []) await syncReviewerCorrectionPermissions(context, hooks, child);
-          if (event.type !== "session.deleted") await syncReviewerCorrectionPermissions(context, hooks, id);
-        }
-        if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
+        try {
+          if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
+          if (event.type === "session.deleted") {
+            await context.storage?.remove?.(childSelectionKey(id));
+            liveState.delete(id);
+            await context.storage?.remove?.(liveStateKey(id));
+            // This native event is definite deletion, unlike a transient session.get failure.
+            await disposeCorrectionPermissions(context, id);
+          }
+          if (event.type === "session.execution.succeeded") await finalize(id);
+          if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.idle") {
+            const info = event.type === "session.created" ? await context.session.get({ sessionID: id }).catch(() => ({ id })) : { id };
+            await hooks.event?.({ event: { type: String(event.type), properties: { sessionID: id, info } } });
+            for (const child of await hooks.reviewerCorrectionSessions?.(id) ?? []) await syncReviewerCorrectionPermissions(context, hooks, child);
+            if (event.type !== "session.deleted") await syncReviewerCorrectionPermissions(context, hooks, id);
+          }
+          if (event.type === "session.compaction.ended") await hooks.event?.({ event: { type: "session.compacted", properties: { sessionID: id } } });
+        } finally { if (event.type === "session.deleted") forgetWorkSession(context.location.directory, id); }
       };
       void (async () => {
         for await (const event of context.event.subscribe({ signal: controller.signal })) {
@@ -924,7 +926,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
       })().catch(error => {
         if (!controller.signal.aborted) console.warn("[sortie-dogs-v010] V2 event adapter stopped", error instanceof Error ? error.message : "unknown");
       });
-      return () => controller.abort();
+      return () => { controller.abort(); forgetWorkDirectory(context.location.directory); };
     },
   };
 }

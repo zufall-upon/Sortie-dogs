@@ -20,7 +20,7 @@ import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missio
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionStatus, missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
-import { cachedWorkProgress, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
+import { cachedWorkProgress, forgetWorkSession, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
 import { serializeOperatorStatus } from "./operator-status-output.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
    observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
@@ -532,7 +532,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // not by resetting the goal budget. This checkpoint grants no dispatch itself.
         if (mission && (!["completed", "cancelled"].includes(mission.phase) ||
             (mission.phase === "cancelled" && run))) {
-          return JSON.stringify(missionPacket(mission, run));
+          return JSON.stringify(missionPacket(mission, run, false));
         }
         return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
       },
@@ -4067,36 +4067,38 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : typeof part?.sessionID === "string" ? part.sessionID
               : event.type.startsWith("session.") && typeof info?.id === "string" ? info.id : undefined;
         if (!id) return;
-        if (event.type === "session.deleted" && canonicalAgent(profile, selected.get(id)) === "dog-coordinator") {
-          await stop(id, "session-deleted");
-          return;
-        }
-        if (!await rootFor(id)) return;
-        const mappedEvent = translate({ event }, false) as { event: typeof event };
-        const mappedPart = record(mappedEvent.event.properties?.part) ? mappedEvent.event.properties.part : undefined;
-        if ((await identity(id)).role === "dog-coordinator" && mappedPart?.type === "text" && typeof mappedPart.text === "string") {
-          mappedPart.text = forwardTerminalText(mappedPart.text);
-        }
-        await core.event?.(mappedEvent);
-        if (event.type === "message.updated" && info) await renderCompletedReply(id, info);
-        if (event.type === "message.part.updated" && part?.type === "tool" && part.tool === "task" &&
-          typeof part.callID === "string" && record(part.state) && part.state.status === "error") {
-          const ownership = taskOwners.get(part.callID);
-          if (ownership !== undefined && ownership.actor === id) {
-            if (ownership.mission) {
-              await missions.update(ownership.root, state => { state.dispatchOpen = false; });
-              taskOwners.delete(part.callID); return;
-            }
-            if (ownership.consultation) { taskOwners.delete(part.callID); return; }
-            const settled = ownership.proposal
-              ? (await control!.settleProposalBudget(ownership.root, (await proposals.required(ownership.root)).intent_id,
-                part.callID, "failed"), true)
-              : ownership.operator
-              ? (await operators.operatorRejected(ownership.root), true)
-              : await control?.settleRejectedDispatch(ownership.root, part.callID) ?? false;
-            if (settled) taskOwners.delete(part.callID);
+        try {
+          if (event.type === "session.deleted" && canonicalAgent(profile, selected.get(id)) === "dog-coordinator") {
+            await stop(id, "session-deleted");
+            return;
           }
-        }
+          if (!await rootFor(id)) return;
+          const mappedEvent = translate({ event }, false) as { event: typeof event };
+          const mappedPart = record(mappedEvent.event.properties?.part) ? mappedEvent.event.properties.part : undefined;
+          if ((await identity(id)).role === "dog-coordinator" && mappedPart?.type === "text" && typeof mappedPart.text === "string") {
+            mappedPart.text = forwardTerminalText(mappedPart.text);
+          }
+          await core.event?.(mappedEvent);
+          if (event.type === "message.updated" && info) await renderCompletedReply(id, info);
+          if (event.type === "message.part.updated" && part?.type === "tool" && part.tool === "task" &&
+            typeof part.callID === "string" && record(part.state) && part.state.status === "error") {
+            const ownership = taskOwners.get(part.callID);
+            if (ownership !== undefined && ownership.actor === id) {
+              if (ownership.mission) {
+                await missions.update(ownership.root, state => { state.dispatchOpen = false; });
+                taskOwners.delete(part.callID); return;
+              }
+              if (ownership.consultation) { taskOwners.delete(part.callID); return; }
+              const settled = ownership.proposal
+                ? (await control!.settleProposalBudget(ownership.root, (await proposals.required(ownership.root)).intent_id,
+                  part.callID, "failed"), true)
+                : ownership.operator
+                ? (await operators.operatorRejected(ownership.root), true)
+                : await control?.settleRejectedDispatch(ownership.root, part.callID) ?? false;
+              if (settled) taskOwners.delete(part.callID);
+            }
+          }
+        } finally { if (event.type === "session.deleted") forgetWorkSession(input.directory, id); }
       },
     };
     const before = hooks["tool.execute.before"]!;

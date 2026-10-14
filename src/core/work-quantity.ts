@@ -92,6 +92,10 @@ function item(id: string, kind: WorkKind, label: string, requirements: string[],
   return { id, kind, label, requirementIDs: unique(requirements), weight: weight[kind], basis: "derived",
     paths: unique(paths.map(key)), commands: unique(commands.map(commandKey)), units: unique(units), observation: {}, fraction: 0 };
 }
+/** Keep alias observations for later subdivisions without counting their quantity twice. */
+function retainedAliases(state: WorkQuantityState): Set<string> {
+  return new Set(state.items.filter(entry => !entry.removed && entry.basis === "declared").flatMap(entry => entry.aliases ?? []));
+}
 /** Concrete work before scheduling/coalescence; broad scopes remain unexpanded estimates. */
 export function planWorkQuantity(mission: Pick<OperatorMission, "id" | "requirements" | "kind" | "execution" | "review" | "submission" | "phase">,
   rawUnits: readonly WorkUnit[] = [], run?: OperatorState, previous?: WorkQuantityState, declared?: unknown, directory?: string): WorkQuantityState {
@@ -259,7 +263,17 @@ function applyDeclaredWork(state: WorkQuantityState, raw: unknown, generated: Ma
             typeof point.label === "string" ? point.label : String(point.id), parent.requirementIDs,
             strings(point.paths), strings(point.commands), parent.units);
           child.units = parent.units; child.paths = strings(point.paths).map(pathKey); child.commands = strings(point.commands).map(commandKey);
-          if (!state.items.includes(child)) child.observation = { ...parent.observation };
+          if (!state.items.includes(child)) {
+            const observations = matches.filter(alias =>
+              child.paths.some(path => alias.paths.some(binding => pathMatches(path, binding))) ||
+              child.commands.some(command => alias.commands.includes(command)))
+              .map(alias => state.items.find(entry => entry.id === alias.id)!.observation);
+            // Bound checkpoints inherit only matching aliases. Multiple aliases retain
+            // common observations conservatively; an unbound checkpoint covers its parent.
+            child.observation = !child.paths.length && !child.commands.length ? { ...parent.observation }
+              : Object.fromEntries(Object.entries(observations[0] ?? {}).filter(([field, value]) =>
+                observations.every(observation => JSON.stringify(observation[field as keyof WorkObservation]) === JSON.stringify(value))));
+          }
           child.parentID = parent.id; child.weight = amount * quantities[index]! / sum; child.basis = "declared"; child.removed = false;
           if (!state.items.includes(child)) state.items.push(child);
         });
@@ -279,8 +293,9 @@ export function observeWorkQuantity(state: WorkQuantityState, event: WorkQuantit
       state.revision++; state.revisionReason = "native work revealed an additional target";
     }
   }
+  const aliases = retainedAliases(state);
   for (const entry of state.items) {
-    if (entry.removed || entry.children?.length) continue;
+    if (entry.removed && !aliases.has(entry.id) || entry.children?.length) continue;
     const pathMatch = paths.some(path => entry.paths.some(binding => pathMatches(path, binding)));
     const unitMatch = event.unit !== undefined && entry.units.includes(event.unit);
     const commandMatch = commands.some(command => entry.commands.includes(command));
@@ -329,8 +344,9 @@ export function syncWorkQuantity(state: WorkQuantityState, mission: Partial<Oper
   }
   if (reviewRef !== undefined) state.lastReview = reviewRef;
   else delete state.lastReview;
+  const aliases = retainedAliases(state);
   for (const entry of state.items) {
-    if (entry.removed || entry.children?.length) continue;
+    if (entry.removed && !aliases.has(entry.id) || entry.children?.length) continue;
     const units = current?.units.filter(unit => entry.units.includes(`${current.runID}/${unit.unit.id}`)) ?? [];
     if (["artifact", "implementation", "validation", "requirement"].includes(entry.kind) && units.length && units.every(unit => unit.status === "succeeded")) {
       const ref = `${current!.runID}:${units.map(unit => unit.callID).join(",")}`;
