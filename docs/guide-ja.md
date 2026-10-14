@@ -18,10 +18,10 @@ model routingが必要なtaskだけSortieを起動する。
 このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
 Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
 
-**現行release: [v0.13.19](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.19)**
-（[release notes](release-v0.13.19.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.13.20](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.20)**
+（[release notes](release-v0.13.20.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.19-workload-progress-v1`。
+現行asset markerは`0.13.20-review-followup-v1`。
 
 > **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -64,7 +64,17 @@ task開始agentとして選択しない。
 実行制御とmodel routingを読み込む。OpenCodeは監視対象設定を再読込できるが、導入済みdependencyの
 置換は完全再起動が必要な場合がある。新しい会話sessionだけでは新pluginの読込を証明しない。
 
-## v0.13.19の更新
+## v0.13.20の更新
+
+PR #234〜#248のCLI監視・cold resume修正を統合。実所有CLIが返すrootへ費用・終了待ちを固定し、
+終了順序に依存せず子sessionを観測する。正常終了後も所有writer停止を待ち、保存中のsignal、
+保存失敗、監視前のserver／callback／CLI起動失敗を元の原因・費用未知・次操作とともに保持する。
+既存#230レビュー3件を修正: 終了後の進捗cache解放、checkpointごとの観測継承、復帰promptへの概算進捗混入除外。
+正式完了表示は重いMission/runを持たない上限128件のscalar snapshotで保持し、session削除・plugin停止時にもcacheを解放。
+PR統合前に既存レビューを回収・切り分ける手順をAGENTS.mdへ保存。Codex上限通知は「指摘なし」と扱わない。
+追加の再レビュー推論・承認待ち・受入条件は設けない。詳細は[release notes](release-v0.13.20.md)。
+
+## v0.13.19の更新（継承）
 
 PR #223〜#232を統合。現在の要求全体を対象に`全体作業量 n/100（概算）`を表示する。
 予算・unit数・固定stage割合ではなく、具体的な成果物・check・残作業の重み付き概算。
@@ -426,7 +436,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.19
+npm install --global sortie-dogs@0.13.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -438,7 +448,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.19
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -459,7 +469,7 @@ npx sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.19-workload-progress-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.13.20-review-followup-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、

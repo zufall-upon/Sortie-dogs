@@ -8,8 +8,9 @@ import crypto from "node:crypto";
 import childProcess from "node:child_process";
 import Ajv from "ajv";
 import { formatWorkQuantity, observeWorkQuantity, planWorkQuantity, projectWorkQuantity, syncWorkQuantity } from "../dist/core/work-quantity.js";
-import { applyPendingWork, cachedWorkProgress, observeActorWork, rememberWorkMission, rememberWorkRun } from "../dist/core/work-quantity-observations.js";
-import { OperatorMissionRuntime, missionPlan, type OperatorMission } from "../dist/core/operator-mission.js";
+import { applyPendingWork, cachedWorkProgress, observeActorWork, rememberWorkMission, rememberWorkRun,
+  rememberedWorkRun, workRootForActor, forgetWorkDirectory, forgetWorkSession } from "../dist/core/work-quantity-observations.js";
+import { OperatorMissionRuntime, missionPacket, missionPlan, type OperatorMission } from "../dist/core/operator-mission.js";
 import { OperatorRuntime, type OperatorState } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { bindMissionProgress, missionProgressReader, publishMissionProgress } from "../dist/plugin/mission-progress.js";
@@ -85,6 +86,77 @@ test("relative weights and checkpoint subdivisions preserve the parent quantity"
   assert.equal(replanned.estimatedTotal, state.estimatedTotal);
   assert.equal(projectWorkQuantity(replanned).n, 48);
   assert.equal(replanned.revision, state.revision, "omitting optional metadata does not reset the estimate");
+});
+
+test("review follow-up: new checkpoints retain only their matching path observations", () => {
+  for (const changed of ["src/a.ts", "src/b.ts"]) for (const declareBeforeChange of [false, true]) {
+    const m = mission(), raw = [work()], r = run(raw);
+    const declared = { id: "feature", kind: "artifact", bindings: { paths: ["src/a.ts", "src/b.ts"] }, relative_weight: 16 };
+    const prior = planWorkQuantity(m, raw, r, undefined, declareBeforeChange ? [declared] : undefined);
+    observeWorkQuantity(prior, { kind: "change", paths: [changed] });
+    const next = planWorkQuantity(m, raw, r, prior, [{ ...declared,
+      checkpoints: [{ id: "a", paths: ["src/a.ts"] }, { id: "b", paths: ["src/b.ts"] }] }]);
+    for (const name of ["a", "b"]) assert.equal(next.items.find(item => item.id === `declared:feature/checkpoint:${name}`)?.fraction,
+      changed === `src/${name}.ts` ? 0.55 : 0, `${changed}, declared before change: ${declareBeforeChange}`);
+    assert.equal(next.estimatedTotal, prior.estimatedTotal);
+  }
+});
+
+test("review follow-up: new validation checkpoints retain only their matching command outcomes", () => {
+  const m = mission(), unit = work([], ["node a.mjs", "node b.mjs"]), r = run([unit]);
+  const declared = { id: "checks", kind: "validation", bindings: { commands: unit.validation }, relative_weight: 6 };
+  const prior = planWorkQuantity(m, [unit], r, undefined, [declared]);
+  observeWorkQuantity(prior, { kind: "command-end", command: "node b.mjs", exit: 0, callID: "b-check" });
+  const next = planWorkQuantity(m, [unit], r, prior, [{ ...declared,
+    checkpoints: [{ id: "a", commands: ["node a.mjs"] }, { id: "b", commands: ["node b.mjs"] }] }]);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:a"))?.fraction, 0);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.fraction, 0.9);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.observation.callID, "b-check");
+});
+
+test("review follow-up: broad aliases do not credit untouched concrete checkpoints", () => {
+  const m = mission(), unit = work(["src/**"]), r = run([unit]);
+  const declared = { id: "feature", kind: "implementation", bindings: { paths: ["src/**"] }, relative_weight: 16 };
+  const prior = planWorkQuantity(m, [unit], r, undefined, [declared]);
+  observeWorkQuantity(prior, { kind: "read", paths: ["src/a.ts"] });
+  observeWorkQuantity(prior, { kind: "change", paths: ["src/a.ts"] });
+  const next = planWorkQuantity(m, [unit], r, prior, [{ ...declared,
+    checkpoints: [{ id: "a", paths: ["src/a.ts"] }, { id: "b", paths: ["src/b.ts"] }] }]);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:a"))?.fraction, 0.55);
+  assert.equal(next.items.find(item => item.id.endsWith("/checkpoint:b"))?.fraction, 0);
+});
+
+test("PR249 follow-up: broad checkpoints retain concrete alias observations in either order", () => {
+  for (const changed of ["src/a.ts", "src/b.ts"]) {
+    const m = mission(), raw = [work()], r = run(raw);
+    const declared = { id: "feature", kind: "artifact", bindings: { paths: raw[0]!.write }, relative_weight: 16 };
+    const prior = planWorkQuantity(m, raw, r, undefined, [declared]);
+    observeWorkQuantity(prior, { kind: "change", paths: [changed] });
+    const next = planWorkQuantity(m, raw, r, prior, [{ ...declared, checkpoints: [{ id: "all", paths: ["src/**"] }] }]);
+    const checkpoint = next.items.find(item => item.id.endsWith("/checkpoint:all"))!;
+    assert.equal(checkpoint.fraction, 0.55 / 2);
+    assert.deepEqual(checkpoint.observation.changedTargets, [changed]);
+    assert.equal(next.estimatedTotal, prior.estimatedTotal);
+    observeWorkQuantity(next, { kind: "change", paths: [changed === "src/a.ts" ? "src/b.ts" : "src/a.ts"] });
+    assert.equal(checkpoint.fraction, 0.55);
+  }
+});
+
+test("PR249 follow-up: deleted child owners stay deleted across repeated Mission and run reads", () => {
+  const directory = "fixture:deleted-child-cache", m = mission(), r = run();
+  m.attempts = [{ childSessionID: "worker" }] as never;
+  m.review = { child: "reviewer" } as never;
+  m.workQuantity = planWorkQuantity(m, [work()], r);
+  try {
+    rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+    for (const actor of ["worker", "reviewer"]) {
+      forgetWorkSession(directory, actor);
+      rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+      assert.equal(workRootForActor(directory, actor), undefined);
+      assert.equal(observeActorWork(directory, actor, { kind: "change", paths: ["src/a.ts"] }), undefined);
+      assert.equal(workRootForActor(directory, "coordinator"), "root");
+    }
+  } finally { forgetWorkDirectory(directory); }
 });
 
 test("malformed optional estimates cannot reject execution or duplicate aliases", () => {
@@ -260,6 +332,57 @@ test("native Worker/direct observation cache is bounded, idempotent, and merged 
   const saved = JSON.stringify(m.workQuantity); applyPendingWork(directory, "root", m.workQuantity);
   assert.equal(JSON.stringify(m.workQuantity), saved);
   assert.ok(m.workQuantity.observationSequence > 800, "restart sequence cannot hide all new events");
+});
+
+test("review follow-up: terminal Missions release heavy cached objects and child ownership", () => {
+  for (const phase of ["completed", "cancelled"] as const) {
+    const directory = `fixture:terminal-cache:${phase}`, m = mission(), r = run();
+    m.workQuantity = planWorkQuantity(m, [work()], r);
+    rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+    observeActorWork(directory, "worker", { kind: "change", paths: ["src/a.ts"] });
+    m.phase = phase; rememberWorkMission(directory, m);
+    assert.equal(rememberedWorkRun(directory, "root"), undefined);
+    assert.equal(workRootForActor(directory, "worker"), undefined);
+    assert.equal(observeActorWork(directory, "worker", { kind: "change", paths: ["src/b.ts"] }), undefined);
+    assert.equal(cachedWorkProgress(directory, "root")?.completed, phase === "completed");
+    assert.equal(cachedWorkProgress(directory, "root")?.cancelled, phase === "cancelled");
+  }
+});
+
+test("review follow-up: terminal snapshots are bounded and deletion is scoped to session and directory", () => {
+  const directory = "fixture:cache-cleanup", other = `${directory}-other`;
+  for (let i = 0; i < 140; i++) {
+    const m = { ...mission(), root: `root-${i}`, coordinator: `coordinator-${i}`, phase: "completed" as const };
+    m.workQuantity = planWorkQuantity(m, [work()]); rememberWorkMission(directory, m);
+  }
+  assert.equal(cachedWorkProgress(directory, "root-0"), undefined);
+  assert.equal(cachedWorkProgress(directory, "root-139")?.n, 100);
+  forgetWorkSession(directory, "root-139");
+  assert.equal(cachedWorkProgress(directory, "root-139"), undefined);
+  const m = mission(), r = run(); m.workQuantity = planWorkQuantity(m, [work()], r);
+  rememberWorkMission(directory, m); rememberWorkRun(directory, r);
+  rememberWorkMission(other, m); rememberWorkRun(other, r);
+  forgetWorkSession(directory, "worker");
+  assert.equal(workRootForActor(directory, "worker"), undefined);
+  assert.equal(workRootForActor(directory, "coordinator"), "root");
+  assert.ok(rememberedWorkRun(directory, "root"), "deleting a child must not discard a live root");
+  forgetWorkDirectory(directory);
+  assert.equal(cachedWorkProgress(directory, "root"), undefined);
+  assert.equal(cachedWorkProgress(directory, "root-138"), undefined);
+  assert.equal(workRootForActor(directory, "coordinator"), undefined);
+  assert.ok(cachedWorkProgress(other, "root"));
+  forgetWorkDirectory(other);
+});
+
+test("review follow-up: profiled continuation checkpoints exclude dynamic workload", async () => {
+  const source = await readFile(new URL("../src/plugin/profiled.ts", import.meta.url), "utf8");
+  const route = source.slice(source.indexOf("continuationCheckpoint: async root =>"), source.indexOf("completedReviewPrompts: async"));
+  assert.match(route, /missionPacket\(mission, run, false\)/u);
+  const m = mission(), r = run(); m.workQuantity = planWorkQuantity(m, [work()], r);
+  const before = JSON.stringify(missionPacket(m, r, false));
+  observeWorkQuantity(m.workQuantity, { kind: "change", paths: ["src/a.ts"] });
+  assert.equal(JSON.stringify(missionPacket(m, r, false)), before);
+  assert.ok(Object.hasOwn(missionPacket(m, r), "work_quantity"), "ordinary status still includes progress");
 });
 
 test("pure rendering is constant-cost and cannot read even a huge irrelevant history", t => {

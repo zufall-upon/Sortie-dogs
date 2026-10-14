@@ -16,9 +16,9 @@
 本页是OpenCode指南。Codex集成也已实现，并记录了Ubuntu／Windows真实Mission的完成与受理。
 Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对Codex使用OpenCode初始化步骤。
 
-**当前release：[v0.13.19](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.19)**
-（[发布说明](release-v0.13.19.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.19-workload-progress-v1`。
+**当前release：[v0.13.20](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.20)**
+（[发布说明](release-v0.13.20.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。当前asset marker为`0.13.20-review-followup-v1`。
 
 > **Beta：** v0.13.x仍在稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -59,7 +59,17 @@ OpenCode V2 plugin，并将subagent depth设为至少2：
 OpenCode可以重新加载受监视的配置，但替换已安装dependency可能需要完全重启。
 仅新建聊天session不能证明新plugin已经加载。
 
-## v0.13.19更新
+## v0.13.20更新
+
+整合PR #234至#248的CLI监视和cold resume修复。费用及结束等待固定到实际所属CLI返回的root，
+子session观察不依赖创建顺序。正常关闭也等待所属writer停止；保留保存期间的signal、保存失败及
+监视前server、callback、CLI启动失败的原始原因、未知费用和下一步，不自动重放任务。
+修复#230已有的3项审查意见：结束后释放进度cache、按checkpoint绑定继承观察、恢复prompt排除动态进度。
+正式完成显示仅保留最多128个scalar snapshot，不持有完整Mission/run；session删除和plugin停止也释放cache。
+AGENTS.md保存合并前收集和判定已有审查的流程；Codex限额通知不等同于无问题。
+不增加重复审查推理、审批等待或接受条件。详见[发布说明](release-v0.13.20.md)。
+
+## v0.13.19更新（保留）
 
 整合PR #223至#232。显示当前完整请求的`全体作業量 n/100（概算）`，基于具体产物、checks及剩余工作的相对量，
 不是预算、unit计数或固定stage比例。复用已有native观察及settlement，不增加进度专用推理、验证或写入。
@@ -405,7 +415,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局提供当前Mission asset：
 
 ```sh
-npm install --global sortie-dogs@0.13.19
+npm install --global sortie-dogs@0.13.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -417,7 +427,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.19
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -438,7 +448,7 @@ npx sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-`0.13.19-workload-progress-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+`0.13.20-review-followup-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，
