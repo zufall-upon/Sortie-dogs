@@ -146,7 +146,7 @@ interface UnitState {
     validationRegisteredAt?: Readonly<Record<string, string>>;
   };
   /** Actual direct author segments retained when the same unit is handed to a Worker. */
-  directHandoffs?: (NonNullable<UnitState["directExecution"]> & { callID: string; handedOffAt: string })[];
+  directHandoffs?: (NonNullable<UnitState["directExecution"]> & { callID: string; handedOffAt: string; settledCallID?: string })[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
   normalRemediationUsed?: boolean;
@@ -1920,6 +1920,7 @@ export class OperatorRuntime {
     if (result.failure !== undefined) (unit as UnitState & { failure?: SerialDispatchSettlement["failure"] }).failure = result.failure;
     else delete unit.failure;
     unit.status = result.disposition;
+    for (const segment of unit.directHandoffs ?? []) segment.settledCallID ??= result.callID;
     if (unit.directExecution) unit.directExecution.finishedAt = new Date().toISOString();
     if (unit.terminalRescue) {
       unit.terminalRescue.status = "settled";

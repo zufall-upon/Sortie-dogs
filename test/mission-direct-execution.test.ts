@@ -14,6 +14,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { directHandoffValidationChecks } from "../dist/plugin/mission-review.js";
 
 const exec = promisify(execFile);
 
@@ -149,6 +150,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
     if (mode.startsWith("handoff-")) {
       await write("fixed\n");
       assert.equal(await check(), 0);
+      const direct = (await readRun()).units[0]!.directExecution!;
+      const prefix = await directHandoffValidationChecks(["node check.mjs", "node check.mjs --tail"], actor, history[actor]!,
+        Date.parse(direct.startedAt), direct.checks, directory);
+      assert.equal(prefix.length, 1, "unexecuted tail must not discard the passing bound prefix");
+      assert.equal(prefix[0]!.callID, direct.checks[0]!.callID);
       const handoff = () => hooks.tool!.sortie_v010_plan_units.execute({ executor: "worker",
         handoff_context: "Continue existing result; node check.mjs already passed. Keep that evidence if source remains current." },
         { sessionID: actor, callID: "handoff-call" });

@@ -250,6 +250,16 @@ export async function reviewerCorrectionValidationFresh(validation: readonly str
   return checked;
 }
 
+/** Preserve a current ordered prefix while the next author executes the remaining recipe. */
+export async function directHandoffValidationChecks(...args: Parameters<typeof reviewerCorrectionValidationFresh>): Promise<readonly ReviewerCorrectionCheck[]> {
+  const [validation, child, history, started, checks, root, directories, registeredAt] = args;
+  for (let count = validation.length; count > 0; count--) {
+    const result = await reviewerCorrectionValidationFresh(validation.slice(0, count), child, history, started, checks, root, directories, registeredAt);
+    if (result.ready) return checks.filter(check => result.matched?.some(item => item.callID === check.callID));
+  }
+  return [];
+}
+
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
 export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
   read?: () => Promise<unknown>, notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): Promise<Record<string, unknown>> {

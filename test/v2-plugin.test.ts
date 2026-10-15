@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import Ajv from "ajv";
+import { legacyToolArgs } from "../dist/plugin/tool-schema.js";
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -2009,6 +2011,14 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     const reflection = tools.find(tool => tool.name === "sortie_v010_reflection")!;
     assert.deepEqual(reflection.input.required, Object.keys(reflection.input.properties));
     assert.match(reflection.input.properties.scope!.description!, /empty string to omit/u);
+    const plan = tools.find(tool => tool.name === "sortie_v010_plan_units")!;
+    const validate = new Ajv({ strict: false }).compile(plan.input);
+    const capturedHandoff = { units: "", work_quantities: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker" };
+    assert.equal(validate(capturedHandoff), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, units: "invented-plan" }), false);
+    assert.equal(validate({ ...capturedHandoff, units: [] }), false, "empty units cannot masquerade as a new plan");
+    const start = tools.find(tool => tool.name === "sortie_v010_start_mission")!;
+    assert.equal(new Ajv({ strict: false }).compile(start.input.properties.preferred_executor)(""), true);
     for (const tool of tools) assert.deepEqual(tool.input.required, Object.keys(tool.input.properties), `${tool.name} cannot expose optional top-level properties`);
     for (const tool of tools) {
       const numeric = (value: unknown): void => {
@@ -2031,6 +2041,24 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
   } finally {
     cleanup?.();
   }
+});
+
+test("V2 omission sentinel reaches the legacy handoff executor without a replacement plan", async () => {
+  const fixture = contextFixture();
+  const received: unknown[] = [];
+  const args = { units: { type: "array", minItems: 1, items: { type: "object" }, "x-sortie-optional": true },
+    executor: { type: "string", enum: ["self", "worker"], "x-sortie-optional": true } };
+  const cleanup = await createSortieDogsV2Plugin(async () => ({ tool: {
+    sortie_v010_plan_units: { description: "handoff", args, execute: async input => { received.push(input); return "continued"; } },
+  } }) as never).setup(fixture.context);
+  try {
+    const tool = fixture.tools.find(value => value.name === "sortie_v010_plan_units") as {
+      execute(input: unknown, context: { sessionID: string }): Promise<unknown>;
+    };
+    await tool.execute({ units: "", executor: "worker" }, { sessionID: "root" });
+    assert.deepEqual(received, [{ executor: "worker" }]);
+    assert.deepEqual(legacyToolArgs({ units: [{ title: "new" }], executor: "" }, args), { units: [{ title: "new" }] });
+  } finally { cleanup?.(); }
 });
 
 test("V2 lowers installed V1 Zod optional strings before provider submission and restores omission on execution", async () => {

@@ -36,10 +36,11 @@ export function toolSchema(args: Record<string, unknown>): JsonObject {
     const schema = plainSchema(value);
     if (optionalArgument(value)) {
       schema.description = `${typeof schema.description === "string" ? `${schema.description} ` : ""}Pass an empty string to omit this argument.`;
-      // Object-typed optional arguments otherwise force a model to manufacture blank
-      // required provenance fields. Admit the same omission sentinel we already decode.
-      if (schema.type === "object") return [name, { anyOf: [schema, { type: "string", enum: [""], minLength: 0, maxLength: 0 }],
+      // Structured optional arguments need the same omission sentinel we decode;
+      // otherwise V2 requires a fabricated object/array even when the tool says to omit it.
+      if (schema.type === "object" || schema.type === "array") return [name, { anyOf: [schema, { type: "string", enum: [""], minLength: 0, maxLength: 0 }],
         description: schema.description }];
+      if (schema.type === "string" && Array.isArray(schema.enum) && !schema.enum.includes("")) schema.enum = [...schema.enum, ""];
     }
     return [name, schema];
   })),
