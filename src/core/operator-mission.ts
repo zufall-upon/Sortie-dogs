@@ -51,7 +51,7 @@ export interface MissionAttempt {
   /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
   candidateID?: string;
   kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction" | "direct_execution";
-  status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed";
+  status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed" | "handed-off";
   callID?: string;
   childSessionID?: string;
   dispatchFingerprint?: string;
@@ -190,6 +190,10 @@ export interface OperatorMission {
   context?: MissionContext[];
   /** Shared public context/working notes; observations, never extra requirements or acceptance. */
   continuity?: MissionContinuity;
+  /** Operator recommendation from already-known context; not a requirement or execution lock. */
+  preferredExecutor?: "coordinator" | "worker";
+  /** Known unit facts passed to the Coordinator without pre-starting a Worker. */
+  suggestedUnit?: Record<string, unknown>;
   /** Explicit continue deliveries, keyed by the original real turn. */
   steering?: { requestID: string; child: string; status: "pending" | "queued" }[];
   kind?: "implementation" | "operation";
@@ -496,6 +500,7 @@ export class OperatorMissionRuntime {
       catch { return { ...source, snapshot_available: false }; }
     }));
     return { original_requests: state.requests, requirements: state.requirements, prohibited_write: state.prohibitedWrite ?? [],
+      ...(state.preferredExecutor ? { preferred_executor: state.preferredExecutor } : {}),
       launch_conditions: state.launchConditions ?? [],
       conversation: sources.some(source => source.session_id === state.root && source.entries > 0 && !("snapshot_available" in source)) ? [] : state.context ?? [],
       continuity: { notes: state.continuity?.notes, sources, progress: state.progress,
@@ -815,6 +820,9 @@ export class OperatorMissionRuntime {
     return [`mission_id: ${state.id}`, `project_root: ${this.projectRoot}`, "Use the user's language below for all replies and Task titles.",
       "Own investigation, implementation, formal validation, corrections and Worker/Scout/Advisor/independent Reviewer dispatch.",
       "Use plan_units with executor=self for direct work in this session, or delegate promptly when useful. finish_direct_unit records native checks without a Worker handoff. No proposal/approval phase; root alone accepts completion.",
+      "Start useful work from the supplied context. Reconsider the recommendation through normal execution, not a separate routing investigation. You may implement substantial work here or delegate remaining work without asking Operator again; explicit user choices still govern.",
+      ...(state.preferredExecutor ? [`Operator recommendation (advisory): ${state.preferredExecutor}. This is not an immutable requirement or a model override.`] : []),
+      ...(state.suggestedUnit ? [`Known unit facts (reuse or adapt during actual work): ${JSON.stringify(state.suggestedUnit)}`] : []),
       "Escalate only a completion candidate, a user-only decision, or an extension of original requirements/budget. Unit progress is published without stopping you.",
       "Requirements:", ...state.requirements.map(item => `${item.id}: ${item.text}`),
       `Confirmed launch conditions (fixed limits, not consumption or remaining budget): ${JSON.stringify(state.launchConditions ?? [])}`,
@@ -1033,6 +1041,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
          normal_remediation_used: unit.normalRemediationUsed ?? false,
          ...(unit.failure ? { failure: { outcome: unit.failure.outcome, exit_code: unit.failure.exitCode } } : {}),
          ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
+    ...(mission.preferredExecutor ? { preferred_executor: mission.preferredExecutor } : {}),
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
       : mission.phase === "submitted" && mission.submission?.status === "ready"
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."

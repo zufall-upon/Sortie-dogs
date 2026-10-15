@@ -8,6 +8,7 @@ import test from "node:test";
 import { CodexMissionSession } from "../dist/codex/mission-session.js";
 import type { CodexAppServerTransport } from "../dist/codex/app-server.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
+import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { resolveCodexMissionShell } from "../dist/codex/mission-shell.js";
 
@@ -103,6 +104,105 @@ class ScriptedTransport implements CodexAppServerTransport {
     this.push({ method: "turn/completed", params: { threadId: this.id, turn: { id: turn.id, status } } });
   }
 }
+
+for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] as const) test(`initial recommendation and autonomous Coordinator completion: ${mode}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-advisory-route-"));
+  const transports: ScriptedTransport[] = [];
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  let missionID: string | undefined, runID: string | undefined, taskID: string | undefined;
+  const handoff = mode.includes("handoff");
+  const unit = { title: "Complete result", objective: "Make result.txt fixed, validate and commit",
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] };
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await exec("git", ["config", "user.name", "Route fixture"], { cwd: directory });
+    await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "import{readFileSync}from'node:fs';if(readFileSync('result.txt','utf8')!=='fixed')process.exit(7)");
+    await exec("git", ["add", "check.mjs"], { cwd: directory });
+    await exec("git", ["commit", "-qm", "fixture"], { cwd: directory });
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
+      const id = ["root", "coordinator", "worker"][transports.length]!;
+      const native = new ScriptedTransport(id, async host => {
+        try {
+          if (id === "root") {
+            const started = await host.call("sortie_v010_start_mission", { requirements: [unit.objective],
+              preferred_executor: mode === "worker-advice" ? "worker" : "coordinator",
+              ...(mode === "worker-advice" ? {} : { unit }), handoff_context: "Use the supplied instruction; start useful work immediately." });
+            assert.equal(started.task.subagent_type, "dogs-coordinator");
+            assert.equal(host.commandExecutions, 0, "Operator does not investigate to recommend a route");
+            missionID = started.mission_id;
+            const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+            assert.equal(state.preferredExecutor, mode === "worker-advice" ? "worker" : "coordinator");
+            assert.equal(state.runID, null, "known single-unit check does not pre-start Luna against recommendation");
+            assert.match(new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).brief(state), /Operator recommendation \(advisory\)/);
+            await host.call("task", started.task);
+            if (failure) return;
+            assert.equal((await host.call("sortie_v010_complete_mission", {})).status, "succeeded");
+          } else if (id === "coordinator") {
+            const started = await host.call("sortie_v010_plan_units", { executor: "self", units: [unit] });
+            assert.equal(started.status, "direct-unit-running");
+            runID = started.run_id;
+            const before = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+            taskID = before.units[0]!.unit.id;
+            await host.call("write", { filePath: "result.txt", content: mode === "handoff" ? "partial" : "fixed" });
+            if (mode !== "handoff") assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+            if (handoff) {
+              const delegated = await host.call("sortie_v010_plan_units", { executor: "worker", handoff_context:
+                mode === "handoff" ? "result.txt already exists with partial work; finish it, validate and commit." : "result.txt already passes the exact declared check; deliver its commit without repeating that check." });
+              assert.equal(delegated.run_id, runID);
+              assert.equal(delegated.task.subagent_type, "dog-worker-v010");
+              const after = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+              assert.equal(after.units[0]!.unit.id, taskID);
+              assert.equal(after.units[0]!.status, "pending");
+              assert.equal(after.units[0]!.resultClass, null, "handoff is not fabricated success/failure");
+              const duplicate = await host.call("sortie_v010_plan_units", { executor: "worker" });
+              assert.deepEqual(duplicate.task, delegated.task, "lost-response replay retains exact pending Worker");
+              const budget = (await host.call("sortie_v010_operator_status", {})).budget;
+              assert.equal(budget.reserved_units, 1);
+              assert.equal(budget.consumed_units, 0);
+              await host.call("task", delegated.task);
+              if (failure) return;
+            } else {
+              await host.call("bash", { command: 'git add result.txt && git commit -m "Deliver result"' });
+              await host.call("sortie_v010_finish_direct_unit", {});
+            }
+            const status = await host.call("sortie_v010_operator_status", {});
+            assert.equal(status.budget.consumed_units, 1, "same unit is charged once across authors");
+            assert.equal(status.budget.reserved_units, 0);
+            await host.call("sortie_v010_review_mission", { risk_tags: [] });
+            await host.call("sortie_v010_submit_mission", { status: "ready", summary: "Implemented, validated and committed" });
+          } else {
+            assert.equal(await readFile(join(directory, "result.txt"), "utf8"), mode === "handoff" ? "partial" : "fixed");
+            if (mode === "handoff") {
+              await host.call("write", { filePath: "result.txt", content: "fixed" });
+              assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+            }
+            await host.call("bash", { command: 'git add result.txt && git commit -m "Deliver result"' });
+            return "DONE: Existing result validated and committed";
+          }
+        } catch (error) { failure = error; }
+      });
+      transports.push(native); return native;
+    } });
+    const result = await adapter.run("Make result.txt fixed, validate with node check.mjs and commit. Use the existing context and complete the work.");
+    if (failure) throw failure;
+    assert.equal(result.accepted, true);
+    const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(mission.id, missionID);
+    assert.equal(mission.runID, runID);
+    assert.equal(transports.length, handoff ? 3 : 2);
+    assert.equal(transports[1]!.threadRequests[0].model, "gpt-6.1-sol");
+    if (handoff) {
+      assert.equal(transports[2]!.threadRequests[0].model, "gpt-6-luna");
+      assert.equal(mission.attempts![0]!.status, "handed-off");
+      // The public Mission budget above also proves the existing single reservation settled once.
+      assert.equal(mission.attempts!.filter(item => item.status === "succeeded").length, 1);
+    }
+    const checkCommands = transports.flatMap(host => host.commandRequests).filter(request => JSON.stringify(request.command).includes("node check.mjs"));
+    assert.equal(checkCommands.length, 1, "current direct validation is not rerun solely for a new actor");
+    assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Deliver result");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("early root response drains the existing Task then continues the same Mission to commit, review and acceptance", { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-owned-task-"));

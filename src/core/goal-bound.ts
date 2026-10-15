@@ -160,7 +160,9 @@ export type GoalFlightEvent =
       readonly result_class?: "acceptance" | "process-defect" | "interrupted";
       readonly progress_fingerprint: string | null; readonly evidence: readonly GoalEvidence[];
         readonly elapsed_ms: number | null; readonly cost_usd: number | null;
-        readonly native_session_id?: string; readonly native_started_at?: string;
+         readonly native_session_id?: string; readonly native_started_at?: string;
+         /** Multiple actual authors of one handed-off unit; missing usage stays unknown. */
+         readonly native_usage_segments?: readonly { readonly sessionID: string; readonly startedAt: string; readonly endedAt?: string }[];
         /** Host-native validation identity retained in this same goal ledger; never model-authored evidence. */
         readonly native_validation_observations?: readonly { readonly thread_id: string; readonly turn_id: string;
           readonly item_id?: string; readonly raw_command: string; readonly canonical_commands: readonly string[];

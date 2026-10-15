@@ -2016,12 +2016,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
-  async function nativeUnitCost(child: string | undefined, startedAt?: string): Promise<number | null> {
+  async function nativeUnitCost(child: string | undefined, startedAt?: string, endedAt?: string): Promise<number | null> {
     if (!child || !input.client?.session?.messages) return null;
     try {
       const response = await input.client.session.messages({ path: { id: child }, query: { directory: input.directory } });
-      return isRecord(response) && Array.isArray(response.data) ? settledUnitUsage(response.data, startedAt) : null;
+      return isRecord(response) && Array.isArray(response.data) ? settledUnitUsage(response.data, startedAt, endedAt) : null;
     } catch { return null; }
+  }
+  async function unitUsageSegments(root: string, taskID: string, callID: string, child?: string) {
+    const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, taskID, callID);
+    return origin ? [...origin.segments, ...(child ? [{ sessionID: child,
+      startedAt: origin.segments.at(-1)!.endedAt }] : [])] : undefined;
+  }
+  async function priceUsageSegments(segments: readonly { sessionID: string; startedAt: string; endedAt?: string }[]): Promise<number | null> {
+    const costs = await Promise.all(segments.map(segment => nativeUnitCost(segment.sessionID, segment.startedAt, segment.endedAt)));
+    return costs.length && costs.every((cost): cost is number => cost !== null) ? costs.reduce((sum, cost) => sum + cost, 0) : null;
   }
   async function reconcileUnitUsage(root: string): Promise<void> {
     const ledger = await goalLedger(root), snapshot = await ledger.readGoal();
@@ -2029,7 +2038,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     for (const { event } of snapshot.records) {
       if (event.kind !== "unit.settled" || event.goal_id !== snapshot.state.goal_id || event.cost_usd !== null ||
           !event.native_session_id || reconciled.has(event.reservation_id)) continue;
-      const cost = await nativeUnitCost(event.native_session_id, event.native_started_at);
+      const cost = event.native_usage_segments ? await priceUsageSegments(event.native_usage_segments)
+        : await nativeUnitCost(event.native_session_id, event.native_started_at);
       if (cost === null) continue;
       await ledger.appendGoal({ kind: "unit.usage-reconciled", at: new Date().toISOString(), goal_id: event.goal_id,
         reservation_id: event.reservation_id, native_session_id: event.native_session_id,
@@ -2049,8 +2059,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const pending = state.outstanding_reservations;
       for (const reservation of pending) {
         const dispatch = await input.runtimeBridge?.recoverMissionDispatch?.(root, reservation.unit_id);
+        const origin = dispatch && await input.runtimeBridge?.missionDispatchOrigin?.(root, reservation.unit_id, dispatch.callID);
         if (!dispatch || !state.goal_id || goalFingerprint({ goal_id: state.goal_id, unit_id: reservation.unit_id,
-          call_id: dispatch.callID }) !== reservation.reservation_id) continue;
+          call_id: origin?.callID ?? dispatch.callID }) !== reservation.reservation_id) continue;
         if (!dispatch.cancelled && dispatch.nativeOutcome === "completed" && goalReservations.get(dispatch.callID)?.reservationID === reservation.reservation_id) {
           // Reuse host-observed command exits/bindings when still present. A terminal outcome alone
           // never supplies evidence, and the ordinary settlement still classifies missing proof as failure.
@@ -2068,13 +2079,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         const startedAt = (await ledger.readGoal()).records.find(({ event }) => event.kind === "dispatch.reserved" &&
           event.reservation_id === reservation.reservation_id)?.event.at;
+        const usageSegments = await unitUsageSegments(root, reservation.unit_id, dispatch.callID, dispatch.childSessionID);
         await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
           reservation_id: reservation.reservation_id,
           receipt_id: goalFingerprint({ recovered_host_task: dispatch.callID, reservation: reservation.reservation_id }),
           goal_id: state.goal_id, unit_id: reservation.unit_id,
           disposition: dispatch.cancelled ? "cancelled" : "failed", result_class: dispatch.cancelled ? "interrupted" : "process-defect",
           progress_fingerprint: null, evidence: [], elapsed_ms: null,
-          cost_usd: await nativeUnitCost(dispatch.childSessionID, startedAt),
+          cost_usd: usageSegments ? await priceUsageSegments(usageSegments) : await nativeUnitCost(dispatch.childSessionID, startedAt),
+          ...(usageSegments ? { native_usage_segments: usageSegments,
+            native_session_id: dispatch.childSessionID ?? usageSegments.at(-1)?.sessionID } : {}),
           ...(dispatch.childSessionID ? { native_session_id: dispatch.childSessionID, native_started_at: startedAt } : {}) });
         // A missed after hook closes execution, but cannot turn unobserved validation into acceptance.
         await input.runtimeBridge?.onSerialSettlement?.({ rootSessionID: root, callID: dispatch.callID,
@@ -2729,13 +2743,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (state.phase === "terminal" || state.receipt !== null) {
       throw new Error("SORTIE_GOAL_CONTROL_DENIED: terminal");
     }
+    const inheritedTaskID = handoffValue(handoffEntries(prompt), ["task_id"]);
+    const origin = inheritedTaskID && await input.runtimeBridge?.missionDispatchOrigin?.(goalRoot(sessionID), inheritedTaskID, callID);
+    const retainHandoffReservation = () => {
+      if (!origin) return;
+      const reservationID = goalFingerprint({ goal_id: state.goal_id, unit_id: inheritedTaskID, call_id: origin.callID });
+      const retained = state.outstanding_reservations.find(item => item.reservation_id === reservationID && item.unit_id === inheritedTaskID);
+      if (!retained) throw new Error("mission-handoff-reservation-unavailable");
+      for (const [previousCall, reservation] of goalReservations) {
+        if (reservation.reservationID === reservationID) goalReservations.delete(previousCall);
+      }
+      goalReservations.set(callID, { root: goalRoot(sessionID), reservationID, unitID: inheritedTaskID!, started: Date.parse(origin.startedAt) });
+    };
     if (state.replan_required && !state.replan_used) {
       state = await ledger.appendGoal({ kind: "goal.replanned", at: new Date().toISOString(),
         goal_id: state.goal_id, revision: state.revision, reason: "no-progress" });
     }
     // No-progress is diagnostic, not another implicit execution budget. Useful
     // repair can continue within the same explicit unit/time/cost limits below.
-    if (state.budget !== null && state.consumed_units + state.outstanding_reservations.length >= state.budget.max_units) {
+    if (!origin && state.budget !== null && state.consumed_units + state.outstanding_reservations.length >= state.budget.max_units) {
       await terminalGoal(sessionID, "stop_budget", "stopped");
       throw budgetDenied("units");
     }
@@ -2749,6 +2775,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await terminalGoal(sessionID, "stop_budget", "stopped");
       throw budgetDenied("cost_usd");
     }
+    if (origin) { retainHandoffReservation(); return; }
     if (state.goal_id === null) return;
     const unitID = handoffValue(handoffEntries(prompt), ["task_id"]) ?? callID;
     const reservationID = goalFingerprint({ goal_id: state.goal_id, unit_id: unitID, call_id: callID });
@@ -2811,7 +2838,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : execution.exitCode === undefined || execution.outcome === undefined ? [] : observedHostGoalEvidence({
           ...execution, immutableRef: execution.immutableRef!, endedAt: execution.endedAt!, fresh: execution.fresh!,
           exitCode: execution.exitCode, outcome: execution.outcome }, state, reservation.unitID));
-    const hostEvidence = [...new Map((directEvidence ?? observedEvidence).map(entry => [entry.evidence_id, entry])).values()];
+    const handedChecks = await input.runtimeBridge?.missionHandoffChecks?.(reservation.root, reservation.unitID, callID) ?? [];
+    const inherited = handedChecks.flatMap(check => {
+      const laterFailure = [...hostGoalExecutions.values()].some(execution => execution.root === reservation.root &&
+        execution.sessionID === childSessionID && execution.endedAt && execution.outcome !== "pass" && execution.outcome !== "skip" &&
+        Date.parse(execution.startedAt) >= Date.parse(check.startedAt));
+      return laterFailure ? [] : observedHostGoalEvidence({ ...check, owner: "coordinator", outcome: "pass",
+        immutableRef: goalFingerprint({ direct_check: check }),
+        correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID, commands: check.command } }, state, reservation.unitID);
+    });
+    const hostEvidence = [...new Map((directEvidence ?? [...observedEvidence, ...inherited]).map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
     // adopt observations still bound to the current accepted source/candidate/criterion contract.
     const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
@@ -2845,13 +2881,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const processDefect = !correctionChecks?.failure && failedAcceptanceExecution === undefined && (childSessionID === undefined || hostBindingDefect ||
       goalValidationDefects.has(childSessionID) || !validated);
     const resultClass = validated ? "acceptance" : interrupted ? "interrupted" : processDefect ? "process-defect" : "acceptance";
+    const usageSegments = await unitUsageSegments(reservation.root, reservation.unitID, callID, childSessionID);
     await ledger.appendGoal({ kind: "unit.settled", at: new Date().toISOString(),
       reservation_id: reservation.reservationID, receipt_id: goalFingerprint({ call_id: callID, output: outputText.slice(0, 2048) }),
       goal_id: state.goal_id, unit_id: reservation.unitID,
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed", result_class: resultClass,
       progress_fingerprint: progress && validated ? goalFingerprint(settlementEvidence) : null,
       evidence: settlementEvidence, elapsed_ms: Math.max(0, Date.now() - reservation.started),
-      cost_usd: await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
+      cost_usd: usageSegments ? await priceUsageSegments(usageSegments) : await nativeUnitCost(childSessionID, new Date(reservation.started).toISOString()),
+      ...(usageSegments ? { native_usage_segments: usageSegments,
+        native_session_id: childSessionID ?? usageSegments.at(-1)?.sessionID } : {}),
       ...(childSessionID ? { native_session_id: childSessionID, native_started_at: new Date(reservation.started).toISOString() } : {}) });
     const result: SerialDispatchSettlement = {
       rootSessionID: reservation.root, callID, unitID: reservation.unitID,
@@ -2896,9 +2935,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
     if (request.direct) {
       const direct = request.direct;
+      const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, request.unitID, direct.callID);
       const defect = [...snapshot.records].reverse().map(record => record.event).find(event => event.kind === "unit.settled" &&
         event.unit_id === request.unitID && event.evidence.length === 0 && event.native_session_id === request.childSessionID &&
-        event.reservation_id === goalFingerprint({ goal_id: goal.goal_id, unit_id: request.unitID, call_id: direct.callID }) &&
+        event.reservation_id === goalFingerprint({ goal_id: goal.goal_id, unit_id: request.unitID, call_id: origin?.callID ?? direct.callID }) &&
         event.receipt_id === goalFingerprint({ call_id: direct.callID,
           output: "Host-observed direct unit finished; controller session remains active." }));
       if (defect?.kind !== "unit.settled" || Math.abs(Date.parse(defect.at) - Date.parse(direct.finishedAt)) > 1000) {
@@ -8568,7 +8608,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_scope: "worker-only", campaign_remaining_usd: null,
-        cost_note: "Implementation token-price estimates from complete native usage; scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_note: "Implementation token-price estimates from complete native usage; direct-author segments and scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
       return snapshot;
     },
     extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
@@ -8624,10 +8664,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       activateSession(actor);
       if (!goalReservations.has(direct.callID)) {
         const snapshot = await (await goalLedger(root)).readGoal();
-        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
-        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
-          goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
-        } else await reserveGoalDispatch(root, direct.callID, prompt);
+        const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, direct.taskID, direct.callID);
+        if (origin) await reserveGoalDispatch(root, direct.callID, prompt);
+        else {
+          const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
+          if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
+            goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
+          } else await reserveGoalDispatch(root, direct.callID, prompt);
+        }
       }
       const binding = await input.runtimeBridge?.missionReadBinding?.(root, actor, handoffPath);
       if (!binding) throw new Error("mission-direct-grant-stale");
@@ -8660,6 +8704,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await releaseWriteGate(actor);
       releaseSessionEnforcement(actor);
     },
+    assertDirectUnitQuiescent: async actor => {
+      if (activeSessions.get(actor)?.inFlightCalls.size) throw new Error("mission-direct-tools-running");
+    },
     failDirectUnit: async (root, actor) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
       if (!direct || direct.root !== root) throw new Error("mission-direct-grant-stale");
@@ -8667,7 +8714,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       // Cold terminal recovery can happen before the actor's next tool/context hook.
       if (!goalReservations.has(direct.callID)) {
         const snapshot = await (await goalLedger(root)).readGoal();
-        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
+        const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, direct.taskID, direct.callID);
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: origin?.callID ?? direct.callID });
         if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
             snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.reservation_id === reservationID)) {
           goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
@@ -8706,7 +8754,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       missionWorkerTerminal: async (root, terminal, writeScopes) => {
         const childSessionID = terminal.childSessionID;
         const snapshot = await (await goalLedger(root)).readGoal();
-        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: terminal.taskID, call_id: terminal.callID });
+        const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, terminal.taskID, terminal.callID);
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: terminal.taskID, call_id: origin?.callID ?? terminal.callID });
         if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
             !snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.goal_id === snapshot.state.goal_id &&
               event.unit_id === terminal.taskID && event.reservation_id === reservationID)) {

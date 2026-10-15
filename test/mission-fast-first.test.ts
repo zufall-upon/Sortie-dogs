@@ -92,9 +92,9 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: 'Empty check',
       objective: 'Write result', read: ['check.mjs'], write: ['result.txt'], validation: [] }] },
       { sessionID: 'root' }), /validation must contain exact commands/);
-    assert.match(started.next_action, /Default to plan_units/);
+    assert.match(started.next_action, /plan_units can dispatch its Worker directly/);
     const open = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
-    assert.match(open.next_action, /Fast-lane.*plan one useful Worker/);
+    assert.match(open.next_action, /plan_units can dispatch its Worker directly/);
     assert.ok(open.task, "the same Coordinator reference remains available when the contract is not one unit");
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Write ready result",
       objective: "Create result.txt with ready followed by newline", read: verdict === "PASS" ? ["."] : ["check.mjs"],
@@ -323,17 +323,19 @@ for (const length of [2000, 2001, 3000, 3001, 32768]) test(`known-check direct d
       parts: [{ type: "text", text: original }],
     });
     operatorCalls.push("start_mission");
-    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Implement exact public contract", "Validate without publishing"] }, { sessionID: "root" }));
-    operatorCalls.push("plan_units");
-    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Implement public contract",
-      objective, read: ["check.mjs"], write: ["src"], validation: ["node check.mjs"] }] }, { sessionID: "root" }));
+    const immediate = length === 2000;
+    const unitInput = { title: "Implement public contract", objective, read: ["check.mjs"], write: ["src"], validation: ["node check.mjs"] };
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Implement exact public contract", "Validate without publishing"],
+      ...(immediate ? { preferred_executor: "worker", unit: unitInput } : {}) }, { sessionID: "root" }));
+    if (!immediate) operatorCalls.push("plan_units");
+    const planned = immediate ? started : JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [unitInput] }, { sessionID: "root" }));
     operatorCalls.push("task");
     const task = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
     const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
     const state = await runtime.required("root");
     assert.equal(state.units[0]!.status, "running", "real native Task admission does not require Operator source/shell calls");
-    assert.deepEqual(operatorCalls, ["start_mission", "plan_units", "task"]);
+    assert.deepEqual(operatorCalls, immediate ? ["start_mission", "task"] : ["start_mission", "plan_units", "task"]);
     assert.equal(state.units[0]!.childSessionID, null, "Worker has not inspected source or bound a manifest yet");
     assert.equal(started.mission_id, (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id);
     await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: agents.worker.agent }, {
@@ -347,7 +349,7 @@ for (const length of [2000, 2001, 3000, 3001, 32768]) test(`known-check direct d
     assert.match(hooks.tool!.sortie_v010_plan_units.description, /2000 characters/);
     assert.doesNotMatch(hooks.tool!.sortie_v010_plan_units.description, /3000/,
       "internal headroom must not become the model's authored target");
-    assert.doesNotMatch(started.next_action, /3000/);
+    if (!immediate) assert.doesNotMatch(started.next_action, /3000/);
     assert.ok(Array.from(handoff.task.objective).length <= 3000);
     if (length <= 3000) assert.equal(handoff.task.objective, objective, "2000 is guidance, not a refusal boundary");
     else assert.equal(handoff.ext["sortie-dogs/mission-context"].unit_instruction, objective, "overflow is retained verbatim, without repair/reapproval");

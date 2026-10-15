@@ -19,13 +19,13 @@ evidence-backed result, not more agents for their own sake.
 [![Node.js](https://img.shields.io/node/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
 [![MIT License](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
 
-**Current release: [v0.13.21](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.21)**
-· [Release notes](docs/release-v0.13.21.md)
+**Current release: [v0.14.0](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.14.0)**
+· [Release notes](docs/release-v0.14.0.md) · [Execution vision](docs/v0.14.0-execution-vision.md)
 
 [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
 [Measured results](#measured-results) · [Configuration](#configuration) · [Documentation](#documentation)
 
-> **Beta:** the v0.13.x package is still stabilizing before 1.0. Both host integrations are
+> **Beta:** the package is still stabilizing before 1.0. Both host integrations are
 > implemented; Codex Missions have completed implementation, validation, correction and acceptance.
 > [Host-specific execution boundaries](docs/codex.md#native-permissions-and-approval) remain explicit.
 
@@ -35,9 +35,9 @@ evidence-backed result, not more agents for their own sake.
 
 - **Autonomy:** retain the original request across delegation, correction, compaction and restart.
   Finish in-request work through the existing host authority instead of routine approval round trips.
-- **Efficiency:** small work stays small. Use a direct Worker for a known single unit; add
-  Coordinator, Scout or Advisor only when discovery or task shape calls for them. Reuse valid
-  unchanged evidence instead of repeating successful work.
+- **Efficiency:** Operator recommends an initial author from the instruction and known context.
+  Coordinator can implement substantial work directly or delegate remaining work as execution makes
+  that useful. Continue the same unit with its edits, valid evidence and cumulative budget.
 - **Visibility:** show real commands, exits, timing, model routes, review disposition and final
   acceptance. Unknown execution or cost stays unknown, not an invented success or zero.
 - **Quality:** meaningful formal checks and risk-based review establish completion, not model prose.
@@ -57,7 +57,7 @@ Use an existing Codex CLI signed in with **ChatGPT**. On Windows, PowerShell **7
 available; POSIX uses bash. Sortie does not install Codex, start login or use a metered API fallback.
 
 ```sh
-npm install --save-dev sortie-dogs@0.13.21
+npm install --save-dev sortie-dogs@0.14.0
 npx --no-install sortie-dogs codex init .
 ```
 
@@ -86,7 +86,7 @@ bridge. [Codex guide: SDK, permissions, progress, resume and manifest route](doc
 Use **OpenCode V2**. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.13.21
+npm install --save-dev sortie-dogs@0.14.0
 npx --no-install sortie-dogs init .
 ```
 
@@ -108,14 +108,16 @@ v0.10 is installed. [OpenCode setup and configuration](docs/configuration.md) ·
 
 ```text
 Known unit: User → Operator → Worker → Validation → Review / Correction → Acceptance
-Discovery:  User → Operator → Coordinator → Worker → Validation → Review / Correction → Acceptance
+Direct:     User → Operator → Coordinator → Validation → Review / Correction → Acceptance
+Handoff:    Coordinator → Worker (same unit, retained edits/context/checks/budget)
 ```
 
-1. **Operator** saves original requirements and owns user decisions and final acceptance.
+1. **Operator** saves original requirements, recommends an initial executor from already-known
+   context, and owns user decisions and final acceptance. No routing-only investigation is required.
 2. **Worker** investigates, implements, runs meaningful checks and performs requested Git delivery
    in the same useful unit. A known unit/check can go directly to Worker without a planning handoff.
-3. **Coordinator**, when needed, investigates or decomposes work, reconciles in-request scope and
-   dispatches units. It can also implement and validate directly.
+3. **Coordinator** starts useful work, implements and validates directly when efficient, and
+   delegates remaining work when useful. The Operator recommendation is advisory, not an execution lock.
 4. **Review** is initially independent for high-risk changes; low-risk skips are explicit.
    Findings can be corrected and validated by the same Reviewer, followed by recorded author
    self-recheck. That is not a second independent PASS.
@@ -193,7 +195,7 @@ known expense. Official local evaluation and leaderboard acceptance are separate
 **8/23 (34.8%)**, versus v0.12.25's 7/23; all seven prior resolutions retained, no empty patches or
 official evaluation errors. [Fixed conditions, stopped-run accounting and costs](docs/benchmarks/swebench-lite-history.md#v0131-dev23-2026-09-30).
 
-All scores belong to their fixed candidates, **not v0.13.21**. SWE-bench remains an optional
+All scores belong to their fixed candidates, **not v0.14.0**. SWE-bench remains an optional
 measurement, not a release gate. Different budgets, models and conditions are not controlled comparisons.
 
 ## Configuration
@@ -216,7 +218,7 @@ Install the desired package version and rerun **your host's** initializer:
 
 An OpenCode config-local bridge may resolve a separate package; npm-global update alone does not
 update it. [Global/update instructions](docs/configuration.md#global-availability).
-The current Mission asset marker is `0.13.21-operation-recovery-v1`; the unchanged Codex skill marker is
+The current Mission asset marker is `0.14.0-autonomous-routing-v1`; the unchanged Codex skill marker is
 `0.13.11-codex-skill-v2`. Installed markers alone do not prove a running host reloaded the new version.
 
 There is no supported uninstall command. Remove the dependency and only known Sortie-owned paths;
@@ -232,7 +234,7 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
   [SWE-bench history](docs/benchmarks/swebench-lite-history.md) · [Historical local case study](docs/benchmark-reference.md).
 - **Development:** [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md) ·
   [Windows tests](docs/windows-tests.md) · [Release routine](docs/release-batch.md).
-- **Releases:** [v0.13.21](docs/release-v0.13.21.md) · [v0.13.20](docs/release-v0.13.20.md) · [v0.13.19](docs/release-v0.13.19.md) · [v0.13.18](docs/release-v0.13.18.md) · [v0.13.17](docs/release-v0.13.17.md) · [v0.13.16](docs/release-v0.13.16.md) · [v0.13.15](docs/release-v0.13.15.md) · [v0.13.14](docs/release-v0.13.14.md) · [v0.13.13](docs/release-v0.13.13.md) · [v0.13.12](docs/release-v0.13.12.md) · [v0.13.11](docs/release-v0.13.11.md) · [v0.13.10](docs/release-v0.13.10.md) ·
+- **Releases:** [v0.14.0](docs/release-v0.14.0.md) · [v0.13.22](docs/release-v0.13.22.md) · [v0.13.21](docs/release-v0.13.21.md) · [v0.13.20](docs/release-v0.13.20.md) · [v0.13.19](docs/release-v0.13.19.md) · [v0.13.18](docs/release-v0.13.18.md) · [v0.13.17](docs/release-v0.13.17.md) · [v0.13.16](docs/release-v0.13.16.md) · [v0.13.15](docs/release-v0.13.15.md) · [v0.13.14](docs/release-v0.13.14.md) · [v0.13.13](docs/release-v0.13.13.md) · [v0.13.12](docs/release-v0.13.12.md) · [v0.13.11](docs/release-v0.13.11.md) · [v0.13.10](docs/release-v0.13.10.md) ·
   [v0.13.9](docs/release-v0.13.9.md) · [All GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases).
 
 ## Community

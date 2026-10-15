@@ -145,6 +145,8 @@ interface UnitState {
     validationCwd?: Readonly<Record<string, string>>;
     validationRegisteredAt?: Readonly<Record<string, string>>;
   };
+  /** Actual direct author segments retained when the same unit is handed to a Worker. */
+  directHandoffs?: (NonNullable<UnitState["directExecution"]> & { callID: string; handedOffAt: string })[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
   normalRemediationUsed?: boolean;
@@ -1553,6 +1555,38 @@ export class OperatorRuntime {
       unit.directExecution = { actor, startedAt: new Date().toISOString(), checks: [] };
       unit.childSessionID = actor; unit.callID = callID; unit.status = "running";
       state.phase = "running";
+      await this.save(state);
+      return state;
+    });
+  }
+  /** Yield an unfinished ordinary direct unit; keep its contract, reservation and source history. */
+  handoffDirect(root: string, actor: string, context: Record<string, unknown>): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      const unit = state.units.find(item => item.status !== "succeeded");
+      if (actor !== (state.operatorSessionID ?? root) || state.phase !== "running" || !unit ||
+          unit.status !== "running" || unit.directExecution?.actor !== actor || !unit.callID ||
+          unit.directExecution.finishedAt || unit.reviewerCorrection || unit.repairValidation || unit.terminalRescue) {
+        throw new Error("mission-direct-handoff-unavailable");
+      }
+      await this.verifyControls(unit);
+      const segment = { ...structuredClone(unit.directExecution), callID: unit.callID, handedOffAt: new Date().toISOString() };
+      // Keep the original controls immutable. Publish continuation context and the new
+      // Task reference together in the atomic run save, so a crash has no half-updated pins.
+      const continuation = { actor, unit_id: unit.unit.id, at: segment.handedOffAt,
+        instruction: "Continue existing changes and remaining action. The authoritative handoff retains the exact original requirements. Reuse current source-bound checks; inspect missing facts only. Handoff itself is not validation.",
+        continuity: context.continuity,
+        checks: segment.checks.map(({ callID, command, directory, exitCode, startedAt, endedAt }) =>
+          ({ callID, command, directory, exitCode, startedAt, endedAt })),
+        validation_cwd: segment.validationCwd ?? unit.unit.validation_cwd, details_ref: this.statePath(root) };
+      unit.task = { ...unit.task, prompt: `${unit.task.prompt.replace(/\ndirect_handoff: .+$/mu, "")}\ndirect_handoff: ${JSON.stringify(continuation)}` };
+      (unit.directHandoffs ??= []).push(segment);
+      delete unit.directExecution;
+      unit.status = "pending";
+      unit.childSessionID = null;
+      state.units[state.units.indexOf(unit)] = { ...unit,
+        unit: segment.validationCwd ? { ...unit.unit, validation_cwd: segment.validationCwd } : unit.unit };
+      // Keep the original call as the reservation anchor until Worker admission replaces it.
       await this.save(state);
       return state;
     });
