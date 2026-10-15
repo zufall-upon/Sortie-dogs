@@ -106,6 +106,15 @@ export interface CodexTurnResult {
   readonly finalResponse?: string;
   readonly items: readonly JsonObject[];
   readonly usage?: JsonObject;
+  /** Host tools still running at native turn completion, drained without resending them. */
+  readonly deferredToolResults?: readonly CodexDeferredToolResult[];
+}
+
+export interface CodexDeferredToolResult {
+  readonly callID: string;
+  readonly tool: string;
+  readonly success: boolean;
+  readonly output: string;
 }
 
 export interface CodexAuthenticationState {
@@ -154,6 +163,7 @@ interface ActiveTurn {
   usage?: JsonObject;
   observerError?: unknown;
   observer: Promise<void>;
+  tools: Set<Promise<CodexDeferredToolResult>>;
   completing?: boolean;
   onEvent?: CodexTurnOptions["onEvent"];
   resolve(result: CodexTurnResult): void;
@@ -279,7 +289,7 @@ export class CodexAppServerHost {
     const turnID = object(started) && object(started.turn) ? text(started.turn.id) : undefined;
     if (!turnID) throw new CodexHostError("protocol-invalid-response", "turn/start returned no turn id.");
     return new Promise<CodexTurnResult>((resolve, reject) => {
-      this.active = { threadID, turnID, items: [], observer: Promise.resolve(), onEvent: options.onEvent, resolve, reject };
+      this.active = { threadID, turnID, items: [], observer: Promise.resolve(), tools: new Set(), onEvent: options.onEvent, resolve, reject };
       const backlog = this.notificationBacklog.splice(0);
       void backlog.reduce((prior, event) => prior.then(() => this.notification(event.method, event.params)), Promise.resolve())
         .catch(error => { this.active?.reject(error); this.active = undefined; });
@@ -367,18 +377,22 @@ export class CodexAppServerHost {
     const params = object(message.params) ? message.params : {};
     if (method === "item/tool/call") {
       const active = this.active;
-      let result: { contentItems: { type: "inputText"; text: string }[]; success: boolean };
-      try {
-        if (!active || active.completing || params.threadId !== active.threadID || params.turnId !== active.turnID ||
-            (params.namespace != null) || typeof params.callId !== "string" || typeof params.tool !== "string" || !this.options.dynamicTool)
-          throw new Error("Dynamic tool call does not belong to an active Sortie turn.");
-        const output = await this.options.dynamicTool({ threadId: active.threadID, turnId: active.turnID,
-          callId: params.callId, tool: params.tool, arguments: params.arguments });
-        result = { contentItems: [{ type: "inputText", text: output }], success: true };
-      } catch (error) {
-        result = { contentItems: [{ type: "inputText", text: error instanceof Error ? error.message : "Dynamic tool failed." }], success: false };
+      if (!active || active.completing || params.threadId !== active.threadID || params.turnId !== active.turnID ||
+          (params.namespace != null) || typeof params.callId !== "string" || typeof params.tool !== "string" || !this.options.dynamicTool) {
+        this.transport.send({ id: message.id, result: { contentItems: [{ type: "inputText",
+          text: "Dynamic tool call does not belong to an active Sortie turn." }], success: false } });
+        return;
       }
-      if (!this.closed) this.transport.send({ id: message.id, result });
+      const call = { threadId: active.threadID, turnId: active.turnID, callId: params.callId, tool: params.tool, arguments: params.arguments };
+      const pending = Promise.resolve().then(async (): Promise<CodexDeferredToolResult> => {
+        let output: string, success: boolean;
+        try { output = await this.options.dynamicTool!(call); success = true; }
+        catch (error) { output = error instanceof Error ? error.message : "Dynamic tool failed."; success = false; }
+        if (!this.closed && !this.fault) this.transport.send({ id: message.id, result: { contentItems: [{ type: "inputText", text: output }], success } });
+        return { callID: call.callId, tool: call.tool, success, output };
+      });
+      active.tools.add(pending);
+      try { await pending; } finally { active.tools.delete(pending); }
       return;
     }
     if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
@@ -438,11 +452,19 @@ export class CodexAppServerHost {
     // requests such as interrupt(), whose response must be read by this pump.
     // Keep the completing turn active until observers settle so close() can
     // reject it and a later turn cannot receive an interrupt meant for it.
-    void active.observer.then(() => {
+    const deferred = status === "completed" ? [...active.tools] : [];
+    // Native response completion is not host execution completion. Keep pumping
+    // command responses and child Tasks; explicit close/transport loss can still
+    // reject this turn. Failed/interrupted native turns never auto-continue.
+    void Promise.all([active.observer, Promise.all(deferred)]).then(([, tools]) => {
       if (this.active !== active) return;
       this.active = undefined;
       if (active.observerError) active.reject(new CodexHostError("request-failed", "Codex turn event observer failed.", active.observerError));
-      else active.resolve(result);
+      else active.resolve({ ...result, ...(tools.length ? { deferredToolResults: tools } : {}) });
+    }).catch(error => {
+      if (this.active !== active) return;
+      this.active = undefined;
+      active.reject(error);
     });
   }
 }

@@ -95,7 +95,9 @@ export class CodexMissionSession {
     return adapter;
   }
 
-  async run(prompt: string): Promise<{ rootSessionID: string; turn: CodexTurnResult; accepted: boolean; sessions: readonly JsonObject[] }> {
+  async run(prompt: string): Promise<{ rootSessionID: string; turn: CodexTurnResult; accepted: boolean;
+    lifecycle: { root_turn_terminal: boolean; owned_tasks_settled: boolean; mission_phase: string | null; mission_accepted: boolean };
+    sessions: readonly JsonObject[] }> {
     if (this.closed) throw new Error("Codex Mission adapter is closed.");
     if (!this.root) {
       const missions = await new OperatorMissionRuntime(this.directory, profile).current();
@@ -117,8 +119,11 @@ export class CodexMissionSession {
     const previous = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
     const turn = await this.prompt(session, prompt);
     const mission = await new OperatorMissionRuntime(this.directory, profile).read(session.id);
-    return { rootSessionID: session.id, turn, accepted: turn.status === "completed" && mission?.phase === "completed" &&
-      (previous?.phase !== "completed" || previous.id !== mission.id), sessions: [...this.sessions.values()].map(item =>
+    const ownedTasksSettled = [...this.sessions.values()].every(item => !["running", "unknown"].includes(item.outcome));
+    const accepted = turn.status === "completed" && ownedTasksSettled && mission?.phase === "completed" &&
+      (previous?.phase !== "completed" || previous.id !== mission.id);
+    return { rootSessionID: session.id, turn, accepted, lifecycle: { root_turn_terminal: ["completed", "failed", "interrupted", "cancelled"].includes(turn.status),
+      owned_tasks_settled: ownedTasksSettled, mission_phase: mission?.phase ?? null, mission_accepted: accepted }, sessions: [...this.sessions.values()].map(item =>
       ({ thread_id: item.id, agent: item.agent, model: item.model, usage: item.usage ?? null, usage_scope: "native-thread-cumulative", cost: null })) };
   }
 
@@ -460,11 +465,33 @@ export class CodexMissionSession {
   }
 
   private async prompt(session: NativeSession, prompt: string, onDispatch?: (messageID: string) => Promise<void>): Promise<CodexTurnResult> {
+    let result = await this.promptTurn(session, prompt, onDispatch);
+    while (result.status === "completed" && result.deferredToolResults?.length) {
+      if (this.closed) throw new Error("Codex Mission adapter is closed.");
+      const mission = await new OperatorMissionRuntime(this.directory, profile).read(this.rootOf(session));
+      if (!mission || ["completed", "cancelled"].includes(mission.phase)) break;
+      await this.claimOwner(this.rootOf(session));
+      await this.options.onEvent?.({ method: "sortie/continuation", threadId: session.id,
+        params: { turnId: result.turnID, phase: "owned-tools-settled", calls: result.deferredToolResults.map(item => ({ callId: item.callID, tool: item.tool, success: item.success })) } });
+      result = await this.promptTurn(session,
+        "The previous native response ended while existing host tools were still running. Those exact calls have now returned:\n" +
+        JSON.stringify(result.deferredToolResults) +
+        "\nContinue this same Mission from these results through the remaining validation, delivery, review and root acceptance. " +
+        "Do not resend the original request or redispatch the completed Tasks. Preserve failures, ownership and cumulative budget; use existing Mission status for the next action.",
+        undefined, true);
+    }
+    return result;
+  }
+
+  private async promptTurn(session: NativeSession, prompt: string, onDispatch?: (messageID: string) => Promise<void>, continuation = false): Promise<CodexTurnResult> {
     const startedAt = Date.now();
     const messageID = randomUUID();
     const message = { id: messageID, agent: session.agent, model: { ...session.model } };
-    const parts = [{ type: "text", text: prompt }];
-    await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
+    const parts = [{ type: "text", text: prompt, ...(continuation ? { synthetic: true } : {}) }];
+    // Only this host's drained results can continue an already-admitted execution.
+    // Reclaiming that Task with the result prompt rejects Workers' exact handoff;
+    // treating it as a real root request also grants spurious user-turn authority.
+    if (!continuation) await this.hooks["chat.message"]?.({ sessionID: session.id, messageID, agent: session.agent }, { message, parts });
     // Shared Task routing may select a model; explicit adapter overrides still govern every native turn.
     if (message.model.providerID !== "openai") throw new Error("Codex Mission cannot use a non-OpenAI model route.");
     message.model = this.modelRoute(session.agent, { ...message.model,

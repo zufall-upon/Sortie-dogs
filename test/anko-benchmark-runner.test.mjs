@@ -97,6 +97,23 @@ test('Anko native root success without accepted Mission exits nonzero', () => {
   }
 });
 
+test('native Codex Anko runner distinguishes root response, owned Tasks and Mission acceptance', () => {
+  const source = readFileSync(join(ROOT, 'scripts/anko-codex-runner.mjs'), 'utf8');
+  const fragment = source.slice(source.indexOf('status.accepted = result.accepted'), source.indexOf("writeJson(join(recordDir, 'result.json')"));
+  for (const accepted of [false, true]) {
+    const status = {};
+    vm.runInNewContext(fragment, { status, result: { accepted, rootSessionID: 'root', turn: { status: 'completed' }, sessions: [],
+      lifecycle: { root_turn_terminal: true, owned_tasks_settled: true, mission_phase: accepted ? 'completed' : 'running', mission_accepted: accepted } },
+      cumulativeUsage: () => null });
+    assert.equal(status.root_turn_terminal, true);
+    assert.equal(status.owned_tasks_settled, true);
+    assert.equal(status.mission_terminal, accepted);
+    assert.equal(status.mission_accepted, accepted);
+    assert.equal(status.cost_usd, null);
+  }
+  execFileSync(process.execPath, ['--check', 'scripts/anko-codex-runner.mjs'], { stdio: 'pipe' });
+});
+
 test('Anko private service is registered for native history and uses its generated password', async () => {
   const source = readFileSync(join(ROOT, 'scripts/anko-benchmark/arm.mjs'), 'utf8');
   const fragment = source.slice(source.indexOf('async function startPrivateServer'), source.indexOf('async function seedOpenAICredential'));

@@ -40,7 +40,7 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
     const result = await adapter.run(prompt);
     process.stdout.write(`${JSON.stringify({ status: result.accepted ? "succeeded" : "incomplete", root_session_id: result.rootSessionID,
       thread_id: result.turn.threadID, turn_id: result.turn.turnID, native_status: result.turn.status,
-      response: result.turn.finalResponse, sessions: result.sessions, cost: null })}\n`);
+      response: result.turn.finalResponse, lifecycle: result.lifecycle, sessions: result.sessions, cost: null })}\n`);
     return signalExit ?? (result.accepted ? 0 : 1);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : "codex-mission-failed"}\n`);
@@ -53,6 +53,11 @@ export async function runCodexMissionCommand(argv: readonly string[]): Promise<n
 
 /** Bounded user-facing progress; do not dump control packets or hidden reasoning. */
 export function codexMissionProgress(event: CodexTurnEvent & { threadId: string }): Record<string, unknown> | undefined {
+  if (event.method === "turn/completed")
+    return { thread_id: event.threadId, phase: "native-turn-terminal", turn_id: (event.params.turn as Record<string, unknown> | undefined)?.id,
+      native_status: (event.params.turn as Record<string, unknown> | undefined)?.status };
+  if (event.method === "sortie/continuation")
+    return { thread_id: event.threadId, turn_id: event.params.turnId, phase: event.params.phase, calls: event.params.calls };
   if (event.method === "sortie/modelRoute")
     return { thread_id: event.threadId, phase: "model-route", agent: event.params.agent, model: event.params.model,
       effort: event.params.effort, service_tier: event.params.serviceTier };

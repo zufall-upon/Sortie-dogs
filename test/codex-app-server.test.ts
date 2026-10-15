@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { CodexAppServerHost, type CodexAppServerTransport } from "../dist/codex/app-server.js";
 
 class FakeTransport implements CodexAppServerTransport {
@@ -21,6 +22,46 @@ class FakeTransport implements CodexAppServerTransport {
 }
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+for (const outcome of ["completed", "tool-failed", "close", "transport-loss", "failed", "interrupted"]) test(`saved Anko pending Task keeps native response separate from host settlement (${outcome})`, async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/codex-anko-pending-task.json", import.meta.url), "utf8"));
+  const [start, task, childStart, terminal] = fixture.events;
+  assert.equal(childStart.params.turn.status, "inProgress");
+  assert(!fixture.events.some((event: any) => event.method === "turn/completed" && event.params.threadId === childStart.params.threadId));
+  const transport = new FakeTransport();
+  let finish!: (value: string) => void, fail!: (error: Error) => void;
+  let executions = 0, returned = false;
+  const host = new CodexAppServerHost(transport, { dynamicTool: () => { executions++; return new Promise((resolve, reject) => { finish = resolve; fail = reject; }); } });
+  const run = host.runTurn(start.params.threadId, "Original request", { cwd: "/fixture" });
+  const observed = run.then(value => { returned = true; return { value }; }, error => ({ error }));
+  try {
+    transport.push({ id: 1, result: {} }); await tick();
+    transport.push({ id: 2, result: { turn: { id: start.params.turn.id } } }); await tick();
+    transport.push(task);
+    // onEvent records do not contain the server RPC. Supply its matching tool call.
+    transport.push({ id: 99, method: "item/tool/call", params: { threadId: task.params.threadId, turnId: task.params.turnId,
+      callId: task.params.item.id, tool: task.params.item.tool, arguments: {} } }); await tick();
+    transport.push({ ...terminal, params: { ...terminal.params, turn: { ...terminal.params.turn,
+      status: ["failed", "interrupted"].includes(outcome) ? outcome : "completed" } } }); await tick();
+    assert.equal(returned, ["failed", "interrupted"].includes(outcome));
+    assert.equal(executions, 1);
+    if (outcome === "close" || outcome === "transport-loss") {
+      if (outcome === "close") await host.close(); else await transport.close();
+      assert("error" in await observed, "loss/close cannot synthesize Task completion");
+      const sent = transport.sent.length;
+      finish("late"); await tick();
+      if (outcome === "close") assert.equal(transport.sent.length, sent);
+    } else {
+      if (outcome === "tool-failed") fail(new Error("child failure")); else finish("Existing Task result");
+      const result = await observed;
+      assert("value" in result);
+      assert.equal(result.value.status, ["failed", "interrupted"].includes(outcome) ? outcome : "completed");
+      assert.deepEqual(result.value.deferredToolResults, ["failed", "interrupted"].includes(outcome) ? undefined :
+        [{ callID: task.params.item.id, tool: "task", success: outcome !== "tool-failed", output: outcome === "tool-failed" ? "child failure" : "Existing Task result" }]);
+    }
+    assert.equal(transport.sent.filter(message => message.method === "turn/start").length, 1, "host drain never adds inference or polling");
+  } finally { finish?.("cleanup"); await host.close(); }
+});
 
 test("Codex native Fast tier is separate from the model and is retained on resume", async () => {
   const transport = new FakeTransport();
