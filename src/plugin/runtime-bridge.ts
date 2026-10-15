@@ -85,6 +85,11 @@ export interface RuntimeBridge {
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
   /** Existing controller executing a declared unit itself; never a fictitious native Task. */
   directMissionExecution?(sessionID: string): Promise<{ root: string; taskID: string; callID: string; startedAt: string } | undefined>;
+  /** The same unit's original reservation and completed direct-author usage segments. */
+  missionDispatchOrigin?(rootSessionID: string, taskID: string, callID: string): Promise<{
+    callID: string; startedAt: string; segments: readonly { sessionID: string; startedAt: string; endedAt: string }[];
+  } | undefined>;
+  missionHandoffChecks?(rootSessionID: string, taskID: string, callID: string): Promise<readonly ReviewerCorrectionCheck[]>;
   reviewerCorrectionValidationMembers?(childSessionID: string, command: string, directory?: string): Promise<string[] | undefined>;
   missionValidationDirectoryMatches?(rootSessionID: string, taskID: string, childSessionID: string,
     commands: readonly string[], directory: string): Promise<boolean>;
@@ -180,6 +185,7 @@ export interface RuntimeBridge {
     /** Settle an unfinished direct unit against its actual actor, never a fabricated child Task. */
     failDirectUnit(rootSessionID: string, actorSessionID: string): Promise<void>;
     releaseDirectUnit(actorSessionID: string): Promise<void>;
+    assertDirectUnitQuiescent(actorSessionID: string): Promise<void>;
     expandMissionWriteGate(childSessionID: string, paths: readonly string[]): Promise<void>;
     completeRoot(rootSessionID: string, acceptanceFingerprint: string): Promise<{
       status: "succeeded" | "awaiting-evidence";

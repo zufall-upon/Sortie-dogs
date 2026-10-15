@@ -588,6 +588,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return direct && taskID && direct.unit.callID ? { root: direct.root, taskID, callID: direct.unit.callID,
           startedAt: direct.unit.directExecution!.startedAt } : undefined;
       },
+      missionDispatchOrigin: async (root, taskID, callID) => {
+        const state = await operators.read(root);
+        const unit = state?.units.find(item => item.callID === callID && /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
+        const first = unit?.directHandoffs?.[0];
+        return first ? { callID: first.callID, startedAt: first.startedAt,
+          segments: unit!.directHandoffs!.map(item => ({ sessionID: item.actor, startedAt: item.startedAt, endedAt: item.handedOffAt })) } : undefined;
+      },
+      missionHandoffChecks: async (root, taskID, callID) => {
+        const run = await operators.read(root);
+        const unit = run?.units.find(item => item.callID === callID && /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
+        const prior = unit?.directHandoffs?.at(-1);
+        if (!unit || !prior) return [];
+        try {
+          const validation = await reviewerCorrectionValidationFresh(unit.unit.validation, prior.actor, await reviewMessages(prior.actor, prior.startedAt, true),
+            Date.parse(prior.startedAt), prior.checks, input.directory, prior.validationCwd ?? unit.unit.validation_cwd, prior.validationRegisteredAt);
+          return validation.ready ? prior.checks.filter(check => validation.matched?.some(item => item.callID === check.callID)) : [];
+        } catch { return []; }
+      },
       reviewerCorrectionValidationMembers: async (child, command, directory) => {
         const correction = await reviewerCorrection(child) ?? await directExecution(child);
         if (!correction) return undefined;
@@ -632,6 +650,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         let run = await operators.read(root);
         const unit = run?.units.find(item => /^task_id: (.+)$/m.exec(item.task.prompt)?.[1] === taskID);
         if (!run || !unit?.callID) return undefined;
+        if (run.phase === "cancelled" && unit.directHandoffs?.length && !unit.childSessionID) {
+          return { callID: unit.callID, cancelled: true };
+        }
         // Direct work has no child Task terminal. Its explicit host-observed finish owns
         // settlement; never mistake a prior parent response for this unit's completion.
         if (unit.directExecution && run.phase !== "cancelled") return undefined;
@@ -1068,7 +1089,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            `and verifies old children before preparing a Worker. Otherwise obtain the user's scope decision.` };
       if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen && mission.phase === "open") {
         return { ...packet, task: missions.task(mission),
-          next_action: "Fast-lane: plan one useful Worker unit with the meaningful formal check known from user, project or task context and estimated scope, then dispatch its Task immediately. Investigation/edit/check/requested commit belong inside Worker before independent Review. Objective: target 2000 characters; original requests are supplied separately. Use Coordinator for an unknown check or real unit decomposition." };
+          next_action: initialMissionAction(mission) };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
           run?.phase === "awaiting-acceptance" && mission.kind === "operation" && !missionExecutionComplete(mission)) {
@@ -2021,6 +2042,39 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         executor_session_id: actor, validation: direct!.unit.unit.validation,
         next_action: `Implement/correct and run the declared checks here, in this same session. Call ${finishDirectUnit} after the requested delivery boundary. No Worker or handoff read is needed. Retain the original requirements; independent Review and Operator acceptance still follow.` });
     }
+    async function handoffDirect(root: string, actor: string, callID?: string, notes?: string) {
+      const direct = await directExecution(actor);
+      if (direct) {
+        await control!.assertDirectUnitQuiescent(actor);
+        const history = await reviewMessages(actor, direct.unit.directExecution!.startedAt, true);
+        const calls = new Map<string, Record<string, unknown>>();
+        for (const message of history) if (record(message.info) && message.info.sessionID === actor && Array.isArray(message.parts)) {
+          for (const part of message.parts) if (record(part) && part.type === "tool" && typeof part.callID === "string" && part.callID !== callID) calls.set(part.callID, part);
+        }
+        if ([...calls.values()].some(part => !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
+            record(part.state.metadata) && ["running", "pending", "unknown"].includes(String(part.state.metadata.status)))) {
+          return JSON.stringify({ status: "direct-handoff-awaits-tools", next_action: "Finish the existing native command before handing off this unit; retain its result and continue here or delegate afterwards." });
+        }
+        await activateDirect(actor);
+        const mission = await missions.retainContext(root, actor, history, notes);
+        await operators.handoffDirect(root, actor, await missions.handoffContext(mission));
+      }
+      const run = await operators.required(root);
+      const unit = run.units.find(item => item.status !== "succeeded");
+      const last = unit?.directHandoffs?.at(-1);
+      if (actor !== (run.operatorSessionID ?? root) || !last || last.actor !== actor) throw new Error("mission-direct-handoff-unavailable");
+      // Idempotently finish projection/release after a restart between the durable handoff and response.
+      await missions.update(root, mission => {
+        const previous = mission.attempts?.find(item => item.callID === last.callID);
+        if (previous?.status === "dispatched") previous.status = "handed-off";
+      });
+      await control!.releaseDirectUnit(actor);
+      const next = await operators.next(root, actor);
+      return JSON.stringify({ ...next as Record<string, unknown>,
+        handoff: { from: actor, unit_id: unit!.unit.id, retained_checks: last.checks.length },
+        next_action: unit!.status === "pending" ? "Dispatch the returned Worker once to continue this same unit. Existing edits, context, checks and reservation are retained. The Worker owns remaining implementation and validation; handoff is not completion."
+          : "The handed-off unit is already admitted. Continue its existing owner; do not dispatch another Worker." });
+    }
     tools[startDirectUnit] = { description: "Execute the next already-planned ordinary unit in this Coordinator/Operator session, including a correction planned with executor=self. Native edits and declared checks become formal evidence without a Worker, handoff read or approval. Never replace an active writer; completed correction history does not restrict this choice.",
       args: {}, execute: async (_args, context) => {
         const { root } = await missionAuthority(context.sessionID);
@@ -2089,12 +2143,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion separately from successful exits; no handwritten proof file is needed. For run-once/result collection, validate the collected result without rerunning the operation.", "x-sortie-optional": true };
     const handoffContextSchema = { type: "string", "x-sortie-optional": true,
       description: "Optional current working notes: intent/rationale, known environment and paths, completed setup/checks with results, failed approaches and remaining work. Reuse known facts with source references; no required form or new approval. Public history and Mission observations are also supplied automatically. Omit when already sufficient; do not recopy the original request." };
-    tools[startMission] = { description: `Operator: save current requirements; the host retains the original request verbatim. With a meaningful formal check known from user, project or task context and one useful unit, include unit NOW (and execution for an operation) and dispatch its Worker directly; plan_units remains available after start. A literal command in the original request is not required. Worker owns investigation/edit/check/requested commit before independent Review; no routine preparation or commit-only handoff. ${MISSION_GIT_SCOPE} Unknown checks or real unit decomposition use Coordinator. intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
+    function initialMissionAction(mission: OperatorMission): string {
+      return mission.preferredExecutor === "coordinator"
+        ? "Dispatch this Coordinator Task now with the supplied recommendation/context. Coordinator owns substantial implementation and can use plan_units executor=self or delegate remaining work when useful. Start useful work, not a route-selection investigation."
+        : "Use the recommendation and already-known context: when a meaningful formal check and useful unit are already known, plan_units can dispatch its Worker directly. Otherwise dispatch this Coordinator Task now; it may implement here or delegate during actual work. Do not investigate merely to decide the route or discover a check for Operator planning.";
+    }
+    tools[startMission] = { description: `Operator: save current requirements and recommend preferred_executor from the original instruction and already-known context, without a routing investigation. The host retains the original request verbatim. Clear bounded work normally suits Worker; coupled design, ambiguous requirements or cross-system integration normally suit Coordinator direct execution. Follow explicit user choices. Coordinator may revise this advisory recommendation during useful work, not a mandatory reassessment. With known unit facts and meaningful formal checks, include unit now (and execution for an operation): worker/default can dispatch its Worker directly; coordinator retains these facts for its own execution choice. Unknown checks are resolved during actual work, not an Operator preflight. Investigation/edit/check/requested commit stay with the chosen author before applicable Review. ${MISSION_GIT_SCOPE} intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         work_quantities: { type: ["array", "object", "string", "number", "boolean", "null"], items: {}, additionalProperties: true, "x-sortie-optional": true,
           minLength: 0, maxLength: 65535, minItems: 0, maxItems: 4096,
           description: "Optional display-only workload array: stable id, kind, relative_weight, bindings.paths/commands, checkpoints. Reuse this ordinary plan; never add a planning/report turn for progress. Invalid shapes/estimates fall back without changing execution." } as never,
-        unit: { ...missionUnitSchema, description: "When the meaningful check and single-unit scope are already known, include this unit now. Returns its configured Worker directly, combining start_mission and plan_units without another model round trip.", "x-sortie-optional": true } as never,
+        preferred_executor: { type: "string", enum: ["coordinator", "worker"], "x-sortie-optional": true,
+          description: "Initial recommendation from the instruction and already-known context. Coordinator may adapt through actual work without approval or a separate investigation. coordinator returns Coordinator even with supplied unit facts; worker uses the direct Worker route when those facts are ready. Not a model override or immutable requirement." } as never,
+        unit: { ...missionUnitSchema, description: "Include already-known unit facts without investigating to fill them. worker/default returns its configured Worker directly; coordinator passes these facts to Coordinator without starting a Worker.", "x-sortie-optional": true } as never,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
         confirmed_conditions: conditionsSchema as never,
@@ -2102,6 +2163,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
+        if (args.preferred_executor !== undefined && !["coordinator", "worker"].includes(args.preferred_executor)) throw new Error("mission-preferred-executor-invalid");
         if (args.intent !== undefined && !["", "continue", "new", "replace"].includes(args.intent)) throw new Error("mission-intent-invalid");
         return serializeDispatchTransition(context.sessionID, async () => {
           const existing = await reconcileMissionDispatch(context.sessionID);
@@ -2143,6 +2205,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
+          if (args.preferred_executor !== undefined) mission = await missions.update(context.sessionID, state => {
+            state.preferredExecutor = args.preferred_executor as "coordinator" | "worker";
+          });
+          const suggestedUnit = (args as Record<string, unknown>).unit;
+          if (mission.preferredExecutor === "coordinator" && record(suggestedUnit) && mission.runID === null && !mission.dispatchOpen) {
+            mission = await missions.update(context.sessionID, state => { state.suggestedUnit = structuredClone(suggestedUnit); });
+          }
           const prohibited = (args as Record<string, unknown>).prohibited_write;
           if (prohibited !== undefined) {
             if (!Array.isArray(prohibited) || !prohibited.every(path => typeof path === "string")) throw new Error("mission-prohibited-write-invalid");
@@ -2175,7 +2244,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const baseline = await missionReviewBaseline(input.directory);
             if (baseline) mission = await missions.update(context.sessionID, state => { state.reviewBaseline = baseline; });
           }
-          if ((args as Record<string, unknown>).unit !== undefined && mission.runID === null && !mission.dispatchOpen &&
+          if (mission.preferredExecutor !== "coordinator" && (args as Record<string, unknown>).unit !== undefined && mission.runID === null && !mission.dispatchOpen &&
               (mission.kind !== "operation" || (args as Record<string, unknown>).execution !== undefined || mission.execution)) {
             const planned = JSON.parse(await declareMissionUnits(context.sessionID, context.sessionID, mission,
               [(args as Record<string, unknown>).unit], undefined, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities));
@@ -2188,7 +2257,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
-              next_action: "Default to plan_units with a meaningful formal check known from user, project or task context and estimated read/write scope; dispatch its returned Worker now. Worker owns investigation/edit/check/requested commit before independent Review. Objective target 2000 characters; original request is separate and verbatim. Use Coordinator for an unknown check or real unit decomposition, not routine preparation." }) });
+              ...(mission.preferredExecutor ? { preferred_executor: mission.preferredExecutor } : {}),
+              next_action: initialMissionAction(mission) }) });
         });
       } };
     tools[skipMissionConsultation] = { description: "Coordinator: durably record why a concrete optional Advisor/Scout consultation is unnecessary. This is observation only: it adds no approval, consultation requirement, or dispatch gate.",
@@ -2339,6 +2409,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const recoveryErrors: { sessionID: string; reason: string }[] = [];
       const addOwner = (actor: string, window: OperationWindow) => owners.set(actor, [...(owners.get(actor) ?? []), window]);
       for (const unit of run.units) {
+        for (const prior of unit.directHandoffs ?? []) addOwner(prior.actor, { notBefore: prior.startedAt, notAfter: prior.handedOffAt });
         if (unit.directExecution?.actor) {
           addOwner(unit.directExecution.actor, { notBefore: unit.directExecution.startedAt,
             ...(unit.directExecution.finishedAt ? { notAfter: unit.directExecution.finishedAt } : {}) });
@@ -2683,16 +2754,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         : next);
     }
     tools[planUnits] = { description: `Coordinator or single-unit Fast-lane Operator: declare useful work with estimated read/write scope and meaningful formal checks. executor=self starts implementation/correction and formal validation HERE without a Worker or handoff read; otherwise dispatch the returned configured Worker promptly. Reuse useful author context by default; legitimate Worker/direct handoff remains available after terminal work, including correction. Retain findings, actual authorship and passed input-bound checks; do not rediscover or revalidate unchanged work merely for a new actor. ${MISSION_GIT_SCOPE} Native scope reconciliation/expand_unit retain host permissions and explicit path prohibitions. Objective is the target or corrective delta: aim for 2000 characters; the full original request/public reproduction is supplied separately, not copied here. Oversized unit instructions are retained verbatim in handoff Mission context, not rejected for another planning round. Keep every requirement covered. Final validation proves the unit; empty or dummy checks do not qualify. Diagnostics need no registration. write: [] is read-only; dir/** and native absolute paths support actual outputs. reason replans settled work, or ends your own quiescent direct unit without acceptance to correct its declaration, in the same requirements/budget; same-scope failed validation uses retry_mission_unit. Completion history is not a correction-owner lock or an acceptance prerequisite.`,
-      args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema } as never,
+      args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema, "x-sortie-optional": true,
+          description: "Useful work units. Omit only with executor=worker to hand off your currently running direct unit, retaining its contract and existing work." } as never,
         work_quantities: tools[startMission]!.args.work_quantities,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
-        executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here without a Worker handoff. Default worker retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
+        executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here. Use worker without units to yield the current direct unit, carrying remaining action in handoff_context; the same unit, edits, checks and budget continue. With units, worker/default retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
+            if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, mission,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
             return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;

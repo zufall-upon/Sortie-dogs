@@ -17,7 +17,7 @@ import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const exec = promisify(execFile);
 
-const directModes = ["correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 for (const actor of ["root", "coordinator"]) for (const mode of directModes.filter(mode =>
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -123,29 +123,110 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
       return;
     }
     let counter = 0;
-    const write = async (content: string, path = resultPath) => {
+    const write = async (content: string, path = resultPath, author = actor) => {
       const callID = `write-${++counter}`, args = { filePath: resolve(directory, path), content };
-      await hooks["tool.execute.before"]!({ tool: "write", sessionID: actor, callID }, { args });
+      await hooks["tool.execute.before"]!({ tool: "write", sessionID: author, callID }, { args });
       await writeFile(args.filePath, content);
-      (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "write", callID,
+      (history[author] ??= []).push({ info: { id: callID, role: "assistant", sessionID: author }, parts: [{ type: "tool", tool: "write", callID,
         state: { status: "completed", input: args, time: { end: Date.now() } } }] });
       const output: { output: string; metadata?: Record<string, unknown> } = { output: "written" };
-      await hooks["tool.execute.after"]!({ tool: "write", sessionID: actor, callID, args }, output);
+      await hooks["tool.execute.after"]!({ tool: "write", sessionID: author, callID, args }, output);
       if (mode === "correction") {
         assert.ok(Number((output.metadata?.work_quantity as { n: number })?.n) > 0);
         if (counter === 1) assert.match(output.output, /全体作業量 \d+\/100（概算）/);
       }
     };
-    const check = async (cwd = externalDirectory ?? directory, command = "node check.mjs") => {
+    const check = async (cwd = externalDirectory ?? directory, command = "node check.mjs", author = actor) => {
       const callID = `check-${++counter}`, args = { command, workdir: cwd }, start = Date.now();
-      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: actor, callID }, { args });
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: author, callID }, { args });
       let exit = 0;
       try { await exec(process.execPath, ["check.mjs", ...(command.endsWith(" --second") ? ["--second"] : [])], { cwd }); } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
-      (history[actor] ??= []).push({ info: { id: callID, role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID,
+      (history[author] ??= []).push({ info: { id: callID, role: "assistant", sessionID: author }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
-      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: actor, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: author, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
       return exit;
     };
+    if (mode.startsWith("handoff-")) {
+      await write("fixed\n");
+      assert.equal(await check(), 0);
+      const handoff = () => hooks.tool!.sortie_v010_plan_units.execute({ executor: "worker",
+        handoff_context: "Continue existing result; node check.mjs already passed. Keep that evidence if source remains current." },
+        { sessionID: actor, callID: "handoff-call" });
+      const priced = (id: string, modelID: string, created: number) => ({ info: { id, role: "assistant", sessionID: id === "direct-usage" ? actor : "worker",
+        providerID: "openai", modelID, time: { created, completed: created + 1 },
+        tokens: { input: 1000, output: 1000, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [] });
+      for (const message of history[actor] ?? []) delete (message.info as Record<string, unknown>).id;
+      history[actor]!.push(priced("direct-usage", "gpt-6.1-sol", Date.parse(before.units[0]!.directExecution!.startedAt)));
+      hooks = await create();
+      const unfinished = { info: { role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID: "background",
+        state: { status: "completed", metadata: { status: "running" } } }] };
+      history[actor]!.push(unfinished);
+      assert.equal(JSON.parse(await handoff()).status, "direct-handoff-awaits-tools");
+      assert.equal((await readRun()).units[0]!.status, "running");
+      history[actor]!.pop();
+      if (mode === "handoff-storage-failure") {
+        const rename = fs.rename;
+        const statePath = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root");
+        const injected = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+          if (String(args[1]) === statePath) throw new Error("fixture handoff state write failure");
+          return Reflect.apply(rename, fs, args);
+        });
+        syncBuiltinESMExports();
+        await assert.rejects(handoff(), /fixture handoff state write failure/);
+        injected.mock.restore(); syncBuiltinESMExports();
+        assert.equal((await readRun()).units[0]!.status, "running");
+        assert.equal(createHash("sha256").update(await readFile(before.units[0]!.handoffPath)).digest("hex"), before.units[0]!.hashes[0]);
+        hooks = await create();
+      }
+      const delegated = JSON.parse(await handoff());
+      const yielded = await readRun();
+      assert.equal(yielded.runID, before.runID);
+      assert.equal(yielded.units[0]!.unit.id, before.units[0]!.unit.id);
+      assert.equal(yielded.units[0]!.directHandoffs!.length, 1);
+      assert.equal(yielded.units[0]!.directHandoffs![0]!.checks.length, 1);
+      hooks = await create();
+      assert.deepEqual(JSON.parse(await handoff()).task, delegated.task, "cold response replay retains pending Task");
+      const key = createHash("sha256").update("v010\u0000root").digest("hex");
+      const ledger = await RunFlightLedger.openGoal(join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`));
+      if (mode === "handoff-cancel") {
+        await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" });
+        const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+        assert.equal(status.budget.reserved_units, 0);
+        assert.equal(status.budget.consumed_units, 1);
+        assert.equal((await readRun()).phase, "cancelled");
+        return;
+      }
+      agents.worker = { agent: "dog-worker-v010", parentID: actor, outcome: "running" };
+      const task = { args: structuredClone(delegated.task) };
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "worker-call" }, task);
+      await prompt("worker", task.args.prompt);
+      const current = (await readRun()).units[0]!;
+      await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: current.handoffPath } });
+      await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: current.handoffPath } },
+        { output: await readFile(current.handoffPath, "utf8") });
+      if (mode === "handoff-stale" || mode === "handoff-latest-failure") await write("broken\n", resultPath, "worker");
+      if (mode === "handoff-latest-failure") {
+        assert.equal(await check(directory, "node check.mjs", "worker"), 1);
+        await write("fixed\n", resultPath, "worker");
+      }
+      for (const message of history.worker ?? []) delete (message.info as Record<string, unknown>).id;
+      (history.worker ??= []).push(priced("worker-usage", "gpt-6-luna", Date.now()));
+      // A later Coordinator turn is not part of its yielded execution segment.
+      history[actor]!.push({ ...priced("unpriced-later", "unpriced-model", Date.now()), info: {
+        ...priced("unpriced-later", "unpriced-model", Date.now()).info, sessionID: actor } });
+      agents.worker.outcome = "completed";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: "worker-call" },
+        { output: "DONE", metadata: { sessionId: "worker", status: "completed" } });
+      const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+      assert.equal(status.budget.reserved_units, 0);
+      assert.equal(status.budget.consumed_units, 1);
+      assert(Math.abs(status.budget.settled_cost_usd - 0.0126) < 1e-10, JSON.stringify(status.budget));
+      assert.equal((await readRun()).units[0]!.status, ["handoff-stale", "handoff-latest-failure"].includes(mode) ? "failed" : "succeeded");
+      const records = (await ledger.readGoal()).records;
+      assert.equal(records.filter(item => item.event.kind === "dispatch.reserved").length, 1);
+      assert.equal(records.filter(item => item.event.kind === "unit.settled").length, 1);
+      return;
+    }
     if (mode.endsWith("replan")) {
       const replacement = { executor: "self", reason: "Remove the invalid prose directory annotation; retain requirements",
         units: [{ title: "Fix result", objective: "Create result.txt accepted by check.mjs", read: ["check.mjs"],

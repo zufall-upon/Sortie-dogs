@@ -330,7 +330,8 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(primary, /^  sortie_v010_complete_mission: true$/m);
   assert.doesNotMatch(primary, /^  sortie_v010_begin_operator_proposal: true$/m);
   assert.match(primary, /host saves the original\n\s+user message verbatim/u);
-  assert.match(primary, /include unit in start_mission to receive its Worker immediately in the same call/u);
+   assert.match(primary, /Recommend preferred_executor in start_mission from the original instruction and already-known context/u);
+   assert.match(primary, /worker\/default receives its configured Worker directly; coordinator receives these facts without starting a Worker/u);
   assert.match(primary, /inspect only missing source or evidence/u);
   assert.match(primary, /Batch focused reads where practical/u);
   assert.match(primary, /use \[\] only for genuinely low-risk work/u);

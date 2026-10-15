@@ -3,7 +3,7 @@ import { estimateModelUsageCost } from "./model-cost.js";
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 
 /** Price complete native requests; absent/interrupted usage is unknown, never a fabricated zero. */
-export function settledUnitUsage(messages: readonly unknown[], startedAt?: string): number | null {
+export function settledUnitUsage(messages: readonly unknown[], startedAt?: string, endedAt?: string): number | null {
   let cost = 0, requests = 0;
   const seen = new Set<string>();
   for (const message of messages) {
@@ -12,9 +12,10 @@ export function settledUnitUsage(messages: readonly unknown[], startedAt?: strin
     if (typeof info.id !== "string" || seen.has(info.id)) continue;
     seen.add(info.id);
     const time = record(info.time) ? info.time : undefined;
-    if (startedAt) {
+    if (startedAt || endedAt) {
       if (typeof time?.created !== "number") return null;
-      if (time.created < Date.parse(startedAt)) continue;
+      if (startedAt && time.created < Date.parse(startedAt)) continue;
+      if (endedAt && time.created >= Date.parse(endedAt)) continue;
     }
     if (typeof time?.completed !== "number") return null;
     const tokens = record(info.tokens) ? info.tokens : undefined;
