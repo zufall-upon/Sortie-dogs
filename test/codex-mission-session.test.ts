@@ -105,14 +105,14 @@ class ScriptedTransport implements CodexAppServerTransport {
   }
 }
 
-for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] as const) test(`initial recommendation and autonomous Coordinator completion: ${mode}`, { timeout: 15000 }, async () => {
+for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff", "partial-check-handoff", "handoff-retry"] as const) test(`initial recommendation and autonomous Coordinator completion: ${mode}`, { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-advisory-route-"));
   const transports: ScriptedTransport[] = [];
   let adapter: CodexMissionSession | undefined, failure: unknown;
   let missionID: string | undefined, runID: string | undefined, taskID: string | undefined;
   const handoff = mode.includes("handoff");
   const unit = { title: "Complete result", objective: "Make result.txt fixed, validate and commit",
-    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] };
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs", ...(mode === "partial-check-handoff" ? ["node check.mjs --tail"] : [])] };
   try {
     await exec("git", ["init", "--quiet"], { cwd: directory });
     await exec("git", ["config", "user.name", "Route fixture"], { cwd: directory });
@@ -121,7 +121,7 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] a
     await exec("git", ["add", "check.mjs"], { cwd: directory });
     await exec("git", ["commit", "-qm", "fixture"], { cwd: directory });
     adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
-      const id = ["root", "coordinator", "worker"][transports.length]!;
+      const id = ["root", "coordinator", "worker", "retry"][transports.length]!;
       const native = new ScriptedTransport(id, async host => {
         try {
           if (id === "root") {
@@ -162,21 +162,36 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] a
               assert.equal(budget.consumed_units, 0);
               await host.call("task", delegated.task);
               if (failure) return;
+              if (mode === "handoff-retry") {
+                const current = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+                assert.equal(current.units[0]!.status, "failed");
+                const retry = await host.call("sortie_v010_retry_mission_unit", { unit_id: current.units[0]!.unit.id });
+                assert.equal(retry.status, "normal_remediation_prepared");
+                await host.call("task", retry.task);
+                if (failure) return;
+              }
             } else {
               await host.call("bash", { command: 'git add result.txt && git commit -m "Deliver result"' });
               await host.call("sortie_v010_finish_direct_unit", {});
             }
             const status = await host.call("sortie_v010_operator_status", {});
-            assert.equal(status.budget.consumed_units, 1, "same unit is charged once across authors");
+            assert.equal(status.budget.consumed_units, mode === "handoff-retry" ? 2 : 1, "handoff retains one reservation; actual remediation is another attempt");
             assert.equal(status.budget.reserved_units, 0);
             await host.call("sortie_v010_review_mission", { risk_tags: [] });
             await host.call("sortie_v010_submit_mission", { status: "ready", summary: "Implemented, validated and committed" });
           } else {
             assert.equal(await readFile(join(directory, "result.txt"), "utf8"), mode === "handoff" ? "partial" : "fixed");
-            if (mode === "handoff") {
+            if (mode === "handoff-retry" && id === "worker") {
+              await host.call("write", { filePath: "result.txt", content: "broken" });
+              assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 7);
+              await host.call("write", { filePath: "result.txt", content: "fixed" });
+              return "FAILED: declared validation exited 7; retained original work for remediation";
+            }
+            if (mode === "handoff" || id === "retry") {
               await host.call("write", { filePath: "result.txt", content: "fixed" });
               assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
             }
+            if (mode === "partial-check-handoff") assert.equal((await host.call("bash", { command: "node check.mjs --tail" })).metadata.exit, 0);
             await host.call("bash", { command: 'git add result.txt && git commit -m "Deliver result"' });
             return "DONE: Existing result validated and committed";
           }
@@ -190,7 +205,7 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] a
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(mission.id, missionID);
     assert.equal(mission.runID, runID);
-    assert.equal(transports.length, handoff ? 3 : 2);
+    assert.equal(transports.length, mode === "handoff-retry" ? 4 : handoff ? 3 : 2);
     assert.equal(transports[1]!.threadRequests[0].model, "gpt-6.1-sol");
     if (handoff) {
       assert.equal(transports[2]!.threadRequests[0].model, "gpt-6-luna");
@@ -199,7 +214,13 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff"] a
       assert.equal(mission.attempts!.filter(item => item.status === "succeeded").length, 1);
     }
     const checkCommands = transports.flatMap(host => host.commandRequests).filter(request => JSON.stringify(request.command).includes("node check.mjs"));
-    assert.equal(checkCommands.length, 1, "current direct validation is not rerun solely for a new actor");
+    assert.equal(checkCommands.length, mode === "handoff-retry" ? 3 : mode === "partial-check-handoff" ? 2 : 1, "current checks are retained; a real failed attempt requires remediation validation");
+    if (mode === "partial-check-handoff") {
+      const state = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const retained = state.units[0]!.evidence.flatMap(item => item.execution.command);
+      assert.equal(state.units[0]!.directHandoffs![0]!.checks[0]!.command[0], "node check.mjs");
+      assert(retained.includes("node check.mjs --tail"));
+    }
     assert.equal((await exec("git", ["log", "-1", "--format=%s"], { cwd: directory })).stdout.trim(), "Deliver result");
   } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });

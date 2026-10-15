@@ -25,7 +25,7 @@ import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
 import { cachedWorkProgress, forgetWorkSession, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
 import { serializeOperatorStatus } from "./operator-status-output.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, validationDirectoryMatches } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, directHandoffValidationChecks, validationDirectoryMatches } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -591,19 +591,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       missionDispatchOrigin: async (root, taskID, callID) => {
         const state = await operators.read(root);
         const unit = state?.units.find(item => item.callID === callID && /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-        const first = unit?.directHandoffs?.[0];
+        const segments = unit?.directHandoffs?.filter(item => !item.settledCallID || item.settledCallID === callID);
+        const first = segments?.[0];
         return first ? { callID: first.callID, startedAt: first.startedAt,
-          segments: unit!.directHandoffs!.map(item => ({ sessionID: item.actor, startedAt: item.startedAt, endedAt: item.handedOffAt })) } : undefined;
+          segments: segments!.map(item => ({ sessionID: item.actor, startedAt: item.startedAt, endedAt: item.handedOffAt })) } : undefined;
       },
       missionHandoffChecks: async (root, taskID, callID) => {
         const run = await operators.read(root);
         const unit = run?.units.find(item => item.callID === callID && /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-        const prior = unit?.directHandoffs?.at(-1);
+        const prior = unit?.directHandoffs?.filter(item => !item.settledCallID || item.settledCallID === callID).at(-1);
         if (!unit || !prior) return [];
         try {
-          const validation = await reviewerCorrectionValidationFresh(unit.unit.validation, prior.actor, await reviewMessages(prior.actor, prior.startedAt, true),
+          const history = await reviewMessages(prior.actor, prior.startedAt, true);
+          return await directHandoffValidationChecks(unit.unit.validation, prior.actor, history,
             Date.parse(prior.startedAt), prior.checks, input.directory, prior.validationCwd ?? unit.unit.validation_cwd, prior.validationRegisteredAt);
-          return validation.ready ? prior.checks.filter(check => validation.matched?.some(item => item.callID === check.callID)) : [];
         } catch { return []; }
       },
       reviewerCorrectionValidationMembers: async (child, command, directory) => {

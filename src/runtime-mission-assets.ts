@@ -66,7 +66,6 @@ required review, accepted criteria and cumulative budget intact; this workflow a
 export const WORKER_VALIDATION_WORKFLOW = `Batch edits, reconcile requirements/diff, run focused tests, then every registered formal check exactly in order:
 separate foreground native shell calls; no tee/redirect/wrapper. Diagnostics lack formal evidence.
 Rerun affected checks and required broad checks when contract/freshness requires; never drop required validation; no stale/unrun proof.
-For a direct_handoff, continue its remaining action and retain current host-observed checks; do not rerun solely because the author changed.
 Check matched caller/output tests.
 `;
 
@@ -694,8 +693,7 @@ Use bounded documented setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 User missing-only: installed/incompatible is not missing.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
-${WORKER_VALIDATION_WORKFLOW}
-No fake success.
+${WORKER_VALIDATION_WORKFLOW}No fake success.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,
 rerun reasons, unresolved/untested behavior; no proof doc.

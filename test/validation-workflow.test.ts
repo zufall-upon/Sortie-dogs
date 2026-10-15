@@ -208,7 +208,7 @@ test('Coordinator planning and direct authorship compose regressions without a n
   assert.match(MISSION_REGRESSION_PLACEMENT, /distinctive behavior-specific name over automatically mirroring the implementation module/);
   assert.match(MISSION_REGRESSION_PLACEMENT, /Preserve established assertions and project test discovery/);
   assert.match(MISSION_REGRESSION_PLACEMENT, /not another test, unit or review requirement/);
-  assert.match(coordinator, /execute it directly instead of re-explaining it to another Worker/);
+  assert.match(coordinator, /Continue directly while your context makes that efficient/);
   assert.match(coordinator, /independent Review and Operator final acceptance still follow/i);
   assert.doesNotMatch(MISSION_REGRESSION_PLACEMENT, /sqlfluff|pydicom|L060|2419|901|test_config|std_L060|hidden|official|permission|approval/);
   for (const name of ['dog-operator', 'dog-worker-v010', 'dog-reviewer-v010']) {

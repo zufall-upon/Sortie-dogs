@@ -6,9 +6,15 @@
 - Align the Operator/Coordinator instructions and host next actions: classification does not require a repository/environment investigation. Explicit user choices govern; an advisory recommendation can change during actual execution without another approval or mandatory reassessment.
 - `plan_units(executor: "worker")` with no `units` yields an unfinished direct unit. `handoff_context` carries remaining action and useful observations. The same Mission/run/unit, original requirements, edits, actual authors, check records and budget reservation continue. The original controls remain immutable; continuation context and Task identity switch in one durable run save.
 - Wait for existing native commands to settle before transferring writer ownership. A handoff is neither successful validation nor a failed implementation. Replaying the response after reload returns the existing pending Task.
-- Reuse current complete direct validation at Worker settlement, with retained native exits and source bindings. Changed source or a later failed check cannot become success through an actor change. Cumulative unit accounting settles once; actual author usage windows remain separately priced, and unavailable usage stays unknown.
+- Reuse the current ordered direct validation prefix at Worker settlement, with retained native exits and source bindings. Changed source or a later failed check cannot become success through an actor change. Cumulative unit accounting settles once; actual author usage windows remain separately priced, and unavailable usage stays unknown.
+- A failed handed-off attempt retains its settled origin for terminal proof. Ordinary remediation receives its own reservation and current validation, retaining historical authorship without recharging the old direct segment or blocking the retry.
+- V2's strict custom-tool shape accepts the existing empty-string omission sentinel for optional arrays and enum strings. This lets a native `plan_units` call omit a replacement plan while keeping ordinary array/enum validation.
 
 Runtime marker: `0.14.0-autonomous-routing-v1`. Codex skill marker remains `0.13.11-codex-skill-v2`. Model route configuration remains separate from executor advice.
+
+## Existing review disposition
+
+PR #260's review bodies, ordinary comments and inline comments were collected. Its two late P1 findings are valid: retain a passing validation prefix during handoff, and stop reusing a settled reservation for ordinary remediation. Both receive minimal fixes and related public-harness regressions. The live V2 probe independently exposed optional-array omission rejection; captured native arguments now exercise schema admission and omission decoding. No extra review was requested; author regression checks are not an independent final PASS.
 
 ## Verification boundaries
 
