@@ -20,6 +20,10 @@ Adapter call shape::
         target_path=Path(self.logs_dir).parent / "artifacts" / "model.patch",
         writers_stopped=lambda: native_cleanup_complete(self.observation_path),
     )
+
+``PierArtifactRecoveryMixin`` supplies this run method for the campaign's Pier
+adapter. Its owner provides ``artifact_base_commit`` from validated task metadata
+and the existing observation/log paths; it does not modify Pier or the verifier.
 """
 
 from __future__ import annotations
@@ -188,3 +192,16 @@ async def run_with_artifact_recovery(
             f"Frontier model.patch recovery retained bytes={size}, sha256={digest}."
         )
         raise original.with_traceback(original_traceback)
+
+
+class PierArtifactRecoveryMixin:
+    """Adapter-side run boundary, before Pier can delete the owned environment."""
+
+    async def run(self, instruction: str, environment: Any, context: Any) -> Any:
+        return await run_with_artifact_recovery(
+            lambda: self._invoke_gateway(instruction, environment, context),
+            environment,
+            base_commit=self.artifact_base_commit,
+            target_path=Path(self.logs_dir).parent / "artifacts" / "model.patch",
+            writers_stopped=lambda: native_cleanup_complete(self.observation_path),
+        )

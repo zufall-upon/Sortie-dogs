@@ -74,6 +74,46 @@ test("explicit requested release is checked before the one-shot fixture can star
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Frontier gateways keep snapshots local and admit both native Worker parent routes", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "frontier-gateway-boundary-"));
+  const python = String.raw`
+import subprocess
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions
+root = Path(sys.argv[2])
+subprocess.run(["git", "init", "-q", str(root)], check=True)
+(root / "unrelated-parent.txt").write_text("parent evidence\n")
+gateway = root / "nested" / "gateway"
+gateway.mkdir(parents=True)
+initialize_gateway_git_root(gateway)
+(gateway / "runtime-output.txt").write_text("generated\n")
+def git(*args):
+    return subprocess.check_output(["git", "-C", str(gateway), *args]).decode().strip()
+assert Path(git("rev-parse", "--show-toplevel")) == gateway
+assert git("ls-files") == ".gitignore"
+assert not git("status", "--porcelain", "--untracked-files=all")
+assert (root / "unrelated-parent.txt").read_text() == "parent evidence\n"
+for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010"}),
+                       ("dogs-coordinator", {"dog-worker-v010"}), ("dog-worker-v010", set())]:
+    rules = product_agent_permissions(role, ("sortie_v010_operator_status",), allow_execute=role == "dog-worker-v010")
+    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
+    assert {r["resource"] for r in rules if r["action"] == "subagent"} == expected
+    assert not any(r["action"] == "subagent" and r["resource"] == "*" for r in rules)
+    assert not any(r["action"] in ("shell", "bash", "write") for r in rules)
+print("PASS_GATEWAY_BOUNDARIES")
+`;
+  try {
+    const result = await execute("/usr/bin/python3", ["-c", python, join(process.cwd(), "scripts"), root],
+      { cwd: root, timeoutMs: 30_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+    assert.equal(result.code, 0, result.stderr.toString("utf8"));
+    assert.match(result.stdout.toString("utf8"), /PASS_GATEWAY_BOUNDARIES/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("V2 registration metadata is not mistaken for available operator and Worker routes", () => {
   const value = manifest(process.cwd());
   const checked = [{ model: (value.opencode as { model: string }).model,
@@ -892,6 +932,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, sys.argv[1])
 from frontierharness_artifact_recovery import (
+    PierArtifactRecoveryMixin,
     native_cleanup_complete,
     official_patch_command,
     run_with_artifact_recovery,
@@ -962,11 +1003,16 @@ async def main():
     async def fail_run():
         raise original
 
+    class RecoveringAdapter(PierArtifactRecoveryMixin):
+        artifact_base_commit = base_commit
+        logs_dir = retained.parent.parent / "agent"
+        observation_path = cleanup_observation
+
+        async def _invoke_gateway(self, instruction, environment, context):
+            await fail_run()
+
     try:
-        await run_with_artifact_recovery(
-            fail_run, environment, base_commit=base_commit, target_path=retained,
-            writers_stopped=writers_stopped,
-        )
+        await RecoveringAdapter().run("exception injection", environment, None)
     except RuntimeError as caught:
         same_original = caught is original
         notes = getattr(caught, "__notes__", [])
