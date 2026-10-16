@@ -309,6 +309,89 @@ async function goalSettlements(directory: string): Promise<number> {
   return count;
 }
 
+for (const state of ["terminal", "active", "unknown-turn", "unknown-command", "live-owner"] as const)
+test(`cold Coordinator without native parent Task history: ${state}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-retained-coordinator-"));
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+    const root = new ScriptedTransport("root", async host => {
+      const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate existing result"], preferred_executor: "coordinator" });
+      await host.call("task", started.task);
+    });
+    const coordinator = new ScriptedTransport("coordinator", async host => {
+      await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Validate", objective: "Validate existing result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      await (adapter as any).stopHosts();
+    });
+    let created = 0;
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => created++ ? coordinator : root });
+    await assert.rejects(adapter.run("Validate existing result"), /closed/);
+    await adapter.close();
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root");
+    const runBefore = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(before.dispatchOpen, true);
+    assert.equal(before.coordinator, "coordinator");
+    // Real app-server interruption: the parent Task item is absent, but claim() and
+    // the native Coordinator turn were already persisted. Do not invent its receipt.
+    root.turns[0].items = root.turns[0].items.filter((item: Json) => item.tool !== "task");
+    const threads = Object.fromEntries([root, coordinator].map(native => {
+      native.turns[0].status = "interrupted";
+      return [native.id, { id: native.id, cwd: directory, modelProvider: "openai", model: "gpt-6.1-sol", turns: structuredClone(native.turns) }];
+    }));
+    if (state === "active") threads.coordinator.turns[0].status = "inProgress";
+    if (state === "unknown-turn") delete threads.coordinator.turns[0].status;
+    if (state === "unknown-command") threads.coordinator.turns[0].items.push({ type: "commandExecution", id: "unknown", status: "inProgress" });
+    if (state === "live-owner") await missions.update("root", mission => { mission.codexOwner!.closed = false; });
+    const restored: ScriptedTransport[] = [];
+    const events: Json[] = [];
+    adapter = await CodexMissionSession.create({ projectRoot: directory, onEvent: event => { events.push(event); }, transportFactory: () => {
+      const id = restored.length ? "coordinator" : "root";
+      const native = new ScriptedTransport(id, async host => {
+        try {
+          const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+          assert.equal(run.runID, runBefore.runID);
+          assert.equal(run.units[0].unit.id, runBefore.units[0].unit.id);
+          if (id === "root") {
+            assert.equal((await missions.required("root")).dispatchOpen, false);
+            const status = await host.call("sortie_v010_operator_status", { view: "full" });
+            assert.equal(status.budget.reserved_units, 1);
+            assert.equal(status.budget.consumed_units, 0);
+            await host.call("task", missions.task(await missions.required("root")));
+            assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0].status, "succeeded");
+          } else {
+            assert.equal(run.operatorSessionID, "coordinator");
+            assert.equal(run.units[0].status, "running", "native terminal alone does not invent validation or fail the retained direct unit");
+            assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+            await host.call("sortie_v010_finish_direct_unit", {});
+          }
+        } catch (error) { failure = error; }
+      });
+      native.readThreads = threads;
+      restored.push(native);
+      return native;
+    } });
+    if (state !== "terminal") {
+      await assert.rejects(adapter.run("Continue the same Mission"), /unproven execution|unresolved native execution|codex-mission-owner-active/);
+      assert(restored.every(native => native.turnStarts === 0 && native.commandExecutions === 0));
+      assert.equal((await missions.required("root")).dispatchOpen, true);
+      assert.equal(await goalSettlements(directory), 0);
+      assert.equal(events.some(event => event.method === "sortie/coordinatorRestored"), false);
+      return;
+    }
+    const result = await adapter.run("Continue the same Mission");
+    if (failure) throw failure;
+    assert.equal(result.accepted, false, "unit validation is not whole-Mission acceptance");
+    assert.equal((await missions.required("root")).id, before.id);
+    assert.deepEqual(events.find(event => event.method === "sortie/coordinatorRestored")?.params, {
+      missionId: before.id, coordinatorId: "coordinator", callId: before.callID, outcome: "interrupted", action: "resume-existing-task" });
+    assert.deepEqual(restored.map(native => [native.id, native.turnStarts, native.commandExecutions]), [["root", 1, 0], ["coordinator", 1, 1]]);
+    assert.equal(await goalSettlements(directory), 1, "one retained reservation settles once");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("exact completed leaf Worker recovers lost parent receipt once without command replay or fabricated PASS", { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-completed-child-"));
   let adapter: CodexMissionSession | undefined;

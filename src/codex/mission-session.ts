@@ -110,6 +110,7 @@ export class CodexMissionSession {
         await this.restoreSession(resume, "dog-operator");
         this.root = resume;
         await this.claimOwner(resume);
+        await this.restoreCoordinator(resume);
         await this.hooks.tool?.sortie_v010_operator_status?.execute({ view: "full" }, { sessionID: resume, agent: "dog-operator" });
       }
     }
@@ -161,6 +162,22 @@ export class CodexMissionSession {
     let current = session;
     while (current.parentID) current = this.required(current.parentID);
     return current.id;
+  }
+
+  private async restoreCoordinator(root: string): Promise<void> {
+    const missions = new OperatorMissionRuntime(this.directory, profile);
+    const mission = await missions.required(root);
+    if (!mission.coordinator || ["completed", "cancelled"].includes(mission.phase)) return;
+    // Codex can persist claim() and the child turn but omit the interrupted parent
+    // Task item. The existing Mission binding still owns this same Coordinator.
+    const coordinator = await this.restoreSession(mission.coordinator, "dogs-coordinator", root);
+    if (coordinator.parentID !== root || coordinator.agent !== "dogs-coordinator") throw new Error("Retained Coordinator lineage mismatch.");
+    if (mission.dispatchOpen && mission.callID) {
+      await missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
+      await this.options.onEvent?.({ method: "sortie/coordinatorRestored", threadId: root,
+        params: { missionId: mission.id, coordinatorId: coordinator.id, callId: mission.callID,
+          outcome: coordinator.outcome, action: "resume-existing-task" } });
+    }
   }
 
   private async recoverNotStarted(threadID: string, turn: JsonObject, item: JsonObject): Promise<boolean> {
@@ -379,7 +396,7 @@ export class CodexMissionSession {
         throw new Error(`Codex thread ${id} has no matching repository history.`);
       const turns = thread.turns.filter(object);
       for (const turn of turns) {
-        if (!Array.isArray(turn.items) || turn.status === "inProgress" || turn.itemsView !== "full")
+        if (!Array.isArray(turn.items) || !["completed", "failed", "interrupted", "cancelled"].includes(String(turn.status)) || turn.itemsView !== "full")
           throw new Error(`Codex thread ${id} still has unproven execution; no resend. Reconcile its native execution before resuming.`);
         for (const item of turn.items.filter(object)) {
           // A terminal parent turn does not prove that its native executions or children stopped.
