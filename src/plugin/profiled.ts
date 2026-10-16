@@ -2594,7 +2594,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
       await control!.currentBudget(root);
-      mission = await missions.required(root);
+      mission = actor === root ? await reconcileMissionDispatch(root) ?? await missions.required(root) : await missions.required(root);
       let previous = await operators.read(root);
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
@@ -2608,7 +2608,34 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         Array.isArray(execution.commands) && execution.commands.length === 0);
       const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
-      if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
+      if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) {
+        // A submitted Coordinator still owns corrective planning. Return its actual
+        // continuation instead of referring to a Task that the rejection never supplied.
+        // This is routing advice only: no replacement plan, reservation or admission.
+        // Routing below alone chooses whether to offer a Task. A resumable parent
+        // packet can already contain one even while its Reviewer is still pending.
+        const { task: _dispatchTask, ...packet } = missionDispatchPacket(mission, previous);
+        const reviewPending = mission.runID === previous?.runID && mission.review?.verdict === "pending";
+        const active = mission.dispatchOpen || reviewPending || mission.runID === previous?.runID &&
+          previous?.units.some(unit => unit.status === "running");
+        const continuation = !active ? missions.task(mission) : undefined;
+        // Existing Coordinator resumes accept a concrete prompt. Do not use the opaque
+        // initial reference here: claim() would expand it from unchanged Mission state
+        // and lose the unadmitted correction that prompted this continuation.
+        const task = continuation && mission.coordinator !== null ? { ...continuation,
+          prompt: `Continue the same Mission ${mission.id} in this existing Coordinator session, in the user's language. ` +
+          "Retain the saved original requests, requirements, candidate, checks and cumulative budget.\n" +
+          "Proposed correction from Operator root (not admitted; preserve requirements, candidate and cumulative budget):\n" +
+          JSON.stringify({ units: raw, reason, execution, handoff_context: handoffNotes, work_quantities: workQuantities }) } : continuation;
+        return JSON.stringify({ ...packet,
+          status: active ? "mission-coordinator-active" : "mission-coordinator-required",
+          ...(task ? { task } : {}),
+          next_action: reviewPending
+            ? "Dispatch the exact Reviewer Task from review_mission if not yet active; otherwise wait for that Reviewer. Do not start a Coordinator or another Worker while review is pending. The proposed plan has not been admitted."
+            : active
+            ? "Continue the active owning session or wait for its native completion; do not dispatch a duplicate Coordinator or Worker. The proposed plan has not been admitted."
+            : "Dispatch this exact Task to continue the same Mission and Coordinator session with the concrete correction and retained checks. The proposed plan has not been admitted; keep requirements, candidate and cumulative budget unchanged." });
+      }
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
       const activeDirect = previous?.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor);
@@ -2769,7 +2796,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, mission,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
-            return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
+            const task = JSON.parse(planned).task;
+            // A Coordinator continuation is not a newly prepared direct unit.
+            return args.executor === "self" && record(task) && task.subagent_type !== profileAgent(profile, "dog-operator")
+              ? startDirect(root, context.sessionID) : planned;
           });
         } catch (error) {
           if (error instanceof Error && error.message.startsWith("mission-replan-terminal-unreconciled:")) {

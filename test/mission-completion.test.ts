@@ -95,6 +95,16 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     const next = fast ? started : JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], execution }, { sessionID: dispatcher }));
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewBaseline, baseline);
     if (mode === "implementation") assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).kind, "implementation");
+    if (mode === "implementation") {
+      const before = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      const active = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
+        reason: "Correct a verification recipe" }, { sessionID: "root" }));
+      assert.equal(active.status, "mission-coordinator-active");
+      assert.equal(active.task, undefined, "an admitted Coordinator must not acquire a duplicate continuation Task");
+      assert.match(active.next_action, /wait|owning session/iu);
+      assert.deepEqual(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root"), before,
+        "routing advice must not replan or spend another unit");
+    }
     assert.deepEqual((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewScope?.write,
       failure ? ["operation.json", "result.txt"] : ["result.txt"]);
     const worker = { args: structuredClone(next.task) };
@@ -207,6 +217,36 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: dispatcher }));
     const reviewer = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, reviewer);
+    if (mode === "implementation") {
+      // The Reviewer can outlive its parent Coordinator Task. Its pending review still
+      // owns the candidate even when the normal dispatch packet offers a continuation.
+      identities.coordinator!.outcome = "interrupted";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { status: "error", output: "Coordinator interrupted while Reviewer remains active", metadata: { sessionId: "coordinator" } });
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      const before = await runtime.required("root"), missionBefore = await missions.required("root");
+      assert.equal(missionBefore.dispatchOpen, false);
+      assert.equal(missionBefore.review!.verdict, "pending");
+      const pending = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
+        reason: "Correct the verification recipe after the parent Task ended" }, { sessionID: "root" }));
+      assert.equal(pending.status, "mission-coordinator-active");
+      assert.equal(pending.task, undefined, "a dispatch packet must not leak a Coordinator Task while its Reviewer is pending");
+      assert.match(pending.next_action, /wait for that Reviewer/u);
+      assert.deepEqual(await runtime.required("root"), before, "pending review routing cannot admit another writer or spend a unit");
+      assert.deepEqual(await missions.required("root"), missionBefore, "retain the pending review and closed parent dispatch");
+    }
+    if (mode === "fast-lane-failure") {
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      const before = await runtime.required("root"), missionBefore = await missions.required("root");
+      const pending = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit,
+        { ...plannedUnit, title: "Related result", validation: ["node check.mjs && git diff --check"] }], executor: "self" },
+      { sessionID: "root" }));
+      assert.equal(pending.status, "mission-coordinator-active");
+      assert.equal(pending.task, undefined, "a pending Reviewer must not acquire a concurrent Coordinator writer");
+      assert.match(pending.next_action, /wait for that Reviewer/u);
+      assert.deepEqual(await runtime.required("root"), before);
+      assert.deepEqual(await missions.required("root"), missionBefore);
+    }
     assert.match(reviewer.args.prompt, /host observes this invocation's native outcome after your terminal/u);
     assert.match(reviewer.args.prompt, /final acceptance is separate.*authorized by the current user request/u);
     assert.match(reviewer.args.prompt, /result-and-hold checkpoint does not require it/u);
@@ -216,6 +256,13 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");
     identities.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
+    if (mode === "implementation") {
+      delete identities.coordinator!.outcome;
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-after-review" },
+        { args: missions.task(await missions.required("root")) });
+      await chat("coordinator", "Continue the same Mission after the Reviewer completed.");
+    }
     if (mode === "NO_START") {
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
       await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 1; });
@@ -252,13 +299,52 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     }
     if (!fast) {
       identities.coordinator!.outcome = "succeeded";
-      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: mode === "implementation" ? "coordinator-after-review" : "coordinator-call" },
+        { output: "ready", metadata: { sessionId: "coordinator" } });
     }
     const cold = await create();
     const status = async () => JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
     assert.equal((await status()).completion.ready, true);
     assertStatusOrder(await status());
     if (mode === "implementation") {
+      const before = await runtime.required("root");
+      const missionBefore = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      const continuation = JSON.parse(await cold.tool!.sortie_v010_plan_units.execute({ units: [{ ...plannedUnit,
+        validation: ["node check.mjs && git diff --check"] }], executor: "self",
+        reason: "Correct a verification recipe without changing the candidate",
+        handoff_context: "Use the corrected verification command, not the previous recipe." }, { sessionID: "root" }));
+      assert.equal(continuation.status, "mission-coordinator-required");
+      assert.equal(continuation.task.task_id, "coordinator", "resume the actual author, not a new controller");
+      assert.equal(continuation.task.subagent_type, "dogs-coordinator");
+      assert.match(continuation.next_action, /same.*Coordinator/iu);
+      assert.deepEqual(await runtime.required("root"), before, "the proposed replacement is not admitted by routing advice");
+      assert.deepEqual(await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root"), missionBefore,
+        "preserve the existing submission, requirements, checks and receipt state");
+      await assert.rejects(cold.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self" },
+        { sessionID: "reviewer" }), /mission-controller-required/u, "unrelated actors gain no continuation authority");
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      // Model the durable admission left behind by a missed execute.after, then reload.
+      await missions.update("root", mission => { mission.dispatchOpen = true; });
+      nativeHistory.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
+        callID: "coordinator-after-review", state: { status: "completed", input: { ...started.task, task_id: "coordinator" } } }] }];
+      const reloaded = await create();
+      const recovered = JSON.parse(await reloaded.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
+        reason: "Resume after a missed Task completion hook" }, { sessionID: "root" }));
+      assert.equal(recovered.status, "mission-coordinator-required", "native terminal wins over a stale admission after restart");
+      assert.equal(recovered.task.task_id, "coordinator");
+      assert.equal((await missions.required("root")).dispatchOpen, false);
+      await reloaded["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "correction-continuation" },
+        { args: structuredClone(continuation.task) });
+      const resumed = { message: { id: "coordinator-correction", agent: "dogs-coordinator" },
+        parts: [{ type: "text", text: continuation.task.prompt }] };
+      await reloaded["chat.message"]!({ sessionID: "coordinator", messageID: "coordinator-correction", agent: "dogs-coordinator" }, resumed);
+      assert.match(resumed.parts[0]!.text, /node check\.mjs && git diff --check/u);
+      assert.match(resumed.parts[0]!.text, /Correct a verification recipe without changing the candidate/u);
+      assert.match(resumed.parts[0]!.text, /Use the corrected verification command, not the previous recipe/u);
+      await reloaded.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Continuation received the correction" },
+        { sessionID: "coordinator" });
+      await reloaded["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "correction-continuation" },
+        { output: "ready", metadata: { sessionId: "coordinator" } });
       const emptyNative = (await status()).acceptance_summary.native_declared_validation[0];
       assert.equal(emptyNative.status, "recorded-formal-evidence");
       assert.ok(emptyNative.evidence_ids.length);
