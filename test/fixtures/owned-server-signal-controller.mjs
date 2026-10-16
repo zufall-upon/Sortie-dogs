@@ -18,9 +18,10 @@ const serverProgram = `
   const state = path.join(process.env.XDG_STATE_HOME, 'opencode');
   fs.mkdirSync(state, { recursive: true });
   fs.writeFileSync(path.join(state, 'service.json'), JSON.stringify({ url: 'http://127.0.0.1:12345', password: 'fixture-service-password' }));
-  console.log('server listening on http://127.0.0.1:12345');
-  console.log('x'.repeat(30000) + process.env.OPENCODE_SERVER_PASSWORD + ' fixture-service-password');
   console.error('y'.repeat(30000) + ' fixture-server-failure ' + process.env.OPENCODE_SERVER_PASSWORD + ' fixture-service-password');
+  // Keep readiness in the bounded tail even when the OS coalesces startup output.
+  process.stdout.write('x'.repeat(30000) + process.env.OPENCODE_SERVER_PASSWORD + ' fixture-service-password\\n'
+    + 'server listening on http://127.0.0.1:12345\\n');
   setInterval(() => {}, 1000);
 `;
 await module.link(async specifier => {
