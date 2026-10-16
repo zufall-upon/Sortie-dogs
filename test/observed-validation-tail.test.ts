@@ -104,6 +104,48 @@ test("an unambiguous final-check refresh selects its new binding without repeati
     "ambiguous repeated declarations retain the existing occurrence rules");
 });
 
+for (const priorComplete of [false, true]) for (const failedExit of [5, null]) {
+  test(`failed unique final-check retry retains its valid prefix: completed=${priorComplete}, exit=${failedExit}`, () => {
+    const commands = priorComplete ? [A, B, B, B] : [A, B, B];
+    const native = history(commands), bindings = checks(commands.map(command => [command]));
+    const failedIndex = commands.length - 2;
+    native[failedIndex]!.parts[0]!.state.metadata.exit = failedExit;
+    bindings[failedIndex].exitCode = failedExit; bindings[failedIndex].fresh = false;
+    const result = reviewerCorrectionValidation([A, B], child, native, 50, bindings);
+    assert.equal(result.ready, true, JSON.stringify(result));
+    assert.deepEqual(result.matched, [
+      { callID: "call-0", member: 0, occurrence: 0 },
+      { callID: `call-${commands.length - 1}`, member: 0, occurrence: 1 },
+    ]);
+    const unfinished = reviewerCorrectionValidation([A, B], child, native.slice(0, -1), 50, bindings);
+    assert.equal(unfinished.ready, false, "failed or unknown tail is not a PASS until a real retry succeeds");
+    assert.equal(unfinished.failure?.exitCode, failedExit);
+    assert.equal(unfinished.nextOccurrence, 1, "the actual failed tail, not its passed prefix, remains next");
+    for (const staleIndex of [0, commands.length - 1]) {
+      const stale = bindings.map((check: any, index: number) => ({ ...check, fresh: index !== staleIndex && check.fresh }));
+      assert.equal(reviewerCorrectionValidation([A, B], child, native, 50, stale).ready, false,
+        "a retry cannot promote stale prefix or tail evidence");
+    }
+    const overlap = structuredClone(native);
+    overlap.at(-1)!.parts[0]!.state.time.start = overlap[failedIndex]!.parts[0]!.state.time.end - 1;
+    assert.equal(reviewerCorrectionValidation([A, B], child, overlap, 50, bindings).ready, false);
+  });
+}
+
+test("failed composite or repeated final declarations cannot lend a partial prefix to retry", () => {
+  const native = history([A, `${A} && ${B}`, B]);
+  native[1]!.parts[0]!.state.metadata.exit = 1;
+  const bindings = checks([[A], [A, B], [B]]);
+  bindings[1].exitCode = 1; bindings[1].fresh = false;
+  assert.equal(reviewerCorrectionValidation([A, B], child, native, 50, bindings).ready, false,
+    "a failed chain proves no individual member passed");
+  const repeated = history([A, B, B, B]), repeatedBindings = checks([[A], [B], [B], [B]]);
+  repeated[2]!.parts[0]!.state.metadata.exit = 1;
+  repeatedBindings[2].exitCode = 1; repeatedBindings[2].fresh = false;
+  assert.equal(reviewerCorrectionValidation([A, B, B], child, repeated, 50, repeatedBindings).ready, false,
+    "ambiguous repeated occurrences keep their existing ordering rules");
+});
+
 for (const changedSource of [false, true]) test(`cold direct finish reuses the prefix after a final report-only refresh: source changed=${changedSource}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/refreshed-tail-"));
@@ -144,6 +186,69 @@ for (const changedSource of [false, true]) test(`cold direct finish reuses the p
     const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
     assert.equal(finished.status, changedSource ? "direct-unit-awaits-validation" : "awaiting-acceptance", JSON.stringify(finished));
     assert.equal(native.length, 3, "the original prefix is never rerun");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const changedSource of [false, true]) test(`cold direct finish retains a successful prefix after final-check setup repair: source changed=${changedSource}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/retried-final-check-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "source.txt"), "fixed\n");
+    await writeFile(join(directory, "prefix.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync("source.txt", "utf8") !== "fixed\\n") process.exit(1);\n');
+    await writeFile(join(directory, "tail.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(".sortie-env/ready", "utf8") !== "ready\\n") process.exit(1);\n');
+    const native: Record<string, unknown>[] = [];
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator", outcome: "running" } }),
+      messages: async () => ({ data: native }), children: async () => ({ data: [] }),
+    } } } as never);
+    let hooks = await create();
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "retry-task", agent: "dog-operator" }, {
+      message: { id: "retry-task", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Run both existing checks, repairing local setup if needed without repeating an unchanged passed check." }],
+    });
+    await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Both checks pass for the fixed source"] }, { sessionID: "root" });
+    await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{
+      title: "Validate fixed source", objective: "Run prefix and final environment-dependent check",
+      read: ["source.txt", "prefix.mjs", "tail.mjs"], write: ["source.txt"], validation: ["node prefix.mjs", "node tail.mjs"],
+    }] }, { sessionID: "root" });
+    const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    const initial = await readRun();
+    const runNative = async (command: string, callID: string) => {
+      const args = { command, workdir: directory }, start = Date.now();
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID }, { args });
+      let exit = 0, output = "";
+      try { output = (await exec("/bin/sh", ["-c", command], { cwd: directory })).stdout; }
+      catch (error) { exit = Number((error as { code?: unknown }).code) || 1; output = String((error as { stderr?: unknown }).stderr ?? ""); }
+      native.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "bash", callID,
+        state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID, args }, { output, metadata: { exit } });
+      return exit;
+    };
+    assert.equal(await runNative("node prefix.mjs", "passed-prefix"), 0);
+    const prefix = structuredClone((await readRun()).units[0]!.directExecution!.checks[0]);
+    assert.ok(prefix, "the native prefix must have a persisted binding");
+    assert.equal(await runNative("node tail.mjs", "failed-tail"), 1);
+    const failed = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+    assert.equal(failed.status, "direct-unit-awaits-validation");
+    assert.match(failed.reason, /validation-failed/);
+    await mkdir(join(directory, ".sortie-env"));
+    await writeFile(join(directory, ".sortie-env/ready"), "ready\n");
+    if (changedSource) await writeFile(join(directory, "source.txt"), "changed\n");
+    assert.equal(await runNative("node tail.mjs", "retried-tail"), 0);
+    hooks = await create();
+    const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+    assert.equal(finished.status, changedSource ? "direct-unit-awaits-validation" : "awaiting-acceptance", JSON.stringify(finished));
+    if (changedSource) assert.match(finished.reason, /validation-stale/);
+    const current = await readRun(), saved = current.units[0]!.directExecution!.checks;
+    assert.equal(current.runID, initial.runID);
+    assert.deepEqual(saved.find(check => check.callID === "passed-prefix"), prefix, "old proof is retained, not relabeled or rerun");
+    assert.equal(native.length, 3);
+    assert.deepEqual(saved.map(check => check.exitCode), [0, 1, 0], "failed native outcome remains in history");
+    if (!changedSource) {
+      const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+      assert.equal(status.budget.consumed_units, 1, "repair uses the same existing direct unit");
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

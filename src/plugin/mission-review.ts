@@ -202,7 +202,14 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       failed = undefined;
       // A failed && chain proves no member, even if earlier members could have passed.
       if (attempt.exit !== 0) {
-        completed = undefined; partial.length = 0;
+        // A standalone, unique final check can be retried after setup repair without
+        // replaying its passed prefix. It still fails until an actual successful retry;
+        // the retained prefix and replacement tail must pass the usual binding/freshness checks.
+        const retryableTail = commands.length === 1 && members.length === 1 &&
+          partial.length === required.length - 1 && members[0]!.command === required.at(-1) &&
+          required.indexOf(members[0]!.command) === required.length - 1;
+        completed = undefined;
+        if (!retryableTail) partial.length = 0;
         failed = { command: commands, outcome: "fail", exitCode: attempt.exit };
         continue;
       }
@@ -215,7 +222,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         if (partial.length === required.length) { completed = [...partial]; overlap = false; }
       }
     }
-    if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed, nextOccurrence: occurrences[0]! };
+    if (failed) return { ready: false, reason: `mission-review-correction-validation-failed:${failed.command.join(" && ")}`, failure: failed,
+      nextOccurrence: occurrences[partial.length] ?? occurrences[0]! };
     if (!completed) {
       const next = occurrences[partial.length] ?? occurrences[0]!;
       if (!incomplete || next < incomplete.nextOccurrence) incomplete = { ready: false,
