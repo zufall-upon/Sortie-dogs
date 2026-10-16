@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -433,6 +434,126 @@ test("supervisor lock rejects a second owner and releases cleanly", async () => 
     await releaseRunLock(first);
     const second = await acquireRunLock(root);
     await releaseRunLock(second);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function withUnreapedChild(check: (identity: { pid: number; starttime: string | null }) => Promise<void>) {
+  // Keep the parent alive so the test, not the container's PID 1, reaps the child.
+  const parent = spawn("python3", ["-c", `
+import os, sys
+reader, writer = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(writer)
+    os.read(reader, 1)
+    os._exit(0)
+os.close(reader)
+print(pid, flush=True)
+sys.stdin.readline()
+os.close(writer)
+sys.stdin.readline()
+os.waitpid(pid, 0)
+`], { stdio: ["pipe", "pipe", "inherit"] });
+  const closed = once(parent, "close");
+  let pid: number | undefined;
+  try {
+    const [data] = await once(parent.stdout, "data");
+    pid = Number(String(data).trim());
+    const identity = await processIdentity(pid);
+    assert.equal(typeof identity.starttime, "string");
+    assert.equal(await processAlive(identity), true);
+    process.kill(pid, "SIGSTOP");
+    assert.equal(await processAlive(identity), true, "a stopped process is still a live owner");
+    process.kill(pid, "SIGCONT");
+    parent.stdin.write("exit-child\n");
+    let state;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      state = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/u)[0];
+      if (state === "Z") break;
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+    }
+    assert.equal(state, "Z", "the child must remain unreaped during the assertions");
+    process.kill(pid, 0); // PID existence alone deliberately still succeeds.
+    assert.deepEqual(await processIdentity(pid), identity, "the PID identity is unchanged after exit");
+    await check(identity);
+  } finally {
+    // Also release a stopped child if a liveness assertion above fails.
+    if (pid !== undefined) {
+      try { process.kill(pid, "SIGCONT"); } catch { /* already reaped */ }
+    }
+    parent.stdin.end();
+    const [exit] = await closed;
+    assert.equal(exit, 0, "the parent reaps its child and exits normally");
+  }
+}
+
+test("zombie owners are not alive even when their PID and starttime still match", {
+  skip: process.platform !== "linux",
+}, async () => {
+  await withUnreapedChild(async identity => {
+    assert.equal(await processAlive(identity), false);
+    assert.equal(await processAlive({ pid: identity.pid, starttime: null }), false);
+    assert.equal(await processAlive({ pid: identity.pid }), false);
+  });
+  const self = await processIdentity();
+  assert.equal(await processAlive(self), true);
+  assert.equal(await processAlive({ ...self, starttime: `${self.starttime}-other` }), false);
+});
+
+test("resume reclaims a zombie supervisor lock without replaying its completed child", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-zombie-resume-"));
+  try {
+    await withUnreapedChild(async identity => {
+      const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+        output: join(root, "predictions.jsonl"), costLimitUsd: 2, perInstanceUsd: 1, watchdog: false };
+      const state = await createSupervisorState(manifestValue, options);
+      const entry = state.instances[0]!;
+      entry.status = "running";
+      entry.attempt = 1;
+      entry.runner = identity;
+      entry.cost_reservation_usd = 1;
+      entry.child_metadata = join(root, "retained-metadata.json");
+      entry.child_output = join(root, "retained-prediction.jsonl");
+      state.reserved_usd = 1;
+      state.heartbeat.supervisor = identity;
+      await writeAtomicJson(entry.child_metadata, {
+        execution: { spent_usd: 0.3, usage_complete: false },
+        results: [{ instance_id: entry.instance_id, status: "succeeded", usage: { usd: 0.3 } }],
+      });
+      const prediction = JSON.stringify({ instance_id: entry.instance_id, model_name_or_path: "retained", model_patch: "retained patch" });
+      await writeFile(entry.child_output, `${prediction}\n`);
+      await writeAtomicJson(join(root, "supervisor-state.json"), state);
+      await writeAtomicJson(join(root, "supervisor.lock"), identity);
+      const report = join(root, "watchdog-report.jsonl");
+      await runWatchdog({ state: join(root, "supervisor-state.json"), report, once: true });
+      const events = (await readFile(report, "utf8")).trim().split("\n").map(JSON.parse);
+      assert.equal(events.at(-1).event, "supervisor-lost");
+      assert.equal(events.at(-1).supervisorAlive, false);
+      state.heartbeat.supervisor = await processIdentity();
+      await writeAtomicJson(join(root, "supervisor-state.json"), state);
+      await runWatchdog({ state: join(root, "supervisor-state.json"), report, once: true });
+      const runnerEvents = (await readFile(report, "utf8")).trim().split("\n").map(JSON.parse);
+      assert.equal(runnerEvents.at(-1).event, "runner-lost");
+      assert.equal(runnerEvents.at(-1).instance_id, entry.instance_id);
+
+      const runs: string[] = [];
+      const resumed = await runSupervisor(manifestValue, options, fakeDependencies(runs));
+      assert.deepEqual(runs, ["example__project-2"]);
+      assert.equal(resumed.status, "completed");
+      assert.equal(resumed.instances[0].status, "succeeded");
+      assert.deepEqual(resumed.instances.map(item => item.attempt), [1, 1]);
+      assert.equal(resumed.spent_usd, 0.3);
+      assert.equal(resumed.held_unknown_usd, 0.7);
+      assert.equal(resumed.reserved_usd, 0);
+      assert.equal((await readFile(options.output, "utf8")).split("\n")[0], prediction);
+      await runSupervisor(manifestValue, options, fakeDependencies(runs));
+      assert.deepEqual(runs, ["example__project-2"], "terminal evidence is not re-inferred");
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

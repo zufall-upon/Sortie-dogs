@@ -78,28 +78,31 @@ export async function appendJsonLine(path, value) {
   await appendFile(path, `${JSON.stringify(value)}\n`, "utf8");
 }
 
-async function processStartTime(pid) {
+async function processStat(pid) {
   if (!Number.isInteger(pid) || process.platform === "win32") return null;
   try {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(") ");
     const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
-    return fields[19] ?? null;
+    return { state: fields[0] ?? null, starttime: fields[19] ?? null };
   } catch {
     return null;
   }
 }
 
 export async function processIdentity(pid = process.pid) {
-  return { pid, starttime: await processStartTime(pid) };
+  return { pid, starttime: (await processStat(pid))?.starttime ?? null };
 }
 
 export async function processAlive(identity) {
   if (!record(identity) || !Number.isInteger(identity.pid)) return false;
   try { process.kill(identity.pid, 0); }
   catch { return false; }
+  const stat = await processStat(identity.pid);
+  // kill(pid, 0) also succeeds for an exited child awaiting its parent's waitpid.
+  if (stat && ["Z", "X", "x"].includes(stat.state)) return false;
   if (identity.starttime === null || identity.starttime === undefined) return true;
-  return (await processStartTime(identity.pid)) === identity.starttime;
+  return stat?.starttime === identity.starttime;
 }
 
 async function killProcessGroup(identity) {
