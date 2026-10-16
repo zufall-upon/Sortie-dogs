@@ -178,6 +178,30 @@ general speed or success-rate guarantee.
 
 ### SWE-bench evaluation
 
+#### v0.14.0 dev23 (2026-10-15 UTC)
+
+**Official resolution: 10/23 (43.48%); Mission completion: 22/23.** One pass through the normal
+OpenCode CLI + Sortie Mission path, using the fixed released v0.14.0 package.
+
+- All 23 frozen patches were officially scored: **10 resolved, 13 unresolved**, zero empty patches,
+  evaluation errors or infrastructure failures. The cost-stopped `sqlfluff__sqlfluff-2419` patch
+  resolved officially, but its Mission remains incomplete; official correctness does not imply acceptance.
+- Pinned public Lite dev rows; one inference attempt per task, no retries. Official grading:
+  `split=dev`, `max_workers=1`, `retry_count=0`. Inference concurrency was **1** due to low host memory.
+- Actual Operator/Coordinator/Reviewer model: `openai/gpt-6.1-sol#xhigh`;
+  Worker: `openai/gpt-6-luna-fast#max`. Ten cases used Workers; 13 used Coordinator direct execution.
+- Inference wall time **2h53m28s**; separate official grading **7m19s**.
+- Known estimated inference cost **$16.76**, with one pending usage record. Separate holds:
+  **$2** for unresolved usage and **$5** for implementation/supervision; these are not known expenses.
+  Costs are API-equivalent estimates, not invoices; the $2/task monitor is not an exact billing cap.
+- Release/runner commit `e69a3b2317a76eeea1229034f52902812ff1d580`;
+  package SHA-256 `120922c31dd6d85040210d68456192b4e6aa45dc87a11451476f3ed576a68e30`.
+
+Local evidence (generated artifacts are not committed):
+`_testenv/autodev/sortie-dogs-dev23/benchmark-v0140-20261015/one-pass-summary.json`.
+
+#### Historical v0.12.24 test300
+
 **SWE-bench Lite test300: 170/300 (56.67%)**, fixed **v0.12.24**, one pass@1 campaign.
 Nine empty patches, zero official evaluation errors, frozen predictions and trajectories for all
 300 instances. Workers ran Luna Fast/max; management/review ran GPT-6 Sol/xhigh.
@@ -195,8 +219,8 @@ known expense. Official local evaluation and leaderboard acceptance are separate
 **8/23 (34.8%)**, versus v0.12.25's 7/23; all seven prior resolutions retained, no empty patches or
 official evaluation errors. [Fixed conditions, stopped-run accounting and costs](docs/benchmarks/swebench-lite-history.md#v0131-dev23-2026-09-30).
 
-All scores belong to their fixed candidates, **not v0.14.0**. SWE-bench remains an optional
-measurement, not a release gate. Different budgets, models and conditions are not controlled comparisons.
+Each score belongs to its fixed candidate. SWE-bench remains an optional measurement, not a release
+gate. Different splits, budgets, models and conditions are not controlled comparisons or proof of a fix's effect.
 
 ## Configuration
 
