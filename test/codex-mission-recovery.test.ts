@@ -256,14 +256,24 @@ test("closing during new child creation preserves exact not-started proof after 
 });
 
 
-async function completedWorkerWithoutParentReceipt(directory: string) {
+async function completedWorkerWithoutParentReceipt(directory: string, parent: "root" | "coordinator" | "coordinator-not-started" = "root") {
   await exec("git", ["init", "--quiet"], { cwd: directory });
   await writeFile(join(directory, "check.mjs"), "process.exit(0)");
   await writeFile(join(directory, "result.txt"), "result");
+  const unit = { title: "Validate", objective: "Validate result", read: ["check.mjs", "result.txt"], write: ["result.txt"], validation: ["node check.mjs"] };
   const root = new ScriptedTransport("root", async host => {
-    const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate result"], unit: {
-      title: "Validate", objective: "Validate result", read: ["check.mjs", "result.txt"], write: ["result.txt"], validation: ["node check.mjs"] } });
+    const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate result"],
+      ...(parent === "root" ? { unit } : { preferred_executor: "coordinator" }) });
     await host.call("task", started.task);
+  });
+  const coordinator = new ScriptedTransport("coordinator", async host => {
+    const planned = await host.call("sortie_v010_plan_units", { executor: "worker", units: [unit] });
+    if (parent === "coordinator-not-started") {
+      const callID = "nested-not-started";
+      host.turns[0].items.push({ type: "dynamicToolCall", id: callID, tool: "task", arguments: planned.task, status: "inProgress" });
+      await (adapter as any).hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID }, { args: { ...planned.task } });
+      await (adapter as any).stopHosts();
+    } else await host.call("task", planned.task);
   });
   let childFailure: unknown;
   const child = new ScriptedTransport("worker", async host => {
@@ -276,7 +286,8 @@ async function completedWorkerWithoutParentReceipt(directory: string) {
     return "Worker completed its foreground validation";
   });
   let created = 0;
-  const adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6.1-sol", transportFactory: () => created++ ? child : root });
+  const transports = parent === "root" ? [root, child] : [root, coordinator, child];
+  const adapter = await CodexMissionSession.create({ projectRoot: directory, model: "gpt-6.1-sol", transportFactory: () => transports[created++]! });
   const hooks = (adapter as any).hooks;
   const originalAfter = hooks["tool.execute.after"];
   hooks["tool.execute.after"] = async (request: Json, output: Json) => {
@@ -290,9 +301,13 @@ async function completedWorkerWithoutParentReceipt(directory: string) {
   await assert.rejects(adapter.run("Validate result"), /closed/);
   await adapter.close();
   if (childFailure) throw childFailure;
-  assert.equal(child.commandExecutions, 1);
+  assert.equal(child.commandExecutions, parent === "coordinator-not-started" ? 0 : 1);
   root.turns[0].status = "interrupted";
-  const threads: Record<string, Json> = Object.fromEntries([root, child].map(native => [native.id, {
+  if (parent !== "root") {
+    root.turns[0].items = root.turns[0].items.filter((item: Json) => item.tool !== "task");
+    coordinator.turns[0].status = "interrupted";
+  }
+  const threads: Record<string, Json> = Object.fromEntries(transports.filter(native => native.turns.length).map(native => [native.id, {
     id: native.id, cwd: directory, modelProvider: "openai", model: "gpt-6.1-sol", turns: structuredClone(native.turns) }]));
   assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0].status, "running");
   return { threads, child };
@@ -308,6 +323,145 @@ async function goalSettlements(directory: string): Promise<number> {
   }
   return count;
 }
+
+for (const parent of ["coordinator", "coordinator-not-started"] as const)
+test(`cold Coordinator restores nested Worker proof before claiming the next owner: ${parent}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-nested-child-"));
+  let adapter: CodexMissionSession | undefined;
+  try {
+    const original = await completedWorkerWithoutParentReceipt(directory, parent);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root");
+    const natives: ScriptedTransport[] = [];
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => {
+      const id = ["root", "coordinator", "worker"][natives.length]!;
+      const native = new ScriptedTransport(id, async () => "Continue through the retained Mission");
+      native.readThreads = structuredClone(original.threads);
+      natives.push(native);
+      return native;
+    } });
+    const result = await adapter.run("Continue");
+    assert.equal(result.accepted, false);
+    const after = await missions.required("root");
+    assert.equal(after.id, before.id);
+    assert.equal(after.runID, before.runID);
+    assert.notEqual(after.codexOwner?.generation, before.codexOwner?.generation);
+    assert.equal(after.dispatchOpen, false);
+    const proofs = parent === "coordinator" ? after.codexCompletedTasks?.map(item => item.dispatch) : after.codexNotStarted;
+    assert.equal(proofs?.length, 1);
+    assert.equal(proofs?.[0]?.ownerGeneration, before.codexOwner?.generation);
+    assert.equal(natives.reduce((sum, native) => sum + native.commandExecutions, 0), 0);
+    assert(natives.filter(native => native.id !== "root").every(native => native.turnStarts === 0));
+    assert.equal(await goalSettlements(directory), 1, "the existing Worker reservation settles once without replay");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const state of ["terminal", "parent-receipt", "resumed-terminal", "resumed-missing-turn", "active", "unknown-turn", "unknown-command", "live-owner",
+  "interrupted-parent-failure", "old-turn-only", "missing-binding"] as const)
+test(`cold Coordinator without native parent Task history: ${state}`, { timeout: 15000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-retained-coordinator-"));
+  let adapter: CodexMissionSession | undefined, failure: unknown;
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), "process.exit(0)");
+    const root = new ScriptedTransport("root", async host => {
+      const started = await host.call("sortie_v010_start_mission", { requirements: ["Validate existing result"], preferred_executor: "coordinator" });
+      await host.call("task", started.task);
+      if (state.startsWith("resumed-")) await host.call("task", (await host.call("sortie_v010_operator_status", { view: "full" })).task);
+    });
+    const coordinator = new ScriptedTransport("coordinator", async host => {
+      if (host.turnStarts === 1) await host.call("sortie_v010_plan_units", { executor: "self", units: [{ title: "Validate", objective: "Validate existing result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      if (!state.startsWith("resumed-") || host.turnStarts === 2) await (adapter as any).stopHosts();
+    });
+    let created = 0;
+    adapter = await CodexMissionSession.create({ projectRoot: directory, transportFactory: () => created++ ? coordinator : root });
+    await assert.rejects(adapter.run("Validate existing result"), /closed/);
+    await adapter.close();
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root");
+    const runBefore = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(before.dispatchOpen, true);
+    assert.equal(before.coordinator, "coordinator");
+    assert.equal(before.codexCoordinatorDispatch?.clientUserMessageID, coordinator.turnRequests.at(-1)!.clientUserMessageId);
+    // Real app-server interruption: the parent Task item is absent, but claim() and
+    // the native Coordinator turn were already persisted. Do not invent its receipt.
+    root.turns[0].items = root.turns[0].items.filter((item: Json) => item.tool !== "task");
+    const threads = Object.fromEntries([root, coordinator].map(native => {
+      native.turns.at(-1)!.status = "interrupted";
+      return [native.id, { id: native.id, cwd: directory, modelProvider: "openai", model: "gpt-6.1-sol", turns: structuredClone(native.turns) }];
+    }));
+    // The prior resume itself completed after a pre-dispatch refusal. Current
+    // Codex stores these explicit negative receipts as failed, not completed.
+    threads.root.turns.push({ id: "refused-resume", status: "completed", itemsView: "full", items: [{
+      type: "dynamicToolCall", id: "refused-task", tool: "task", arguments: missions.task(before), status: "failed", success: false,
+      contentItems: [{ type: "inputText", text: "mission-dispatch-not-authorized: Coordinator Task is still admitted" }] }] });
+    if (state === "active") threads.coordinator.turns[0].status = "inProgress";
+    if (state === "unknown-turn") delete threads.coordinator.turns[0].status;
+    if (state === "unknown-command") threads.coordinator.turns[0].items.push({ type: "commandExecution", id: "unknown", status: "inProgress" });
+    if (state === "live-owner") await missions.update("root", mission => { mission.codexOwner!.closed = false; });
+    if (state === "interrupted-parent-failure") threads.root.turns[1].status = "interrupted";
+    if (state === "resumed-missing-turn") threads.coordinator.turns.pop();
+    if (state === "missing-binding") await missions.update("root", mission => { delete mission.codexCoordinatorDispatch; });
+    if (state === "parent-receipt") {
+      await missions.update("root", mission => { delete mission.codexCoordinatorDispatch; });
+      threads.root.turns[0].items.push({ type: "dynamicToolCall", id: before.callID, tool: "task",
+        arguments: { ...missions.task(before), task_id: "coordinator" }, status: "completed", success: true,
+        contentItems: [{ type: "inputText", text: JSON.stringify({ output: "Stopped", metadata: { sessionId: "coordinator", status: "interrupted" } }) }] });
+    }
+    if (state === "old-turn-only") await missions.update("root", mission => {
+      mission.callID = "newly-admitted-resume";
+      // The old Coordinator turn must not settle a newer dispatch whose turn is absent.
+    });
+    const restored: ScriptedTransport[] = [];
+    const events: Json[] = [];
+    adapter = await CodexMissionSession.create({ projectRoot: directory, onEvent: event => { events.push(event); }, transportFactory: () => {
+      const id = restored.length ? "coordinator" : "root";
+      const native = new ScriptedTransport(id, async host => {
+        try {
+          const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+          assert.equal(run.runID, runBefore.runID);
+          assert.equal(run.units[0].unit.id, runBefore.units[0].unit.id);
+          if (id === "root") {
+            assert.equal((await missions.required("root")).dispatchOpen, false);
+            const status = await host.call("sortie_v010_operator_status", { view: "full" });
+            assert.equal(status.budget.reserved_units, 1);
+            assert.equal(status.budget.consumed_units, 0);
+            assert.equal(status.task.task_id, "coordinator", "status supplies the exact retained continuation, not an impossible background wait");
+            assert.match(status.next_action, /Resume this existing Coordinator Task/);
+            await host.call("task", status.task);
+            assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0].status, "succeeded");
+          } else {
+            assert.equal(run.operatorSessionID, "coordinator");
+            assert.equal(run.units[0].status, "running", "native terminal alone does not invent validation or fail the retained direct unit");
+            assert.equal((await host.call("bash", { command: "node check.mjs" })).metadata.exit, 0);
+            await host.call("sortie_v010_finish_direct_unit", {});
+          }
+        } catch (error) { failure = error; }
+      });
+      native.readThreads = threads;
+      restored.push(native);
+      return native;
+    } });
+    if (!["terminal", "resumed-terminal", "parent-receipt"].includes(state)) {
+      await assert.rejects(adapter.run("Continue the same Mission"), /unproven execution|unresolved (native|tool) execution|codex-mission-owner-active/);
+      assert(restored.every(native => native.turnStarts === 0 && native.commandExecutions === 0));
+      assert.equal((await missions.required("root")).dispatchOpen, true);
+      assert.equal(await goalSettlements(directory), 0);
+      assert.equal(events.some(event => event.method === "sortie/coordinatorRestored"), false);
+      return;
+    }
+    const result = await adapter.run("Continue the same Mission");
+    if (failure) throw failure;
+    assert.equal(result.accepted, false, "unit validation is not whole-Mission acceptance");
+    assert.equal((await missions.required("root")).id, before.id);
+    if (state === "parent-receipt") assert.equal(events.some(event => event.method === "sortie/coordinatorRestored"), false);
+    else assert.deepEqual(events.find(event => event.method === "sortie/coordinatorRestored")?.params, {
+      missionId: before.id, coordinatorId: "coordinator", callId: before.callID, outcome: "interrupted", action: "resume-existing-task" });
+    assert.deepEqual(restored.map(native => [native.id, native.turnStarts, native.commandExecutions]), [["root", 1, 0], ["coordinator", 1, 1]]);
+    assert.equal(await goalSettlements(directory), 1, "one retained reservation settles once");
+  } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 test("exact completed leaf Worker recovers lost parent receipt once without command replay or fabricated PASS", { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-completed-child-"));

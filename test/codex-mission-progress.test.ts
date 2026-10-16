@@ -11,6 +11,13 @@ test("native turn completion and settled-tool continuation do not claim Mission 
   assert.equal(continuation?.mission_accepted, undefined);
 });
 
+test("retained Coordinator recovery exposes identity and next action without claiming acceptance", () => {
+  assert.deepEqual(codexMissionProgress({ method: "sortie/coordinatorRestored", threadId: "root", params: {
+    missionId: "mission", coordinatorId: "coordinator", callId: "original-task", outcome: "interrupted", action: "resume-existing-task",
+  } }), { thread_id: "root", phase: "coordinator-restored", mission_id: "mission", coordinator_id: "coordinator",
+    call_id: "original-task", native_outcome: "interrupted", next_action: "resume-existing-task" });
+});
+
 test("native model route progress exposes role, model, effort and separate Fast tier", () => {
   assert.deepEqual(codexMissionProgress({ method: "sortie/modelRoute", threadId: "worker", params: {
     agent: "dog-luna-worker-v010", model: "gpt-6-luna", effort: "max", serviceTier: "priority",

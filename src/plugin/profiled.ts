@@ -1139,6 +1139,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return { ...packet, next_action: "Fast-lane: dispatch the exact Reviewer Task from review_mission if not yet active; otherwise wait for that Reviewer. Do not start a Coordinator or another Worker while review is pending." };
       }
       if (mission.runID === run?.runID && run?.units.some(unit => unit.status === "running")) {
+        if (mission.coordinator && !mission.dispatchOpen && !["completed", "cancelled"].includes(mission.phase)) return { ...packet, task: missions.task(mission),
+          next_action: "Resume this existing Coordinator Task with its task_id to continue the retained unit. Do not dispatch a replacement or wait for background work that has already ended." };
         return { ...packet, next_action: "The current unit is active. Continue its owning session; do not dispatch a replacement Worker or Coordinator. Native background completion will return to the parent." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
