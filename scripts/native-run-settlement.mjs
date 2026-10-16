@@ -24,7 +24,9 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
           db.prepare('SELECT 1 FROM session_inbox WHERE session_id = ? LIMIT 1').get(session.id)) return true;
       const row = db.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq DESC LIMIT 1").get(session.id);
       if (!row) {
-        if (session.parent_id && !session.time_idle) return true;
+        // An explicitly owned CLI root can still be starting its first assistant,
+        // just like an unstarted descendant. Missing messages are not native idle.
+        if (!session.time_idle) return true;
         continue;
       }
       const message = JSON.parse(row.data);
