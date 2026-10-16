@@ -338,6 +338,19 @@ The stop path terminates active process groups, preserves completed child output
 Interrupted attempts are not silently retried.
 Keep the entire run root if diagnosis or replay is required.
 
+On Linux, ownership checks distinguish an exited, unreaped process (`Z`/`X`) from
+an active PID even when `kill(pid, 0)` succeeds and its start time still matches.
+A stopped process (`T`, for example after `SIGSTOP`) remains a live owner. Resume
+can reclaim a zombie owner's lock through the existing recovery path: retained
+child predictions, recorded spend and unknown-usage holds survive; consumed
+instances are not dispatched again. This does not restart a stopped owner or
+change the runner's inference deadlines. Cleanup separately checks live process-group
+members: a zombie or already-reaped leader does not skip signals to remaining
+writers, while a zombie-only group does not block termination confirmation.
+Recovery retires the previously recorded watchdog before replacing the supervisor
+heartbeat or starting another watchdog. Watchdog termination targets its matched
+PID, not a process group (watchdogs are not detached group leaders).
+
 ## 7. Run incremental official scoring
 
 Run the grader only after the official harness is installed and its Docker environment is ready:

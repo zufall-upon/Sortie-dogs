@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile, appendFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -78,33 +78,64 @@ export async function appendJsonLine(path, value) {
   await appendFile(path, `${JSON.stringify(value)}\n`, "utf8");
 }
 
-async function processStartTime(pid) {
+async function processStat(pid) {
   if (!Number.isInteger(pid) || process.platform === "win32") return null;
   try {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(") ");
     const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
-    return fields[19] ?? null;
+    return { state: fields[0] ?? null, group: fields[2] ?? null, starttime: fields[19] ?? null };
   } catch {
     return null;
   }
 }
 
 export async function processIdentity(pid = process.pid) {
-  return { pid, starttime: await processStartTime(pid) };
+  return { pid, starttime: (await processStat(pid))?.starttime ?? null };
+}
+
+const exitedProcess = stat => stat && ["Z", "X", "x"].includes(stat.state);
+
+async function matchingProcess(identity) {
+  if (!record(identity) || !Number.isInteger(identity.pid)) return null;
+  try { process.kill(identity.pid, 0); }
+  catch { return null; }
+  const stat = await processStat(identity.pid);
+  if (identity.starttime !== null && identity.starttime !== undefined && stat?.starttime !== identity.starttime) return null;
+  return stat ?? { state: null };
 }
 
 export async function processAlive(identity) {
-  if (!record(identity) || !Number.isInteger(identity.pid)) return false;
-  try { process.kill(identity.pid, 0); }
-  catch { return false; }
-  if (identity.starttime === null || identity.starttime === undefined) return true;
-  return (await processStartTime(identity.pid)) === identity.starttime;
+  const stat = await matchingProcess(identity);
+  // kill(pid, 0) also succeeds for an exited child awaiting its parent's waitpid.
+  return stat !== null && !exitedProcess(stat);
 }
 
-async function killProcessGroup(identity) {
+async function processGroupAlive(identity) {
+  if (process.platform !== "linux") return processAlive(identity);
+  const leader = await processStat(identity.pid);
+  if (leader && identity.starttime != null && leader.starttime !== identity.starttime) return false;
+  if (leader && !exitedProcess(leader)) return true;
+  // A zombie/reaped leader can leave live writers in its detached process group.
+  let entries;
+  try { entries = await readdir("/proc"); }
+  catch { return true; } // Unreadable membership cannot establish cleanup.
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const stat = await processStat(Number(entry));
+    if (stat?.group === String(identity.pid) && !exitedProcess(stat)) return true;
+  }
+  return false;
+}
+
+async function killProcessGroup(identity, { processOnly = false } = {}) {
   if (!record(identity) || !Number.isInteger(identity.pid)) return true;
-  if (!await processAlive(identity)) return true;
+  if (!await matchingProcess(identity)) {
+    // A reaped Linux leader leaves its PGID reserved while group members remain.
+    // A present but mismatched leader is PID reuse, not permission to signal it.
+    if (processOnly || process.platform !== "linux" || await processStat(identity.pid) ||
+      !await processGroupAlive(identity)) return true;
+  }
   if (process.platform === "win32") {
     const killer = spawn("taskkill.exe", ["/PID", String(identity.pid), "/T", "/F"], {
       stdio: "ignore", windowsHide: true,
@@ -115,13 +146,15 @@ async function killProcessGroup(identity) {
     });
     return !(await processAlive(identity));
   }
-  try { process.kill(-identity.pid, "SIGTERM"); } catch { /* already stopped */ }
-  for (let attempt = 0; attempt < 50 && await processAlive(identity); attempt += 1) await sleep(100);
-  if (await processAlive(identity)) {
-    try { process.kill(-identity.pid, "SIGKILL"); } catch { /* already stopped */ }
+  const target = processOnly ? identity.pid : -identity.pid;
+  const alive = () => processOnly ? processAlive(identity) : processGroupAlive(identity);
+  try { process.kill(target, "SIGTERM"); } catch { /* already stopped */ }
+  for (let attempt = 0; attempt < 50 && await alive(); attempt += 1) await sleep(100);
+  if (await alive()) {
+    try { process.kill(target, "SIGKILL"); } catch { /* already stopped */ }
   }
-  for (let attempt = 0; attempt < 20 && await processAlive(identity); attempt += 1) await sleep(100);
-  return !(await processAlive(identity));
+  for (let attempt = 0; attempt < 20 && await alive(); attempt += 1) await sleep(100);
+  return !(await alive());
 }
 
 export async function acquireRunLock(runRoot) {
@@ -422,7 +455,7 @@ export async function stopSupervisor(statePath) {
   const writes = stateWriteQueue(state, statePath);
   try {
     if (state.instances?.some(entry => entry.status === "running")) await markInterrupted(state);
-    if (state.watchdog?.pid) await killProcessGroup(state.watchdog.pid);
+    if (state.watchdog?.pid) await killProcessGroup(state.watchdog.pid, { processOnly: true });
     state.watchdog ??= { pid: null, report: join(state.run_root, "watchdog-report.jsonl") };
     state.watchdog.pid = null;
     state.status = "failed";
@@ -490,6 +523,11 @@ export async function runSupervisor(value, options, dependencies = {}) {
     state.heartbeat ??= { sequence: 0, at: now(), supervisor: await processIdentity() };
     state.heartbeat.sequence = Number.isInteger(state.heartbeat.sequence) ? state.heartbeat.sequence : 0;
     state.watchdog ??= { pid: null, report: join(runRoot, "watchdog-report.jsonl") };
+    if (state.watchdog.pid) {
+      // Watchdogs are direct children, not detached process-group leaders.
+      ensure(await killProcessGroup(state.watchdog.pid, { processOnly: true }), "previous-watchdog-termination-failed");
+      state.watchdog.pid = null;
+    }
     state.heartbeat.supervisor = await processIdentity();
     state.model_name_or_path ??= `sortie-dogs@${value.candidate?.version}+${String(value.candidate?.sha256 ?? "").slice(0, 12)}`;
     if (state.status === "running") await markInterrupted(state);
