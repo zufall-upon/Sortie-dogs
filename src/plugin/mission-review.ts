@@ -348,7 +348,7 @@ export async function missionDeliveryObservation(directory: string, runID: strin
 
 /** A child ID alone cannot establish the initial phase after a restart or failed dispatch. */
 export function initialMissionReviewPrompt(mission: OperatorMission, prompts: readonly string[]): string | undefined {
-  return [mission.review?.initialPrompt, ...prompts].find(prompt => typeof prompt === "string" &&
+  return [mission.review?.initialPrompt, ...(mission.corrections ?? []).map(item => item.initialPrompt), ...prompts].find(prompt => typeof prompt === "string" &&
     prompt.startsWith(`candidate_id: ${mission.id}\n`) && /^review_phase: initial$/mu.test(prompt) &&
     /^canonical_validation_exit: 0$/mu.test(prompt));
 }
@@ -362,7 +362,8 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
       mission.review?.task?.prompt !== requestedPrompt) return [];
   // The completion hook has already bound this prompt to a real independent Reviewer child.
   // Avoid a second V2 history read when its page/list API is temporarily unavailable.
-  if (initialMissionReviewPrompt(mission, [])) return [mission.review!.initialPrompt!];
+  const initial = initialMissionReviewPrompt(mission, []);
+  if (initial) return [initial];
   const owner = mission.coordinator ?? root;
   if (mission.coordinator !== null) {
     const coordinator = await host.get(owner);

@@ -252,6 +252,8 @@ export interface OperatorMission {
     priorSource: string; findings: string; initialPrompt: string; baseline?: string;
     /** Actual still-running initial Review; direct correction is not another child terminal. */
     inlineReview?: { callID: string; promptID: string; admittedAt: number; reviewIdentity: string };
+    /** Exact terminal of an unused inline grant; no implementation calls followed admission. */
+    noWriteReceipt?: { promptID: string; messageID: string };
     status: "prepared" | "running" | "ready" | "failed" | "cancelled";
     selfRecheck?: MissionSelfRecheck }[];
 }
@@ -995,7 +997,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
 
 export function missionReviewIndependent(mission: OperatorMission, child: string | undefined): boolean {
   return child !== undefined && !mission.sourceAuthors?.includes(child) &&
-    !(mission.corrections ?? []).some(correction => correction.author === child);
+    !(mission.corrections ?? []).some(correction => correction.author === child &&
+      !(correction.status === "failed" && correction.noWriteReceipt));
 }
 
 export function missionPacket(mission: OperatorMission, run?: OperatorState, includeWorkQuantity = true): Record<string, unknown> {
