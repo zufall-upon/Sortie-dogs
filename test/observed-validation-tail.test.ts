@@ -85,6 +85,68 @@ test("bound ordered tail finishes without a standalone repetition; old logs acqu
     "registration cannot rebind a previously successful native tail");
 });
 
+test("an unambiguous final-check refresh selects its new binding without repeating the prefix", () => {
+  const native = history([A, B, B]), bindings = checks([[A], [B], [B]]);
+  const result = reviewerCorrectionValidation([A, B], child, native, 50, bindings);
+  assert.equal(result.ready, true, JSON.stringify(result));
+  assert.deepEqual(result.matched, [{ callID: "call-0", member: 0, occurrence: 0 }, { callID: "call-2", member: 0, occurrence: 1 }]);
+  for (const exit of [1, null]) {
+    const failed = history([A, B, B]);
+    failed[2]!.parts[0]!.state.metadata.exit = exit;
+    assert.equal(reviewerCorrectionValidation([A, B], child, failed, 50, bindings).ready, false,
+      "a failed or unknown latest tail cannot fall back to the old success");
+  }
+  const stale = bindings.map((check: any, i: number) => ({ ...check, fresh: i !== 2 }));
+  assert.equal(reviewerCorrectionValidation([A, B], child, native, 50, stale).ready, false);
+  assert.equal(reviewerCorrectionValidation([A, B, A], child, history([A, B, A, A]), 50, checks([[A], [B], [A], [A]])).ready, true);
+  assert.deepEqual(reviewerCorrectionValidation([A, B, A], child, history([A, B, A, A]), 50, checks([[A], [B], [A], [A]])).matched,
+    [{ callID: "call-0", member: 0, occurrence: 0 }, { callID: "call-1", member: 0, occurrence: 1 }, { callID: "call-2", member: 0, occurrence: 2 }],
+    "ambiguous repeated declarations retain the existing occurrence rules");
+});
+
+for (const changedSource of [false, true]) test(`cold direct finish reuses the prefix after a final report-only refresh: source changed=${changedSource}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/refreshed-tail-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "source.txt"), "fixed\n");
+    await writeFile(join(directory, "report.json"), "{}\n");
+    await writeFile(join(directory, "check.mjs"), 'import {readFileSync, writeFileSync} from "node:fs"; writeFileSync("cache.txt", "generated\\n"); if (readFileSync("source.txt", "utf8") !== "fixed\\n") process.exit(1);\n');
+    const native: Record<string, unknown>[] = [];
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator", outcome: "running" } }),
+      messages: async () => ({ data: native }), children: async () => ({ data: [] }),
+    } } } as never);
+    let hooks = await create();
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "real-task", agent: "dog-operator" }, {
+      message: { id: "real-task", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Validate the source, retaining the report." }],
+    });
+    await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validated fixed source and retained report"] }, { sessionID: "root" });
+    await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{
+      title: "Validate fixed source", objective: "Validate source and retain report",
+      read: ["check.mjs", "source.txt"], write: ["source.txt", "report.json", "cache.txt"], validation: ["node check.mjs", "git diff --check"],
+    }] }, { sessionID: "root" });
+    const runNative = async (command: string, callID: string) => {
+      const args = { command, workdir: directory }, start = Date.now();
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID }, { args });
+      await exec("/bin/sh", ["-c", command], { cwd: directory });
+      native.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "bash", callID,
+        state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID, args }, { output: "PASS", metadata: { exit: 0 } });
+    };
+    await runNative("node check.mjs", "prefix");
+    await runNative("git diff --check", "old-tail");
+    await writeFile(join(directory, "report.json"), '{"integrated":true}\n');
+    if (changedSource) await writeFile(join(directory, "source.txt"), "broken\n");
+    await runNative("git diff --check", "new-tail");
+    hooks = await create();
+    const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+    assert.equal(finished.status, changedSource ? "direct-unit-awaits-validation" : "awaiting-acceptance", JSON.stringify(finished));
+    assert.equal(native.length, 3, "the original prefix is never rerun");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const mode of ["fresh", "changed-input", "stale-after", "wrong-cwd", "failed-prefix"] as const) {
   test(`live direct tail captures the existing snapshot and survives cold recovery: ${mode}`, async t => {
     await mkdir(resolve("_testenv"), { recursive: true });

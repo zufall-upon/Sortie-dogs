@@ -39,6 +39,26 @@ Cycle032のcommit `050e0afa0c9622dd42552c159573409a7138b6e7` は、同じ診断�
 - 今回の関連testは役割assetへの配置と既存CLI initによる生成を確認するもの。
   保存済み同条件確認を再利用し、新たな有料CLI完遂や公式正答改善とは主張しない。
 
+## 実作業中に観測した最終check選択の停止
+
+型群対策のPR #264をmain `a644e10`へ統合した後、統合記録を保存し
+`git diff --check`を再実行しても、`finish_direct_unit` は更新前のcheckのbindingを選び
+`mission-review-correction-validation-stale:git diff --check` で停止した。
+登録補正も `mission-replan-terminal-unreconciled:tool_dispatch_active_or_unproven` で拒否。
+未変更の全体test再実行による回避は行わず、この具体的な停止経路を次の修正対象とした。
+
+- 原因: `reviewerCorrectionValidation` が最初の全列完了を保持し、後続の最終checkだけの
+  成功を完了列へ反映しなかった。以前のprefixは有効でも古いtailが選ばれた。
+- 修正範囲: 完了列に続く、同じregistration group内で出現箇所が一意な最終checkの再実行だけ、
+  新しいnative callのbindingへ置換する。prefixの実入力・cwd・時間・結果の検証は維持。
+  同じコマンドが複数回宣言される場合のoccurrence規則は変更しない。
+- 既存fixtureで旧callが選ばれることを再現。通常のnative hookと実shellを使うcold resumeでは、
+  prefix→旧tail→レポート更新→新tailの3呼出しで完了し、prefixは再実行しない。
+  ソース変更・最新tailの失敗/未知exit・stale bindingは引き続き拒否する。
+- これはrepository candidateの修正。共有hostの読込済みruntime更新・再起動・global applyは行わない。
+  課題推論・公式採点結果への改善主張もない。新しいソース変更に対する関連・全体検証は、
+  先の型群対策の未変更testを証跡整形のためだけに再実行することとは区別する。
+
 ## 証跡
 
 - `benchmark-v0140-20261015/swe-dev23/children/007-pydicom__pydicom-1139/usage/opencode.db`

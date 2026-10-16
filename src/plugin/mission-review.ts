@@ -190,6 +190,14 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         continue;
       }
       previousEnd = attempt.completed;
+      // A final-check-only refresh must replace its old binding, not force the
+      // unchanged prefix to run again. Repeated declarations stay ambiguous;
+      // preserve their existing occurrence rules and validate every saved input.
+      if (completed && partial.length === required.length && members.length === 1 &&
+          members[0]!.command === required.at(-1) && required.indexOf(members[0]!.command) === required.length - 1) {
+        partial.splice(0, partial.length, ...completed.slice(0, -1));
+        completed = undefined;
+      }
       if (members[0]!.command !== required[partial.length] || partial.length === required.length) partial.length = 0;
       failed = undefined;
       // A failed && chain proves no member, even if earlier members could have passed.
