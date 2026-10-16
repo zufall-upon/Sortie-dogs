@@ -9667,15 +9667,40 @@ test("parent idle evicts authorization left by an interrupted Task call", async 
   });
 });
 
-test("root task watchdog aborts and resumes the same coordinator once when after and idle are absent", async () => {
+for (const delayedTicket of [false, true]) test(`root task watchdog aborts and resumes the same coordinator once when after and idle are absent${delayedTicket ? " with delayed durable ticket" : ""}`, async (context) => {
   await withProject("task-watchdog-recovery", async (directory) => {
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
     const aborts: string[] = [];
     const prompts: Array<{ id: string; text: string }> = [];
+    let recoveryObserved!: () => void, ticketObserved!: () => void, releaseTicket!: () => void;
+    const recovered = new Promise<void>((resolve) => { recoveryObserved = resolve; });
+    const ticketEntered = new Promise<void>((resolve) => { ticketObserved = resolve; });
+    const ticketReleased = new Promise<void>((resolve) => { releaseTicket = resolve; });
+    const withinDeadline = async (signal: Promise<void>) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([signal, new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("watchdog recovery event was not observed")), 5_000);
+        })]);
+      } finally { if (timeout !== undefined) clearTimeout(timeout); }
+    };
+    const { RunFlightLedger } = await import("../dist/core/run-flight-ledger.js");
+    const append = RunFlightLedger.prototype.appendGoal;
+    let ticketWasEntered = false;
+    const mocked = delayedTicket ? context.mock.method(RunFlightLedger.prototype, "appendGoal", async function(event) {
+      if (event.kind === "ticket.issued" && event.session_id === "watchdog-root" && event.checkpoint.startsWith("watchdog:")) {
+        ticketWasEntered = true; ticketObserved();
+        await ticketReleased;
+      }
+      return append.call(this, event);
+    }) : undefined;
     const hooks = await SortieDogsPlugin({
       directory,
       client: {
+        app: { log: ({ body }) => {
+          if (body.message === "batch-watchdog.recovered" && body.extra?.sessionID === "watchdog-root") recoveryObserved();
+        } },
         session: {
           abort: async ({ path }) => { aborts.push(path.id); return true; },
           promptAsync: async ({ path, body }) => {
@@ -9685,25 +9710,36 @@ test("root task watchdog aborts and resumes the same coordinator once when after
         },
       },
     }, { continuation: { taskWatchdogMilliseconds: 20 } });
-    await beginTrackedTaskChild(hooks, directory, "watchdog-root", "watchdog-child", "watchdog-call");
-    const goalProjection = { system: [] as string[] };
-    await hooks["experimental.chat.system.transform"]!({ sessionID: "watchdog-root" }, goalProjection);
-    assert.match(goalProjection.system.join("\n"), /"phase":"active"/u);
+    try {
+      await beginTrackedTaskChild(hooks, directory, "watchdog-root", "watchdog-child", "watchdog-call");
+      const goalProjection = { system: [] as string[] };
+      await hooks["experimental.chat.system.transform"]!({ sessionID: "watchdog-root" }, goalProjection);
+      assert.match(goalProjection.system.join("\n"), /"phase":"active"/u);
+      if (delayedTicket) {
+        await withinDeadline(ticketEntered);
+        assert.deepEqual(aborts, [], "durable ticket authority must settle before aborting the host session");
+        releaseTicket();
+      }
+      // The watchdog threshold starts async identity/ticket I/O; it is not a recovery completion deadline.
+      await withinDeadline(recovered);
+      assert.deepEqual(aborts, ["watchdog-root"]);
+      assert.equal(prompts.length, 1);
+      assert.equal(prompts[0]!.id, "watchdog-root");
+      assert.ok(prompts[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
+      assert.match(prompts[0]!.text, /coordinator-task-watchdog/);
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.deepEqual(aborts, ["watchdog-root"]);
-    assert.equal(prompts.length, 1);
-    assert.equal(prompts[0]!.id, "watchdog-root");
-    assert.ok(prompts[0]!.text.startsWith(STEP_CONTINUE_PREFIX));
-    assert.match(prompts[0]!.text, /coordinator-task-watchdog/);
-
-    await hooks["tool.execute.after"]!(
-      { tool: "task", sessionID: "watchdog-root", callID: "watchdog-call" },
-      { output: "<task><task_result>late</task_result></task>", metadata: { sessionId: "watchdog-child" } },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.equal(aborts.length, 1);
-    assert.equal(prompts.length, 1);
+      await hooks["tool.execute.after"]!(
+        { tool: "task", sessionID: "watchdog-root", callID: "watchdog-call" },
+        { output: "<task><task_result>late</task_result></task>", metadata: { sessionId: "watchdog-child" } },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      assert.equal(aborts.length, 1);
+      assert.equal(prompts.length, 1);
+    } finally {
+      releaseTicket();
+      try { if (ticketWasEntered) await withinDeadline(recovered); }
+      finally { mocked?.mock.restore(); }
+    }
   });
 });
 
