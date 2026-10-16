@@ -83,7 +83,7 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions
+from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions, product_worker_chain
 root = Path(sys.argv[2])
 subprocess.run(["git", "init", "-q", str(root)], check=True)
 (root / "unrelated-parent.txt").write_text("parent evidence\n")
@@ -97,6 +97,23 @@ assert Path(git("rev-parse", "--show-toplevel")) == gateway
 assert git("ls-files") == ".gitignore"
 assert not git("status", "--porcelain", "--untracked-files=all")
 assert (root / "unrelated-parent.txt").read_text() == "parent evidence\n"
+# Retained httpx shape: two root-owned Coordinators, two direct Workers,
+# and a Worker beneath the later Coordinator. All 37 calls belong to one root.
+def session(id, agent, parent):
+    return {"session_id": id, "agent": agent, "parent_id": parent}
+sessions = [session("c1", "dogs-coordinator", "r"), session("w1", "dog-worker-v010", "r"),
+            session("w2", "dog-worker-v010", "r"), session("c2", "dogs-coordinator", "r"),
+            session("w3", "dog-worker-v010", "c2"), session("other-c", "dogs-coordinator", "other-root"),
+            session("other-w", "dog-worker-v010", "other-c"), session("unknown-w", "dog-worker-v010", "unknown")]
+chain = product_worker_chain(sessions, {"r"})
+assert chain["coordinator_session_ids"] == ["c1", "c2"]
+workers = {row["session_id"] for row in chain["workers"]}
+assert workers == {"w1", "w2", "w3"}
+calls = ["w1"] * 24 + ["w2"] * 4 + ["w3"] * 9
+assert sum(id in workers for id in calls) == len(calls) == 37
+assert "other-w" not in workers and "unknown-w" not in workers and "c2" not in workers
+assert product_worker_chain([session("w", "dog-worker-v010", "r")], {"r"})["workers"][0]["session_id"] == "w"
+assert product_worker_chain([session("w", "dog-worker-v010", "unknown")], {"r"}) is None
 for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010"}),
                        ("dogs-coordinator", {"dog-worker-v010"}), ("dog-worker-v010", set())]:
     rules = product_agent_permissions(role, ("sortie_v010_operator_status",), allow_execute=role == "dog-worker-v010")
