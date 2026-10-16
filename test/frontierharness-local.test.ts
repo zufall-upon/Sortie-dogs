@@ -114,6 +114,20 @@ assert sum(id in workers for id in calls) == len(calls) == 37
 assert "other-w" not in workers and "unknown-w" not in workers and "c2" not in workers
 assert product_worker_chain([session("w", "dog-worker-v010", "r")], {"r"})["workers"][0]["session_id"] == "w"
 assert product_worker_chain([session("w", "dog-worker-v010", "unknown")], {"r"}) is None
+# An explicit Mission root outranks an unrelated, earlier-sorting Operator.
+unrelated = [session("a-other", "dog-operator", None),
+             session("foreign-w", "dog-worker-v010", "a-other")]
+selected = [session("z-real", "dog-operator", None),
+            session("real-c1", "dogs-coordinator", "z-real"),
+            session("real-c2", "dogs-coordinator", "z-real"),
+            session("real-direct", "dog-worker-v010", "z-real"),
+            session("real-nested", "dog-worker-v010", "real-c2")]
+selected_chain = product_worker_chain(unrelated + selected, {"z-real"})
+assert selected_chain["root"] == "z-real"
+assert selected_chain["coordinator_session_ids"] == ["real-c1", "real-c2"]
+assert {row["session_id"] for row in selected_chain["workers"]} == {"real-direct", "real-nested"}
+assert product_worker_chain(unrelated + selected[:1], {"z-real"}) is None
+assert product_worker_chain(unrelated, set())["root"] == "a-other", "retain unselected Operator fallback"
 for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010"}),
                        ("dogs-coordinator", {"dog-worker-v010"}), ("dog-worker-v010", set())]:
     rules = product_agent_permissions(role, ("sortie_v010_operator_status",), allow_execute=role == "dog-worker-v010")

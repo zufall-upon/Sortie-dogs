@@ -850,7 +850,8 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
   const directory = await mkdtemp(join(tmpdir(), "codex-host-executor-"));
   let adapter: CodexMissionSession | undefined;
   let failure: unknown;
-  let dispatched = 0, executions = 0;
+  let dispatched = 0, executions = 0, closeCalls = 0;
+  let closing: Promise<void> | undefined;
   const beforeCalls: string[] = [], afterReceipts: Json[] = [];
   let entered!: () => void, authorize!: () => void;
   const entry = new Promise<void>(resolve => { entered = resolve; });
@@ -894,7 +895,12 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
           assert.equal(request.signal.aborted, true);
           return { status: "completed", exitCode: 0, stdout: "late result must not validate", stderr: "" };
         }
-        if (outcome === "close-race") { void adapter!.close(); return { status: "completed", exitCode: 0, stdout: "raced result", stderr: "" }; }
+        if (outcome === "close-race") {
+          closing = adapter!.close();
+          // Observe rejection now, then join the original Promise in finally after this callback unwinds.
+          void closing.catch(() => {});
+          return { status: "completed", exitCode: 0, stdout: "raced result", stderr: "" };
+        }
         if (outcome === "throw") throw new Error("Host connection lost");
         if (outcome === "invalid") return { status: "completed", exitCode: undefined, stdout: "approved only", stderr: "" } as any;
         if (["denied", "not-started", "interrupted"].includes(outcome)) return { status: outcome as "denied" | "not-started" | "interrupted", reason: "fixture host decision" };
@@ -904,6 +910,8 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
           return { status: "completed", exitCode: 0, ...result };
         } catch (error: any) { return { status: "completed", exitCode: error.code, stdout: error.stdout, stderr: error.stderr }; }
       } });
+    const close = adapter.close.bind(adapter);
+    adapter.close = () => { closeCalls++; return close(); };
     const hooks = (adapter as any).hooks;
     const before = hooks["tool.execute.before"], after = hooks["tool.execute.after"];
     hooks["tool.execute.before"] = async (input: Json, output: Json) => {
@@ -943,7 +951,11 @@ test(`host executor preserves Mission evidence for ${outcome}`, { timeout: 15000
         assert(events.some(event => event.method === "sortie/commandExecution" && event.params.status === "unknown" && event.params.cwd === directory && event.params.reason));
       }
     }
-  } finally { authorize(); await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    authorize(); await (closing ?? adapter?.close());
+    await rm(directory, { recursive: true, force: true });
+    if (outcome === "close-race") assert.equal(closeCalls, 1, "join the original owned close rather than start a second teardown");
+  }
 });
 
 

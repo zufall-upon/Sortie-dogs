@@ -21,7 +21,9 @@ def product_worker_chain(sessions, mission_roots):
     """
     operators = {row["session_id"]: row for row in sessions
                  if row["agent"] == "dog-operator" and row["parent_id"] is None}
-    for root in sorted(set(mission_roots) | operators.keys()):
+    # Observed Operators are a fallback, not alternatives to a selected Mission.
+    roots = set(mission_roots) or operators.keys()
+    for root in sorted(roots):
         coordinators = [row for row in sessions if row["agent"] == "dogs-coordinator"
                         and row["parent_id"] == root]
         coordinator_ids = {row["session_id"] for row in coordinators}
