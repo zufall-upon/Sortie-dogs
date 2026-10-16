@@ -437,12 +437,13 @@ test("owned server exits before native settlement preserves the stopped attempt 
 });
 
 test("owned server signal and bounded diagnostic output survive the monitor receipt", {
-  timeout: 20_000, skip: process.platform === "win32",
+  timeout: 60_000, skip: process.platform === "win32",
 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "mission-server-signal-"));
   try {
     const output = execFileSync(process.execPath, ["--experimental-vm-modules",
-      resolve("test/fixtures/owned-server-signal-controller.mjs"), directory], { encoding: "utf8", timeout: 15_000 });
+      // Allow the real 30s startup bound, 5s monitor and owned-process cleanup to settle.
+      resolve("test/fixtures/owned-server-signal-controller.mjs"), directory], { encoding: "utf8", timeout: 50_000 });
     const result = JSON.parse(await readFile(join(directory, "signal-receipt.json"), "utf8"));
     assert.match(output, /PASS_OWNED_SERVER_SIGNAL_DIAGNOSTICS/);
     assert.equal(result.stopped, "observation-failed");
