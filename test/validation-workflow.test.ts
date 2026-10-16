@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_BEHAVIOR_REVIEW, MISSION_CLIENT_STATE_CHECK, MISSION_REPRESENTATION_ORACLE, MISSION_RETURN_CONTRACT, MISSION_MUTATION_CONTRACT, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_CLIENT_STATE_CHECK, MISSION_REPRESENTATION_ORACLE, MISSION_TYPE_FAMILY_ORACLE, MISSION_RETURN_CONTRACT, MISSION_MUTATION_CONTRACT, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
@@ -42,6 +42,23 @@ test('Coordinator authors preserve explicit effects under established caller pre
   assert.doesNotMatch(guidance, /pydicom|sqlfluff|901|debug\(|StreamHandler|NullHandler|approval|permission/);
   for (const role of ['dog-operator', 'dog-worker-v010', 'dog-reviewer-v010']) {
     assert.ok(!runtimeAssets.find(asset => asset.name === role)!.content.includes(marker), role);
+  }
+});
+
+test('planning and Review derive affected type families from public registries without prescribing entries', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
+  for (const content of [coordinator, reviewer, MISSION_BEHAVIOR_REVIEW]) {
+    assert.equal(content.split(MISSION_TYPE_FAMILY_ORACLE).length, 2);
+    assert.match(content, /derive the affected same-representation family from an existing\s+schema\/registry and its public callers/);
+    assert.match(content, /not just issue examples/);
+    assert.match(content, /Compare sibling entries under that\s+contract; reuse suitable parameterized checks/);
+    assert.match(content, /Do not widen unrelated families or require an exhaustive\s+matrix, another unit or review lane/);
+  }
+  assert.ok(MISSION_TYPE_FAMILY_ORACLE.length < 400);
+  assert.doesNotMatch(MISSION_TYPE_FAMILY_ORACLE, /pydicom|1413|OL|OD|OV|bytes|backslash|VALUE_REFERENCE|official|hidden|permission|approval/);
+  for (const name of ['dog-operator', 'dog-worker-v010']) {
+    assert.ok(!runtimeAssets.find(item => item.name === name)!.content.includes(MISSION_TYPE_FAMILY_ORACLE));
   }
 });
 
@@ -321,6 +338,10 @@ test('native CLI init installs the validation workflow in each active mission ro
     assert.equal(coordinator.split(MISSION_MUTATION_CONTRACT).length, 2);
     assert.equal(coordinator.split(MISSION_REGRESSION_PLACEMENT).length, 2);
     assert.match(coordinator, /not another test, unit or review requirement/);
+    for (const installed of [coordinator, reviewer]) {
+      assert.equal(installed.split(MISSION_TYPE_FAMILY_ORACLE).length, 2);
+      assert.match(installed, /schema\/registry and its public callers/);
+    }
     assert.equal(coordinator.split('When removing implicit initialization effects').length, 2);
     assert.match(coordinator, /preserve established explicit opt-in behavior unless the request changes it/);
     assert.match(coordinator, /flags or internal state alone are not that behavior/);

@@ -299,6 +299,12 @@ existing user authorization and project gates; npm publication remains manual.
 /** Keep representation oracles consistent in direct execution, Worker and Review. */
 export const MISSION_REPRESENTATION_ORACLE = `Same-type representation, not name/visitor analogy; resolve conflicts.`;
 
+/** Planning and Review use public type families instead of only issue-named examples. */
+export const MISSION_TYPE_FAMILY_ORACLE = `When changing a dispatch/exclusion set, derive the affected same-representation family from an existing
+schema/registry and its public callers, not just issue examples. Compare sibling entries under that
+contract; reuse suitable parameterized checks. Do not widen unrelated families or require an exhaustive
+matrix, another unit or review lane.`;
+
 /** Coordinator preserves source-backed return semantics in direct work or a Worker's objective. */
 export const MISSION_RETURN_CONTRACT = `For a changed value-producing operation, derive its return contract from public callers and unchanged source/tests.
 Preserve established return type/container, metadata and label alignment unless the original request changes them;
@@ -338,6 +344,7 @@ For changed observable behavior, inspect affected public caller assertions/outpu
 Reconcile expected outputs with the original requirements and reuse adequate checks; no extra review round.
 ${MISSION_CLIENT_STATE_CHECK}
 ${MISSION_REPRESENTATION_ORACLE}
+${MISSION_TYPE_FAMILY_ORACLE}
 Trace a concrete rejected input through the changed code back to the public caller, checking result,
 error and observable state together, including earlier results that can survive failure. Missing assertions
 alone are not defects; a concrete contradiction with the established contract is a finding even if tests pass.
@@ -561,6 +568,7 @@ If peer source/tests expose a plausible related still-unhandled error, probe its
 before choosing the fix; reuse adequate checks. Include this in the current author's objective/check
 plan, not another unit or review round. Do not invent an exhaustive error matrix.
 ${MISSION_REPRESENTATION_ORACLE}
+${MISSION_TYPE_FAMILY_ORACLE}
 ${MISSION_RETURN_CONTRACT}
 ${MISSION_MUTATION_CONTRACT}
 ${MISSION_REGRESSION_PLACEMENT}
