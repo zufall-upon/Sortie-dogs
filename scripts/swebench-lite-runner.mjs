@@ -1030,6 +1030,7 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
   const database = new DatabaseSync(databasePath, { readOnly: true });
   const unpriced = new Set();
   const unpricedDetails = [];
+  const nativeModels = new Map();
   let unpricedCount = 0;
   let latestPricedAtMs = 0;
   const recordUnpriced = (reason, session, message) => {
@@ -1072,15 +1073,32 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
         }
         result.requests += 1;
         const tokens = message.tokens;
+        const providerID = v2 ? message.model?.providerID : message.providerID;
+        const modelID = v2 ? message.model?.id : message.modelID;
+        const serviceTier = v2 ? message.providerState?.serviceTier : message.serviceTier;
+        // Keep actual native usage identities from this same read, not configured
+        // routes or incomplete/zero-token assistant placeholders. Price coverage
+        // is independent: an unpriced native response can still identify its model.
+        if (Number.isFinite(message.time?.completed) && message.time.completed >= 0 &&
+            [tokens.input, tokens.output, tokens.reasoning, tokens.cache?.read, tokens.cache?.write]
+              .some(value => typeof value === "number" && Number.isFinite(value) && value > 0)) {
+          const known = value => typeof value === "string" && value.length > 0 ? value : null;
+          const observation = { session_id: session.id, agent: known(message.agent),
+            model: { providerID: known(providerID), id: known(modelID), variant: known(v2 ? message.model?.variant : message.variant) },
+            event_type: v2 ? row.type : "assistant", service_tier: known(serviceTier) };
+          const key = JSON.stringify(observation), prior = nativeModels.get(key);
+          if (prior) prior.usage_records++;
+          else nativeModels.set(key, { ...observation, usage_records: 1 });
+        }
         const estimate = estimateModelUsageCost({
-          providerID: v2 ? message.model?.providerID : message.providerID,
-          modelID: v2 ? message.model?.id : message.modelID,
+          providerID,
+          modelID,
           uncachedInputTokens: tokens.input,
           cacheReadTokens: tokens.cache?.read,
           cacheWriteTokens: tokens.cache?.write,
           outputTokens: tokens.output,
           reasoningTokens: tokens.reasoning,
-          serviceTier: v2 ? message.providerState?.serviceTier : message.serviceTier,
+          serviceTier,
         });
         if (estimate.status === "priced") {
           result.usd += estimate.usd;
@@ -1093,6 +1111,7 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
     database.close();
   }
   result.unpriced = [...unpriced];
+  result.native_model_usage = [...nativeModels.values()];
   if (unpricedCount) {
     result.unpriced_count = unpricedCount;
     result.unpriced_details = unpricedDetails;
@@ -1389,7 +1408,10 @@ export async function runOpenCode(options, dependencies = {}) {
   const processStopped = await cleanupPromise;
   const serverStopped = await server.stop().then(() => true, () => false);
   const cleanupEstablished = processStopped && serverStopped;
-  try { usage = readUsage(options.workspace, options.databasePath); } catch { usage = { usd: usage.usd, requests: usage.requests, unpriced: ["usage-read-failed"] }; }
+  try { usage = readUsage(options.workspace, options.databasePath); } catch {
+    usage = { usd: usage.usd, requests: usage.requests, unpriced: ["usage-read-failed"],
+      ...(usage.native_model_usage === undefined ? {} : { native_model_usage: usage.native_model_usage }) };
+  }
   await recordWatchdog("exited").catch(() => undefined);
   // Keep the primary stop cause; incomplete usage is reported by usageComplete.
   const finalReason = !cleanupEstablished ? "cleanup-failed"

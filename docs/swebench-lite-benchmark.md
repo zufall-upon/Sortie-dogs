@@ -424,6 +424,21 @@ Retain these together for reproducibility:
 - scoring snapshots, requests, state, logs, live results, and official harness report;
 - exact command lines, exits, and environment/tool versions without credentials.
 
+`results[].usage.native_model_usage` preserves directory-scoped native model facts from
+that same read-only usage scan. Each entry groups session, native message agent,
+provider/model/variant, native service tier and assistant-versus-compaction event type; `usage_records`
+counts completed records with positive reported tokens, not benchmark attempts or
+all outbound requests. Compaction entries are not Worker-turn coverage.
+Pending or zero-token placeholders are not observations;
+missing identity fields remain `null`, never a configured route/default. Unpriced
+responses can still identify a model without becoming free or completely priced.
+The array reaches child metadata and supervisor state; a final usage-read failure
+keeps prior observations while usage coverage remains incomplete and holds remain.
+An empty array (or an absent field in older results) does not prove no Worker ran.
+These are native usage identities, not a Mission receipt, provider transport/billing
+certificate or official correctness. Do not repeat consumed inference to populate
+this field in an older frozen result.
+
 ### Verify a completed dev23 candidate
 
 ```sh

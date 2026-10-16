@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { syncBuiltinESMExports } from "node:module";
 import fsPromises from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
@@ -171,6 +172,68 @@ test("owned V2 server restart keeps the private refreshed route without rereadin
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+for (const v2 of [true, false]) test(`native model usage survives pricing and keeps unknown identity fields: ${v2 ? "V2" : "legacy"}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-native-model-usage-"));
+  const path = join(root, "opencode.db"), workspace = join(root, "workspace");
+  const db = new DatabaseSync(path);
+  try {
+    db.exec(v2
+      ? "CREATE TABLE session_v2 (id TEXT, directory TEXT); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)"
+      : "CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE message (session_id TEXT, data TEXT)");
+    const sessions = db.prepare(`INSERT INTO ${v2 ? "session_v2" : "session"} VALUES (?, ?)`);
+    sessions.run("root", workspace); sessions.run("worker", workspace); sessions.run("unrelated", join(root, "other"));
+    const write = db.prepare(v2 ? "INSERT INTO session_message VALUES (?, ?, ?)" : "INSERT INTO message VALUES (?, ?)");
+    const tokens = { input: 1000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } };
+    const message = (id: string | null, agent: string | null, variant: string | null = null, providerID = "openai") => ({
+      ...(agent === null ? {} : { agent }),
+      ...(v2 ? { model: id === null ? undefined : { id, providerID, ...(variant === null ? {} : { variant }) } }
+        : { modelID: id ?? undefined, providerID: id === null ? undefined : providerID, ...(variant === null ? {} : { variant }) }),
+      tokens, time: { completed: 2 }, content: [{ type: "text", text: "private-prompt-not-model-evidence" }],
+    });
+    const add = (session: string, type: string, data: Record<string, unknown>) => v2
+      ? write.run(session, type, JSON.stringify(data))
+      : write.run(session, JSON.stringify({ ...data, role: type }));
+    add("root", "assistant", message("gpt-6.1-sol", "dog-operator", "xhigh"));
+    for (let i = 0; i < 2; i++) add("worker", "assistant", message("gpt-6-luna-fast", "dog-worker-v010", "max"));
+    add("worker", "assistant", { ...message("gpt-6-luna-fast", "dog-worker-v010", "low"),
+      ...(v2 ? { providerState: { serviceTier: "standard", private: "private-provider-detail" } } : { serviceTier: "standard" }) });
+    add("worker", "assistant", message("unpriced-model", null, null, "unsupported"));
+    add("worker", "assistant", message(null, "dogs-coordinator"));
+    add("worker", "assistant", { ...message("gpt-6-astra", "dog-worker-v010", "max"), time: { created: 3 } });
+    add("worker", "assistant", { ...message("gpt-6-astra", "dog-worker-v010", "max"),
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } });
+    add("worker", "assistant", { ...message("gpt-6-astra", "configured-only", "max"), tokens: undefined, time: { created: 3 } });
+    add("worker", "user", message("gpt-5.6-terra", "not-an-assistant"));
+    add("unrelated", "assistant", message("gpt-5.6-terra", "other-directory"));
+    if (v2) add("root", "compaction", message("gpt-6.1-sol", null));
+    const before = createHash("sha256").update(await readFile(path)).digest("hex");
+    const usage = readDirectoryUsage(workspace, path);
+    const expected = [
+      { session_id: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" }, event_type: "assistant", service_tier: null, usage_records: 1 },
+      { session_id: "worker", agent: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }, event_type: "assistant", service_tier: null, usage_records: 2 },
+      { session_id: "worker", agent: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "low" }, event_type: "assistant", service_tier: "standard", usage_records: 1 },
+      { session_id: "worker", agent: null, model: { providerID: "unsupported", id: "unpriced-model", variant: null }, event_type: "assistant", service_tier: null, usage_records: 1 },
+      { session_id: "worker", agent: "dogs-coordinator", model: { providerID: null, id: null, variant: null }, event_type: "assistant", service_tier: null, usage_records: 1 },
+      ...(v2 ? [{ session_id: "root", agent: null, model: { providerID: "openai", id: "gpt-6.1-sol", variant: null }, event_type: "compaction", service_tier: null, usage_records: 1 }] : []),
+    ];
+    const ordered = (items: typeof expected) => [...items].sort((a, b) =>
+      JSON.stringify([a.session_id, a.agent, a.model, a.event_type, a.service_tier])
+        .localeCompare(JSON.stringify([b.session_id, b.agent, b.model, b.event_type, b.service_tier])));
+    assert.ok(Array.isArray(usage.native_model_usage));
+    assert.deepEqual(ordered(usage.native_model_usage), ordered(expected),
+      "return only completed positive-token native records; keep role/model/variant/tier changes and unknowns regardless of SQL row order");
+    assert.equal(usage.requests, v2 ? 9 : 8, "the existing pricing request count, including zero/pending token rows, is unchanged");
+    const cost = (modelID: string, serviceTier?: string) => benchmarkModelCost({ providerID: "openai", modelID, serviceTier, uncachedInputTokens: 1000,
+      cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 500, reasoningTokens: 0 }).usd;
+    const priced = cost("gpt-6.1-sol") * (v2 ? 2 : 1) + cost("gpt-6-luna-fast") * 2 + cost("gpt-6-luna-fast", "standard") + cost("gpt-6-astra");
+    assert.ok(Math.abs(usage.usd - priced) < 1e-12, "observations cannot alter price arithmetic");
+    assert.equal(usage.unpriced_count, v2 ? 2 : 3, "unknown pricing and missing usage stay unknown");
+    assert.ok(usage.unpriced.includes(v2 ? "pending-usage" : "missing-usage"));
+    assert.doesNotMatch(JSON.stringify(usage.native_model_usage), /private-prompt|configured-only|other-directory|gpt-6-astra|gpt-5.6-terra/u);
+    assert.equal(createHash("sha256").update(await readFile(path)).digest("hex"), before, "existing read-only native query never writes the DB");
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("V2 usage reader charges owned sessions including Luna Fast and retains missing usage", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-v2-usage-"));
   const path = join(root, "opencode.db"), workspace = join(root, "workspace");
@@ -188,13 +251,15 @@ test("V2 usage reader charges owned sessions including Luna Fast and retains mis
       write.run("root", "assistant", JSON.stringify(message));
       write.run("child", "assistant", JSON.stringify(message));
       write.run("other", "assistant", JSON.stringify(message));
-      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: [] });
+      const nativeModels = ["root", "child"].map(session_id => ({ session_id, agent: null,
+        model: { providerID: "openai", id: "gpt-6-luna-fast", variant: null }, event_type: "assistant", service_tier: null, usage_records: 1 }));
+      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: [], native_model_usage: nativeModels });
       write.run("child", "assistant", JSON.stringify({ agent: "dogs-coordinator",
         model: { providerID: "openai", id: "gpt-6-sol" }, time: { completed: 2 },
         error: { type: "provider.transport", message: "WebSocket closed with code 1012: private detail" },
         content: [{ type: "text", text: "private prompt" }] }));
       const gap = readDirectoryUsage(workspace, path);
-      assert.deepEqual(gap, { usd: 0.0014, requests: 2, unpriced: ["missing-usage"], unpriced_count: 1,
+      assert.deepEqual(gap, { usd: 0.0014, requests: 2, unpriced: ["missing-usage"], native_model_usage: nativeModels, unpriced_count: 1,
         unpriced_details: [{ reason: "missing-usage", session_id: "child", agent: "dogs-coordinator",
           model: "openai/gpt-6-sol", error_type: "provider.transport", transport_code: 1012, completed_at_ms: 2 }],
         latest_priced_at_ms: 1 });
@@ -213,7 +278,7 @@ test("V2 usage reader charges owned sessions including Luna Fast and retains mis
       db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%"completed":4%');
       db.prepare("DELETE FROM session_message WHERE session_id = ? AND data LIKE ?").run("child", '%private detail%');
       write.run("child", "assistant", JSON.stringify({ time: { created: 3 }, model: { providerID: "openai", id: "gpt-6-sol" } }));
-      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["pending-usage"] });
+      assert.deepEqual(readDirectoryUsage(workspace, path), { usd: 0.0014, requests: 2, unpriced: ["pending-usage"], native_model_usage: nativeModels });
     } finally { db.close(); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -256,6 +321,34 @@ async function fakeOpenCode(script: string) {
     startedAt: Date.now(), ...extra });
   return { root, options };
 }
+
+test("known native model usage survives a final usage read failure without claiming complete coverage", { skip: process.platform === "win32" }, async () => {
+  const { root, options } = await fakeOpenCode('while [ ! -f "$HOME/usage-observed" ]; do sleep 0.02; done\nexit 0');
+  const models = [{ session_id: "worker", agent: "dog-worker-v010", event_type: "assistant",
+    model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }, usage_records: 1 }];
+  let stopped = false, reads = 0;
+  try {
+    const result = await runOpenCode(options({ timeoutSeconds: 8 }), {
+      ...fakeReadyServer,
+      startServer: async (_workspace: string, environment: Record<string, string>) => ({
+        url: "http://127.0.0.1:12345", env: environment, stop: async () => { stopped = true; },
+      }),
+      nativeRunPending: () => false,
+      readUsage: () => {
+        reads++;
+        if (stopped) throw new Error("retained fixture final read failure");
+        writeFileSync(join(root, "usage-observed"), "observed\n");
+        return { usd: 0.0007, requests: 1, unpriced: [], native_model_usage: models };
+      },
+    });
+    assert.ok(reads >= 2, "CLI waits for an actual observed usage snapshot, then final read fails");
+    assert.deepEqual(result.usage.native_model_usage, models, "already observed model facts must not disappear on an accounting gap");
+    assert.equal(result.usage.usd, 0.0007); assert.equal(result.usage.requests, 1);
+    assert.deepEqual(result.usage.unpriced, ["usage-read-failed"]);
+    assert.equal(result.usageComplete, false);
+    assert.equal(result.reason, "pricing-coverage-missing");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("benchmark CLI admission preserves the original prompt through stdin, not positional formatting",
   { skip: process.platform === "win32" }, async () => {
@@ -594,6 +687,55 @@ const createTestLiveRunPlan = (value: ReturnType<typeof manifest>, options: Reco
 const runTestLive = (value: ReturnType<typeof manifest>, options: Record<string, unknown>, dependencies: Record<string, unknown>) =>
   runLive(value, options, { ...dependencies, publicRowHashes: testPublicRowHashes(value) });
 const execFileAsync = promisify(execFile);
+
+test("native model usage reaches runner metadata and supervisor state without replaying the task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-native-model-forwarding-"));
+  const database = new DatabaseSync(join(root, "native.db"));
+  const value = manifest([instance("example__project-1")]);
+  const options = { manifestPath: join(root, "manifest.json"), runRoot: join(root, "supervisor"),
+    output: join(root, "predictions.jsonl"), costLimitUsd: 2, perInstanceUsd: 2, workers: 1, watchdog: false };
+  let executions = 0;
+  let observed: ReturnType<typeof readDirectoryUsage> | undefined;
+  database.exec("CREATE TABLE session_v2 (id TEXT, directory TEXT); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)");
+  const dependencies = {
+    allowWindows: true,
+    spawnRunner: async (_state: unknown, _entry: unknown, paths: { root: string; output: string; metadata: string }) => {
+      await runTestLive(value, { runRoot: join(paths.root, "live"), output: paths.output, metadata: paths.metadata, costLimitUsd: 2 }, {
+        prepareCandidate: async () => ({ environment: {}, evidence: { package_sha256: candidate.sha256 } }),
+        clone: async () => undefined,
+        git: async () => ({ exit: 0, stdout: "", stderr: "" }),
+        execute: async ({ workspace }: { workspace: string }) => {
+          executions++;
+          database.prepare("INSERT INTO session_v2 VALUES (?, ?)").run("actual-worker", workspace);
+          database.prepare("INSERT INTO session_message VALUES (?, 'assistant', ?)").run("actual-worker", JSON.stringify({
+            agent: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" },
+            time: { completed: 1 }, tokens: { input: 1000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } },
+          }));
+          observed = readDirectoryUsage(workspace, join(root, "native.db"));
+          return { command: "model-free fixture", exit: 0, reason: "completed", cleanupEstablished: true,
+            usage: observed, usageComplete: true };
+        },
+      });
+      return { identity: { pid: 99999999, starttime: null } };
+    },
+    waitForChild: async () => ({ exit: 0, signal: null }),
+  };
+  try {
+    const state = await runSupervisor(value, options, dependencies);
+    assert.equal(state.status, "completed");
+    const expected = [{ session_id: "actual-worker", agent: "dog-worker-v010",
+      model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }, event_type: "assistant", service_tier: null, usage_records: 1 }];
+    assert.deepEqual(state.instances[0]!.result.usage.native_model_usage, expected);
+    const durable = JSON.parse(await readFile(join(options.runRoot, "supervisor-state.json"), "utf8"));
+    const child = JSON.parse(await readFile(state.instances[0]!.child_metadata, "utf8"));
+    assert.deepEqual(durable.instances[0].result.usage, observed);
+    assert.deepEqual(child.results[0].usage, observed);
+    assert.equal(state.spent_usd, 0.0007); assert.equal(state.held_unknown_usd, 0);
+    assert.notEqual(state.instances[0]!.status, "succeeded", "model evidence and a clean CLI exit cannot manufacture a nonempty patch or accepted task");
+    await runSupervisor(value, options, dependencies);
+    assert.equal(executions, 1, "observing terminal evidence never re-executes inference");
+  } finally { database.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 test("release manifest selects receipt bytes over a same-version development candidate and records runner identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-release-manifest-"));
