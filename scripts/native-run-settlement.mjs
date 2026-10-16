@@ -12,6 +12,9 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
     db.exec('BEGIN');
     const sessions = db.prepare('SELECT id, parent_id, time_idle, idle_outcome FROM session_v2 WHERE directory IN (?, ?) AND time_created >= ? ORDER BY time_created')
       .all(project, project.replaceAll('\\', '/'), since);
+    // The owned CLI can identify its root before this snapshot sees the row.
+    // Absence is not native settlement; the caller still owns all stop limits.
+    if (root && !sessions.some(session => session.id === root)) return true;
     root ??= sessions.filter(s => !s.parent_id && db.prepare("SELECT 1 FROM session_message WHERE session_id = ? AND type = 'assistant' LIMIT 1").get(s.id)).at(-1)?.id;
     if (!root) return false;
     const ids = new Set([root]);

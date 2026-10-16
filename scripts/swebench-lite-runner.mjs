@@ -1454,6 +1454,7 @@ function emptyLiveResult(instance, status) {
     status,
     exit_code: null,
     signal: null,
+    root_session_id: null,
     patch_bytes: 0,
     patch_sha256: null,
     elapsed_ms: 0,
@@ -1519,7 +1520,7 @@ export async function runLive(value, options, dependencies = {}) {
       failure_stage: "candidate-runtime-preparation",
       failure: String(error?.message ?? error),
       ...(error?.code === undefined ? {} : { failure_code: error.code }),
-      task_execution_started: false, exit_code: null, patch_bytes: 0, patch_sha256: null,
+      task_execution_started: false, exit_code: null, root_session_id: null, patch_bytes: 0, patch_sha256: null,
       usage_complete: false, next_action: nextAction,
       ...(context?.cleanup_complete === false ? { candidate_runtime_cleanup: context } : {}),
     }));
