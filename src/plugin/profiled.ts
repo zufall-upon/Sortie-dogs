@@ -2594,7 +2594,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
       await control!.currentBudget(root);
-      mission = await missions.required(root);
+      mission = actor === root ? await reconcileMissionDispatch(root) ?? await missions.required(root) : await missions.required(root);
       let previous = await operators.read(root);
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
@@ -2612,12 +2612,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // A submitted Coordinator still owns corrective planning. Return its actual
         // continuation instead of referring to a Task that the rejection never supplied.
         // This is routing advice only: no replacement plan, reservation or admission.
-        const active = mission.dispatchOpen || mission.runID === previous?.runID &&
+        const packet = missionDispatchPacket(mission, previous);
+        const reviewPending = mission.runID === previous?.runID && mission.review?.verdict === "pending";
+        const active = mission.dispatchOpen || reviewPending || mission.runID === previous?.runID &&
           previous?.units.some(unit => unit.status === "running");
-        return JSON.stringify({ ...missionDispatchPacket(mission, previous),
+        const continuation = !active ? missions.task(mission) : undefined;
+        // Existing Coordinator resumes accept a concrete prompt. Do not use the opaque
+        // initial reference here: claim() would expand it from unchanged Mission state
+        // and lose the unadmitted correction that prompted this continuation.
+        const task = continuation && mission.coordinator !== null ? { ...continuation,
+          prompt: `Continue the same Mission ${mission.id} in this existing Coordinator session, in the user's language. ` +
+          "Retain the saved original requests, requirements, candidate, checks and cumulative budget.\n" +
+          "Proposed correction from Operator root (not admitted; preserve requirements, candidate and cumulative budget):\n" +
+          JSON.stringify({ units: raw, reason, execution, handoff_context: handoffNotes, work_quantities: workQuantities }) } : continuation;
+        return JSON.stringify({ ...packet,
           status: active ? "mission-coordinator-active" : "mission-coordinator-required",
-          ...(!active ? { task: missions.task(mission) } : {}),
-          next_action: active
+          ...(task ? { task } : {}),
+          next_action: reviewPending ? packet.next_action : active
             ? "Continue the active owning session or wait for its native completion; do not dispatch a duplicate Coordinator or Worker. The proposed plan has not been admitted."
             : "Dispatch this exact Task to continue the same Mission and Coordinator session with the concrete correction and retained checks. The proposed plan has not been admitted; keep requirements, candidate and cumulative budget unchanged." });
       }

@@ -48,6 +48,21 @@ Coordinatorまたはunitが稼働中ならTaskを返さず、元セッション�
 途中の修正では`executor=self`が継続Taskをdirect unitと誤認して失敗し、同じ作者が補正した。
 検証command、exit、所要時間、既存レビュー回収結果、費用観測は外部証跡とPRへ記録する。
 
+### PR #263 の既存レビュー
+
+レビュー本文・通常コメント・行コメントを回収した。本文と通常コメントは一般案内／実行状態。
+行コメント3件は既存契約と照合し、すべて有効として最小修正した。
+
+- `4289787568`（P1）: opaque参照だけでは未admitの検証修正内容が再開先に届かない。
+  既存Coordinatorの認可済みresume promptへ具体的提案と理由・引継ぎを載せ、admission後の受信内容を確認する。
+- `4289787576`（P1）: missed `tool.execute.after`／再起動時の古い`dispatchOpen`で誤待機する。
+  rootのplan処理で既存のnative終端照合を先に使い、同じCoordinator継続を回復する。
+- `4289787581`（P2）: Fast-laneのpending Review中にmulti-unit planを出すと並行Coordinatorを返す。
+  pending Reviewを稼働中として扱い、既存のReviewer待機案内を保持する。
+
+初回native独立ReviewはPASSだったが、この3経路の抜けを検出できなかった。
+CI成功を指摘解消の代替とせず、同じMission完遂fixtureの関連境界を補正する。
+
 ## 継続と会計
 
 実装作者はCoordinator `openai/gpt-6.1-sol`。モデル網羅のWorker委譲なし。
