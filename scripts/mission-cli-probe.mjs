@@ -106,7 +106,7 @@ export function completeProbeObservations(result, schemaRejected = false) {
  * finish persists completed evidence idempotently; a first late signal can require a re-save. */
 export async function monitorMissionCLI({ child, server, project, since, rootAgent, root, mode, rootModel, capUSD, timeoutSeconds,
   databasePath = missionDatabasePath(server.env ?? process.env, project), observe = observeMissionCLI, pending, finish, persistFailure }) {
-  let stdout = '', stderr = '', identityBuffer = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationRoot = root, observationError, cliError, usageIncomplete;
+  let stdout = '', stderr = '', identityBuffer = '', stopped = false, stopping, cutoff, stopObservation, controllerSignal, lastObserved, observationRoot = root, observationError, cliError, usageIncomplete, serverExited = false;
   const cleanupErrors = [];
   const cleanup = (target, run) => Promise.resolve().then(run).catch(error => {
     cleanupErrors.push({ target, name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
@@ -191,6 +191,13 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   const onInterrupt = () => interrupt('SIGINT'), onTerminate = () => interrupt('SIGTERM');
   process.on('SIGINT', onInterrupt);
   process.on('SIGTERM', onTerminate);
+  // Persisted pending rows cannot finish once their owned server has exited.
+  // Ignore our intentional teardown and preserve any earlier stop reason.
+  server.closed?.then(code => {
+    if (serverStopping || stopped) return;
+    serverExited = true;
+    failObservation(Object.assign(Error(`Owned server exited before native settlement (exit ${code})`), { code }), 'server-close');
+  });
   let code, signal;
   try {
     try {
@@ -223,7 +230,7 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
     }
     const observed = observeNow('final');
     await stopping; // A final read can fail after normal cleanup; retain one owned teardown.
-    const usageComplete = !usageIncomplete && !cleanupErrors.length;
+    const usageComplete = !usageIncomplete && !serverExited && !cleanupErrors.length;
     const evidence = { observed: observationError || cliError || cleanupErrors.length ? { ...observed, usage_complete: usageComplete,
       // Missing coverage retains the existing reservation. The floor is an accounting
       // marker, not a claim that an additional model request was observed.
@@ -237,7 +244,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
         nextAction: cleanupErrors.length
         ? 'Retry teardown only for the recorded owned CLI/server and verify all writers stopped, then reconcile database usage and saved CLI logs. Do not automatically replay the consumed task or restart the shared host.' : cliError
         ? 'Inspect the recorded CLI error, executable and working directory; reconcile the owned database usage and saved CLI logs. Do not automatically replay the consumed task.' : savedStop === 'cli-exit-failed'
-        ? 'Inspect the recorded CLI exit code/signal and saved logs; reconcile the owned database usage and Mission receipt before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : observationError
+        ? 'Inspect the recorded CLI exit code/signal and saved logs; reconcile the owned database usage and Mission receipt before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : serverExited
+        ? 'Inspect the recorded owned server exit and saved CLI logs; reconcile the retained database usage and Mission receipt. Do not automatically replay the consumed task or restart the shared host.' : observationError
         ? 'Inspect the recorded owned database and saved CLI logs; reconcile session usage. Do not automatically replay the consumed task.'
         : savedStop === 'controller-interrupted'
         ? 'Inspect the saved Mission receipt, owned database usage and CLI logs before deciding the next operation. Do not automatically replay the consumed task or restart the shared host.' : undefined };

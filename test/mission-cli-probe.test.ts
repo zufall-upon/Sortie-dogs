@@ -364,8 +364,11 @@ test("practical monitor freezes the owning server database for observation and n
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
   let stopped = false, settled = false;
+  let closeServer!: (code: number) => void;
+  const closed = new Promise<number>(done => { closeServer = done; });
   try {
-    const monitor = monitorMissionCLI({ child, server: { env: { OPENCODE_DB: path }, stop: async () => { stopped = true; } },
+    const monitor = monitorMissionCLI({ child, server: { env: { OPENCODE_DB: path }, closed,
+      stop: async () => { stopped = true; closeServer(0); } },
       root: "owned-root",
       project: directory, since, rootAgent: "dog-operator", mode: "complete", rootModel: expected,
       capUSD: 2, timeoutSeconds: 30,
@@ -392,6 +395,44 @@ test("practical monitor freezes the owning server database for observation and n
     await stopProcessGroup(child);
     db.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owned server exits before native settlement preserves the stopped attempt instead of waiting for timeout", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-server-exit-"));
+  const path = join(directory, "owned.db"), since = Date.now();
+  const db = seedObservationDatabase(path, directory, "owned-root", since, true);
+  const child = spawn(process.execPath, ["-e", "console.log('ROOT_TURN_CLOSED')"], {
+    detached: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let closeServer!: (code: number) => void, stops = 0, finishes = 0;
+  const closed = new Promise<number>(done => { closeServer = done; });
+  try {
+    const monitoring = monitorMissionCLI({ child, server: { env: { OPENCODE_DB: path }, closed,
+      stop: async () => { stops++; } }, root: "owned-root", project: directory, since,
+      rootAgent: "dog-operator", mode: "complete", rootModel: expected, capUSD: 2, timeoutSeconds: 1,
+      finish: async result => { finishes++; return result; } });
+    await new Promise<void>(done => child.once("close", () => done()));
+    closeServer(17);
+    const result = await monitoring;
+    assert.equal(result.stopped, "observation-failed");
+    assert.equal(result.stopObservation, "server-close");
+    assert.equal(result.code, 0, "preserve the root CLI exit, not the server exit");
+    assert.equal(result.signal, null);
+    assert.equal(result.observationError.code, 17);
+    assert.match(result.observationError.message, /owned server.*exited/i);
+    assert.equal(result.observed.usage_complete, false, "a readable final DB cannot prove coverage after server loss");
+    assert.equal(result.observed.known_unpriced_requests, 0);
+    assert.equal(result.observed.unpriced_requests, 1, "retain unresolved coverage rather than inventing a free request");
+    assert.equal(result.observed.root, "owned-root");
+    assert.match(result.stdout, /ROOT_TURN_CLOSED/);
+    assert.match(result.nextAction, /owned server exit/i);
+    assert.match(result.nextAction, /Do not automatically replay.*restart the shared host/);
+    assert.equal(stops, 1); assert.equal(finishes, 1);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM session_pending").get()!.count, 1,
+      "do not rewrite native pending state to manufacture settlement");
+  } finally {
+    await stopProcessGroup(child); db.close(); await rm(directory, { recursive: true, force: true });
   }
 });
 
