@@ -47,6 +47,29 @@ test("full status keeps actual model, scoped cost and next action visible at the
   assert.deepEqual(original, before, "serialization does not mutate canonical acceptance or evidence");
 });
 
+for (const view of ["full", "progress"]) test(`${view} status keeps the action prefix before oversized attempt history`, () => {
+  const retained = packet();
+  const original = { ...retained, view,
+    attempts: Array.from({ length: 256 }, (_, index) => ({
+      ...retained.attempts[0], childSessionID: `retained-worker-${index}`, status: "failed",
+      failure: { category: "implementation", code: "validation-failed:5" },
+    })),
+    next_action: "Declared validation failed. Continue the same diagnosed task; retain prior spend and do not replay it.",
+    execution_summary: { failed_units: 1, accepted: false },
+    completion: { ready: false },
+  };
+  const before = structuredClone(original);
+  assert.ok(Buffer.byteLength(JSON.stringify(original.attempts)) > 51200,
+    "the native transport cannot display this whole attempt-history line");
+  const output = serializeOperatorStatus(original), visible = nativeVisiblePrefix(output);
+  for (const fact of [original.next_action, '"failed_units":1', '"accepted":false',
+    '"ready":false', '"settled_cost_usd":0.04769424', '"cost_scope":"worker-only"',
+    '"campaign_remaining_usd":null', "loaded-adapter"]) assert.ok(visible.includes(fact), fact);
+  assert.ok(output.indexOf('"next_action"') < output.indexOf('"attempts"'));
+  assert.deepEqual(JSON.parse(output), before, "complete history and failure/model facts remain in full JSON");
+  assert.deepEqual(original, before, "rendering cannot mutate canonical state or promote failed validation");
+});
+
 test("status serialization preserves missing or unknown model/cost without promoting selected model or zero price", () => {
   const original = { attempts: [{ selectedModel: "openai/gpt-6-luna-fast#max", observedModel: null, observedVariant: null }],
     budget: { settled_cost_usd: 0, cost_status: "unknown", cost_scope: "worker-only", campaign_remaining_usd: null },
