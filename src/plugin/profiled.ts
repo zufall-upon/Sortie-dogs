@@ -251,8 +251,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
       const direct = await directExecution(child) ?? await reviewerCorrection(child);
-      return observedMissionValidationSummary(validation, child, typeof nativeSession?.messages === "function"
-        ? () => session("messages", { path: { id: child }, query: { directory: input.directory } }) : undefined, notBefore,
+      const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
+      return observedMissionValidationSummary(validation, child, typeof nativeSession?.[method] === "function"
+        ? () => session(method, { path: { id: child }, query: { directory: input.directory,
+          ...(notBefore === undefined ? {} : { notBefore: new Date(notBefore).toISOString() }) } }) : undefined, notBefore,
         notBefore === undefined ? undefined : input.directory,
         direct?.unit.directExecution?.validationCwd ?? direct?.unit.unit.validation_cwd);
     }
@@ -649,8 +651,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!correction) return undefined;
         const unit = correction.unit;
         const directories = unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
-        const progress = reviewerCorrectionValidation(unit.unit.validation, child, await messages(child),
-          Date.parse(unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt),
+        const admittedAt = unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt;
+        const progress = reviewerCorrectionValidation(unit.unit.validation, child, await reviewMessages(child, admittedAt),
+          Date.parse(admittedAt),
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory, directories,
           unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt);
         const members = canonicalObservedValidationMembers(command, unit.unit.validation, progress.nextOccurrence ?? 0);
@@ -670,7 +673,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child &&
           (item.reviewerCorrection?.author === child || item.directExecution?.actor === child));
         if (!unit) return undefined;
-        try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await messages(child),
+        // Compaction removes earlier tools from session.context, not from native history.
+        // Reuse the admission-window reader; saved checks still require their live input binding.
+        try { return await reviewerCorrectionValidationFresh(unit.unit.validation, child, await reviewMessages(child, new Date(startedAt).toISOString()),
           startedAt,
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? [], input.directory,
           unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt); }
@@ -3201,8 +3206,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function correctionValidationFailure(run: OperatorState): Promise<string | undefined> {
       for (const unit of run.units) {
         if (!unit.reviewerCorrection || !unit.childSessionID) continue;
-        const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await messages(unit.childSessionID),
-          Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt), unit.reviewerCorrection.checks ?? [], input.directory,
+        const admittedAt = unit.reviewerCorrection.admittedAt ?? run.createdAt;
+        const checked = await reviewerCorrectionValidationFresh(unit.unit.validation, unit.childSessionID, await reviewMessages(unit.childSessionID, admittedAt),
+          Date.parse(admittedAt), unit.reviewerCorrection.checks ?? [], input.directory,
           unit.directExecution?.validationCwd ?? unit.unit.validation_cwd, unit.reviewerCorrection.validationRegisteredAt);
         if (!checked.ready) return checked.reason;
       }
@@ -3216,7 +3222,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       callID: string, promptID: string | undefined, admittedAt: number, expectedSource?: string,
       suppliedHistory?: readonly Record<string, unknown>[]): Promise<import("../core/operator-mission.js").MissionSelfRecheck | undefined> {
       if (!promptID || !Number.isFinite(admittedAt) || mission.runID !== run.runID || run.phase !== "awaiting-acceptance") return undefined;
-      const history = suppliedHistory ?? await messages(author);
+      const history = suppliedHistory ?? await reviewMessages(author, new Date(admittedAt).toISOString());
       const prompt = history.findIndex(message => record(message.info) && message.info.id === promptID && message.info.role === "user" && message.info.sessionID === author);
       if (prompt < 0) return undefined;
       // Native shell Job completions are synthetic continuation input, not a new

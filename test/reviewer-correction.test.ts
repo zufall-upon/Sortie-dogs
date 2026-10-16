@@ -22,7 +22,7 @@ import type { OpenCodeHooks } from "../dist/plugin/index.js";
 const exec = promisify(execFile);
 type ObjectValue = Record<string, any>;
 
-async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number } = {}) {
+async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number; compactedHistory?: boolean } = {}) {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/reviewer-correction-"));
   for (const args of [["init", "--quiet", "--initial-branch=base"], ["config", "user.name", "test"], ["config", "user.email", "test@example.invalid"]]) {
@@ -46,6 +46,7 @@ async function fixture(options: { permissionsUnavailable?: boolean; contextWindo
   let tools: ObjectValue[], toolHooks: Map<string, Function>, sessionHooks: Map<string, Function>, permissionHook: Function, hooks: OpenCodeHooks;
   let cleanup: (() => void) | void, counter = 0;
   const nativeLaunches: ObjectValue[] = [];
+  const compaction = { start: null as number | null };
   const projection = { failGrant: false, failRestore: false, failRestorationLookup: false };
   const start = async () => {
     cleanup?.(); tools = [{ name: "subagent", execute: async (input: ObjectValue) => {
@@ -96,10 +97,24 @@ async function fixture(options: { permissionsUnavailable?: boolean; contextWindo
         switchModel: async input => { switches.push(input); agents[String(input.sessionID)]!.model = input.model; },
         hook: async (name, callback) => { sessionHooks.set(name, callback); return { dispose() {} }; } },
       permission: { hook: async (_name, callback) => { permissionHook = callback; return { dispose() {} }; } }, // NO rules API.
-      message: { list: async ({ sessionID }) => ({ data: history[sessionID] ?? [], cursor: {} }) },
+      message: { list: async ({ sessionID, order }) => ({
+        data: order === "desc" ? [...(history[String(sessionID)] ?? [])].reverse() : history[String(sessionID)] ?? [], cursor: {},
+      }) },
       provider: { list: async () => ({ data: [] }) }, model: { list: async () => ({ data: [] }) },
     };
-    cleanup = await createSortieDogsV2Plugin(async (input, options) => { hooks = await SortieDogsV010Plugin(input, options); return hooks; }).setup(context);
+    cleanup = await createSortieDogsV2Plugin(async (input, pluginOptions) => {
+      if (options.compactedHistory) {
+        const session = (input.client as ObjectValue).session, messages = session.messages;
+        // Match hosts where messages exposes only the compacted context, while
+        // reviewMessages retains the public paginated native admission history.
+        session.messages = async (request: ObjectValue) => {
+          const result = await messages(request);
+          return request.path?.id === "author" && compaction.start !== null
+            ? { ...result, data: result.data.slice(compaction.start) } : result;
+        };
+      }
+      hooks = await SortieDogsV010Plugin(input, pluginOptions); return hooks;
+    }).setup(context);
   };
   const permission = async (sessionID: string, action: string, resource: string | string[], savedAllow = false, callID?: string) => {
     // Permission.evaluateInput: configured deny is terminal before saved allow and hook.
@@ -190,7 +205,7 @@ async function fixture(options: { permissionsUnavailable?: boolean; contextWindo
     throw new Error("fixture-goal-ledger-missing");
   };
   await start();
-  return { directory, agents, history, storage, rules, switches, projection, globalRules, agentRules, registry: () => registry, start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
+  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, registry: () => registry, start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
     launch: (event: ObjectValue) => tools.find(tool => tool.name === "subagent")!.execute(event.input, { id: event.id, sessionID: event.sessionID }),
     hooks: () => hooks, context: (event: ObjectValue) => sessionHooks.get("context")!(event),
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
@@ -1356,6 +1371,38 @@ async function correctionReady(f: Awaited<ReturnType<typeof fixture>>) {
 
 const inlineReport = (unresolved: string[] = [], residual: unknown = null, candidate = "current-validated") =>
   `SELF_RECHECKED\nself_recheck: ${JSON.stringify({ candidate, unresolved_findings: unresolved, residual_major: residual })}\nCompared every original requirement, all retained findings, corrected source and relevant impact against actual fresh formal checks and clean commit.`;
+
+for (const mode of ["success", "latest-failure", "stale"] as const) test(`compacted correction retains native terminal and current validation: ${mode}`, async () => {
+  const f = await fixture({ compactedHistory: true });
+  try {
+    const { dispatch } = await initial(f, { keepReviewOpen: true, validation: ["node required-test.mjs", "node check.mjs"] });
+    await f.tool("author", "repair_review", { findings: "Medium: result.txt must contain ready output." });
+    await f.edit("author", "ready");
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
+    const checks = (await f.run()).units[0]!.reviewerCorrection!.checks!;
+    f.compaction.start = f.history.author!.length; // The admission prompt and successful tools leave context together.
+    if (mode === "latest-failure") {
+      await f.edit("author", "bad-required"); await f.shell("author", "node required-test.mjs");
+      await f.edit("author", "ready"); // Restored bytes do not erase the later native failure.
+    } else if (mode === "stale") await f.edit("author", "ready changed after validation");
+    const finished = await f.tool("author", "finish_direct_unit");
+    if (mode !== "success") {
+      assert.equal(finished.status, "direct-unit-awaits-validation");
+      assert.match(finished.reason, mode === "latest-failure" ? /validation-failed/ : /validation-stale/);
+      await assert.rejects(f.tool("root", "complete_mission"), /validation|incomplete/);
+      assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+      return;
+    }
+    assert.equal(finished.status, "correction-validated");
+    const returned = JSON.parse(await f.finish(dispatch, "author", inlineReport()));
+    assert.equal(returned.status, "review-correction-recorded", JSON.stringify(returned));
+    assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, checks, "no successful native check is repeated or replaced");
+    assert.equal((await f.tool("root", "review_mission", { risk_tags: ["public-logic"] })).status, "review-recorded");
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+  } finally { await f.dispose(); }
+});
 
 for (const mode of ["foreground", "background", "background-cold"] as const) {
   test(`stale inline correction terminal cannot block subsequent native prompts: ${mode}`, async () => {

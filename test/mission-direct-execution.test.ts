@@ -19,7 +19,7 @@ import { directHandoffValidationChecks } from "../dist/plugin/mission-review.js"
 const exec = promisify(execFile);
 
 const directModes = ["handoff-reload", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
-for (const actor of ["root", "coordinator"]) for (const mode of directModes.filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const incomplete = mode === "blocked" || mode === "needs-decision";
@@ -63,16 +63,23 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
     const history: Record<string, Record<string, unknown>[]> = {};
     const aborted: string[] = [];
     let historyAvailable = true;
+    const compacted = mode.startsWith("compacted-");
+    const paginatedStarts: string[] = [];
     let historyBarrier: (() => Promise<void>) | undefined;
     const create = () => SortieDogsV010Plugin({ directory, client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       messages: async ({ path }: { path: { id: string } }) => {
         await historyBarrier?.();
         if (historyAvailable) return { data: history[path.id] ?? [] };
+        if (compacted) return { data: (history[path.id] ?? []).map(message => ({ ...message,
+          parts: (message.parts as { tool?: string }[] ?? []).filter(part => part.tool !== "bash") })) };
         return mode === "recovery-paginated" ? { data: (history[path.id] ?? []).map(message => ({ ...message,
           parts: (message.parts as { tool?: string }[] ?? []).filter(part => part.tool !== "sortie_v010_finish_direct_unit") })) } : undefined;
       },
-      ...(mode === "recovery-paginated" ? { reviewMessages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }) } : {}),
+      ...(mode === "recovery-paginated" || compacted ? { reviewMessages: async ({ path, query }: { path: { id: string }; query?: { notBefore?: string } }) => {
+        if (query?.notBefore) paginatedStarts.push(query.notBefore);
+        return { data: history[path.id] ?? [] };
+      } } : {}),
       children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents).filter(([, item]) => item.parentID === path.id)
         .map(([id, item]) => ({ id, ...item })) }),
       abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); agents[path.id]!.outcome = "interrupted"; return { data: true }; },
@@ -381,6 +388,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
       assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
       hooks = await create();
     }
+    if (compacted) historyAvailable = false; // Native history survives when the model's context window no longer contains checks.
     assert.equal(await check(), 0);
     if (externalDirectory) {
       const count = (await readRun()).units[0]!.directExecution!.checks.length;
@@ -506,12 +514,24 @@ for (const actor of ["root", "coordinator"]) for (const mode of directModes.filt
       await write("Actual native check passed.\n", "reports/result.md");
     }
     hooks = await create(); // The saved native checks, not live hook memory, authorize finish.
+    if (mode === "compacted-latest-failure") {
+      await write("bad\n");
+      assert.equal(await check(), 1);
+      await writeFile(join(directory, resultPath), "fixed\n");
+    } else if (mode === "compacted-stale") await write("changed after validation\n");
     if (mode.startsWith("parent-")) {
       const previousOutcome = mode.slice("parent-".length);
       if (previousOutcome === "unset") delete agents[actor]!.outcome;
       else agents[actor]!.outcome = previousOutcome;
     }
     const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
+    if (compacted) assert.ok(paginatedStarts.includes(before.units[0]!.directExecution!.startedAt),
+      "read the actual admission window instead of the compacted context");
+    if (mode === "compacted-latest-failure" || mode === "compacted-stale") {
+      assert.equal(finished.status, "direct-unit-awaits-validation");
+      assert.equal((await readRun()).units[0]!.evidence.length, 0, "old success cannot hide a later failure or changed inputs");
+      return;
+    }
     assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
     const done = await readRun();
     assert.equal(done.phase, "awaiting-acceptance", JSON.stringify(done));
