@@ -198,8 +198,24 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
   const child = spawn(launch.executable, launch.args, {
     cwd, env: serverEnv, shell: false, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const closed = new Promise(resolve => child.once('close', resolve));
-  child.stderr.resume();
+  let stdoutTail = '', stderrTail = '', termination;
+  const startedAt = Date.now();
+  const diagnosticTail = text => {
+    // Both the requested and service-generated passwords can appear in startup output.
+    for (const secret of [password, serverEnv.OPENCODE_SERVER_PASSWORD]) {
+      if (secret) text = text.split(secret).join('[REDACTED]');
+    }
+    return text.slice(-8_192);
+  };
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', data => { stdoutTail = (stdoutTail + data).slice(-16_384); });
+  child.stderr.on('data', data => { stderrTail = (stderrTail + data).slice(-16_384); });
+  // Retain the numeric closed Promise for existing callers; diagnostics are additive.
+  const closed = new Promise(resolve => child.once('close', (code, signal) => {
+    termination = { pid: child.pid ?? null, code, signal, started_at_ms: startedAt, closed_at_ms: Date.now() };
+    resolve(code);
+  }));
   try {
     const url = await new Promise((resolveReady, rejectReady) => {
       let output = '';
@@ -235,7 +251,10 @@ export async function startV2ReleaseServer(cwd, env, { inheritEnvironment = true
       const databasePath = missionDatabasePath(serverEnv, cwd);
       await seedIsolatedV2Credential(credentialSource, databasePath, dirname(databasePath), { ifMissing: true });
     }
-    return { url, env: serverEnv, pid: child.pid, closed, stop: () => stopProcessGroup(child) };
+    return { url, env: serverEnv, pid: child.pid, closed,
+      get termination() { return termination && { ...termination,
+        stdout_tail: diagnosticTail(stdoutTail), stderr_tail: diagnosticTail(stderrTail) }; },
+      stop: () => stopProcessGroup(child) };
   } catch (error) {
     try { await stopProcessGroup(child); }
     catch (cleanupError) {

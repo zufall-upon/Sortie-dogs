@@ -436,6 +436,36 @@ test("owned server exits before native settlement preserves the stopped attempt 
   }
 });
 
+test("owned server signal and bounded diagnostic output survive the monitor receipt", {
+  timeout: 60_000, skip: process.platform === "win32",
+}, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-server-signal-"));
+  try {
+    const output = execFileSync(process.execPath, ["--experimental-vm-modules",
+      // Allow the real 30s startup bound, 5s monitor and owned-process cleanup to settle.
+      resolve("test/fixtures/owned-server-signal-controller.mjs"), directory], { encoding: "utf8", timeout: 50_000 });
+    const result = JSON.parse(await readFile(join(directory, "signal-receipt.json"), "utf8"));
+    assert.match(output, /PASS_OWNED_SERVER_SIGNAL_DIAGNOSTICS/);
+    assert.equal(result.stopped, "observation-failed");
+    assert.equal(result.code, 0, "root CLI outcome remains independent");
+    assert.equal(result.observation_error.code, null);
+    const exit = result.observation_error.server_exit;
+    assert.equal(exit.signal, "SIGTERM");
+    assert.equal(exit.code, null);
+    assert.ok(exit.pid > 0);
+    assert.ok(exit.closed_at_ms >= exit.started_at_ms);
+    assert.ok(exit.stdout_tail.length <= 8192 && exit.stderr_tail.length <= 8192);
+    assert.match(exit.stderr_tail, /fixture-server-failure/);
+    assert.match(exit.stdout_tail, /\[REDACTED\]/);
+    assert.match(exit.stderr_tail, /\[REDACTED\]/);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-service-password/);
+    assert.equal(result.usage_complete, false);
+    assert.equal(result.unpriced_requests, 1);
+    assert.equal(result.closed_promise_value, null, "closed still resolves to the original numeric-or-null code");
+    assert.equal(result.spawns, 1, "no replacement server or native model request");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const phase of ["budget", "settlement", "missing", "no-root-first", "stable"]) {
   test(`practical monitor retains its first observed root through ${phase}`, { timeout: 10_000 }, async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-monitor-root-"));
