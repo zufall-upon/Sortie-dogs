@@ -404,7 +404,8 @@ export class CodexMissionSession {
               ["commandExecution", "fileChange", "mcpToolCall"].includes(String(item.type)) &&
               !["completed", "failed", ...(item.type === "mcpToolCall" ? [] : ["declined"])].includes(String(item.status)))
             throw new Error(`Codex thread ${id} has an unresolved native execution; no resend. Reconcile its native execution before resuming.`);
-          if (item.type !== "dynamicToolCall" || item.status === "completed" && (turn.status === "completed" || item.success === true)) continue;
+          if (item.type !== "dynamicToolCall" || ["completed", "failed"].includes(String(item.status)) &&
+              (turn.status === "completed" || item.success === true)) continue;
           const unique = turns.flatMap(entry => Array.isArray(entry.items) ? entry.items.filter(object) : []).filter(entry => entry.id === item.id).length === 1;
           if (!unique) throw new Error(`Codex thread ${id} has an unresolved tool execution; no resend.`);
           if (await this.recoverNotStarted(id, turn, item)) {

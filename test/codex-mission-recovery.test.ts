@@ -309,7 +309,7 @@ async function goalSettlements(directory: string): Promise<number> {
   return count;
 }
 
-for (const state of ["terminal", "active", "unknown-turn", "unknown-command", "live-owner"] as const)
+for (const state of ["terminal", "active", "unknown-turn", "unknown-command", "live-owner", "interrupted-parent-failure"] as const)
 test(`cold Coordinator without native parent Task history: ${state}`, { timeout: 15000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-retained-coordinator-"));
   let adapter: CodexMissionSession | undefined, failure: unknown;
@@ -341,10 +341,16 @@ test(`cold Coordinator without native parent Task history: ${state}`, { timeout:
       native.turns[0].status = "interrupted";
       return [native.id, { id: native.id, cwd: directory, modelProvider: "openai", model: "gpt-6.1-sol", turns: structuredClone(native.turns) }];
     }));
+    // The prior resume itself completed after a pre-dispatch refusal. Current
+    // Codex stores these explicit negative receipts as failed, not completed.
+    threads.root.turns.push({ id: "refused-resume", status: "completed", itemsView: "full", items: [{
+      type: "dynamicToolCall", id: "refused-task", tool: "task", arguments: missions.task(before), status: "failed", success: false,
+      contentItems: [{ type: "inputText", text: "mission-dispatch-not-authorized: Coordinator Task is still admitted" }] }] });
     if (state === "active") threads.coordinator.turns[0].status = "inProgress";
     if (state === "unknown-turn") delete threads.coordinator.turns[0].status;
     if (state === "unknown-command") threads.coordinator.turns[0].items.push({ type: "commandExecution", id: "unknown", status: "inProgress" });
     if (state === "live-owner") await missions.update("root", mission => { mission.codexOwner!.closed = false; });
+    if (state === "interrupted-parent-failure") threads.root.turns[1].status = "interrupted";
     const restored: ScriptedTransport[] = [];
     const events: Json[] = [];
     adapter = await CodexMissionSession.create({ projectRoot: directory, onEvent: event => { events.push(event); }, transportFactory: () => {
@@ -374,7 +380,7 @@ test(`cold Coordinator without native parent Task history: ${state}`, { timeout:
       return native;
     } });
     if (state !== "terminal") {
-      await assert.rejects(adapter.run("Continue the same Mission"), /unproven execution|unresolved native execution|codex-mission-owner-active/);
+      await assert.rejects(adapter.run("Continue the same Mission"), /unproven execution|unresolved (native|tool) execution|codex-mission-owner-active/);
       assert(restored.every(native => native.turnStarts === 0 && native.commandExecutions === 0));
       assert.equal((await missions.required("root")).dispatchOpen, true);
       assert.equal(await goalSettlements(directory), 0);
