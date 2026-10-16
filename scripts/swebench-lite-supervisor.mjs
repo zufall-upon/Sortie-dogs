@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile, appendFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -84,7 +84,7 @@ async function processStat(pid) {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(") ");
     const fields = close < 0 ? [] : stat.slice(close + 2).trim().split(/\s+/u);
-    return { state: fields[0] ?? null, starttime: fields[19] ?? null };
+    return { state: fields[0] ?? null, group: fields[2] ?? null, starttime: fields[19] ?? null };
   } catch {
     return null;
   }
@@ -94,20 +94,43 @@ export async function processIdentity(pid = process.pid) {
   return { pid, starttime: (await processStat(pid))?.starttime ?? null };
 }
 
-export async function processAlive(identity) {
-  if (!record(identity) || !Number.isInteger(identity.pid)) return false;
+const exitedProcess = stat => stat && ["Z", "X", "x"].includes(stat.state);
+
+async function matchingProcess(identity) {
+  if (!record(identity) || !Number.isInteger(identity.pid)) return null;
   try { process.kill(identity.pid, 0); }
-  catch { return false; }
+  catch { return null; }
   const stat = await processStat(identity.pid);
+  if (identity.starttime !== null && identity.starttime !== undefined && stat?.starttime !== identity.starttime) return null;
+  return stat ?? { state: null };
+}
+
+export async function processAlive(identity) {
+  const stat = await matchingProcess(identity);
   // kill(pid, 0) also succeeds for an exited child awaiting its parent's waitpid.
-  if (stat && ["Z", "X", "x"].includes(stat.state)) return false;
-  if (identity.starttime === null || identity.starttime === undefined) return true;
-  return stat?.starttime === identity.starttime;
+  return stat !== null && !exitedProcess(stat);
+}
+
+async function processGroupAlive(identity) {
+  if (process.platform !== "linux") return processAlive(identity);
+  const leader = await processStat(identity.pid);
+  if (leader && identity.starttime != null && leader.starttime !== identity.starttime) return false;
+  if (leader && !exitedProcess(leader)) return true;
+  // A zombie/reaped leader can leave live writers in its detached process group.
+  let entries;
+  try { entries = await readdir("/proc"); }
+  catch { return true; } // Unreadable membership cannot establish cleanup.
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const stat = await processStat(Number(entry));
+    if (stat?.group === String(identity.pid) && !exitedProcess(stat)) return true;
+  }
+  return false;
 }
 
 async function killProcessGroup(identity) {
   if (!record(identity) || !Number.isInteger(identity.pid)) return true;
-  if (!await processAlive(identity)) return true;
+  if (!await matchingProcess(identity)) return true;
   if (process.platform === "win32") {
     const killer = spawn("taskkill.exe", ["/PID", String(identity.pid), "/T", "/F"], {
       stdio: "ignore", windowsHide: true,
@@ -119,12 +142,12 @@ async function killProcessGroup(identity) {
     return !(await processAlive(identity));
   }
   try { process.kill(-identity.pid, "SIGTERM"); } catch { /* already stopped */ }
-  for (let attempt = 0; attempt < 50 && await processAlive(identity); attempt += 1) await sleep(100);
-  if (await processAlive(identity)) {
+  for (let attempt = 0; attempt < 50 && await processGroupAlive(identity); attempt += 1) await sleep(100);
+  if (await processGroupAlive(identity)) {
     try { process.kill(-identity.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
-  for (let attempt = 0; attempt < 20 && await processAlive(identity); attempt += 1) await sleep(100);
-  return !(await processAlive(identity));
+  for (let attempt = 0; attempt < 20 && await processGroupAlive(identity); attempt += 1) await sleep(100);
+  return !(await processGroupAlive(identity));
 }
 
 export async function acquireRunLock(runRoot) {

@@ -439,28 +439,62 @@ test("supervisor lock rejects a second owner and releases cleanly", async () => 
   }
 });
 
-async function withUnreapedChild(check: (identity: { pid: number; starttime: string | null }) => Promise<void>) {
+async function withUnreapedChild(check: (identity: { pid: number; starttime: string | null },
+  member?: { pid: number; starttime: string | null }) => Promise<void>, groupMember: boolean | "ignore-term" = false) {
   // Keep the parent alive so the test, not the container's PID 1, reaps the child.
   const parent = spawn("python3", ["-c", `
-import os, sys
+import ctypes, json, os, signal, sys, time
+group = sys.argv[1] != "single"
+if group:
+    # Adopt/reap the group member after its leader exits, including on failure.
+    if ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) != 0:
+        raise RuntimeError("could not become child subreaper")
 reader, writer = os.pipe()
+ready_reader, ready_writer = os.pipe()
 pid = os.fork()
 if pid == 0:
     os.close(writer)
+    os.close(ready_reader)
+    member = None
+    if group:
+        os.setsid()
+        if sys.argv[1] == "ignore-term":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        member = os.fork()
+        if member == 0:
+            os.close(reader)
+            os.close(ready_writer)
+            time.sleep(60)
+            os._exit(0)
+    os.write(ready_writer, json.dumps(member).encode())
+    os.close(ready_writer)
     os.read(reader, 1)
     os._exit(0)
 os.close(reader)
-print(pid, flush=True)
+os.close(ready_writer)
+member = json.loads(os.read(ready_reader, 100))
+os.close(ready_reader)
+print(json.dumps({"pid": pid, "member": member}), flush=True)
 sys.stdin.readline()
 os.close(writer)
+if member:
+    while True:
+        try:
+            if os.waitpid(member, os.WNOHANG)[0] == member:
+                break
+        except ChildProcessError:
+            pass  # The leader has not exited/reparented the member yet.
+        time.sleep(0.01)
 sys.stdin.readline()
 os.waitpid(pid, 0)
-`], { stdio: ["pipe", "pipe", "inherit"] });
+`, groupMember === "ignore-term" ? "ignore-term" : groupMember ? "group" : "single"], { stdio: ["pipe", "pipe", "inherit"] });
   const closed = once(parent, "close");
-  let pid: number | undefined;
+  let pid: number | undefined, member: number | undefined;
   try {
     const [data] = await once(parent.stdout, "data");
-    pid = Number(String(data).trim());
+    const ready = JSON.parse(String(data));
+    pid = ready.pid;
+    member = ready.member ?? undefined;
     const identity = await processIdentity(pid);
     assert.equal(typeof identity.starttime, "string");
     assert.equal(await processAlive(identity), true);
@@ -478,8 +512,11 @@ os.waitpid(pid, 0)
     assert.equal(state, "Z", "the child must remain unreaped during the assertions");
     process.kill(pid, 0); // PID existence alone deliberately still succeeds.
     assert.deepEqual(await processIdentity(pid), identity, "the PID identity is unchanged after exit");
-    await check(identity);
+    await check(identity, member === undefined ? undefined : await processIdentity(member));
   } finally {
+    if (member !== undefined) {
+      try { process.kill(member, "SIGKILL"); } catch { /* already reaped */ }
+    }
     // Also release a stopped child if a liveness assertion above fails.
     if (pid !== undefined) {
       try { process.kill(pid, "SIGCONT"); } catch { /* already reaped */ }
@@ -554,6 +591,43 @@ test("resume reclaims a zombie supervisor lock without replaying its completed c
       await runSupervisor(manifestValue, options, fakeDependencies(runs));
       assert.deepEqual(runs, ["example__project-2"], "terminal evidence is not re-inferred");
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("user stop terminates live group members behind a zombie runner leader", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-zombie-member-"));
+  try {
+    for (const mode of [true, "ignore-term"] as const) {
+      await withUnreapedChild(async (identity, member) => {
+        assert.ok(member);
+        assert.equal(await processAlive(identity), false);
+        assert.equal(await processAlive(member), true, "a dead runner leader does not imply its writers stopped");
+        const state = await createSupervisorState(manifestValue, {
+          manifestPath: join(root, "manifest.json"), runRoot: root,
+          output: join(root, "predictions.jsonl"), costLimitUsd: 2,
+        });
+        state.instances[0].status = "running";
+        state.instances[0].attempt = 1;
+        state.instances[0].runner = { ...identity, starttime: `${identity.starttime}-other` };
+        state.instances[0].cost_reservation_usd = 1;
+        const statePath = join(root, "supervisor-state.json");
+        await writeAtomicJson(statePath, state);
+        await stopSupervisor(statePath);
+        assert.equal(await processAlive(member), true, "a mismatched leader identity must not signal the group");
+        state.instances[0].runner = identity;
+        await writeAtomicJson(statePath, state);
+        const stopped = await stopSupervisor(statePath);
+        assert.equal(await processAlive(member), false, "stop must signal and await remaining group writers");
+        assert.equal(stopped.status, "failed");
+        assert.equal(stopped.failure, "user-stopped");
+        assert.equal(stopped.instances[0].status, "interrupted");
+        assert.equal(stopped.held_unknown_usd, 1);
+      }, mode);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

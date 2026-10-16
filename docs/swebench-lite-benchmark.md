@@ -344,7 +344,9 @@ A stopped process (`T`, for example after `SIGSTOP`) remains a live owner. Resum
 can reclaim a zombie owner's lock through the existing recovery path: retained
 child predictions, recorded spend and unknown-usage holds survive; consumed
 instances are not dispatched again. This does not restart a stopped owner or
-change the runner's inference deadlines.
+change the runner's inference deadlines. Cleanup separately checks live process-group
+members: an exited leader does not skip signals to remaining writers, while a
+zombie-only group does not block termination confirmation.
 
 ## 7. Run incremental official scoring
 
