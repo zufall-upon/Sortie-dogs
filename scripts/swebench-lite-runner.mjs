@@ -1079,7 +1079,9 @@ export function readDirectoryUsage(directory, databasePath = usageDatabasePath()
         // Keep actual native usage identities from this same read, not configured
         // routes or incomplete/zero-token assistant placeholders. Price coverage
         // is independent: an unpriced native response can still identify its model.
-        if (Number.isFinite(message.time?.completed) && message.time.completed >= 0 &&
+        const completed = Number.isFinite(message.time?.completed) && message.time.completed >= 0 ||
+          v2 && row.type === "compaction" && message.status === "completed";
+        if (completed &&
             [tokens.input, tokens.output, tokens.reasoning, tokens.cache?.read, tokens.cache?.write]
               .some(value => typeof value === "number" && Number.isFinite(value) && value > 0)) {
           const known = value => typeof value === "string" && value.length > 0 ? value : null;

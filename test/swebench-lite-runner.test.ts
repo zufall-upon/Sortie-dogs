@@ -199,7 +199,7 @@ for (const v2 of [true, false]) test(`native model usage survives pricing and ke
       ...(v2 ? { providerState: { serviceTier: "standard", private: "private-provider-detail" } } : { serviceTier: "standard" }) });
     add("worker", "assistant", message("unpriced-model", null, null, "unsupported"));
     add("worker", "assistant", message(null, "dogs-coordinator"));
-    add("worker", "assistant", { ...message("gpt-6-astra", "dog-worker-v010", "max"), time: { created: 3 } });
+    add("worker", "assistant", { ...message("gpt-6-astra", "dog-worker-v010", "max"), status: "completed", time: { created: 3 } });
     add("worker", "assistant", { ...message("gpt-6-astra", "dog-worker-v010", "max"),
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } });
     add("worker", "assistant", { ...message("gpt-6-astra", "configured-only", "max"), tokens: undefined, time: { created: 3 } });
@@ -231,6 +231,38 @@ for (const v2 of [true, false]) test(`native model usage survives pricing and ke
     assert.ok(usage.unpriced.includes(v2 ? "pending-usage" : "missing-usage"));
     assert.doesNotMatch(JSON.stringify(usage.native_model_usage), /private-prompt|configured-only|other-directory|gpt-6-astra|gpt-5.6-terra/u);
     assert.equal(createHash("sha256").update(await readFile(path)).digest("hex"), before, "existing read-only native query never writes the DB");
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("V2 native compaction model usage accepts completed status without an assistant timestamp", async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-compaction-status-"));
+  const path = join(root, "opencode.db"), workspace = join(root, "workspace");
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("CREATE TABLE session_v2 (id TEXT, directory TEXT, agent TEXT, model TEXT); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)");
+    db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?)").run("worker", workspace, "dog-worker-v010",
+      JSON.stringify({ providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }));
+    const write = db.prepare("INSERT INTO session_message VALUES ('worker', ?, ?)");
+    const tokens = { input: 1000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } };
+    const cached = { input: 0, output: 0, reasoning: 0, cache: { read: 1000, write: 0 } };
+    // Existing native shape: anko-benchmark-runner.test.mjs's owned compaction fixture.
+    const completed = { status: "completed", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "low" }, tokens };
+    for (const record of [completed, { ...completed, tokens: cached }, { ...completed, status: "running" },
+      { ...completed, status: "failed" }, { ...completed, status: undefined },
+      { ...completed, tokens: { ...cached, cache: { read: 0, write: 0 } } }, { ...completed, tokens: undefined }]) {
+      write.run("compaction", JSON.stringify(record));
+    }
+    write.run("assistant", JSON.stringify(completed));
+    const usage = readDirectoryUsage(workspace, path);
+    assert.deepEqual(usage.native_model_usage, [{ session_id: "worker", agent: null,
+      model: completed.model, event_type: "compaction", service_tier: null, usage_records: 2 }],
+      "only native completed positive-token compactions qualify; do not borrow the configured Worker model or role");
+    assert.equal(usage.requests, 7, "the existing cost reader still prices token-bearing rows independently of observation status");
+    const price = (value: typeof tokens) => benchmarkModelCost({ providerID: "openai", modelID: "gpt-6.1-sol",
+      uncachedInputTokens: value.input, outputTokens: value.output, reasoningTokens: value.reasoning,
+      cacheReadTokens: value.cache.read, cacheWriteTokens: value.cache.write }).usd;
+    assert.ok(Math.abs(usage.usd - (5 * price(tokens) + price(cached))) < 1e-12);
+    assert.deepEqual(usage.unpriced, ["pending-usage"], "missing compaction usage is not made completely priced");
   } finally { db.close(); await rm(root, { recursive: true, force: true }); }
 });
 

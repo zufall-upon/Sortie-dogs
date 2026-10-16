@@ -428,7 +428,9 @@ Retain these together for reproducibility:
 that same read-only usage scan. Each entry groups session, native message agent,
 provider/model/variant, native service tier and assistant-versus-compaction event type; `usage_records`
 counts completed records with positive reported tokens, not benchmark attempts or
-all outbound requests. Compaction entries are not Worker-turn coverage.
+all outbound requests. V2 compactions may use `status: "completed"` instead of an
+assistant completion timestamp; this status shortcut does not apply to assistant
+or legacy rows. Compaction entries are not Worker-turn coverage.
 Pending or zero-token placeholders are not observations;
 missing identity fields remain `null`, never a configured route/default. Unpriced
 responses can still identify a model without becoming free or completely priced.
