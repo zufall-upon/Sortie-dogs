@@ -128,9 +128,14 @@ async function processGroupAlive(identity) {
   return false;
 }
 
-async function killProcessGroup(identity) {
+async function killProcessGroup(identity, { processOnly = false } = {}) {
   if (!record(identity) || !Number.isInteger(identity.pid)) return true;
-  if (!await matchingProcess(identity)) return true;
+  if (!await matchingProcess(identity)) {
+    // A reaped Linux leader leaves its PGID reserved while group members remain.
+    // A present but mismatched leader is PID reuse, not permission to signal it.
+    if (processOnly || process.platform !== "linux" || await processStat(identity.pid) ||
+      !await processGroupAlive(identity)) return true;
+  }
   if (process.platform === "win32") {
     const killer = spawn("taskkill.exe", ["/PID", String(identity.pid), "/T", "/F"], {
       stdio: "ignore", windowsHide: true,
@@ -141,13 +146,15 @@ async function killProcessGroup(identity) {
     });
     return !(await processAlive(identity));
   }
-  try { process.kill(-identity.pid, "SIGTERM"); } catch { /* already stopped */ }
-  for (let attempt = 0; attempt < 50 && await processGroupAlive(identity); attempt += 1) await sleep(100);
-  if (await processGroupAlive(identity)) {
-    try { process.kill(-identity.pid, "SIGKILL"); } catch { /* already stopped */ }
+  const target = processOnly ? identity.pid : -identity.pid;
+  const alive = () => processOnly ? processAlive(identity) : processGroupAlive(identity);
+  try { process.kill(target, "SIGTERM"); } catch { /* already stopped */ }
+  for (let attempt = 0; attempt < 50 && await alive(); attempt += 1) await sleep(100);
+  if (await alive()) {
+    try { process.kill(target, "SIGKILL"); } catch { /* already stopped */ }
   }
-  for (let attempt = 0; attempt < 20 && await processGroupAlive(identity); attempt += 1) await sleep(100);
-  return !(await processGroupAlive(identity));
+  for (let attempt = 0; attempt < 20 && await alive(); attempt += 1) await sleep(100);
+  return !(await alive());
 }
 
 export async function acquireRunLock(runRoot) {
@@ -448,7 +455,7 @@ export async function stopSupervisor(statePath) {
   const writes = stateWriteQueue(state, statePath);
   try {
     if (state.instances?.some(entry => entry.status === "running")) await markInterrupted(state);
-    if (state.watchdog?.pid) await killProcessGroup(state.watchdog.pid);
+    if (state.watchdog?.pid) await killProcessGroup(state.watchdog.pid, { processOnly: true });
     state.watchdog ??= { pid: null, report: join(state.run_root, "watchdog-report.jsonl") };
     state.watchdog.pid = null;
     state.status = "failed";
@@ -516,6 +523,11 @@ export async function runSupervisor(value, options, dependencies = {}) {
     state.heartbeat ??= { sequence: 0, at: now(), supervisor: await processIdentity() };
     state.heartbeat.sequence = Number.isInteger(state.heartbeat.sequence) ? state.heartbeat.sequence : 0;
     state.watchdog ??= { pid: null, report: join(runRoot, "watchdog-report.jsonl") };
+    if (state.watchdog.pid) {
+      // Watchdogs are direct children, not detached process-group leaders.
+      ensure(await killProcessGroup(state.watchdog.pid, { processOnly: true }), "previous-watchdog-termination-failed");
+      state.watchdog.pid = null;
+    }
     state.heartbeat.supervisor = await processIdentity();
     state.model_name_or_path ??= `sortie-dogs@${value.candidate?.version}+${String(value.candidate?.sha256 ?? "").slice(0, 12)}`;
     if (state.status === "running") await markInterrupted(state);

@@ -440,7 +440,8 @@ test("supervisor lock rejects a second owner and releases cleanly", async () => 
 });
 
 async function withUnreapedChild(check: (identity: { pid: number; starttime: string | null },
-  member?: { pid: number; starttime: string | null }) => Promise<void>, groupMember: boolean | "ignore-term" = false) {
+  member?: { pid: number; starttime: string | null }) => Promise<void>, groupMember: boolean | "ignore-term" = false,
+  reapLeader = false) {
   // Keep the parent alive so the test, not the container's PID 1, reaps the child.
   const parent = spawn("python3", ["-c", `
 import ctypes, json, os, signal, sys, time
@@ -477,6 +478,9 @@ os.close(ready_reader)
 print(json.dumps({"pid": pid, "member": member}), flush=True)
 sys.stdin.readline()
 os.close(writer)
+if sys.argv[2] == "reap":
+    os.waitpid(pid, 0)
+    print("reaped", flush=True)
 if member:
     while True:
         try:
@@ -486,8 +490,10 @@ if member:
             pass  # The leader has not exited/reparented the member yet.
         time.sleep(0.01)
 sys.stdin.readline()
-os.waitpid(pid, 0)
-`, groupMember === "ignore-term" ? "ignore-term" : groupMember ? "group" : "single"], { stdio: ["pipe", "pipe", "inherit"] });
+if sys.argv[2] != "reap":
+    os.waitpid(pid, 0)
+`, groupMember === "ignore-term" ? "ignore-term" : groupMember ? "group" : "single",
+  reapLeader ? "reap" : "keep"], { stdio: ["pipe", "pipe", "inherit"] });
   const closed = once(parent, "close");
   let pid: number | undefined, member: number | undefined;
   try {
@@ -501,24 +507,30 @@ os.waitpid(pid, 0)
     process.kill(pid, "SIGSTOP");
     assert.equal(await processAlive(identity), true, "a stopped process is still a live owner");
     process.kill(pid, "SIGCONT");
+    const reaped = reapLeader ? once(parent.stdout, "data") : null;
     parent.stdin.write("exit-child\n");
-    let state;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-      state = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/u)[0];
-      if (state === "Z") break;
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+    if (reaped) {
+      await reaped;
+      await assert.rejects(readFile(`/proc/${pid}/stat`, "utf8"), { code: "ENOENT" });
+    } else {
+      let state;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+        state = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/u)[0];
+        if (state === "Z") break;
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+      }
+      assert.equal(state, "Z", "the child must remain unreaped during the assertions");
+      process.kill(pid, 0); // PID existence alone deliberately still succeeds.
+      assert.deepEqual(await processIdentity(pid), identity, "the PID identity is unchanged after exit");
     }
-    assert.equal(state, "Z", "the child must remain unreaped during the assertions");
-    process.kill(pid, 0); // PID existence alone deliberately still succeeds.
-    assert.deepEqual(await processIdentity(pid), identity, "the PID identity is unchanged after exit");
     await check(identity, member === undefined ? undefined : await processIdentity(member));
   } finally {
     if (member !== undefined) {
       try { process.kill(member, "SIGKILL"); } catch { /* already reaped */ }
     }
     // Also release a stopped child if a liveness assertion above fails.
-    if (pid !== undefined) {
+    if (pid !== undefined && !reapLeader) {
       try { process.kill(pid, "SIGCONT"); } catch { /* already reaped */ }
     }
     parent.stdin.end();
@@ -596,7 +608,8 @@ test("resume reclaims a zombie supervisor lock without replaying its completed c
   }
 });
 
-test("user stop terminates live group members behind a zombie runner leader", {
+for (const reapLeader of [false, true]) {
+test(`user stop terminates live group members behind a ${reapLeader ? "reaped" : "zombie"} runner leader`, {
   skip: process.platform !== "linux",
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-zombie-member-"));
@@ -612,12 +625,14 @@ test("user stop terminates live group members behind a zombie runner leader", {
         });
         state.instances[0].status = "running";
         state.instances[0].attempt = 1;
-        state.instances[0].runner = { ...identity, starttime: `${identity.starttime}-other` };
         state.instances[0].cost_reservation_usd = 1;
         const statePath = join(root, "supervisor-state.json");
-        await writeAtomicJson(statePath, state);
-        await stopSupervisor(statePath);
-        assert.equal(await processAlive(member), true, "a mismatched leader identity must not signal the group");
+        if (!reapLeader) {
+          state.instances[0].runner = { ...identity, starttime: `${identity.starttime}-other` };
+          await writeAtomicJson(statePath, state);
+          await stopSupervisor(statePath);
+          assert.equal(await processAlive(member), true, "a mismatched leader identity must not signal the group");
+        }
         state.instances[0].runner = identity;
         await writeAtomicJson(statePath, state);
         const stopped = await stopSupervisor(statePath);
@@ -626,8 +641,63 @@ test("user stop terminates live group members behind a zombie runner leader", {
         assert.equal(stopped.failure, "user-stopped");
         assert.equal(stopped.instances[0].status, "interrupted");
         assert.equal(stopped.held_unknown_usd, 1);
-      }, mode);
+      }, mode, reapLeader);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
+
+test("resume retires a previous watchdog before publishing the replacement owner", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-supervisor-watchdog-recovery-"));
+  try {
+    await withUnreapedChild(async identity => {
+      const options = { manifestPath: join(root, "manifest.json"), runRoot: root,
+        output: join(root, "predictions.jsonl"), costLimitUsd: 2 };
+      const state = await createSupervisorState(manifestValue, options);
+      const statePath = join(root, "supervisor-state.json");
+      const report = join(root, "old-watchdog.jsonl");
+      await writeAtomicJson(statePath, state);
+      const watchdog = spawn(process.execPath, [fileURLToPath(new URL("../scripts/swebench-lite-supervisor.mjs", import.meta.url)),
+        "--watchdog", "--state", statePath, "--report", report, "--interval-seconds", "60", "--stale-seconds", "120",
+        "--report-seconds", "0"], { stdio: "ignore" });
+      const closed = once(watchdog, "close");
+      try {
+        const previous = await processIdentity(watchdog.pid!);
+        let polling = false;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          try { polling = (await readFile(report, "utf8")).includes('"event":"heartbeat"'); } catch { /* starting */ }
+          if (polling) break;
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 10));
+        }
+        assert.equal(polling, true, "the retained watchdog is sleeping between polls");
+        assert.equal(await processAlive(previous), true);
+        state.heartbeat.supervisor = identity;
+        state.watchdog.pid = previous;
+        await writeAtomicJson(statePath, state);
+        await writeAtomicJson(join(root, "supervisor.lock"), identity);
+        let replacements = 0;
+        const runs: string[] = [];
+        const dependencies = fakeDependencies(runs);
+        const resumed = await runSupervisor(manifestValue, options, { ...dependencies,
+          spawnWatchdog: async () => {
+            assert.equal(await processAlive(previous), false, "old watchdog must stop before its identity is overwritten");
+            replacements += 1;
+            return {};
+          },
+        });
+        assert.equal(resumed.status, "completed");
+        assert.equal(resumed.watchdog.pid, null);
+        assert.equal(replacements, 1);
+        assert.deepEqual(runs, ["example__project-1", "example__project-2"]);
+      } finally {
+        watchdog.kill("SIGKILL");
+        await closed;
+      }
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
