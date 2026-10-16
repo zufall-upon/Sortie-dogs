@@ -1880,7 +1880,8 @@ test("V2 status decoration keeps actionable lines before full proof and reports 
     const original = { units: [{ evidence: "protected-source".repeat(20000) }], status: "idle", budget: { consumed_units: 25,
       settled_cost_usd: 0.04769424, cost_scope: "worker-only", cost_status: "settled" }, attempts: [{
       selectedModel: "openai/gpt-6-luna-fast#max", observedModel: "openai/gpt-6-luna-fast", observedVariant: "max" }],
-      next_action: "Compare original requirements before acceptance." };
+      next_action: "Compare original requirements before acceptance.",
+      completion: { ready: false, blockers: [{ source_paths: Array.from({ length: 5000 }, (_, index) => `src/proof-${index}.ts`) }] } };
     const dispose = await create(async () => ({ tool: { sortie_v010_operator_status: {
       description: "status", args: {}, execute: async () => JSON.stringify(original),
     } } })).setup(fixture.context);
@@ -1891,12 +1892,20 @@ test("V2 status decoration keeps actionable lines before full proof and reports 
         execute(input: unknown, execution: unknown): Promise<{ content: string }>; };
       const output = (await tool.execute({}, { sessionID: "root" })).content;
       assert.ok(output.includes("\n"), "V2 decoration must not collapse the status back into one giant line");
-      const prefix = output.slice(0, output.indexOf('  "units"'));
+      const visible: string[] = [];
+      let visibleBytes = 0;
+      for (const line of output.split("\n").slice(0, 2000)) {
+        const bytes = Buffer.byteLength(line) + (visible.length ? 1 : 0);
+        if (visibleBytes + bytes > 51200) break;
+        visible.push(line); visibleBytes += bytes;
+      }
+      const prefix = visible.join("\n");
       assert.ok(Buffer.byteLength(prefix) < 51200);
       for (const fact of ["openai/gpt-6-luna-fast#max", '"observedVariant":"max"', '"settled_cost_usd":0.04769424',
         '"cost_scope":"worker-only"', original.next_action]) assert.ok(prefix.includes(fact), fact);
       const packet = JSON.parse(output);
-      const { runtime: _runtime, ...withoutRuntime } = packet;
+      const { runtime: _runtime, model_observations: models, ...withoutRuntime } = packet;
+      assert.deepEqual(models, { recent_attempts: original.attempts, omitted_attempts: 0 });
       assert.deepEqual(withoutRuntime, original, "explicit full records survive decoration without loss");
       assert.equal(packet.status, "idle");
       assert.equal(packet.budget.consumed_units, 25);
