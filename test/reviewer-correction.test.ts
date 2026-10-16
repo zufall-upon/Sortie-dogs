@@ -321,6 +321,76 @@ test("earlier-run findings remain actionable after a validation-only replan", as
   } finally { await f.dispose(); }
 });
 
+for (const mode of ["live", "cold", "legacy-cold"] as const) test(`verification findings then direct correction preserve initial review lineage: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const previous = await initial(f);
+    const initialPrompt = previous.mission.review!.initialPrompt;
+    const verification = await f.tool("root", "review_mission", { risk_tags: ["public-logic"], traces: ["Inspect the remaining concrete finding."] });
+    const dispatch = await f.before("root", "subagent", f.task(verification.task));
+    await f.prompt("author", dispatch.input.prompt);
+    assert.match(dispatch.input.prompt, /^review_phase: verification$/mu);
+    await f.tool("author", "repair_review", { findings: "Medium: ready output is still missing." });
+    await f.finish(dispatch, "author", "FINDINGS\nNo source edits; the controller will correct the retained finding.");
+    if (mode === "legacy-cold") await f.missions.update("root", mission => {
+      // v0.14.0 replaced the initial receipt with the verification prompt.
+      mission.review!.initialPrompt = dispatch.input.prompt;
+      mission.corrections!.at(-1)!.initialPrompt = dispatch.input.prompt;
+      delete mission.review!.child; // A subsequently denied replacement has no native child yet.
+    });
+    await f.tool("root", "plan_units", { executor: "self", reason: "Controller corrects the concrete finding directly",
+      units: [{ title: "Correct output", objective: "Produce ready output", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+    await f.edit("root", "ready");
+    await f.shell("root", "git add -- result.txt && git commit -m direct-correction");
+    await f.shell("root", "node check.mjs"); await f.tool("root", "finish_direct_unit");
+    const run = await f.run(), budget = (await f.ledger()).state.consumed_units;
+    if (mode !== "live") await f.start();
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"], mode: "independent", reviewer_session_id: "final" });
+    const next = await f.before("root", "subagent", f.task(review.task));
+    assert.match(next.input.prompt, /^review_phase: verification$/mu);
+    assert.equal((await f.missions.required("root")).review!.initialPrompt, initialPrompt);
+    await f.prompt("final", next.input.prompt);
+    await f.finish(next, "final", "PASS\nCompared the corrected output and retained findings with the existing checks.");
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+    assert.equal((await f.run()).runID, run.runID);
+    assert.equal((await f.ledger()).state.consumed_units, budget, "read-only continuation adds no implementation unit");
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["no-writes", "writes", "failed-write", "missing-prompt", "missing-terminal"] as const) test(`failed inline admission preserves actual Reviewer authorship after direct correction: ${mode}`, async () => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    if (mode === "writes") await f.edit("author", "partial correction");
+    if (mode === "failed-write") await f.after(await f.before("author", "patch", {
+      patchText: "*** Begin Patch\n*** Update File: result.txt\n@@\n-wrong\n+partial\n*** End Patch",
+    }), "Write failed; absence of partial effects is unknown", {}, "error");
+    await f.finish(started.dispatch, "author", "FINDINGS\nController must finish the correction.");
+    if (mode === "missing-prompt") f.history.author = f.history.author!.filter(message => message.type !== "user");
+    if (mode === "missing-terminal") f.history.author = f.history.author!.filter(message => message.finish !== "stop");
+    await f.tool("root", "plan_units", { executor: "self", reason: "Controller finishes the correction",
+      units: [{ title: "Correct output", objective: "Produce ready output", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] });
+    await f.edit("root", "ready"); await f.shell("root", "git add -- result.txt && git commit -m direct-correction");
+    await f.shell("root", "node check.mjs"); await f.tool("root", "finish_direct_unit");
+    await f.start();
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+    assert.equal(review.task.task_id, "author");
+    assert.equal(review.status, mode === "no-writes" ? "review-required" : "self-recheck-required");
+    assert.equal(missionReviewIndependent(await f.missions.required("root"), "author"), mode === "no-writes");
+    if (!["no-writes", "writes"].includes(mode)) {
+      assert.equal((await f.missions.required("root")).corrections![0]!.noWriteReceipt, undefined);
+      await assert.rejects(f.tool("root", "complete_mission"));
+      return;
+    }
+    const dispatch = await f.before("root", "subagent", f.task(review.task)); await f.prompt("author", dispatch.input.prompt);
+    const source = (await f.missions.required("root")).review!.source;
+    await f.finish(dispatch, "author", mode === "writes" ? inlineReport([], null, source) : "PASS\nConfirmed the controller's actual correction against the retained findings.");
+    assert.equal((await f.missions.required("root")).review!.verdict, mode === "writes" ? "self-rechecked" : "PASS");
+    assert.equal((await f.tool("root", "complete_mission")).status, "succeeded");
+  } finally { await f.dispose(); }
+});
+
 test("a failed native start may retry the identical prompt in the retained Reviewer", async () => {
   const f = await fixture();
   try {

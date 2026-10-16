@@ -353,6 +353,43 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return who.role === "dog-reviewer" && who.parent === (mission.coordinator ?? root);
     }
     async function restoreReviewAuthorship(root: string, mission: OperatorMission, id: string): Promise<OperatorMission> {
+      // An inline correction admission can end without any implementation: the
+      // controller may be the designated writer. Recover that exact native return
+      // rather than permanently treating the unused grant as source authorship.
+      const unused = mission.sourceAuthors?.includes(id) ? [] : (mission.corrections ?? []).filter(item =>
+        item.author === id && item.inlineReview && item.status === "failed" && !item.noWriteReceipt);
+      if (unused.length) {
+        const history = await reviewMessages(id);
+        const receipts = unused.flatMap(correction => {
+          const inline = correction.inlineReview!;
+          const prompt = history.findIndex(message => record(message.info) && message.info.id === inline.promptID &&
+            message.info.role === "user" && message.info.sessionID === id);
+          if (prompt < 0) return [];
+          const response = reviewResponseMessages(history, prompt);
+          const last = [...response].reverse().find(message => record(message.info) && message.info.role === "assistant");
+          const info = record(last?.info) ? last.info : undefined;
+          if (!info || info.sessionID !== id || info.finish !== "stop" || info.error || typeof info.id !== "string" ||
+              !record(info.time) || typeof info.time.completed !== "number" || info.time.completed < inline.admittedAt) return [];
+          const parts = response.flatMap(message => Array.isArray(message.parts) ? message.parts.filter(record) : []);
+          const admitted = parts.findIndex(part => part.type === "tool" && part.tool === repairReview && record(part.state) &&
+            part.state.status === "completed" && record(part.state.time) && typeof part.state.time.end === "number" &&
+            part.state.time.end >= inline.admittedAt);
+          // Before admission this Reviewer was read-only. After it, require the
+          // observed terminal and only read/search calls; unknown tools or failed
+          // writes cannot establish that no implementation occurred.
+          if (admitted < 0 || parts.slice(admitted + 1).some(part => part.type === "tool" &&
+              (!["read", "grep", "glob"].includes(String(part.tool)) || !record(part.state) ||
+                !["completed", "error"].includes(String(part.state.status))))) return [];
+          return [{ runID: correction.runID, promptID: inline.promptID, messageID: info.id }];
+        });
+        if (receipts.length) mission = await missions.update(root, current => {
+          for (const receipt of receipts) {
+            const correction = current.corrections?.find(item => item.runID === receipt.runID && item.author === id &&
+              item.status === "failed" && item.inlineReview?.promptID === receipt.promptID);
+            if (correction) correction.noWriteReceipt = { promptID: receipt.promptID, messageID: receipt.messageID };
+          }
+        });
+      }
       if (!missionReviewIndependent(mission, id) || !mission.attempts?.some(attempt => attempt.childSessionID === id)) return mission;
       const history = await reviewMessages(id);
       const attempts = mission.attempts.filter(attempt => attempt.childSessionID === id);
@@ -2921,7 +2958,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               if (!current || current.callID !== review!.callID || current.promptID !== review!.promptID) throw new Error("mission-review-correction-generation-stale");
               current.verdict = "findings"; current.result = findings;
               // The independent investigation is recorded by this real tool call, not a fictitious terminal.
-              current.initialPrompt = current.task!.prompt;
+              current.initialPrompt = initialMissionReviewPrompt(item, [current.task!.prompt]);
             });
             review = mission.review;
           }
@@ -3094,7 +3131,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           // turn. Generate verification only when a completed initial review is recoverable;
           // otherwise generate an admissible initial review instead of trapping the Coordinator.
           const prior = mission.review?.task?.prompt;
-          const completed = risk.length > 0 && prior && mission.review?.child && !mission.review.initialPrompt
+          const completed = risk.length > 0 && prior && !initialMissionReviewPrompt(mission, [])
             ? await completedMissionReviewPrompts(mission, profile, root, prior, {
               get: async id => payload(await session("get", { path: { id }, query: { directory: input.directory } })),
               messages: reviewMessages,
