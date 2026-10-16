@@ -58,6 +58,9 @@ export function codexMissionProgress(event: CodexTurnEvent & { threadId: string 
       native_status: (event.params.turn as Record<string, unknown> | undefined)?.status };
   if (event.method === "sortie/continuation")
     return { thread_id: event.threadId, turn_id: event.params.turnId, phase: event.params.phase, calls: event.params.calls };
+  if (event.method === "sortie/coordinatorRestored")
+    return { thread_id: event.threadId, phase: "coordinator-restored", mission_id: event.params.missionId,
+      coordinator_id: event.params.coordinatorId, call_id: event.params.callId, native_outcome: event.params.outcome, next_action: event.params.action };
   if (event.method === "sortie/modelRoute")
     return { thread_id: event.threadId, phase: "model-route", agent: event.params.agent, model: event.params.model,
       effort: event.params.effort, service_tier: event.params.serviceTier };

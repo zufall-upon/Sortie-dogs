@@ -365,7 +365,9 @@ test(`cold Coordinator without native parent Task history: ${state}`, { timeout:
             const status = await host.call("sortie_v010_operator_status", { view: "full" });
             assert.equal(status.budget.reserved_units, 1);
             assert.equal(status.budget.consumed_units, 0);
-            await host.call("task", missions.task(await missions.required("root")));
+            assert.equal(status.task.task_id, "coordinator", "status supplies the exact retained continuation, not an impossible background wait");
+            assert.match(status.next_action, /Resume this existing Coordinator Task/);
+            await host.call("task", status.task);
             assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0].status, "succeeded");
           } else {
             assert.equal(run.operatorSessionID, "coordinator");
