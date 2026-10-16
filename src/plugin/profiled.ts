@@ -2612,7 +2612,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // A submitted Coordinator still owns corrective planning. Return its actual
         // continuation instead of referring to a Task that the rejection never supplied.
         // This is routing advice only: no replacement plan, reservation or admission.
-        const packet = missionDispatchPacket(mission, previous);
+        // Routing below alone chooses whether to offer a Task. A resumable parent
+        // packet can already contain one even while its Reviewer is still pending.
+        const { task: _dispatchTask, ...packet } = missionDispatchPacket(mission, previous);
         const reviewPending = mission.runID === previous?.runID && mission.review?.verdict === "pending";
         const active = mission.dispatchOpen || reviewPending || mission.runID === previous?.runID &&
           previous?.units.some(unit => unit.status === "running");
@@ -2628,7 +2630,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return JSON.stringify({ ...packet,
           status: active ? "mission-coordinator-active" : "mission-coordinator-required",
           ...(task ? { task } : {}),
-          next_action: reviewPending ? packet.next_action : active
+          next_action: reviewPending
+            ? "Dispatch the exact Reviewer Task from review_mission if not yet active; otherwise wait for that Reviewer. Do not start a Coordinator or another Worker while review is pending. The proposed plan has not been admitted."
+            : active
             ? "Continue the active owning session or wait for its native completion; do not dispatch a duplicate Coordinator or Worker. The proposed plan has not been admitted."
             : "Dispatch this exact Task to continue the same Mission and Coordinator session with the concrete correction and retained checks. The proposed plan has not been admitted; keep requirements, candidate and cumulative budget unchanged." });
       }

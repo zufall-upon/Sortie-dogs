@@ -63,9 +63,16 @@ Coordinatorまたはunitが稼働中ならTaskを返さず、元セッション�
 初回native独立ReviewはPASSだったが、この3経路の抜けを検出できなかった。
 CI成功を指摘解消の代替とせず、同じMission完遂fixtureの関連境界を補正する。
 
+継続差分のnative Reviewでは、Reviewer稼働中に親Coordinator Taskだけが終端すると、
+既存dispatch packetのCoordinator Taskがrouting応答に残るMediumを検出した。
+同じReviewer Task内で公開tool fixtureの失敗を確認し、継承packetのTaskを除去してから
+継続可否を決め、pending Review時はCoordinatorの有無によらずReviewer待機を案内する。
+元の提案・状態・予算は保持し、Review完了後の同じCoordinator再開も回帰で確認する。
+
 ## 継続と会計
 
 実装作者はCoordinator `openai/gpt-6.1-sol`。モデル網羅のWorker委譲なし。
+上記Mediumの補正作者は同じnative Reviewer `openai/gpt-6.1-sol`。自己再点検は独立承認ではない。
 共有runnerへ実装・監督用最大exposure $5を予約し、未確定usageは留保する。
 上限は累計 $1166.5503014、nightly $500。旧留保解放による枠補充はしない。
 独立有料CLI／課題を追加する場合だけ、従来runnerへ一意な実出力パスと最大exposureを事前予約する。

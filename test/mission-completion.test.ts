@@ -217,6 +217,24 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: dispatcher }));
     const reviewer = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, reviewer);
+    if (mode === "implementation") {
+      // The Reviewer can outlive its parent Coordinator Task. Its pending review still
+      // owns the candidate even when the normal dispatch packet offers a continuation.
+      identities.coordinator!.outcome = "interrupted";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { status: "error", output: "Coordinator interrupted while Reviewer remains active", metadata: { sessionId: "coordinator" } });
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      const before = await runtime.required("root"), missionBefore = await missions.required("root");
+      assert.equal(missionBefore.dispatchOpen, false);
+      assert.equal(missionBefore.review!.verdict, "pending");
+      const pending = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
+        reason: "Correct the verification recipe after the parent Task ended" }, { sessionID: "root" }));
+      assert.equal(pending.status, "mission-coordinator-active");
+      assert.equal(pending.task, undefined, "a dispatch packet must not leak a Coordinator Task while its Reviewer is pending");
+      assert.match(pending.next_action, /wait for that Reviewer/u);
+      assert.deepEqual(await runtime.required("root"), before, "pending review routing cannot admit another writer or spend a unit");
+      assert.deepEqual(await missions.required("root"), missionBefore, "retain the pending review and closed parent dispatch");
+    }
     if (mode === "fast-lane-failure") {
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
       const before = await runtime.required("root"), missionBefore = await missions.required("root");
@@ -238,6 +256,13 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");
     identities.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
+    if (mode === "implementation") {
+      delete identities.coordinator!.outcome;
+      const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-after-review" },
+        { args: missions.task(await missions.required("root")) });
+      await chat("coordinator", "Continue the same Mission after the Reviewer completed.");
+    }
     if (mode === "NO_START") {
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
       await missions.update("root", mission => { mission.review!.verdict = "evidence-gaps"; mission.review!.evidenceGapReviews = 1; });
@@ -274,7 +299,8 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     }
     if (!fast) {
       identities.coordinator!.outcome = "succeeded";
-      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { output: "ready", metadata: { sessionId: "coordinator" } });
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: mode === "implementation" ? "coordinator-after-review" : "coordinator-call" },
+        { output: "ready", metadata: { sessionId: "coordinator" } });
     }
     const cold = await create();
     const status = async () => JSON.parse(await cold.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
@@ -300,7 +326,7 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       // Model the durable admission left behind by a missed execute.after, then reload.
       await missions.update("root", mission => { mission.dispatchOpen = true; });
       nativeHistory.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task",
-        callID: "coordinator-call", state: { status: "completed", input: structuredClone(started.task) } }] }];
+        callID: "coordinator-after-review", state: { status: "completed", input: { ...started.task, task_id: "coordinator" } } }] }];
       const reloaded = await create();
       const recovered = JSON.parse(await reloaded.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
         reason: "Resume after a missed Task completion hook" }, { sessionID: "root" }));
