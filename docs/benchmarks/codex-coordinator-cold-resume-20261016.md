@@ -20,8 +20,8 @@ receipts was treated as an unresolved execution on the next resume.
 
 The correction:
 
-- Restore the existing Mission-bound Coordinator from native history after acquiring
-  the existing owner lease. Reconcile only its exact admitted dispatch.
+- Restore the existing Mission-bound Coordinator and nested child receipts from native
+  history before replacing the previous owner generation. Reconcile only its exact admitted dispatch.
 - Accept terminal failed tool receipts in completed parent turns, as already done
   for completed negative receipts. Interrupted negative receipts remain unresolved.
 - Return the existing Coordinator Task and its exact `task_id` instead of advising
@@ -67,6 +67,28 @@ acceptance.
   build 10,699 ms and tests 4,344 ms, after the common full suite passed.
 
 ## Retained live Anko Mission
+
+### PR #268 review follow-up
+
+Both P1 findings were reproduced and corrected before integration:
+
+- `4291580444`: owner replacement preceded nested Worker recovery. Restore completed
+  or explicitly unstarted child proof with the predecessor generation first, then
+  claim the new owner. The retained Worker reservation settles once without replay.
+- `4291580454`: an earlier terminal Coordinator turn could close a newer dispatch.
+  Persist the exact current Task/child/client-message/owner binding before each
+  Coordinator request, including same-Task continuations. Missing current-turn proof
+  leaves that dispatch unresolved; existing terminal parent receipts retain the shared
+  reconciliation path without requiring a new binding.
+
+The pre-fix targeted run reproduced all three added failures (completed nested Worker,
+unstarted nested Worker and stale-turn settlement). Final targeted recovery/session/
+settlement/progress/app-server checks: **120 passed**, exit 0, build 7.151 s and tests
+8.147 s. Initial and resumed dispatches, absent current turns, legacy parent receipts,
+live owners and unknown execution are covered. No live Anko rerun or scoring replay
+was added; the runtime and measurements below remain those of the original run.
+
+### Original live run
 
 - Original task SHA-256: `96c0c7ad98237d6176034c8893d8bff164ec5fda45889e51780a65cf599ffcfe`.
 - Anko base: `3f269a72ff69398b1250c584171f32d12c0d8085`.

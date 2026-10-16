@@ -39,6 +39,7 @@ export interface CodexWorkerDispatch {
   missionID: string; runID: string; unitID: string; threadID: string; turnID: string; callID: string;
   inputHash: string; childThreadID: string; clientUserMessageID: string; ownerGeneration: string;
 }
+export type CodexCoordinatorDispatch = Omit<CodexWorkerDispatch, "runID" | "unitID">;
 export interface CodexCompletedTaskProof {
   dispatch: CodexWorkerDispatch; childTurnID: string;
 }
@@ -182,6 +183,8 @@ export interface OperatorMission {
   codexNotStarted?: CodexNotStartedProof[];
   /** Missing parent receipts reconciled from exact completed native Worker turns. */
   codexCompletedTasks?: CodexCompletedTaskProof[];
+  /** Current Coordinator dispatch bound before its exact native turn is sent. */
+  codexCoordinatorDispatch?: CodexCoordinatorDispatch;
   version: "0.12";
   id: string;
   root: string;

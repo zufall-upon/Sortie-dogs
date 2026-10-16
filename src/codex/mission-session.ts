@@ -109,8 +109,8 @@ export class CodexMissionSession {
         this.observations = missions.find(item => item.root === resume)?.codexUsage ?? [];
         await this.restoreSession(resume, "dog-operator");
         this.root = resume;
-        await this.claimOwner(resume);
         await this.restoreCoordinator(resume);
+        await this.claimOwner(resume);
         await this.hooks.tool?.sortie_v010_operator_status?.execute({ view: "full" }, { sessionID: resume, agent: "dog-operator" });
       }
     }
@@ -168,12 +168,32 @@ export class CodexMissionSession {
     const missions = new OperatorMissionRuntime(this.directory, profile);
     const mission = await missions.required(root);
     if (!mission.coordinator || ["completed", "cancelled"].includes(mission.phase)) return;
+    if (!await codexOwnerGone(mission.codexOwner)) throw new Error("codex-mission-owner-active:no-resend");
     // Codex can persist claim() and the child turn but omit the interrupted parent
     // Task item. The existing Mission binding still owns this same Coordinator.
     const coordinator = await this.restoreSession(mission.coordinator, "dogs-coordinator", root);
     if (coordinator.parentID !== root || coordinator.agent !== "dogs-coordinator") throw new Error("Retained Coordinator lineage mismatch.");
     if (mission.dispatchOpen && mission.callID) {
-      await missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
+      // A retained terminal parent receipt already has the shared reconciliation path.
+      // The new binding is required only when that exact receipt is missing.
+      const parentReceipts = this.required(root).history.flatMap(message => Array.isArray(message.parts) ? message.parts.filter(object) : [])
+        .filter(part => part.type === "tool" && part.tool === "task" && part.callID === mission.callID && object(part.state) &&
+          ["completed", "error"].includes(String(part.state.status)) && object(part.state.input) &&
+          part.state.input.subagent_type === coordinator.agent &&
+          (part.state.input.task_id === undefined || part.state.input.task_id === coordinator.id));
+      if (parentReceipts.length === 1) return;
+      const binding = mission.codexCoordinatorDispatch;
+      if (!binding || binding.missionID !== mission.id || binding.threadID !== root || binding.callID !== mission.callID ||
+          binding.childThreadID !== coordinator.id || binding.ownerGeneration !== mission.codexOwner?.generation ||
+          coordinator.history.filter(message => object(message.info) && message.info.role === "user" &&
+            message.info.id === binding.clientUserMessageID).length !== 1)
+        throw new Error("Retained Coordinator has unproven execution for the current dispatch; no resend. Reconcile its exact native turn before resuming.");
+      await missions.codexRecovery(root, async current => {
+        if (current.codexOwner?.generation !== binding.ownerGeneration || !await codexOwnerGone(current.codexOwner) ||
+            JSON.stringify(current.codexCoordinatorDispatch) !== JSON.stringify(binding))
+          throw new Error("codex-mission-recovery-generation-stale");
+        await missions.reconcileFinishedDispatch(root, mission.id, mission.callID!);
+      });
       await this.options.onEvent?.({ method: "sortie/coordinatorRestored", threadId: root,
         params: { missionId: mission.id, coordinatorId: coordinator.id, callId: mission.callID,
           outcome: coordinator.outcome, action: "resume-existing-task" } });
@@ -212,7 +232,18 @@ export class CodexMissionSession {
     return false;
   }
 
-  private async bindWorkerDispatch(parent: NativeSession, child: NativeSession, call: CodexDynamicToolCall, messageID: string): Promise<void> {
+  private async bindTaskDispatch(parent: NativeSession, child: NativeSession, call: CodexDynamicToolCall, messageID: string): Promise<void> {
+    if (child.agent === "dogs-coordinator") {
+      await new OperatorMissionRuntime(this.directory, profile).update(this.rootOf(parent), state => {
+        if (state.root !== call.threadId || state.coordinator !== child.id || state.callID !== call.callId || !state.dispatchOpen ||
+            state.codexOwner?.generation !== this.owner.generation || state.codexOwner.closed)
+          throw new Error("codex-mission-dispatch-owner-stale");
+        state.codexCoordinatorDispatch = { missionID: state.id, threadID: call.threadId, turnID: call.turnId, callID: call.callId,
+          inputHash: createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex"),
+          childThreadID: child.id, clientUserMessageID: messageID, ownerGeneration: this.owner.generation };
+      });
+      return;
+    }
     if (child.agent !== "dog-worker-v010" || !object(call.arguments) || call.arguments.task_id) return;
     const root = this.rootOf(parent), missions = new OperatorMissionRuntime(this.directory, profile);
     await missions.update(root, state => {
@@ -496,7 +527,7 @@ export class CodexMissionSession {
         JSON.stringify(result.deferredToolResults) +
         "\nContinue this same Mission from these results through the remaining validation, delivery, review and root acceptance. " +
         "Do not resend the original request or redispatch the completed Tasks. Preserve failures, ownership and cumulative budget; use existing Mission status for the next action.",
-        undefined, true);
+        session.agent === "dogs-coordinator" ? onDispatch : undefined, true);
     }
     return result;
   }
@@ -588,7 +619,7 @@ export class CodexMissionSession {
       await this.hooks["tool.execute.after"]?.({ tool: call.tool, sessionID: session.id, callID: call.callId, args },
         { output: "", metadata: { sessionId: child.id, status: "running" } });
       const result = await this.prompt(child, String(args.prompt), async messageID => {
-        await this.bindWorkerDispatch(session, child!, call, messageID);
+        await this.bindTaskDispatch(session, child!, call, messageID);
         dispatched = true;
       });
       text = result.finalResponse ?? "";
