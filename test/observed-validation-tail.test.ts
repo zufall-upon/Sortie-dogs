@@ -64,6 +64,37 @@ test("mixed tails retain native input/timing and need successful native exits fo
   }
 });
 
+test("Docker codemode observations require one completed call and an explicit exit header without guessing cwd", async () => {
+  const command = "python3 /app/verify.py";
+  const call = { tool: "fh.docker_exec", status: "completed", input: { command } };
+  const docker = (output: string, options: { calls?: unknown[]; callStatus?: string; outerStatus?: string } = {}) => [{
+    info: { role: "assistant", sessionID: child }, parts: [{ type: "tool", tool: "execute", callID: "codemode",
+      time: { ran: 100, completed: 110 }, state: { status: options.outerStatus ?? "completed", input: { code: "return await tools.fh.docker_exec(...)" },
+        output, metadata: { toolCalls: options.calls ?? [{ ...call, status: options.callStatus ?? "completed" }] } } }],
+  }];
+  const observed = observedMissionValidation([command], child, docker("exit_code=0\nPASS\n"), 50);
+  assert.deepEqual(observed, { attempts: [{ command, directory_status: "unobserved", exit_code: 0,
+    started_ms: 100, completed_ms: 110 }], not_observed: [], omitted_attempts: 0 });
+  const summary = await observedMissionValidationSummary([command], child, async () => ({ data: docker("exit_code=0\nPASS\n") }), 50);
+  assert.deepEqual(summary.commands, [{ command, directory_status: "unobserved", exit_code: 0,
+    observed_attempts: 1, latest_started_ms: 100, latest_completed_ms: 110 }]);
+  for (const [output, exit] of [["exit_code=7\nPASS\n", 7], ["exit_code=unknown\nPASS\n", null], ["PASS\n", null]] as const) {
+    assert.equal(observedMissionValidation([command], child, docker(output), 50).attempts[0]?.exit_code, exit,
+      "stdout PASS without an explicit successful Docker exit remains unknown");
+  }
+  const explicitCwd = observedMissionValidation([command], child, docker("exit_code=0\nPASS\n"), 50, resolve("_testenv/docker-root"));
+  assert.deepEqual(explicitCwd, { attempts: [], not_observed: [command], omitted_attempts: 0 },
+    "the Docker schema has no cwd, so an explicit directory binding cannot be inferred");
+  for (const history of [
+    docker("exit_code=0\nPASS\n", { calls: [] }),
+    docker("exit_code=0\nPASS\n", { calls: [call, call] }),
+    docker("exit_code=0\nPASS\n", { callStatus: "error" }),
+    docker("exit_code=0\nPASS\n", { outerStatus: "error" }),
+  ]) assert.deepEqual(observedMissionValidation([command], child, history, 50), {
+    attempts: [], not_observed: [command], omitted_attempts: 0,
+  }, "missing, ambiguous, or failed native tool records are not successful observations");
+});
+
 test("bound ordered tail finishes without a standalone repetition; old logs acquire no proof", () => {
   const native = history([bundled, B]), bindings = checks([[A], [B]]);
   const result = reviewerCorrectionValidation([A, B], child, native, 50, bindings);

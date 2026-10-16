@@ -27,7 +27,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
-import { completedMissionReviewPrompts, observedMissionValidation } from "../dist/plugin/mission-review.js";
+import { completedMissionReviewPrompts, observedMissionValidation, observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../dist/runtime-mission-assets.js";
 
@@ -519,6 +519,35 @@ test("V2 native shell results retain build→test exits and timestamps through t
         { command: "npm run build", exit_code: 0, started_ms: 100, completed_ms: 200 },
         { command: "node check.mjs", exit_code: 0, started_ms: 250, completed_ms: 300 },
       ], not_observed: [], omitted_attempts: 0,
+    });
+  } finally { cleanup?.(); }
+});
+
+test("V2 adapter retains Docker codemode command/result as native observation without inferring cwd", async () => {
+  const fixture = contextFixture(), command = "python3 /app/verify.py";
+  const code = `const r = await tools.fh.docker_exec({command:${JSON.stringify(command)}}); return r;`;
+  fixture.history.push({ id: "msg_docker_worker", type: "assistant", agent: "dog-worker-v010", content: [{
+    type: "tool", id: "call_docker_verify", name: "execute",
+    state: { status: "completed", input: { code }, metadata: { toolCalls: [{ tool: "fh.docker_exec", status: "completed", input: { command } }] },
+      content: [{ type: "text", text: "exit_code=0\nPASS\n" }] },
+    time: { created: 99, ran: 100, completed: 110 },
+  }], time: { created: 99, completed: 111 } });
+  let client: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const history = (await client.session.messages({ path: { id: "worker" } })).data;
+    const nativeCall = history.find((message: any) => message.info.id === "msg_docker_worker").parts[0];
+    assert.equal(nativeCall.tool, "execute");
+    assert.deepEqual(nativeCall.state.input, { code }, "the outer codemode call remains intact");
+    assert.deepEqual(nativeCall.state.metadata.toolCalls, [{ tool: "fh.docker_exec", status: "completed", input: { command } }]);
+    assert.equal(nativeCall.state.output, "exit_code=0\nPASS\n");
+    assert.deepEqual(nativeCall.state.time, { start: 100, end: 110 });
+    assert.deepEqual(await observedMissionValidationSummary([command], "worker", async () => ({ data: history }), 50), {
+      commands: [{ command, directory_status: "unobserved", exit_code: 0, observed_attempts: 1,
+        latest_started_ms: 100, latest_completed_ms: 110 }],
+      not_observed: [], omitted_attempts: 0,
+      details_ref: { method: "session.messages", session_id: "worker",
+        omitted: "full native tool records and repeated attempts; summary contains only declared commands and observed exits" },
     });
   } finally { cleanup?.(); }
 });

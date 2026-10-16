@@ -110,6 +110,35 @@ test("native summary distinguishes absent/error/non-array responses from success
   assert.deepEqual((summary.details_ref as Record<string, unknown>).session_id, "worker");
 });
 
+test("Docker exit is shown as native declared observation, never formal evidence or inferred cwd", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const command = "python3 /app/verify.py";
+  await missions.capture("root", { id: "docker-request", text: "Verify the existing container output" });
+  const mission = await missions.start("root", ["Verify the existing container output"]);
+  const run = await operators.prepareMission("root", missionPlan(mission, [{ title: "Verify container output",
+    objective: "Run the declared verification in the fixed Docker task container", read: ["/app/logs"],
+    write: ["/app/summary.csv"], validation: [command] }]));
+  const unit = run.units[0]!;
+  unit.childSessionID = "worker";
+  mission.runID = run.runID;
+  mission.attempts = [{ runID: run.runID } as never];
+  const native = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "execute",
+    time: { ran: 100, completed: 110 }, state: { status: "completed", input: { code: "return await tools.fh.docker_exec(...)" },
+      metadata: { toolCalls: [{ tool: "fh.docker_exec", status: "completed", input: { command } }] },
+      output: "exit_code=0\nPASS\n" } }] }];
+  const summary = await missionAcceptanceSummary(mission, run, operators, async (validation, child, notBefore) => {
+    if (!child) throw new Error("worker session unavailable");
+    return observedMissionValidationSummary(validation, child, async () => ({ data: native }), notBefore);
+  });
+  assert.deepEqual(summary.formal_validation, [], "native Docker history does not become formal protected proof");
+  const observed = (summary.native_declared_validation as Record<string, unknown>[])[0]!;
+  assert.equal(observed.status, "available");
+  assert.equal(observed.authority, "native declared-command observations; not additional formal evidence or current freshness");
+  assert.deepEqual((observed.observations as Record<string, unknown>).commands, [{ command, directory_status: "unobserved",
+    exit_code: 0, observed_attempts: 1, latest_started_ms: 100, latest_completed_ms: 110 }]);
+  assert.deepEqual((observed.observations as Record<string, unknown>).not_observed, []);
+}));
+
 test("lineage lookup failures are unavailable, never successful empty history", async () => fixture(async directory => {
   const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
