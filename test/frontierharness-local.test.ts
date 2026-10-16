@@ -875,3 +875,207 @@ test("requires selectors matching the official FrontierHarness reward schema", (
   assert.throws(() => validateManifest(wrong, join(root, "manifest.json"), root),
     (error: Error & { gate?: string }) => error.gate === "reward-selectors");
 });
+
+test("Frontier abnormal Pier runs retain the official binary patch before workspace cleanup", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "frontier-artifact-recovery-"));
+  const python = String.raw`
+import asyncio
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, sys.argv[1])
+from frontierharness_artifact_recovery import (
+    native_cleanup_complete,
+    official_patch_command,
+    run_with_artifact_recovery,
+)
+
+root = Path(sys.argv[2])
+repo = root / "owned-workspace"
+repo.mkdir()
+artifacts = repo / "logs" / "artifacts"
+retained = root / "trial" / "artifacts" / "model.patch"
+cleanup_observation = root / "native-observation.json"
+
+def git(*args):
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+
+git("init", "--quiet")
+git("config", "user.name", "Frontier artifact test")
+git("config", "user.email", "frontier-artifact-test@example.invalid")
+(repo / "candidate.bin").write_bytes(b"before\x00candidate\n")
+git("add", "candidate.bin")
+git("commit", "--quiet", "-m", "base")
+base_commit = git("rev-parse", "HEAD").decode().strip()
+(repo / "candidate.bin").write_bytes(b"after\x00candidate\n")
+git("add", "candidate.bin")
+git("commit", "--quiet", "-m", "edited candidate")
+expected = subprocess.run(
+    ["git", "diff", "--binary", base_commit, "HEAD"], cwd=repo,
+    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+).stdout
+cleanup_observation.write_text(json.dumps({"cleanup_complete": True}))
+
+class LocalWorkspaceEnvironment:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.commands = []
+        self.downloads = []
+
+    async def exec(self, *, command, timeout_sec):
+        self.commands.append(command)
+        if command != official_patch_command(base_commit) or timeout_sec != 300:
+            return SimpleNamespace(return_code=98, stdout="", stderr="wrong hook contract")
+        if self.fail:
+            return SimpleNamespace(return_code=17, stdout="", stderr="injected hook failure")
+        result = subprocess.run(
+            ["git", "diff", "--binary", base_commit, "HEAD"], cwd=repo,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "model.patch").write_bytes(result.stdout)
+        return SimpleNamespace(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+
+    async def download_file(self, *, source_path, target_path):
+        self.downloads.append(source_path)
+        if source_path != "/logs/artifacts/model.patch":
+            raise AssertionError("unexpected artifact source")
+        shutil.copyfile(artifacts / "model.patch", target_path)
+
+def writers_stopped():
+    return native_cleanup_complete(cleanup_observation)
+
+async def main():
+    environment = LocalWorkspaceEnvironment()
+    original = RuntimeError("injected agent route failure")
+
+    async def fail_run():
+        raise original
+
+    try:
+        await run_with_artifact_recovery(
+            fail_run, environment, base_commit=base_commit, target_path=retained,
+            writers_stopped=writers_stopped,
+        )
+    except RuntimeError as caught:
+        same_original = caught is original
+        notes = getattr(caught, "__notes__", [])
+    else:
+        raise AssertionError("run failure was swallowed")
+
+    shutil.rmtree(repo)
+    bytes_survived_cleanup = retained.read_bytes() == expected
+    recovered_digest = hashlib.sha256(retained.read_bytes()).hexdigest()
+
+    failure_target = root / "failed" / "artifacts" / "model.patch"
+    failing_environment = LocalWorkspaceEnvironment(fail=True)
+    recovery_original = RuntimeError("original failure survives recovery failure")
+
+    async def fail_again():
+        raise recovery_original
+
+    try:
+        await run_with_artifact_recovery(
+            fail_again, failing_environment, base_commit=base_commit,
+            target_path=failure_target, writers_stopped=writers_stopped,
+        )
+    except RuntimeError as caught:
+        same_failure_original = caught is recovery_original
+        failure_notes = getattr(caught, "__notes__", [])
+    else:
+        raise AssertionError("recovery failure hid the original exception")
+
+    unknown_environment = LocalWorkspaceEnvironment()
+    unknown_original = RuntimeError("writer state unknown")
+
+    async def fail_unknown():
+        raise unknown_original
+
+    try:
+        await run_with_artifact_recovery(
+            fail_unknown, unknown_environment, base_commit=base_commit,
+            target_path=root / "unknown" / "model.patch",
+            writers_stopped=lambda: native_cleanup_complete(root / "missing-observation.json"),
+        )
+    except RuntimeError as caught:
+        unknown_identity = caught is unknown_original
+        unknown_notes = getattr(caught, "__notes__", [])
+    else:
+        raise AssertionError("unknown writer state was treated as success")
+
+    cancelled_environment = LocalWorkspaceEnvironment()
+
+    async def cancel_run():
+        raise asyncio.CancelledError()
+
+    try:
+        await run_with_artifact_recovery(
+            cancel_run, cancelled_environment, base_commit=base_commit,
+            target_path=root / "cancelled" / "model.patch",
+            writers_stopped=lambda: (_ for _ in ()).throw(AssertionError("must not inspect cancellation")),
+        )
+    except asyncio.CancelledError as caught:
+        cancellation_visible = any("cancelled" in note for note in getattr(caught, "__notes__", []))
+    else:
+        raise AssertionError("cancellation was swallowed")
+
+    success_environment = LocalWorkspaceEnvironment()
+    success_value = await run_with_artifact_recovery(
+        lambda: asyncio.sleep(0, result="success"), success_environment,
+        base_commit=base_commit, target_path=root / "success" / "model.patch",
+        writers_stopped=writers_stopped,
+    )
+    print(json.dumps({
+        "artifact_matches_after_cleanup": bytes_survived_cleanup,
+        "patch_digest_matches": recovered_digest == hashlib.sha256(expected).hexdigest(),
+        "binary_patch_present": b"GIT binary patch" in expected,
+        "workspace_removed": not repo.exists(),
+        "original_exception_preserved": same_original,
+        "success_note_visible": any("recovery retained" in note for note in notes),
+        "failure_exception_preserved": same_failure_original,
+        "failure_note_visible": any("official-hook-exit-17" in note for note in failure_notes),
+        "failed_target_absent": not failure_target.exists(),
+        "unknown_writers_skipped": unknown_identity and not unknown_environment.commands
+            and any("writer stop not confirmed" in note for note in unknown_notes),
+        "cancel_preserved": cancellation_visible and not cancelled_environment.commands,
+        "success_unchanged": success_value == "success" and not success_environment.commands,
+        "official_hook_command_seen": environment.commands == [official_patch_command(base_commit)],
+        "artifact_source_downloaded": environment.downloads == ["/logs/artifacts/model.patch"],
+    }, sort_keys=True))
+
+asyncio.run(main())
+`;
+  try {
+    const result = await execute("/usr/bin/python3", ["-c", python,
+      join(process.cwd(), "scripts"), root], { cwd: root, timeoutMs: 30_000,
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+    assert.equal(result.code, 0, result.stderr.toString("utf8"));
+    const outcome = JSON.parse(result.stdout.toString("utf8"));
+    assert.deepEqual(outcome, {
+      artifact_matches_after_cleanup: true,
+      patch_digest_matches: true,
+      binary_patch_present: true,
+      workspace_removed: true,
+      original_exception_preserved: true,
+      success_note_visible: true,
+      failure_exception_preserved: true,
+      failure_note_visible: true,
+      failed_target_absent: true,
+      unknown_writers_skipped: true,
+      cancel_preserved: true,
+      success_unchanged: true,
+      official_hook_command_seen: true,
+      artifact_source_downloaded: true,
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
