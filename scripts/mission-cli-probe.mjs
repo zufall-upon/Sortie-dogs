@@ -170,7 +170,8 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   };
   const failObservation = (error, point) => {
     observationError ??= { name: error?.name ?? 'Error', message: String(error?.message ?? error).slice(0, 1500),
-      ...(error?.code === undefined ? {} : { code: error.code }) };
+      ...(error?.code === undefined ? {} : { code: error.code }),
+      ...(error?.serverExit === undefined ? {} : { server_exit: error.serverExit }) };
     usageIncomplete = true;
     stop('observation-failed', lastObserved, point);
   };
@@ -196,7 +197,9 @@ export async function monitorMissionCLI({ child, server, project, since, rootAge
   server.closed?.then(code => {
     if (serverStopping || stopped) return;
     serverExited = true;
-    failObservation(Object.assign(Error(`Owned server exited before native settlement (exit ${code})`), { code }), 'server-close');
+    const serverExit = server.termination;
+    failObservation(Object.assign(Error(`Owned server exited before native settlement (exit ${code}${serverExit?.signal ? `, signal ${serverExit.signal}` : ''})`),
+      { code, ...(serverExit === undefined ? {} : { serverExit }) }), 'server-close');
   });
   let code, signal;
   try {
