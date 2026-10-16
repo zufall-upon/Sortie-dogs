@@ -2608,7 +2608,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         Array.isArray(execution.commands) && execution.commands.length === 0);
       const plan = missionPlan(mission, raw, input.directory);
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
-      if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) throw new Error("mission-coordinator-required: dispatch the returned Coordinator task");
+      if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) {
+        // A submitted Coordinator still owns corrective planning. Return its actual
+        // continuation instead of referring to a Task that the rejection never supplied.
+        // This is routing advice only: no replacement plan, reservation or admission.
+        const active = mission.dispatchOpen || mission.runID === previous?.runID &&
+          previous?.units.some(unit => unit.status === "running");
+        return JSON.stringify({ ...missionDispatchPacket(mission, previous),
+          status: active ? "mission-coordinator-active" : "mission-coordinator-required",
+          ...(!active ? { task: missions.task(mission) } : {}),
+          next_action: active
+            ? "Continue the active owning session or wait for its native completion; do not dispatch a duplicate Coordinator or Worker. The proposed plan has not been admitted."
+            : "Dispatch this exact Task to continue the same Mission and Coordinator session with the concrete correction and retained checks. The proposed plan has not been admitted; keep requirements, candidate and cumulative budget unchanged." });
+      }
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
       const activeDirect = previous?.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor);
@@ -2769,7 +2781,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, mission,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
-            return args.executor === "self" && record(JSON.parse(planned).task) ? startDirect(root, context.sessionID) : planned;
+            const task = JSON.parse(planned).task;
+            // A Coordinator continuation is not a newly prepared direct unit.
+            return args.executor === "self" && record(task) && task.subagent_type !== profileAgent(profile, "dog-operator")
+              ? startDirect(root, context.sessionID) : planned;
           });
         } catch (error) {
           if (error instanceof Error && error.message.startsWith("mission-replan-terminal-unreconciled:")) {

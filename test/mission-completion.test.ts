@@ -95,6 +95,16 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     const next = fast ? started : JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], execution }, { sessionID: dispatcher }));
     assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewBaseline, baseline);
     if (mode === "implementation") assert.equal((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).kind, "implementation");
+    if (mode === "implementation") {
+      const before = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      const active = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self",
+        reason: "Correct a verification recipe" }, { sessionID: "root" }));
+      assert.equal(active.status, "mission-coordinator-active");
+      assert.equal(active.task, undefined, "an admitted Coordinator must not acquire a duplicate continuation Task");
+      assert.match(active.next_action, /wait|owning session/iu);
+      assert.deepEqual(await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root"), before,
+        "routing advice must not replan or spend another unit");
+    }
     assert.deepEqual((await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).reviewScope?.write,
       failure ? ["operation.json", "result.txt"] : ["result.txt"]);
     const worker = { args: structuredClone(next.task) };
@@ -259,6 +269,20 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     assert.equal((await status()).completion.ready, true);
     assertStatusOrder(await status());
     if (mode === "implementation") {
+      const before = await runtime.required("root");
+      const missionBefore = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      const continuation = JSON.parse(await cold.tool!.sortie_v010_plan_units.execute({ units: [{ ...plannedUnit,
+        validation: ["node check.mjs && git diff --check"] }], executor: "self",
+        reason: "Correct a verification recipe without changing the candidate" }, { sessionID: "root" }));
+      assert.equal(continuation.status, "mission-coordinator-required");
+      assert.equal(continuation.task.task_id, "coordinator", "resume the actual author, not a new controller");
+      assert.equal(continuation.task.subagent_type, "dogs-coordinator");
+      assert.match(continuation.next_action, /same.*Coordinator/iu);
+      assert.deepEqual(await runtime.required("root"), before, "the proposed replacement is not admitted by routing advice");
+      assert.deepEqual(await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root"), missionBefore,
+        "preserve the existing submission, requirements, checks and receipt state");
+      await assert.rejects(cold.tool!.sortie_v010_plan_units.execute({ units: [plannedUnit], executor: "self" },
+        { sessionID: "reviewer" }), /mission-controller-required/u, "unrelated actors gain no continuation authority");
       const emptyNative = (await status()).acceptance_summary.native_declared_validation[0];
       assert.equal(emptyNative.status, "recorded-formal-evidence");
       assert.ok(emptyNative.evidence_ids.length);
