@@ -1232,6 +1232,17 @@ export async function runOpenCode(options, dependencies = {}) {
   let progressDecision = "not-reached";
   let lastUsageProgress = Date.now();
   let stdoutLine = "";
+  let rootSessionID;
+  // Same owned top-level native CLI identity contract as mission-cli-probe.
+  // A later same-project root or a nested tool/text ID is not this invocation.
+  const identifyRoot = line => {
+    if (rootSessionID !== undefined) return;
+    try {
+      const event = JSON.parse(line);
+      if (["step_start", "step_finish", "text", "tool_use", "error"].includes(event?.type) &&
+          typeof event.sessionID === "string" && event.sessionID) rootSessionID = event.sessionID;
+    } catch { /* Diagnostic lines do not identify the owned CLI. */ }
+  };
   const stop = async reason => {
     if (stopping || settled) return;
     stopping = true;
@@ -1259,7 +1270,10 @@ export async function runOpenCode(options, dependencies = {}) {
     stdoutLine += chunk.toString("utf8");
     const lines = stdoutLine.split("\n");
     stdoutLine = lines.pop() ?? "";
-    for (const line of lines) if (locationShutdownEvent(line)) void stop("location-shut-down");
+    for (const line of lines) {
+      identifyRoot(line);
+      if (locationShutdownEvent(line)) void stop("location-shut-down");
+    }
     if (stdoutLine.length > 64 * 1024) stdoutLine = "";
   });
   child.stderr?.on("data", chunk => {
@@ -1298,6 +1312,7 @@ export async function runOpenCode(options, dependencies = {}) {
       stderr: Buffer.concat(stderrChunks).toString("utf8"),
       output_limit_exceeded: outputLimitExceeded,
       command,
+      root_session_id: rootSessionID ?? null,
       usage,
       cleanupEstablished,
       watchdogEvents,
@@ -1323,14 +1338,17 @@ export async function runOpenCode(options, dependencies = {}) {
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
         output_limit_exceeded: outputLimitExceeded,
         command,
+        root_session_id: rootSessionID ?? null,
       });
     };
     void cliClosed.then(({ exit, signal, spawnFailed }) => {
       if (spawnFailed) { stopReason = "spawn-failed"; finish(exit, signal); return; }
       finishAfterClose = () => finish(exit, signal);
+      identifyRoot(stdoutLine); // Native JSON can close without a trailing newline.
       if (exit !== 0 || signal || stopping) { finish(exit, signal); return; }
       void waitForNativeSettlement({
-        pending: () => (dependencies.nativeRunPending ?? nativeRunPending)(options.workspace, options.databasePath, { since: startedAt }),
+        pending: () => (dependencies.nativeRunPending ?? nativeRunPending)(options.workspace, options.databasePath,
+          { since: startedAt, ...(rootSessionID === undefined ? {} : { root: rootSessionID }) }),
         stopped: () => stopping || settled,
       }).then(() => finish(exit, signal), () => { stopReason = "settlement-read-failed"; finish(1, signal); });
     });
@@ -1436,6 +1454,7 @@ function emptyLiveResult(instance, status) {
     status,
     exit_code: null,
     signal: null,
+    root_session_id: null,
     patch_bytes: 0,
     patch_sha256: null,
     elapsed_ms: 0,
@@ -1501,7 +1520,7 @@ export async function runLive(value, options, dependencies = {}) {
       failure_stage: "candidate-runtime-preparation",
       failure: String(error?.message ?? error),
       ...(error?.code === undefined ? {} : { failure_code: error.code }),
-      task_execution_started: false, exit_code: null, patch_bytes: 0, patch_sha256: null,
+      task_execution_started: false, exit_code: null, root_session_id: null, patch_bytes: 0, patch_sha256: null,
       usage_complete: false, next_action: nextAction,
       ...(context?.cleanup_complete === false ? { candidate_runtime_cleanup: context } : {}),
     }));
@@ -1691,6 +1710,7 @@ export async function runLive(value, options, dependencies = {}) {
       status,
       exit_code: execution?.exit ?? null,
       signal: execution?.signal ?? null,
+      root_session_id: execution?.root_session_id ?? null,
       patch_bytes: Buffer.byteLength(patch),
       patch_sha256: patch.length > 0 ? digest(patch) : null,
       elapsed_ms: Date.now() - started,

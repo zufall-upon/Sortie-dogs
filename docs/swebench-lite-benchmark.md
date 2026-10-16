@@ -424,6 +424,19 @@ Retain these together for reproducibility:
 - scoring snapshots, requests, state, logs, live results, and official harness report;
 - exact command lines, exits, and environment/tool versions without credentials.
 
+`results[].root_session_id` records the first native top-level session identity
+emitted by the owned CLI JSON stream, including fragmented or final no-newline
+events. When present, that same identity pins the existing native settlement wait;
+a later same-project root cannot release or hold its owned queued work. A known
+active root with no first assistant yet is not settled just because its queue is
+transitioning. An emitted root not yet visible in the native snapshot remains
+pending until observable or the caller's existing stop/limit, not settled from an
+empty family. Nested part/text IDs and diagnostics are not identities.
+An unavailable identity stays `null`, including skipped/preparation-failure rows;
+legacy no-identity discovery remains compatible, not new ownership evidence.
+This field is not a Mission receipt or official correctness. Pricing retains its
+existing directory scope and all original limits remain in force.
+
 `results[].usage.native_model_usage` preserves directory-scoped native model facts from
 that same read-only usage scan. Each entry groups session, native message agent,
 provider/model/variant, native service tier and assistant-versus-compaction event type; `usage_records`

@@ -11,6 +11,7 @@ import test from "node:test";
 import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { runSupervisor } from "../scripts/swebench-lite-supervisor.mjs";
+import { nativeRunPending as readNativePending } from "../scripts/native-run-settlement.mjs";
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
 import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
@@ -409,6 +410,103 @@ console.log(JSON.stringify({ text: message && input ? message + "\\n" + input : 
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+for (const queue of ["session_pending", "session_inbox", "native_starting", "native_row_pending"]) for (const shape of ["fragmented", "no-newline"]) {
+  test(`benchmark settlement follows its emitted CLI root, not a later project root: ${queue}/${shape}`, { skip: process.platform === "win32" }, async () => {
+    const { root, options } = await fakeOpenCode("exit 0");
+    const path = join(root, "native.db"), db = new DatabaseSync(path), since = Date.now() - 1000;
+    let running: ReturnType<typeof runOpenCode> | undefined, stopped = false;
+    let signalPending!: () => void;
+    const pendingSeen = new Promise<void>(done => { signalPending = done; });
+    const scopes: { root?: string; since: number }[] = [];
+    const queueTable = queue.startsWith("native_") ? "session_pending" : queue;
+    try {
+      db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+        CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+        CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+      const session = db.prepare("INSERT INTO session_v2 VALUES (?, NULL, ?, ?, ?, ?)");
+      if (queue !== "native_row_pending") session.run("owned-root", root, since + 1, null, null);
+      session.run("foreign-root", root, since + 2, since + 100, "succeeded");
+      session.run("configuration-only", root, since + 3, null, null);
+      const message = db.prepare("INSERT INTO session_message VALUES (?, 'assistant', 1, ?)");
+      message.run("foreign-root", JSON.stringify({ time: { completed: since + 100 }, finish: "stop", content: [] }));
+      if (!queue.startsWith("native_")) db.exec(`INSERT INTO ${queueTable} VALUES ('owned-root')`);
+      const prefix = 'diagnostic\n{"sessionID":"foreign-root"}\n{"type":"text","part":{"sessionID":"foreign-root"}}\n';
+      const identity = JSON.stringify({ type: "step_start", sessionID: "owned-root", part: { sessionID: "foreign-root" } });
+      const later = JSON.stringify({ type: "text", sessionID: "foreign-root" });
+      const script = shape === "fragmented"
+        ? `process.stdout.write(${JSON.stringify(prefix + identity.slice(0, 23))});setTimeout(()=>process.stdout.write(${JSON.stringify(identity.slice(23) + "\n" + later + "\n")}),20);`
+        : `process.stdout.write(${JSON.stringify(prefix + identity)});`;
+      await writeFile(join(root, "bin", "opencode"), `#!${process.execPath}\n${script}\n`);
+      running = runOpenCode(options({ startedAt: since, timeoutSeconds: 8, databasePath: path }), {
+        ...fakeReadyServer,
+        startServer: async (_workspace: string, environment: Record<string, string>) => ({
+          url: "http://127.0.0.1:12345", env: environment, stop: async () => { stopped = true; },
+        }),
+        nativeRunPending: (project: string, database: string, scope: { root?: string; since: number }) => {
+          scopes.push(scope);
+          const pending = readNativePending(project, database, scope);
+          if (pending) signalPending();
+          return pending;
+        },
+        readUsage: () => ({ usd: 0.1, requests: 1, unpriced: [] }),
+      });
+      const first = await Promise.race([pendingSeen.then(() => "pending"), running.then(() => "settled")]);
+      if (first === "settled") {
+        const premature = await running;
+        assert.equal(premature.exit, 0, premature.stderr);
+        assert.equal(premature.reason, "completed", premature.stderr);
+        assert.match(premature.stdout, /"sessionID":"owned-root"/);
+      }
+      assert.equal(first, "pending", "CLI close must not tear down its queued root merely because a later foreign root is idle");
+      assert.equal(stopped, false);
+      db.exec(`DELETE FROM ${queueTable} WHERE session_id = 'owned-root'`);
+      if (queue === "native_row_pending") session.run("owned-root", root, since + 1, null, null);
+      message.run("owned-root", JSON.stringify({ time: { completed: since + 500 }, finish: "stop", content: [] }));
+      db.prepare("UPDATE session_v2 SET time_idle = ?, idle_outcome = 'succeeded' WHERE id = 'owned-root'").run(since + 500);
+      db.exec(`INSERT INTO ${queueTable} VALUES ('foreign-root')`);
+      const result = await running;
+      assert.equal(result.reason, "completed", "later foreign work cannot hold this completed CLI root open");
+      assert.equal(result.root_session_id, "owned-root");
+      assert.ok(scopes.length >= 2);
+      assert.ok(scopes.every(scope => scope.root === "owned-root" && scope.since === since), "first native CLI identity stays pinned");
+      assert.equal(stopped, true); assert.equal(result.usage.usd, 0.1);
+    } finally {
+      db.exec("DELETE FROM session_pending; DELETE FROM session_inbox; UPDATE session_v2 SET time_idle = 9999999999999, idle_outcome = 'succeeded'");
+      if (!db.prepare("SELECT 1 FROM session_v2 WHERE id = 'owned-root'").get()) {
+        db.prepare("INSERT INTO session_v2 VALUES ('owned-root', NULL, ?, ?, 9999999999999, 'succeeded')").run(root, since + 1);
+      }
+      await running?.catch(() => undefined);
+      db.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("an emitted root that never becomes visible still obeys the original timeout", { skip: process.platform === "win32" }, async () => {
+  const { root, options } = await fakeOpenCode(`printf '%s' '{"type":"step_start","sessionID":"invisible-root"}'`);
+  const path = join(root, "native.db"), db = new DatabaseSync(path);
+  let stopped = false, pendingReads = 0;
+  try {
+    db.exec(`CREATE TABLE session_v2(id TEXT, parent_id TEXT, directory TEXT, time_created INTEGER, time_idle INTEGER, idle_outcome TEXT);
+      CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+      CREATE TABLE session_pending(session_id TEXT); CREATE TABLE session_inbox(session_id TEXT);`);
+    const result = await runOpenCode(options({ databasePath: path, timeoutSeconds: 1 }), {
+      ...fakeReadyServer,
+      startServer: async (_workspace: string, environment: Record<string, string>) => ({
+        url: "http://127.0.0.1:12345", env: environment, stop: async () => { stopped = true; },
+      }),
+      nativeRunPending: (project: string, database: string, scope: { root?: string; since: number }) => {
+        pendingReads++; assert.equal(stopped, false); assert.equal(scope.root, "invisible-root");
+        return readNativePending(project, database, scope);
+      },
+      readUsage: () => ({ usd: 0, requests: 0, unpriced: ["pending-usage"] }),
+    });
+    assert.ok(pendingReads > 0);
+    assert.equal(result.reason, "timeout"); assert.equal(result.root_session_id, "invisible-root");
+    assert.equal(result.usageComplete, false); assert.equal(result.cleanupEstablished, true);
+    assert.equal(stopped, true);
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("native background work survives CLI close until settlement, under the original limits", { skip: process.platform === "win32" }, async () => {
   const { root, options } = await fakeOpenCode("exit 0");
   try {
@@ -745,7 +843,7 @@ test("native model usage reaches runner metadata and supervisor state without re
           }));
           observed = readDirectoryUsage(workspace, join(root, "native.db"));
           return { command: "model-free fixture", exit: 0, reason: "completed", cleanupEstablished: true,
-            usage: observed, usageComplete: true };
+            root_session_id: "cli-root", usage: observed, usageComplete: true };
         },
       });
       return { identity: { pid: 99999999, starttime: null } };
@@ -762,6 +860,9 @@ test("native model usage reaches runner metadata and supervisor state without re
     const child = JSON.parse(await readFile(state.instances[0]!.child_metadata, "utf8"));
     assert.deepEqual(durable.instances[0].result.usage, observed);
     assert.deepEqual(child.results[0].usage, observed);
+    assert.equal(state.instances[0]!.result.root_session_id, "cli-root");
+    assert.equal(durable.instances[0].result.root_session_id, "cli-root");
+    assert.equal(child.results[0].root_session_id, "cli-root", "CLI root is forwarded, not inferred from the Worker model record");
     assert.equal(state.spent_usd, 0.0007); assert.equal(state.held_unknown_usd, 0);
     assert.notEqual(state.instances[0]!.status, "succeeded", "model evidence and a clean CLI exit cannot manufacture a nonempty patch or accepted task");
     await runSupervisor(value, options, dependencies);
@@ -1032,6 +1133,7 @@ for (const unresolvedCleanup of [false, true]) {
         assert.equal(result.failure, primary.message); assert.equal(result.failure_code, "EIO");
         assert.equal(result.failure_stage, "candidate-runtime-preparation");
         assert.equal(result.task_execution_started, false); assert.equal(result.exit_code, null);
+        assert.equal(result.root_session_id, null, "no CLI identity exists before candidate preparation");
         assert.equal(result.patch_sha256, null); assert.equal(result.usage_complete, false);
         assert.equal(result.usage, undefined, "missing usage is not invented as zero");
         assert.match(result.next_action, /retain unresolved reservation holds/i);
@@ -1777,10 +1879,12 @@ test("cost enforcement failures stop later instances with deterministic replay e
         const notRunStatus = `not-run-${reason}`;
         assert.equal(executeCalls, 1);
         assert.deepEqual(result.results.map(item => item.status), [reason, notRunStatus]);
+        assert.ok(result.results.every(item => item.root_session_id === null), "executed and skipped unknown identities share the live result contract");
         if (reason === "pricing-coverage-missing") {
           assert.deepEqual(result.results[0]!.usage, gapUsage);
           const metadata = JSON.parse(await readFile(join(root, "predictions.jsonl.metadata.json"), "utf8"));
           assert.deepEqual(metadata.results[0].usage, gapUsage, "the diagnostic survives into durable run metadata");
+          assert.equal(metadata.results[1].root_session_id, null, "skipped identity is serialized as unknown, not omitted");
           assert.match(metadata.results[0].next_action, /provider transport failure/);
         }
         const replayManifest = JSON.parse(await readFile(result.replay.manifest.path, "utf8"));
