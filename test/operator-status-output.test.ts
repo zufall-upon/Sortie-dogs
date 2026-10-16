@@ -110,6 +110,49 @@ test("model header stays bounded when completion proof and attempt history are b
   assert.deepEqual(full, original, "bounded display never truncates the full original proofs or history");
 });
 
+test("model header keeps model-bearing attempts behind a model-less direct tail", () => {
+  for (const modelCount of [1, 8]) {
+    const retained = packet();
+    const original = { ...retained, attempts: [
+      ...Array.from({ length: modelCount }, (_, index) => ({ ...retained.attempts[0],
+        attemptID: `worker-${index}`, kind: "implementation" })),
+      ...Array.from({ length: 8 }, (_, index) => ({ attemptID: `direct-${index}`,
+        kind: "direct_execution", status: "succeeded", nativeOutcome: "completed" })),
+    ], completion: { ready: false, blockers: [{ source_paths: Array.from({ length: 5000 }, (_, index) => `src/tail-proof-${index}.ts`) }] } };
+    const before = structuredClone(original);
+    const output = serializeOperatorStatus(original), visible = nativeVisiblePrefix(output);
+    assert.ok(visible.includes('"observedModel":"openai/gpt-6-luna-fast"'), "direct executions cannot displace known Worker observations");
+    const { model_observations: models, ...full } = JSON.parse(output);
+    assert.equal(models.recent_attempts.length, modelCount + 8);
+    assert.ok(models.recent_attempts.length <= 16);
+    assert.equal(models.omitted_attempts, 0);
+    assert.deepEqual(models.recent_attempts.map((attempt: { attemptID: string }) => attempt.attemptID),
+      original.attempts.map(attempt => attempt.attemptID));
+    for (const attempt of models.recent_attempts.filter((attempt: { kind: string }) => attempt.kind === "direct_execution")) {
+      assert.equal(Object.hasOwn(attempt, "observedModel"), false);
+      assert.equal(Object.hasOwn(attempt, "selectedModel"), false);
+    }
+    assert.deepEqual(full, before);
+    assert.deepEqual(original, before);
+  }
+});
+
+test("model header preserves failure details before oversized completion proof", () => {
+  const retained = packet();
+  const original = { ...retained, attempts: [{ ...retained.attempts[0], status: "failed", resultClass: "acceptance",
+    failure: { category: "implementation", code: "validation-failed:5", detail: "retained full diagnostic ".repeat(5000) } }],
+    completion: { ready: false, blockers: [{ candidate_paths: Array.from({ length: 5000 }, (_, index) => `src/failure-proof-${index}.ts`) }] } };
+  const before = structuredClone(original);
+  const output = serializeOperatorStatus(original), visible = nativeVisiblePrefix(output);
+  for (const fact of ['"category":"implementation"', '"code":"validation-failed:5"', '"resultClass":"acceptance"'])
+    assert.ok(visible.includes(fact), fact);
+  const { model_observations: models, ...full } = JSON.parse(output);
+  assert.deepEqual(models.recent_attempts[0].failure, { category: "implementation", code: "validation-failed:5" });
+  assert.equal(models.recent_attempts[0].status, "failed");
+  assert.deepEqual(full, before, "detailed failure remains intact outside the bounded prefix");
+  assert.deepEqual(original, before);
+});
+
 test("status serialization preserves missing or unknown model/cost without promoting selected model or zero price", () => {
   const original = { attempts: [{ selectedModel: "openai/gpt-6-luna-fast#max", observedModel: null, observedVariant: null }],
     budget: { settled_cost_usd: 0, cost_status: "unknown", cost_scope: "worker-only", campaign_remaining_usd: null },

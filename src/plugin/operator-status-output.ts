@@ -1,13 +1,31 @@
+const RECENT_ATTEMPTS = 8;
 const RECENT_MODEL_ATTEMPTS = 8;
-const MODEL_FIELDS = ["attemptID", "runID", "unitID", "kind", "childSessionID", "status", "nativeOutcome",
-  "selectedModel", "observedModel", "observedVariant"] as const;
+const ATTEMPT_FIELDS = ["attemptID", "runID", "unitID", "kind", "childSessionID", "status", "nativeOutcome",
+  "selectedModel", "observedModel", "observedVariant", "resultClass"] as const;
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
 /** Display-only projection: never infer an observed model from a selection. */
 function recentModelObservations(attempts: unknown[]) {
-  const recent = attempts.slice(-RECENT_MODEL_ATTEMPTS).flatMap(value => {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
-    const attempt = value as Record<string, unknown>;
-    return [Object.fromEntries(MODEL_FIELDS.filter(key => Object.hasOwn(attempt, key)).map(key => [key, attempt[key]]))];
+  const selected = new Set<number>();
+  for (let index = Math.max(0, attempts.length - RECENT_ATTEMPTS); index < attempts.length; index++) selected.add(index);
+  // Model-less direct work must not displace the most recent model observations.
+  let models = 0;
+  for (let index = attempts.length - 1; index >= 0 && models < RECENT_MODEL_ATTEMPTS; index--) {
+    const attempt = attempts[index];
+    if (record(attempt) && [attempt.selectedModel, attempt.observedModel].some(value => typeof value === "string" && value.length > 0)) {
+      selected.add(index); models++;
+    }
+  }
+  const recent = [...selected].sort((left, right) => left - right).flatMap(index => {
+    const attempt = attempts[index];
+    if (!record(attempt)) return [];
+    const summary: Record<string, unknown> = Object.fromEntries(ATTEMPT_FIELDS.filter(key => Object.hasOwn(attempt, key)).map(key => [key, attempt[key]]));
+    if (record(attempt.failure)) {
+      const failure = attempt.failure;
+      summary.failure = Object.fromEntries(["category", "code"].filter(key => Object.hasOwn(failure, key)).map(key => [key, failure[key]]));
+    } else if (attempt.failure === null) summary.failure = null;
+    return [summary];
   });
   return { recent_attempts: recent, omitted_attempts: attempts.length - recent.length };
 }
