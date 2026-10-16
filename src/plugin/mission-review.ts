@@ -151,6 +151,19 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     }
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
+  // Reuse the completed-sequence binding predicate before retaining an incomplete
+  // prefix too; an exit-zero call with an invalid saved check is not reusable proof.
+  const bindingUnavailable = (item: (typeof matched)[number]): boolean => {
+    if (!checks) return false;
+    const command = declared[item.occurrence]!;
+    const check = checks.find(check => check.callID === item.callID && check.childSessionID === child);
+    const attempt = attempts.find(attempt => attempt.callID === item.callID);
+    return !check || !attempt || !check.fresh || check.exitCode !== 0 || check.command[item.member] !== command ||
+      !validationDirectoryMatches([command], check.directory, directory, directories) ||
+      directory !== undefined && resolve(directory, check.directory ?? ".") !== resolve(directory, attempt.directory ?? ".") ||
+      !Number.isFinite(Date.parse(check.startedAt)) || !Number.isFinite(Date.parse(check.endedAt)) ||
+      Date.parse(check.startedAt) < notBefore || Date.parse(check.endedAt) < Date.parse(check.startedAt);
+  };
   // Registration repairs replace only affected recipes. Retain the ordered actual
   // occurrences of unchanged checks and join the changed checks after their own
   // registration, rather than making an inserted/corrected command rerun its neighbors.
@@ -207,7 +220,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         // the retained prefix and replacement tail must pass the usual binding/freshness checks.
         const retryableTail = commands.length === 1 && members.length === 1 &&
           partial.length === required.length - 1 && members[0]!.command === required.at(-1) &&
-          required.indexOf(members[0]!.command) === required.length - 1;
+          required.indexOf(members[0]!.command) === required.length - 1 &&
+          partial.every(item => !bindingUnavailable(item));
         completed = undefined;
         if (!retryableTail) partial.length = 0;
         failed = { command: commands, outcome: "fail", exitCode: attempt.exit };
@@ -236,13 +250,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   complete.sort((a, b) => a.occurrence - b.occurrence);
   for (const item of complete) {
     const command = declared[item.occurrence]!;
-    const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
-    const attempt = attempts.find(attempt => attempt.callID === item.callID)!;
-    if (checks && (!check || !check.fresh || check.exitCode !== 0 || check.command[item.member] !== command ||
-        !validationDirectoryMatches([command], check.directory, directory, directories) ||
-        directory !== undefined && resolve(directory, check.directory ?? ".") !== resolve(directory, attempt.directory ?? ".") ||
-        !Number.isFinite(Date.parse(check.startedAt)) || !Number.isFinite(Date.parse(check.endedAt)) ||
-        Date.parse(check.startedAt) < notBefore || Date.parse(check.endedAt) < Date.parse(check.startedAt))) {
+    if (bindingUnavailable(item)) {
       return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}` };
     }
   }

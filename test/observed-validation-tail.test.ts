@@ -132,6 +132,26 @@ for (const priorComplete of [false, true]) for (const failedExit of [5, null]) {
   });
 }
 
+for (const failedExit of [5, null]) test(`failed final-check guidance rejects an invalid retained prefix: exit=${failedExit}`, () => {
+  const root = resolve("_testenv/prefix-validity-root");
+  for (const mode of ["stale", "missing", "wrong-exit", "wrong-command", "wrong-child", "bad-time", "wrong-cwd"]) {
+    const native = history([A, B]), bindings = checks([[A], [B]]);
+    native[1]!.parts[0]!.state.metadata.exit = failedExit;
+    bindings[1].exitCode = failedExit; bindings[1].fresh = false;
+    if (mode === "stale") bindings[0].fresh = false;
+    if (mode === "missing") bindings.splice(0, 1);
+    if (mode === "wrong-exit") bindings[0].exitCode = 1;
+    if (mode === "wrong-command") bindings[0].command = ["node another-check.mjs"];
+    if (mode === "wrong-child") bindings[0].childSessionID = "another-author";
+    if (mode === "bad-time") bindings[0].startedAt = "invalid";
+    if (mode === "wrong-cwd") bindings[0].directory = resolve(root, "elsewhere");
+    const result = reviewerCorrectionValidation([A, B], child, native, 50, bindings, root);
+    assert.equal(result.ready, false);
+    assert.equal(result.nextOccurrence, 0, `${mode}: repair the invalid prefix before spending another tail execution`);
+    assert.equal(result.failure?.exitCode, failedExit, "actual failed tail remains reported");
+  }
+});
+
 test("failed composite or repeated final declarations cannot lend a partial prefix to retry", () => {
   const native = history([A, `${A} && ${B}`, B]);
   native[1]!.parts[0]!.state.metadata.exit = 1;
@@ -189,7 +209,7 @@ for (const changedSource of [false, true]) test(`cold direct finish reuses the p
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-for (const changedSource of [false, true]) test(`cold direct finish retains a successful prefix after final-check setup repair: source changed=${changedSource}`, async () => {
+for (const changedSource of [false, true, "during-prefix"] as const) test(`cold direct finish retains a successful prefix after final-check setup repair: source changed=${changedSource}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/retried-final-check-"));
   try {
@@ -214,9 +234,10 @@ for (const changedSource of [false, true]) test(`cold direct finish retains a su
     }] }, { sessionID: "root" });
     const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     const initial = await readRun();
-    const runNative = async (command: string, callID: string) => {
+    const runNative = async (command: string, callID: string, during?: () => Promise<void>) => {
       const args = { command, workdir: directory }, start = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID }, { args });
+      await during?.();
       let exit = 0, output = "";
       try { output = (await exec("/bin/sh", ["-c", command], { cwd: directory })).stdout; }
       catch (error) { exit = Number((error as { code?: unknown }).code) || 1; output = String((error as { stderr?: unknown }).stderr ?? ""); }
@@ -225,27 +246,38 @@ for (const changedSource of [false, true]) test(`cold direct finish retains a su
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID, args }, { output, metadata: { exit } });
       return exit;
     };
-    assert.equal(await runNative("node prefix.mjs", "passed-prefix"), 0);
+    const invalidPrefix = changedSource === "during-prefix";
+    if (invalidPrefix) await writeFile(join(directory, "source.txt"), "broken\n");
+    assert.equal(await runNative("node prefix.mjs", "passed-prefix",
+      invalidPrefix ? () => writeFile(join(directory, "source.txt"), "fixed\n") : undefined), 0);
     const prefix = structuredClone((await readRun()).units[0]!.directExecution!.checks[0]);
     assert.ok(prefix, "the native prefix must have a persisted binding");
+    assert.equal(prefix.fresh, !invalidPrefix);
     assert.equal(await runNative("node tail.mjs", "failed-tail"), 1);
     const failed = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
     assert.equal(failed.status, "direct-unit-awaits-validation");
     assert.match(failed.reason, /validation-failed/);
+    if (invalidPrefix) {
+      assert.equal(failed.nextOccurrence, 0, "guide repair to the invalid prefix before suggesting another tail execution");
+      hooks = await create();
+      const cold = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+      assert.equal(cold.nextOccurrence, 0, "invalid-prefix guidance survives reload");
+      assert.equal(await runNative("node prefix.mjs", "repaired-prefix"), 0);
+    }
     await mkdir(join(directory, ".sortie-env"));
     await writeFile(join(directory, ".sortie-env/ready"), "ready\n");
-    if (changedSource) await writeFile(join(directory, "source.txt"), "changed\n");
+    if (changedSource === true) await writeFile(join(directory, "source.txt"), "changed\n");
     assert.equal(await runNative("node tail.mjs", "retried-tail"), 0);
     hooks = await create();
     const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
-    assert.equal(finished.status, changedSource ? "direct-unit-awaits-validation" : "awaiting-acceptance", JSON.stringify(finished));
-    if (changedSource) assert.match(finished.reason, /validation-stale/);
+    assert.equal(finished.status, changedSource === true ? "direct-unit-awaits-validation" : "awaiting-acceptance", JSON.stringify(finished));
+    if (changedSource === true) assert.match(finished.reason, /validation-stale/);
     const current = await readRun(), saved = current.units[0]!.directExecution!.checks;
     assert.equal(current.runID, initial.runID);
     assert.deepEqual(saved.find(check => check.callID === "passed-prefix"), prefix, "old proof is retained, not relabeled or rerun");
-    assert.equal(native.length, 3);
-    assert.deepEqual(saved.map(check => check.exitCode), [0, 1, 0], "failed native outcome remains in history");
-    if (!changedSource) {
+    assert.equal(native.length, invalidPrefix ? 4 : 3);
+    assert.deepEqual(saved.map(check => check.exitCode), invalidPrefix ? [0, 1, 0, 0] : [0, 1, 0], "failed native outcome remains in history");
+    if (changedSource !== true) {
       const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
       assert.equal(status.budget.consumed_units, 1, "repair uses the same existing direct unit");
     }
