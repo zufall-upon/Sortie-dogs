@@ -623,10 +623,10 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-for (const mode of ["shim", "shim-alias", "shim-external-file", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
+for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only", "shim-git-only-external-file", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
   skip: mode === "actual" && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
 }, async () => {
-  const actualDocker = mode === "actual";
+  const actualDocker = mode === "actual", noPython = mode.includes("git-only");
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/native-docker-formal-"));
   const gateway = join(root, "gateway"), physicalWorkspace = join(root, "workspace"), bin = join(root, "bin");
@@ -648,13 +648,14 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "actual"]) test(
     await exec("git", ["add", "--", "instruction.md", "host-canary.txt"], { cwd: gateway });
     await exec("git", ["commit", "--quiet", "-m", "gateway fixture"], { cwd: gateway });
     await writeFile(join(workspace, "input.txt"), "fixed\n");
-    if (mode === "shim-external-file") {
+    if (mode.endsWith("external-file")) {
       await writeFile(join(root, "captured-check.sh"), source);
       await fs.symlink(join(root, "captured-check.sh"), join(workspace, "check.sh"));
     } else await writeFile(join(workspace, "check.sh"), source);
     await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
     await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
     await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexport GIT_CEILING_DIRECTORIES=${JSON.stringify(root)}\nexec "$@"\n`);
+    if (noPython) await writeFile(fakeDocker, `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]!=='exec'||a[1]!=='--workdir'||a[3]!==process.env.FAKE_DOCKER_CONTAINER)process.exit(125);\nif(a[4]==='python3')process.exit(127);\nif(a[4]==='sh')a[6]=a[6].replace('if command -v python3 >/dev/null 2>&1; then','if false; then');\nconst r=spawnSync(a[4],a.slice(5),{cwd:a[2],env:{...process.env,GIT_CEILING_DIRECTORIES:${JSON.stringify(root)}},stdio:'inherit'});\nprocess.exit(r.status??125);\n`);
     await chmod(fakeDocker, 0o755);
     if (actualDocker) {
       const image = process.env.SORTIE_NATIVE_DOCKER_IMAGE!;
@@ -802,7 +803,7 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "actual"]) test(
     assert.equal(inspectedFile.sha256, createHash("sha256").update(source).digest("hex"));
     assert.equal(inspectedFile.workspace.candidate, dockerBinding.candidate);
     assert.equal(inspectedFile.lines.map((row: [number, string]) => row[1]).join(""), source);
-    if (mode === "shim-external-file") {
+    if (mode.endsWith("external-file")) {
       assert.equal(inspectedFile.path, join(root, "captured-check.sh"));
       await assert.rejects(dockerRead!.execute({ ...readArgs, path: join(root, "captured-check.sh") },
         { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /file-outside-candidate-workspace/);
@@ -840,9 +841,14 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "actual"]) test(
       "Git ignore rules do not exclude task inputs from Docker proof");
     const plain = join(root, "non-git-task"); await mkdir(plain); await writeFile(join(plain, "logs.txt"), "original\n");
     await writeFile(join(plain, "sitecustomize.py"), 'open("startup-side-effect.txt", "w").write("candidate startup executed\\n")\n');
+    if (noPython) {
+      await exec("git", ["init", "--quiet"], { cwd: plain });
+      await exec("git", ["add", "."], { cwd: plain });
+      await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Git-only plain fixture"], { cwd: plain });
+    }
     const plainBefore = await captureDockerWorkspaceSnapshot(containerID, plain);
     await assert.rejects(readFile(join(plain, "startup-side-effect.txt")), { code: "ENOENT" }, "snapshot does not execute candidate Python startup code");
-    assert.ok(plainBefore, "Terminal task workspaces need no Git initialization");
+    assert.ok(plainBefore, noPython ? "Git-only image reuses the committed Git identity" : "Terminal task workspaces need no Git initialization");
     const plainRead = await dockerRead!.execute({ container_id: containerID, cwd: plain, candidate: plainBefore.candidate, path: "logs.txt" },
       { agent: "dog-reviewer-v010", sessionID: "reviewer" });
     assert.equal(JSON.parse(plainRead.content).lines[0][1], "original\n");

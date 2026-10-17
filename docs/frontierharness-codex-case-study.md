@@ -52,7 +52,17 @@ The host captures the actual container workspace before and after a declared
 check. Python-enabled task images support non-Git workspaces and include ignored
 inputs, file modes, and link identity/content. Snapshot and reader Python processes
 use `-I -S`, so candidate-local startup hooks and import paths are not executed as
-part of read-only observation. Git-only images retain a Git-based
+part of read-only observation. If a read cannot start Python, a fixed capability
+probe must confirm its absence before the same read API uses existing
+`sh`/`find -print0`/`readlink`/`cat` tools; it requires no image-side JSON utility
+or additional GNU `-printf` capability. Python observation errors are not silently
+retried through another recipe. This transport installs nothing in the task and
+accepts paths only as arguments, never caller commands. Host Node streams the
+whole-file hash and at most 64 KB of excerpts even for giant lines; directory
+pagination retains only the first offset-plus-limit names, with Unicode ordering
+and byte-safe NUL framing. Invalid UTF-8 path/name framing remains unavailable,
+not a substituted filename. Candidate identity is still checked before and after
+the read, and producer failures discard partial output. Git-only images retain a Git-based
 fallback that also binds actual workspace modes and symlink targets, including
 ignored files and tracked executable bits when `core.filemode=false`. It also hashes
 regular-file bytes reached through tracked symlinks, rather than treating their

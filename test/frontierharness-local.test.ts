@@ -164,6 +164,7 @@ config = native_gateway_config("openai/gpt-6-sol", "0123456789abcdef01234567", "
 assert package == config["plugins"][1]["package"] == "./.opencode/plugins/docker-task"
 assert (gateway / ".opencode/plugins/docker-task/scripts/frontierharness-docker-task.mjs").read_bytes() == (Path(sys.argv[1]) / "frontierharness-docker-task.mjs").read_bytes()
 assert (gateway / ".opencode/plugins/docker-task/dist/plugin/docker-validation.js").read_bytes() == (Path(sys.argv[1]).parent / "dist/plugin/docker-validation.js").read_bytes()
+assert (gateway / ".opencode/plugins/docker-task/dist/plugin/docker-workspace-read-fallback.js").read_bytes() == (Path(sys.argv[1]).parent / "dist/plugin/docker-workspace-read-fallback.js").read_bytes()
 assert config["plugins"][1]["options"]["container"] == "0123456789abcdef01234567"
 root_rules = config["agents"]["dog-operator"]["permissions"]
 assert {"action": "subagent", "resource": "dog-reviewer-v010", "effect": "allow"} in root_rules
