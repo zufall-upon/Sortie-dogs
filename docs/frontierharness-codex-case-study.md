@@ -33,7 +33,11 @@ excerpts and whole-file SHA-256 retain their existing meaning. The fixed reader 
 output for JSON escaping of those existing bounds, so a valid long-name page or
 escaped excerpt is not mistaken for an unavailable candidate. The tool checks the exact candidate
 before and after the read, uses a fixed reader rather than caller-supplied shell,
-and does not mint validation evidence. Stale/unavailable candidates are reported
+and does not mint validation evidence. A candidate-local regular-file symlink can
+be read through that link even when its snapshot-bound referent is outside the
+repository. Direct outside paths and file/../ traversal are not admitted; a
+normalized directory hop cannot substitute a different link for the candidate
+entry. External directory trees remain unavailable. Stale/unavailable candidates are reported
 as such, not replaced by a new snapshot. Reviewer context, native permissions,
 and route/usage audits include this read-only path. Actual correction still uses
 the existing `repair_review` admission, scope, formal checks, and self-recheck.

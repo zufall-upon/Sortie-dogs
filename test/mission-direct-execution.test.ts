@@ -623,7 +623,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-for (const mode of ["shim", "shim-alias", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
+for (const mode of ["shim", "shim-alias", "shim-external-file", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
   skip: mode === "actual" && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
 }, async () => {
   const actualDocker = mode === "actual";
@@ -648,7 +648,10 @@ for (const mode of ["shim", "shim-alias", "actual"]) test(`native Docker validat
     await exec("git", ["add", "--", "instruction.md", "host-canary.txt"], { cwd: gateway });
     await exec("git", ["commit", "--quiet", "-m", "gateway fixture"], { cwd: gateway });
     await writeFile(join(workspace, "input.txt"), "fixed\n");
-    await writeFile(join(workspace, "check.sh"), source);
+    if (mode === "shim-external-file") {
+      await writeFile(join(root, "captured-check.sh"), source);
+      await fs.symlink(join(root, "captured-check.sh"), join(workspace, "check.sh"));
+    } else await writeFile(join(workspace, "check.sh"), source);
     await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
     await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
     await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexport GIT_CEILING_DIRECTORIES=${JSON.stringify(root)}\nexec "$@"\n`);
@@ -799,6 +802,11 @@ for (const mode of ["shim", "shim-alias", "actual"]) test(`native Docker validat
     assert.equal(inspectedFile.sha256, createHash("sha256").update(source).digest("hex"));
     assert.equal(inspectedFile.workspace.candidate, dockerBinding.candidate);
     assert.equal(inspectedFile.lines.map((row: [number, string]) => row[1]).join(""), source);
+    if (mode === "shim-external-file") {
+      assert.equal(inspectedFile.path, join(root, "captured-check.sh"));
+      await assert.rejects(dockerRead!.execute({ ...readArgs, path: join(root, "captured-check.sh") },
+        { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /file-outside-candidate-workspace/);
+    }
     await hooks["tool.execute.after"]!({ tool: "fh_docker_read", sessionID: "reviewer", callID: "docker-review-source", args: readArgs },
       { output: inspected.content, metadata: { status: "completed" } });
     await assert.rejects(dockerDefinition!.execute(args, { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /author-only/);

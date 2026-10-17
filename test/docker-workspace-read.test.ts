@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { captureDockerWorkspaceSnapshot, readDockerWorkspaceFile } from "../dist
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
+for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root", "external-file-link", "external-file-chain", "external-directory-link"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
   skip: process.platform === "win32" || (mode === "long-line" && process.platform !== "linux"),
 }, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -43,9 +43,54 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", 
         await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"], { cwd: workspace });
       }
     }
+    if (mode.startsWith("external-")) {
+      await writeFile(join(root, "external.txt"), "captured external input\n");
+      await writeFile(join(root, "uncaptured.txt"), "not candidate input\n");
+      await mkdir(join(root, "deep", "leaf"), { recursive: true });
+      await mkdir(join(root, "deep", "task"));
+      await symlink(join(root, "deep", "leaf"), join(root, "external-hop"));
+      await symlink(join(root, "uncaptured.txt"), join(root, "deep", "task", "input-link"));
+      if (mode === "external-directory-link") {
+        await mkdir(join(root, "external-directory"));
+        await symlink(join(root, "external-directory"), join(workspace, "input-link"));
+      } else {
+        if (mode === "external-file-chain") await symlink(join(root, "external.txt"), join(root, "intermediate"));
+        await symlink(join(root, mode === "external-file-chain" ? "intermediate" : "external.txt"), join(workspace, "input-link"));
+      }
+    }
     process.env.PATH = `${bin}:${priorPath ?? ""}`;
     const candidate = await captureDockerWorkspaceSnapshot(container, cwd);
+    if (mode === "external-directory-link") {
+      assert.equal(candidate, undefined, "uncaptured external directory trees remain unavailable");
+      return;
+    }
     assert.ok(candidate);
+    if (mode.startsWith("external-file-")) {
+      for (const path of [join(root, "external.txt"), join(root, "uncaptured.txt"), "../uncaptured.txt", "input-link/../uncaptured.txt", "../external-hop/../task/input-link"]) {
+        await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate, path), /file-outside-candidate-workspace/);
+      }
+      const read = await readDockerWorkspaceFile(container, cwd, candidate.candidate, "input-link");
+      assert.deepEqual(read.lines, [[1, "captured external input\n"]]);
+      assert.equal(read.sha256, createHash("sha256").update("captured external input\n").digest("hex"));
+      assert.equal(read.workspace.candidate, candidate.candidate, "read does not replace the protected candidate");
+      const absolute = await readDockerWorkspaceFile(container, cwd, candidate.candidate, join(workspace, "input-link"));
+      assert.deepEqual(absolute.lines, read.lines, "absolute candidate-local link is the same admitted input");
+      assert.equal(absolute.sha256, read.sha256);
+      await writeFile(join(root, "external.txt"), "changed external input\n");
+      await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate, "input-link"), /candidate-stale/);
+      const fresh = await captureDockerWorkspaceSnapshot(container, cwd);
+      assert.ok(fresh);
+      if (mode === "external-file-chain") {
+        await writeFile(join(root, "retargeted.txt"), "changed external input\n");
+        await unlink(join(root, "intermediate"));
+        await symlink(join(root, "retargeted.txt"), join(root, "intermediate"));
+      } else {
+        await unlink(join(workspace, "input-link"));
+        await symlink(join(root, "uncaptured.txt"), join(workspace, "input-link"));
+      }
+      await assert.rejects(readDockerWorkspaceFile(container, cwd, fresh.candidate, "input-link"), /candidate-stale/);
+      return;
+    }
     if (repository) {
       assert.deepEqual(await captureDockerWorkspaceSnapshot(container, cwd), candidate, "unchanged observation is deterministic");
       await writeFile(join(workspace, "escaped.txt"), "changed root input\n");
