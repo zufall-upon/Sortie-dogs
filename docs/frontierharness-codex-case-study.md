@@ -26,7 +26,10 @@ the existing native-admitted Reviewer correction role, not initial Review.
 Independent Review uses `fh_docker_read`, copying `container_id`, `cwd`, and
 `candidate` from the Review envelope's `protected_binding_ref.docker_workspace`.
 Read `path: "."` to list the candidate directory or a source/test file path to
-inspect its numbered contents and SHA-256. The tool checks the exact candidate
+inspect its numbered contents and SHA-256. Directory pages admit up to 2000 names;
+file excerpts remain capped at 64 KB. The fixed reader reserves enough subprocess
+output for JSON escaping of those existing bounds, so a valid long-name page or
+escaped excerpt is not mistaken for an unavailable candidate. The tool checks the exact candidate
 before and after the read, uses a fixed reader rather than caller-supplied shell,
 and does not mint validation evidence. Stale/unavailable candidates are reported
 as such, not replaced by a new snapshot. Reviewer context, native permissions,
