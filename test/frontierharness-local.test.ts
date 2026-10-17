@@ -84,7 +84,7 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions, product_worker_chain
+from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions, product_worker_chain, install_native_docker_plugin, native_gateway_config
 root = Path(sys.argv[2])
 subprocess.run(["git", "init", "-q", str(root)], check=True)
 (root / "unrelated-parent.txt").write_text("parent evidence\n")
@@ -138,7 +138,7 @@ caller_tools = {
         "sortie_v010_skip_mission_consultation", "sortie_v010_retry_mission_unit", "sortie_v010_rescue_mission_unit"),
     "dog-worker-v010": ("sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status", "fh_docker_exec"),
 }
-for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010"}),
+for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010", "dog-reviewer-v010"}),
                        ("dogs-coordinator", {"dog-worker-v010", "dog-reviewer-v010"}), ("dog-worker-v010", set())]:
     rules = product_agent_permissions(role, caller_tools[role], allow_execute=role == "dog-worker-v010")
     assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
@@ -158,6 +158,15 @@ review_actions = {r["action"] for r in review}
 assert {"sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status",
         "sortie_v010_expand_unit", "sortie_v010_repair_review", "sortie_v010_finish_direct_unit"} <= review_actions
 assert not any(r["action"] in ("shell", "bash", "write", "edit", "patch") for r in review)
+package = install_native_docker_plugin(gateway)
+config = native_gateway_config("openai/gpt-6-sol", "0123456789abcdef01234567", "fixed instruction",
+                              allowed_models=["openai/gpt-6-sol"])
+assert package == config["plugins"][1]["package"] == "./.opencode/plugins/docker-task"
+assert (gateway / ".opencode/plugins/docker-task/index.js").read_bytes() == (Path(sys.argv[1]) / "frontierharness-docker-task.mjs").read_bytes()
+assert config["plugins"][1]["options"]["container"] == "0123456789abcdef01234567"
+root_rules = config["agents"]["dog-operator"]["permissions"]
+assert {"action": "subagent", "resource": "dog-reviewer-v010", "effect": "allow"} in root_rules
+assert {"action": "sortie_v010_finish_direct_unit", "resource": "*", "effect": "allow"} in root_rules
 print("PASS_GATEWAY_BOUNDARIES")
 `;
   try {

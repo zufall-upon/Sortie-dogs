@@ -118,6 +118,45 @@ def product_agent_permissions(role, tools, *, allow_execute=False, correction=Fa
     return permissions
 
 
+def install_native_docker_plugin(directory):
+    """Install the explicit native route in a NEW gateway, never a frozen run.
+
+    Call from the existing runner's gateway preparation after runtime assets are
+    copied. Keep the returned package entry in the ordinary V2 plugins list.
+    """
+    destination = Path(directory) / ".opencode/plugins/docker-task/index.js"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("xb") as stream:
+        stream.write(Path(__file__).with_name("frontierharness-docker-task.mjs").read_bytes())
+    return "./.opencode/plugins/docker-task"
+
+
+def native_gateway_config(model, container_id, instruction, *, allowed_models,
+                          runtime_plugin="./.opencode/plugins/00-sortie-runtime"):
+    """Use the existing plugin-loading entrypoint and shared role permissions."""
+    registry = _agent_registry()
+    agents = {}
+    for logical, policy in registry["roles"].items():
+        runtime = _runtime_agent(logical)
+        agents[runtime] = {
+            "mode": "primary" if logical == "dog-coordinator" else "subagent",
+            "permissions": product_agent_permissions(
+                runtime, (), allow_execute="execute" in policy.get("core_tools", ()),
+            ) + [{"action": "read", "resource": ".sortie-dogs-v010/*", "effect": "allow"}],
+        }
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "default_agent": _runtime_agent("dog-coordinator"),
+        "experimental": {"subagent_depth": 2},
+        "agents": agents,
+        "plugins": [runtime_plugin, {
+            "package": "./.opencode/plugins/docker-task",
+            "options": {"container": container_id, "instruction": instruction,
+                        "model": model, "allowedModels": sorted(allowed_models)},
+        }],
+    }
+
+
 def initialize_gateway_git_root(directory):
     """Keep native snapshots inside this gateway rather than its parent repo.
 

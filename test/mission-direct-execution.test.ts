@@ -16,6 +16,8 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { directHandoffValidationChecks } from "../dist/plugin/mission-review.js";
 import nativeDockerTaskPlugin from "../scripts/frontierharness-docker-task.mjs";
+import { pathToFileURL } from "node:url";
+import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation.js";
 import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
@@ -655,10 +657,17 @@ test("native Docker validation binds the task container CWD and candidate throug
       ...["execute", "subagent", "read", "task", "shell", "edit", ...requiredTools].map(id => ({ id })),
     ];
     let dockerDefinition: { options?: { codemode?: boolean }; execute(input: unknown, context: Record<string, unknown>): Promise<{ content: string }> } | undefined;
+    const nativeHooks = new Map<string, (event: any) => void>();
     const context = {
-      directory: gateway,
+      location: { directory: gateway },
       options: { container: containerID, instruction: "fixed instruction", model: "openai/gpt-6-sol", allowedModels: ["openai/gpt-6-sol"] },
-      session: { get: async ({ sessionID }: { sessionID: string }) => ({ data: { id: sessionID, agent: "dog-worker-v010" } }) },
+      session: {
+        get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, agent: "dog-worker-v010", parentID: "coordinator" }),
+        context: async () => [{ id: "usage", type: "assistant", agent: "dog-worker-v010", time: { completed: 2 },
+          model: { providerID: "openai", id: "gpt-6-luna-fast" }, tokens: { input: 3, output: 2, cache: { read: 1, write: 0 } } }],
+        hook: async (name: string, callback: (event: any) => void) => { nativeHooks.set(name, callback); return { dispose: async () => {} }; },
+      },
+      event: { subscribe: () => ({ async *[Symbol.asyncIterator]() { yield { type: "session.idle", data: { sessionID: "worker" } }; } }) },
       tool: {
         list: async () => registeredTools,
         transform: async (change: (editor: { namespace(): void; add(tool: any): void; list(): typeof registeredTools; remove(id: string): void }) => void) => {
@@ -667,7 +676,16 @@ test("native Docker validation binds the task container CWD and candidate throug
         },
       },
     };
-    await nativeDockerTaskPlugin.setup(context as never);
+    // Exercise the public preparation/loading path, not an unpublished in-memory tool.
+    await exec("python3", ["-c", `import sys; sys.path.insert(0, sys.argv[1]); from frontierharness_gateway import install_native_docker_plugin; install_native_docker_plugin(sys.argv[2])`,
+      resolve("scripts"), gateway], { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+    const installedPlugin = (await import(pathToFileURL(join(gateway, ".opencode/plugins/docker-task/index.js")).href)).default;
+    const cleanupPlugin = await installedPlugin.setup(context as never);
+    nativeHooks.get("model.request")!({ kind: "primary", sessionID: "worker", agent: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast" } });
+    const nativeContext = { agent: "dog-worker-v010", system: [] as { text: string }[] };
+    nativeHooks.get("context")!(nativeContext);
+    assert.match(nativeContext.system[0]!.text, /validation_cwd/);
+    assert.ok(nativeContext.system[0]!.text.includes(containerID));
     assert.equal(dockerDefinition?.options?.codemode, false, "the replacement tool must produce an ordinary native call");
     assert.ok(dockerDefinition);
 
@@ -692,7 +710,8 @@ test("native Docker validation binds the task container CWD and candidate throug
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
     await chat("coordinator", started.task.prompt);
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validate task workspace",
-      objective: "Run the declared check inside the fixed task container", read: ["instruction.md"], write: [], validation: ["node check.mjs"] }] },
+       objective: "Run the declared check inside the fixed task container", read: ["instruction.md"], write: [], validation: ["node check.mjs"],
+       validation_cwd: { "node check.mjs": workspace } }] },
     { sessionID: "coordinator" }));
     const workerTask = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
@@ -703,6 +722,16 @@ test("native Docker validation binds the task container CWD and candidate throug
     assert.equal(JSON.parse(await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: gateway,
       manifest_path: unit.manifestPath }, { sessionID: "worker" })).status, "bound");
 
+    const wrongCwd = join(workspace, "other");
+    await mkdir(wrongCwd); await writeFile(join(wrongCwd, "input.txt"), "fixed\n"); await writeFile(join(wrongCwd, "check.mjs"), source);
+    const wrongArgs = { container_id: containerID, cwd: wrongCwd, command: "node check.mjs" };
+    await hooks["tool.execute.before"]!({ tool: "fh_docker_exec", sessionID: "worker", callID: "wrong-cwd-success" }, { args: wrongArgs });
+    const wrongResult = await dockerDefinition!.execute(wrongArgs, { agent: "dog-worker-v010", sessionID: "worker" });
+    assert.match(wrongResult.content, /^exit_code=0\n/);
+    await hooks["tool.execute.after"]!({ tool: "fh_docker_exec", sessionID: "worker", callID: "wrong-cwd-success", args: wrongArgs },
+      { output: wrongResult.content, metadata: { status: "completed" } });
+    assert.equal((await new OperatorRuntime(gateway, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence.length, 0,
+      "a real successful check in another container CWD is not the registered proof");
     const args = { container_id: containerID, cwd: workspace, command: "node check.mjs" }, callID = "native-docker-check";
     await hooks["tool.execute.before"]!({ tool: "fh_docker_exec", sessionID: "worker", callID }, { args });
     const startedAt = Date.now();
@@ -743,12 +772,78 @@ test("native Docker validation binds the task container CWD and candidate throug
     const changedTaskInput = await refreshProtectedSnapshot(gateway, binding);
     assert.notEqual(changedTaskInput?.candidate, dockerBinding.candidate,
       "changed task-workspace bytes invalidate the saved Docker candidate binding");
+    await writeFile(join(workspace, "input.txt"), "fixed\n");
+    await writeFile(join(workspace, ".gitignore"), "ignored-input.txt\n");
+    await writeFile(join(workspace, "ignored-input.txt"), "before\n");
+    const withIgnored = await captureDockerWorkspaceSnapshot(containerID, workspace);
+    await writeFile(join(workspace, "ignored-input.txt"), "after\n");
+    assert.notEqual((await captureDockerWorkspaceSnapshot(containerID, workspace))?.candidate, withIgnored?.candidate,
+      "Git ignore rules do not exclude task inputs from Docker proof");
+    const plain = join(root, "non-git-task"); await mkdir(plain); await writeFile(join(plain, "logs.txt"), "original\n");
+    const plainBefore = await captureDockerWorkspaceSnapshot(containerID, plain);
+    assert.ok(plainBefore, "Terminal task workspaces need no Git initialization");
+    await writeFile(join(plain, "logs.txt"), "changed\n");
+    assert.notEqual((await captureDockerWorkspaceSnapshot(containerID, plain))?.candidate, plainBefore.candidate);
+    await cleanupPlugin();
+    const requestAudit = await readFile(join(gateway, "model-request-audit.ndjson"), "utf8");
+    const usageAudit = await readFile(join(gateway, "model-usage-audit.ndjson"), "utf8");
+    assert.match(requestAudit, /openai\/gpt-6-luna-fast/);
+    assert.match(usageAudit, /"message_id":"usage"/);
+    assert.match(usageAudit, /"cost":null/, "unreported cost is retained as unknown, not zero");
     const audit = await readFile(join(gateway, "docker-exec-audit.ndjson"), "utf8");
     assert.match(audit, new RegExp(`"container_id":"${containerID}"`));
     assert.match(audit, new RegExp(`"cwd":"${workspace.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}"`));
   } finally {
     process.env.PATH = priorPath;
     if (priorContainer === undefined) delete process.env.FAKE_DOCKER_CONTAINER; else process.env.FAKE_DOCKER_CONTAINER = priorContainer;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("native Docker smoke uses a fixed local image and a non-Git task workspace", {
+  skip: !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
+}, async () => {
+  const image = process.env.SORTIE_NATIVE_DOCKER_IMAGE!;
+  assert.match(image, /^sha256:[a-f0-9]{64}$/, "do not pull or select a mutable task image");
+  const root = await mkdtemp(resolve("_testenv/native-docker-smoke-"));
+  const gateway = join(root, "gateway"), workspace = join(root, "task");
+  let container: string | undefined;
+  try {
+    await mkdir(gateway); await mkdir(workspace);
+    await writeFile(join(workspace, "input.txt"), "fixed\n");
+    const created = await exec("docker", ["create", "--network", "none", "--label", "sortie.native-docker-smoke=true",
+      "--mount", `type=bind,src=${workspace},dst=/app,readonly`, "--entrypoint", "/bin/sh", image, "-c", "sleep 180"]);
+    container = created.stdout.trim();
+    assert.match(container, /^[a-f0-9]{64}$/);
+    await exec("docker", ["start", container]);
+    const before = await captureDockerWorkspaceSnapshot(container, "/app");
+    assert.ok(before, "actual non-Git container workspace is captured");
+    let definition: { execute(input: unknown, context: unknown): Promise<{ content: string }> } | undefined;
+    let tools = ["execute", "subagent", "read", "sortie_v010_start_mission", "sortie_v010_operator_next",
+      "sortie_v010_plan_units", "sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status",
+      "sortie_v010_start_direct_unit", "sortie_v010_finish_direct_unit", "sortie_v010_repair_review"].map(id => ({ id }));
+    const cleanup = await nativeDockerTaskPlugin.setup({
+      location: { directory: gateway },
+      options: { container, instruction: "synthetic smoke only", model: "openai/gpt-6-sol", allowedModels: ["openai/gpt-6-sol"] },
+      tool: { list: async () => tools, transform: async (fn: (editor: any) => void) => fn({ namespace() {},
+        add(tool: any) { definition = tool; tools.push({ id: "fh_docker_exec" }); }, list: () => tools,
+        remove(id: string) { tools = tools.filter(tool => tool.id !== id); } }) },
+      session: { hook: async () => ({ dispose: async () => {} }), context: async () => [], get: async () => ({}) },
+      event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
+    } as never);
+    try {
+      const result = await definition!.execute({ container_id: container, cwd: "/app", command: 'test "$(cat input.txt)" = fixed' },
+        { agent: "dog-worker-v010", sessionID: "no-model-smoke" });
+      assert.match(result.content, /^exit_code=0\n/);
+      assert.equal((await captureDockerWorkspaceSnapshot(container, "/app"))?.candidate, before.candidate);
+      await writeFile(join(workspace, "input.txt"), "changed\n");
+      assert.notEqual((await captureDockerWorkspaceSnapshot(container, "/app"))?.candidate, before.candidate);
+      const failed = await definition!.execute({ container_id: container, cwd: "/app", command: 'test "$(cat input.txt)" = fixed' },
+        { agent: "dog-worker-v010", sessionID: "no-model-smoke" });
+      assert.match(failed.content, /^exit_code=1\n/);
+    } finally { await cleanup(); }
+  } finally {
+    if (container) await exec("docker", ["rm", "-f", container]);
     await rm(root, { recursive: true, force: true });
   }
 });

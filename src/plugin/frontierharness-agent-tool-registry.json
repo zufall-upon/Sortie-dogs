@@ -18,7 +18,7 @@
         "unit_execution": ["plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "expand_unit"],
         "review": ["review_mission", "repair_review"]
       },
-      "children": ["dog-operator", "dog-worker"]
+      "children": ["dog-operator", "dog-worker", "dog-reviewer"]
     },
     "dog-worker": {
       "tool_families": {

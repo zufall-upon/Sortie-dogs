@@ -222,7 +222,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     if (attempt.dockerWorkspace) {
       const workspace = check.binding.docker_workspace;
       return workspace?.container_id === attempt.dockerWorkspace.container_id && workspace.cwd === attempt.dockerWorkspace.cwd &&
-        check.directory === attempt.dockerWorkspace.cwd;
+        check.directory === attempt.dockerWorkspace.cwd && validationDirectoryMatches([command], check.directory, directory, directories);
     }
     return check.binding?.docker_workspace === undefined && validationDirectoryMatches([command], check.directory, directory, directories);
   };
@@ -270,7 +270,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
       const members = commands.flatMap((command, member) => required.includes(command) &&
         (attempt.dockerWorkspace
           ? recorded?.binding?.docker_workspace?.container_id === attempt.dockerWorkspace.container_id &&
-            recorded.binding?.docker_workspace?.cwd === attempt.dockerWorkspace.cwd && recorded.directory === attempt.dockerWorkspace.cwd
+             recorded.binding?.docker_workspace?.cwd === attempt.dockerWorkspace.cwd && recorded.directory === attempt.dockerWorkspace.cwd &&
+             validationDirectoryMatches([command], attempt.directory, directory, directories)
           : recorded?.binding?.docker_workspace === undefined && validationDirectoryMatches([command], attempt.directory, directory, directories)) &&
         (registeredAt?.[command] === undefined || Number.isFinite(Date.parse(registeredAt[command]!)) &&
           attempt.started >= Date.parse(registeredAt[command]!)) ? [{ command, member }] : []);

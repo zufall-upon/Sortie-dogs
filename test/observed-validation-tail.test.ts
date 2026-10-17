@@ -129,6 +129,9 @@ test("native Docker validation preserves its exact CWD and rejects unknown, chan
   const wrongCwd = reviewerCorrectionValidation([commandA, commandB], child, wrongCwdHistory, 50,
     bind([commandA, commandB], [0, 0], [cwd, cwd]));
   assert.equal(wrongCwd.ready, false, "a successful native result from another CWD cannot satisfy the registered task workspace");
+  const oldBoundCwd = reviewerCorrectionValidation([commandA, commandB], child, wrongCwdHistory, 50,
+    bind([commandA, commandB], [0, 0], [cwd, "/app/other"]), "/gateway", { [commandA]: cwd, [commandB]: cwd });
+  assert.equal(oldBoundCwd.ready, false, "an internally matching saved binding still must match the current declared CWD");
   const ambiguousStatus = native([{ command: commandA, exit: 0, metadataStatus: "error" }]);
   assert.equal(observedMissionValidation([commandA, commandB], child, ambiguousStatus, 50).attempts[0]?.exit_code, null,
     "tool error status cannot become a passing observation from its output header");

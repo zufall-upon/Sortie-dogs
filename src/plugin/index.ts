@@ -1847,11 +1847,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const directory = dockerRequest?.cwd ?? resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
     // A check is proof only in its registered cwd. Snapshot the same admitted source
     // recipe at actual native start; never retrofit it to older external-cwd history.
-    const validationDirectory = dockerRequest ? resolve(input.directory) : directory;
-    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, validationDirectory)
+    const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, directory)
       : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
     if (correcting && !members) return;
-    if (members && !dockerRequest && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
+    if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
         toolInput.sessionID, members, directory) === false) return;
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
     const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(

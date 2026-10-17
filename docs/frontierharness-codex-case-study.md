@@ -1,5 +1,48 @@
 # FrontierHarness Codex subscription case study
 
+## Native Docker gateway development (2026-10-17)
+
+This support route does not authorize another benchmark attempt or change any
+frozen campaign. The original v0.14.1 single-pass results remain unchanged.
+
+For a **new, authorized** gateway, after the existing runner copies the pinned
+runtime assets and creates its isolated Git root, use the reusable preparation
+functions in `scripts/frontierharness_gateway.py`:
+
+```python
+install_native_docker_plugin(gateway_dir)
+config = native_gateway_config(model, container_id, instruction,
+                               allowed_models=ALLOWED_MODELS)
+```
+
+The returned config retains the ordinary `.opencode/plugins/docker-task` loading
+entrypoint. It is not a new controller. The native tool takes `container_id`,
+absolute `cwd`, and `command`; register that same container directory in each
+unit's `validation_cwd`. Role/tool families come from the shared runtime registry,
+including root-owned independent Review. Host shell and mutation tools remain
+outside this isolated gateway, and the Docker execution tool remains Worker-only.
+
+The host captures the actual container workspace before and after a declared
+check. Python-enabled task images support non-Git workspaces and include ignored
+inputs, file modes, and link identity/content. Git-only images retain a Git-based
+fallback. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
+candidate bytes do not become proof. The container is not represented by the
+unrelated gateway filesystem. Snapshot capture is conservative: a check that
+changes workspace files needs a stable candidate before it can supply proof.
+
+The regression fixture installs and loads the plugin through these preparation
+functions with the public V2 `ctx.location.directory` shape. It checks native
+evidence attachment and Worker settlement with a fake-Docker shim. A separate
+opt-in `native Docker smoke` test uses only a local immutable image and synthetic
+files, with no model request, task replay, or official grading. It checks actual
+Docker execution, non-Git snapshots, successful/failed exits, and stale inputs;
+it is not an end-to-end model CLI/Mission or benchmark completion claim.
+
+Historical `campaign_runner.py` and its Code Mode plugin remain frozen. Selecting
+the native route for a future campaign requires its own pre-run artifact receipt;
+these development checks do not retroactively repair earlier results. Route,
+model-request, and usage audits remain enabled; missing cost stays unknown.
+
 ## Purpose
 
 Measure whether Sortie-dogs' normal planning, delegation, validation, review, and remediation improve an accepted software-engineering result enough to justify their latency and token overhead. Compare the product configuration against bare OpenCode on the same public FrontierHarness Eval task.
