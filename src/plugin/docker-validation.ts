@@ -74,12 +74,42 @@ const SNAPSHOT_COMMAND = [
   "tracked=${tracked%% *}",
   // A NUL on enumeration failure is an invalid empty filename, so xargs fails
   // rather than treating a failed Git listing as an empty untracked set.
-  "untracked_bytes=$({ git ls-files -z --others || printf '\\0'; } | xargs -0 -r sha256sum --)",
+  // An untracked internal directory alias is already covered at its target.
+  // Filter only that case before the batched hash; retain all producer failures.
+  "untracked_bytes=$({",
+  "{ git ls-files -z --others || printf '\\0'; } | xargs -0 -r sh -c '",
+  "root=$1; shift",
+  "for path do",
+  "  [ -n \"$path\" ] || exit 1",
+  "  if [ -L \"$path\" ] && [ -d \"$path\" ]; then",
+  "    target=$(readlink -f -- \"$path\") || exit 1",
+  "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
+  "  else printf \"%s\\0\" \"$path\"",
+  "  fi",
+  "done' sh \"$root\" || printf '\\0'",
+  "} | xargs -0 -r sha256sum --)",
   // Git may ignore tracked executable-bit changes (core.filemode=false).
   // Observe workspace modes/links independently, excluding only Git bookkeeping.
   "workspace_modes=$({ find . -path ./.git -prune -o -print0 || printf '\\0'; } | LC_ALL=C QUOTING_STYLE=c xargs -0 -r stat -c '%f %N' --)",
   "workspace_modes=$(printf '%s' \"$workspace_modes\" | LC_ALL=C sort)",
+  // Git records a tracked link's text, not the regular-file bytes it reads.
+  "link_bytes=$({ find . -path ./.git -prune -o -type l -print0 || printf '\\0'; } | xargs -0 -r sh -c '",
+  "root=$1; shift",
+  "for path do",
+  "  [ -n \"$path\" ] || exit 1",
+  "  if [ -f \"$path\" ]; then sha256sum -- \"$path\" || exit 1",
+  "  elif [ -d \"$path\" ]; then",
+  "    target=$(readlink -f -- \"$path\") || exit 1",
+  "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
+  "  elif [ -e \"$path\" ]; then exit 1",
+  "  fi",
+  "done' sh \"$root\")",
+  "link_bytes=$(printf '%s' \"$link_bytes\" | LC_ALL=C sort)",
+  "if [ -n \"$link_bytes\" ]; then",
+  "untracked=$(printf '%s\\0%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" \"$link_bytes\" | sha256sum)",
+  "else",
   "untracked=$(printf '%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" | sha256sum)",
+  "fi",
   "untracked=${untracked%% *}",
   "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' 'SORTIE_DOCKER_WORKSPACE_V1' \"$actual_cwd\" \"$root\" \"$tree\" \"$tracked\" \"$untracked\"",
   "fi",
