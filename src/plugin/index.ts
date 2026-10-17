@@ -140,7 +140,8 @@ import type { RuntimeBridge, SerialDispatchSettlement } from "./runtime-bridge.j
 import { reviewerCorrectionValidationFresh } from "./mission-review.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
+import { operationInputSnapshot, protectedDockerSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
+import { isDockerContainerID, isDockerWorkspacePath, type DockerWorkspaceSnapshot } from "./docker-validation.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
 
@@ -495,6 +496,7 @@ interface HostGoalExecution {
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
+  readonly dockerWorkspace?: DockerWorkspaceSnapshot;
   readonly operationInputs?: string;
   readonly validationInputs?: string;
   readonly validationSource?: string;
@@ -605,9 +607,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validationEnvironment(directory?: string): ValidationEnvironment {
+function validationEnvironment(directory?: string, dockerWorkspace?: DockerWorkspaceSnapshot): ValidationEnvironment {
+  if (dockerWorkspace) return { platform: "docker-container", arch: "unknown", runtime: "docker",
+    toolchain: `container:${dockerWorkspace.container_id}`, directory: dockerWorkspace.cwd };
   return { platform: process.platform, arch: process.arch, runtime: process.version,
     ...(directory ? { directory } : {}) };
+}
+
+function dockerToolExitCode(output: TaskResultRepairOutput): number | null | undefined {
+  const metadata = isRecord(output.metadata) ? output.metadata : undefined;
+  const status = output.status ?? metadata?.status;
+  if (status === "error" || status === "cancel" || status === "cancelled" || status === "canceled" || status === "interrupted") return undefined;
+  const recorded = metadata?.exit;
+  const text = typeof output.output === "string" ? output.output
+    : typeof output.content === "string" ? output.content
+      : Array.isArray(output.content) ? output.content.flatMap(part => isRecord(part) && typeof part.text === "string" ? [part.text] : []).join("\n")
+        : "";
+  const match = text.match(/^exit_code=(0|[1-9]\d*|-[1-9]\d*|unknown)(?:\r?\n|$)/u);
+  const header = match?.[1] === "unknown" ? null : match ? Number(match[1]) : undefined;
+  const explicit = typeof recorded === "number" && Number.isSafeInteger(recorded) ? recorded : undefined;
+  if (explicit !== undefined && header !== undefined && explicit !== header) return undefined;
+  if (explicit !== undefined) return explicit;
+  if (header !== undefined && (header === null || Number.isSafeInteger(header))) return header;
+  return null;
 }
 
 function validationCandidate(source: string, candidate: string): string {
@@ -1814,10 +1836,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const authorization = sessionAuthorizations.get(toolInput.sessionID);
     if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== owner) return;
     const args = isRecord(output.args) ? output.args : undefined;
+    const dockerTool = toolInput.tool === "fh_docker_exec" || toolInput.tool === "fh.docker_exec";
+    const dockerRequest = dockerTool && args !== undefined && isDockerContainerID(args.container_id) &&
+      isDockerWorkspacePath(args.cwd) && typeof args.command === "string"
+      ? { containerID: args.container_id, cwd: args.cwd } : undefined;
+    if (dockerTool && dockerRequest === undefined) return;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
     const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
-    const directory = resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
+    const directory = dockerRequest?.cwd ?? resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
     // A check is proof only in its registered cwd. Snapshot the same admitted source
     // recipe at actual native start; never retrofit it to older external-cwd history.
     const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, directory)
@@ -1832,8 +1859,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
     const correction = correcting && dispatchCallID && members
       ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
-    const admittedSnapshot = await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
+    const admittedSnapshot = dockerRequest
+      ? await protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd).catch(() => undefined)
+      : await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
     if (admittedSnapshot === undefined) return;
+    const dockerWorkspace = admittedSnapshot.binding.docker_workspace;
+    if (dockerRequest && (!dockerWorkspace || dockerWorkspace.container_id !== dockerRequest.containerID || dockerWorkspace.cwd !== dockerRequest.cwd)) return;
     const root = goalRoot(owner);
     const ledger = await goalLedger(root);
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
@@ -1874,7 +1905,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const owner = validationOwner(scope);
       const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
         source_snapshot: snapshot.source, candidate: validationCandidate(snapshot.source, snapshot.candidate),
-        command: [rawCommand], environment: validationEnvironment(directory), scope, owner,
+        command: [rawCommand], environment: validationEnvironment(directory, dockerWorkspace), scope, owner,
         expected_evidence: [...new Set(criteria.flatMap((criterion) => [criterion.criterion_id, ...criterion.oracle_coverage,
           `unit:${unitID}`, "source_snapshot", "candidate", "command", "scope", "exit_code"]))],
         marginal_value: { unmet_criteria: criteria.map(criterion => criterion.criterion_id), risk_hypothesis: null },
@@ -1883,12 +1914,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const evidenceKey = validationEvidenceKey(request);
       const durable = goalSnapshot.records.flatMap(({ event }) =>
         event.kind === "unit.settled" || event.kind === "unit.evidence-reconciled" ? event.evidence : [])
-        .filter(entry => directory === resolve(input.directory) && validGoalEvidence(entry, goal) && (entry.proof_scope !== "requested-full" || coordinatorOwned) &&
+        .filter(entry => (directory === resolve(input.directory) || dockerWorkspace !== undefined &&
+          entry.protected_binding?.docker_workspace?.container_id === dockerWorkspace.container_id &&
+          entry.protected_binding.docker_workspace.cwd === dockerWorkspace.cwd) && validGoalEvidence(entry, goal) &&
+          (entry.proof_scope !== "requested-full" || coordinatorOwned) &&
           entry.identity.source === snapshot.source && entry.identity.candidate === snapshot.candidate &&
           entry.execution.command.length === 1 && entry.execution.command[0] === rawCommand)
         .map(entry => ({ ...entry, execution: { ...entry.execution, units: [unitID] } }));
       const live = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
-        execution.sessionID === toolInput.sessionID && execution.directory === directory && execution.endedAt !== undefined && execution.exitCode === 0 &&
+        execution.sessionID === toolInput.sessionID && (execution.directory === directory || dockerWorkspace !== undefined &&
+          execution.dockerWorkspace?.container_id === dockerWorkspace.container_id && execution.dockerWorkspace.cwd === dockerWorkspace.cwd) &&
+        execution.endedAt !== undefined && execution.exitCode === 0 &&
         execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === snapshot.source && execution.candidate === snapshot.candidate &&
         execution.command.length === 1 && execution.command[0] === rawCommand)
@@ -1925,7 +1961,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         if (reservation.decision === "SKIP") {
           reusedEvidence = reconciliationEvidence;
-          const notice = settledPassNoticeCommand();
+          const notice = dockerRequest ? "true" : settledPassNoticeCommand();
           args!.command = notice;
           settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
         } else {
@@ -1935,10 +1971,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     }
     const mission = await new OperatorMissionRuntime(input.directory, runtimeProfile).read(root);
-    const operationInputs = mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
+    const operationInputs = !dockerWorkspace && mission?.kind === "operation" && mission.execution?.commands.includes(rawCommand) &&
       resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".") === mission.execution.directory
       ? await operationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
-    const validationInputs = (validation !== undefined || correction !== undefined) && operationInputs === undefined
+    const validationInputs = !dockerWorkspace && (validation !== undefined || correction !== undefined) && operationInputs === undefined
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     const validationSource = correction && validationInputs !== undefined
       ? await validatedSourceSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
@@ -1946,6 +1982,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      ...(dockerWorkspace === undefined ? {} : { dockerWorkspace }),
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
       ...(validationSource === undefined ? {} : { validationSource }),
@@ -1960,7 +1997,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (execution === undefined || execution.endedAt !== undefined) return;
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
     const rawExit = metadata?.exit;
-    const exitCode = typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
+    const exitCode = execution.dockerWorkspace ? dockerToolExitCode(output)
+      : typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
     const rawStatus = metadata?.status ?? output.status;
     const outcome = exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip" : exitCode !== undefined ? "fail"
       : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
@@ -1981,11 +2019,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? new Date(timing.end).toISOString() : new Date().toISOString();
     // Declared outputs can change during a successful validation. Read inputs must not;
     // the evidence still binds to the complete post-command candidate and source.
-    const fresh = refreshed !== undefined && (execution.operationInputs !== undefined
-      ? await operationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.operationInputs
-      : execution.validationInputs !== undefined
-        ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
-        : refreshed.source === execution.source);
+    const fresh = refreshed !== undefined && (execution.dockerWorkspace !== undefined
+      ? refreshed.source === execution.source && refreshed.candidate === execution.candidate
+      : execution.operationInputs !== undefined
+        ? await operationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.operationInputs
+        : execution.validationInputs !== undefined
+          ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
+          : refreshed.source === execution.source);
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command, directory: execution.directory,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,

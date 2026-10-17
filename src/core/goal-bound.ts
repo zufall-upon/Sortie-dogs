@@ -48,6 +48,14 @@ export interface GoalEvidence {
     /** Non-generating native validation pins inputs/concrete outputs, not write-only directory bookkeeping.
      * Missing on old evidence: retain its full source/output recipe. */
     readonly validation_policy?: "inputs-and-concrete-outputs-v1";
+    /** Snapshot and recheck the exact Git workspace inside one validated Docker task container. */
+    readonly docker_workspace?: {
+      readonly container_id: string;
+      readonly cwd: string;
+      readonly repository_root: string;
+      readonly source: string;
+      readonly candidate: string;
+    };
     /** Fixed when validation starts. Full manifest_hash still identifies the historical execution contract. */
     readonly freshness?: {
       readonly contract_hash: string;
@@ -296,6 +304,7 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
   const criteria = state.acceptance_contract?.criteria.filter(({ criterion_id }) =>
     value.measurement.criterion_ids.includes(criterion_id)) ?? [];
   const protectedBinding = value.protected_binding;
+  const dockerWorkspace = protectedBinding?.docker_workspace;
   const protectedBindingValid = protectedBinding !== undefined && HASH.test(protectedBinding.manifest_hash) &&
     text(protectedBinding.project_root) && text(protectedBinding.manifest_path) && Array.isArray(protectedBinding.source_paths) &&
     protectedBinding.source_paths.every(text) && Array.isArray(protectedBinding.candidate_paths) &&
@@ -303,7 +312,11 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
     (protectedBinding.source_policy === undefined || protectedBinding.source_policy === "project-files-v1" ||
       protectedBinding.source_policy === "declared-paths-v1") &&
     (protectedBinding.candidate_policy === undefined || protectedBinding.candidate_policy === "project-root-artifacts-v1") &&
-    (protectedBinding.validation_policy === undefined || protectedBinding.validation_policy === "inputs-and-concrete-outputs-v1") &&
+     (protectedBinding.validation_policy === undefined || protectedBinding.validation_policy === "inputs-and-concrete-outputs-v1") &&
+     (dockerWorkspace === undefined || (typeof dockerWorkspace.container_id === "string" && /^[a-f0-9]{12,64}$/u.test(dockerWorkspace.container_id) &&
+       typeof dockerWorkspace.cwd === "string" && dockerWorkspace.cwd.startsWith("/") &&
+       typeof dockerWorkspace.repository_root === "string" && dockerWorkspace.repository_root.startsWith("/") &&
+       HASH.test(dockerWorkspace.source) && HASH.test(dockerWorkspace.candidate))) &&
     (protectedBinding.freshness === undefined || (protectedBinding.freshness !== null && typeof protectedBinding.freshness === "object" &&
       HASH.test(protectedBinding.freshness.contract_hash) &&
       Array.isArray(protectedBinding.freshness.scratch_paths) && protectedBinding.freshness.scratch_paths.every(text) &&
@@ -326,11 +339,11 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
       criterion.entrypoint === value.measurement.entrypoint && criterion.workload === value.measurement.workload &&
       sameStrings(criterion.oracle_coverage, value.measurement.oracle_coverage) &&
       criterion.build_boundary === value.measurement.build_boundary &&
-      (criterion.source_binding === "current-protected"
-        ? protectedBindingValid && HASH.test(value.identity.source)
-        : criterion.source === value.identity.source) &&
-      (criterion.candidate_binding === "current-protected"
-        ? protectedBindingValid && HASH.test(value.identity.candidate)
+       (criterion.source_binding === "current-protected"
+         ? protectedBindingValid && HASH.test(value.identity.source) && (dockerWorkspace === undefined || dockerWorkspace.source === value.identity.source)
+         : criterion.source === value.identity.source) &&
+       (criterion.candidate_binding === "current-protected"
+         ? protectedBindingValid && HASH.test(value.identity.candidate) && (dockerWorkspace === undefined || dockerWorkspace.candidate === value.identity.candidate)
         : criterion.candidate === value.identity.candidate) &&
       (criterion.validation_command === undefined ||
         (value.execution.command.length === 1 && value.execution.command[0] === criterion.validation_command)) &&

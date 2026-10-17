@@ -1,5 +1,76 @@
 # FrontierHarness Codex subscription case study
 
+## Native Docker gateway development (2026-10-17)
+
+This support route does not authorize another benchmark attempt or change any
+frozen campaign. The original v0.14.1 single-pass results remain unchanged.
+
+For a **new, authorized** gateway, after the existing runner copies the pinned
+runtime assets and creates its isolated Git root, use the reusable preparation
+functions in `scripts/frontierharness_gateway.py`:
+
+```python
+install_native_docker_plugin(gateway_dir)
+config = native_gateway_config(model, container_id, instruction,
+                               allowed_models=ALLOWED_MODELS)
+```
+
+The returned config retains the ordinary `.opencode/plugins/docker-task` loading
+entrypoint. It is not a new controller. The native tool takes `container_id`,
+absolute `cwd`, and `command`; register that same container directory in each
+unit's `validation_cwd`. Role/tool families come from the shared runtime registry,
+including root-owned independent Review. Host shell and mutation tools remain
+outside this isolated gateway. `fh_docker_exec` is available to the Worker and
+the existing native-admitted Reviewer correction role, not initial Review.
+
+Independent Review uses `fh_docker_read`, copying `container_id`, `cwd`, and
+`candidate` from the Review envelope's `protected_binding_ref.docker_workspace`.
+Read `path: "."` to list the candidate directory or a source/test file path to
+inspect its numbered contents and SHA-256. The tool checks the exact candidate
+before and after the read, uses a fixed reader rather than caller-supplied shell,
+and does not mint validation evidence. Stale/unavailable candidates are reported
+as such, not replaced by a new snapshot. Reviewer context, native permissions,
+and route/usage audits include this read-only path. Actual correction still uses
+the existing `repair_review` admission, scope, formal checks, and self-recheck.
+When that correction activates, only the exact generated gateway permission block
+is projected to the registry's correction tool families. Other configured agent
+rules and session rules retain their native order; the ordinary Reviewer stays
+read-only. The projection also survives a cold reload and is removed on settlement.
+
+The host captures the actual container workspace before and after a declared
+check. Python-enabled task images support non-Git workspaces and include ignored
+inputs, file modes, and link identity/content. Snapshot and reader Python processes
+use `-I -S`, so candidate-local startup hooks and import paths are not executed as
+part of read-only observation. Git-only images retain a Git-based
+fallback. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
+candidate bytes do not become proof. The container is not represented by the
+unrelated gateway filesystem. Snapshot capture is conservative: a check that
+changes workspace files needs a stable candidate before it can supply proof.
+
+The regression fixture installs and loads the plugin through these preparation
+functions with the public V2 `ctx.location.directory` shape. It checks native
+evidence attachment, Worker settlement, independent candidate inspection, and
+the final Mission receipt with a fake-Docker shim. The same regression can use
+an immutable local Docker image by setting `SORTIE_NATIVE_DOCKER_IMAGE`. A separate
+opt-in `native Docker smoke` test uses only a local immutable image and synthetic
+files, with no model request, task replay, or official grading. It checks actual
+Docker execution, non-Git snapshots, successful/failed exits, and stale inputs;
+it is not an end-to-end model CLI/Mission or benchmark completion claim.
+
+Historical `campaign_runner.py` and its Code Mode plugin remain frozen. Selecting
+the native route for a future campaign requires its own pre-run artifact receipt;
+these development checks do not retroactively repair earlier results. Route,
+model-request, and usage audits remain enabled; missing cost stays unknown.
+
+PR #280 release review follow-up classified both retained native Reviewer Medium
+findings as valid: generated gateway correction permissions and Python startup
+side effects. Both are corrected above. The five-file targeted run passed 424
+tests with two live-Docker skips and one fixture failure: the shim discovered the
+host parent repository for its non-Git task. After matching the container's Git
+discovery boundary, both affected regressions passed (one live-Docker skip).
+The original Mission's 32-unit budget, findings and accounting remain retained;
+this release follow-up does not assert an independent final Mission PASS.
+
 ## Purpose
 
 Measure whether Sortie-dogs' normal planning, delegation, validation, review, and remediation improve an accepted software-engineering result enough to justify their latency and token overhead. Compare the product configuration against bare OpenCode on the same public FrontierHarness Eval task.

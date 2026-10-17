@@ -95,6 +95,48 @@ test("Docker codemode observations require one completed call and an explicit ex
   }, "missing, ambiguous, or failed native tool records are not successful observations");
 });
 
+test("native Docker validation preserves its exact CWD and rejects unknown, changed-binding, or later-failed checks", () => {
+  const commandA = "python3 /app/prepare.py", commandB = "python3 /app/verify.py";
+  const containerID = "a".repeat(64), cwd = "/app/task", repositoryRoot = "/app";
+  const workspace = { container_id: containerID, cwd, repository_root: repositoryRoot,
+    source: `sha256:${"b".repeat(64)}`, candidate: `sha256:${"c".repeat(64)}` };
+  const native = (calls: readonly { command: string; exit: number | null; cwd?: string; status?: string; metadataStatus?: string }[]) => [{
+    info: { role: "assistant", sessionID: child }, parts: calls.map((call, index) => {
+      const started = 100 + index * 20, completed = started + 10;
+      return { type: "tool", tool: "fh_docker_exec", callID: `docker-${index}`,
+        time: { ran: started, completed }, state: { status: call.status ?? "completed",
+          input: { container_id: containerID, cwd: call.cwd ?? cwd, command: call.command },
+          ...(call.metadataStatus ? { metadata: { status: call.metadataStatus } } : {}),
+          output: `exit_code=${call.exit === null ? "unknown" : call.exit}\n${call.exit === 0 ? "PASS" : "failed"}\n` } };
+    }),
+  }];
+  const bind = (commands: readonly string[], exits: readonly (number | null)[], directories: readonly string[] = commands.map(() => cwd)) =>
+    commands.map((command, index) => ({ command: [command], childSessionID: child, callID: `docker-${index}`,
+      fresh: exits[index] === 0, exitCode: exits[index], directory: directories[index], binding: { docker_workspace: {
+        ...workspace, cwd: directories[index],
+      } }, startedAt: new Date(100 + index * 20).toISOString(), endedAt: new Date(110 + index * 20).toISOString() })) as any;
+
+  const observed = observedMissionValidation([commandA, commandB], child, native([{ command: commandA, exit: 0 }]), 50);
+  assert.deepEqual(observed.attempts, [{ command: commandA, directory: cwd, exit_code: 0, started_ms: 100, completed_ms: 110 }]);
+  for (const exit of [1, null] as const) {
+    const last = native([{ command: commandA, exit: 0 }, { command: commandB, exit: 0 }, { command: commandB, exit }]);
+    const result = reviewerCorrectionValidation([commandA, commandB], child, last, 50,
+      bind([commandA, commandB, commandB], [0, 0, exit]));
+    assert.equal(result.ready, false, `later ${exit === null ? "unknown" : `exit ${exit}`} native result invalidates earlier success`);
+    assert.equal(result.failure?.exitCode, exit);
+  }
+  const wrongCwdHistory = native([{ command: commandA, exit: 0 }, { command: commandB, exit: 0, cwd: "/app/other" }]);
+  const wrongCwd = reviewerCorrectionValidation([commandA, commandB], child, wrongCwdHistory, 50,
+    bind([commandA, commandB], [0, 0], [cwd, cwd]));
+  assert.equal(wrongCwd.ready, false, "a successful native result from another CWD cannot satisfy the registered task workspace");
+  const oldBoundCwd = reviewerCorrectionValidation([commandA, commandB], child, wrongCwdHistory, 50,
+    bind([commandA, commandB], [0, 0], [cwd, "/app/other"]), "/gateway", { [commandA]: cwd, [commandB]: cwd });
+  assert.equal(oldBoundCwd.ready, false, "an internally matching saved binding still must match the current declared CWD");
+  const ambiguousStatus = native([{ command: commandA, exit: 0, metadataStatus: "error" }]);
+  assert.equal(observedMissionValidation([commandA, commandB], child, ambiguousStatus, 50).attempts[0]?.exit_code, null,
+    "tool error status cannot become a passing observation from its output header");
+});
+
 test("bound ordered tail finishes without a standalone repetition; old logs acquire no proof", () => {
   const native = history([bundled, B]), bindings = checks([[A], [B]]);
   const result = reviewerCorrectionValidation([A, B], child, native, 50, bindings);

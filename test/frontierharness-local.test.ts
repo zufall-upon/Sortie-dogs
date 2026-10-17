@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
+import { V010_AGENT_TOOL_REGISTRY } from "../dist/plugin/v2.js";
 
 import {
   assertBareIsolation,
@@ -83,7 +84,7 @@ import subprocess
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions, product_worker_chain
+from frontierharness_gateway import initialize_gateway_git_root, product_agent_permissions, product_worker_chain, install_native_docker_plugin, native_gateway_config
 root = Path(sys.argv[2])
 subprocess.run(["git", "init", "-q", str(root)], check=True)
 (root / "unrelated-parent.txt").write_text("parent evidence\n")
@@ -128,13 +129,50 @@ assert selected_chain["coordinator_session_ids"] == ["real-c1", "real-c2"]
 assert {row["session_id"] for row in selected_chain["workers"]} == {"real-direct", "real-nested"}
 assert product_worker_chain(unrelated + selected[:1], {"z-real"}) is None
 assert product_worker_chain(unrelated, set())["root"] == "a-other", "retain unselected Operator fallback"
-for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010"}),
-                       ("dogs-coordinator", {"dog-worker-v010"}), ("dog-worker-v010", set())]:
-    rules = product_agent_permissions(role, ("sortie_v010_operator_status",), allow_execute=role == "dog-worker-v010")
+caller_tools = {
+    "dog-operator": ("sortie_v010_start_mission", "sortie_v010_plan_units", "sortie_v010_operator_next",
+        "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_review_mission",
+        "sortie_v010_complete_mission", "sortie_v010_cancel_operator", "sortie_v010_reflection"),
+    "dogs-coordinator": ("sortie_v010_plan_units", "sortie_v010_operator_next", "sortie_v010_operator_status",
+        "sortie_v010_expand_unit", "sortie_v010_review_mission", "sortie_v010_submit_mission",
+        "sortie_v010_skip_mission_consultation", "sortie_v010_retry_mission_unit", "sortie_v010_rescue_mission_unit"),
+    "dog-worker-v010": ("sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status", "fh_docker_exec"),
+}
+for role, expected in [("dog-operator", {"dogs-coordinator", "dog-worker-v010", "dog-reviewer-v010"}),
+                       ("dogs-coordinator", {"dog-worker-v010", "dog-reviewer-v010"}), ("dog-worker-v010", set())]:
+    rules = product_agent_permissions(role, caller_tools[role], allow_execute=role == "dog-worker-v010")
     assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
     assert {r["resource"] for r in rules if r["action"] == "subagent"} == expected
+    actions = {r["action"] for r in rules}
+    if role in ("dog-operator", "dogs-coordinator"):
+        assert "sortie_v010_start_direct_unit" in actions and "sortie_v010_finish_direct_unit" in actions
+        assert "sortie_v010_repair_review" in actions
+    if role == "dog-worker-v010":
+        assert "fh_docker_exec" in actions, "the direct task-container tool must remain available to its Worker"
+    else:
+        assert "fh_docker_exec" not in actions, "the task-container tool must not be granted to other roles"
     assert not any(r["action"] == "subagent" and r["resource"] == "*" for r in rules)
-    assert not any(r["action"] in ("shell", "bash", "write") for r in rules)
+    assert not any(r["action"] in ("shell", "bash", "write", "edit", "patch") for r in rules)
+review = product_agent_permissions("dog-reviewer-v010", ("sortie_v010_repair_review",), correction=True)
+review_actions = {r["action"] for r in review}
+assert {"sortie_v010_bind_write_gate", "sortie_v010_release_write_gate", "sortie_v010_operator_status",
+        "sortie_v010_expand_unit", "sortie_v010_repair_review", "sortie_v010_finish_direct_unit"} <= review_actions
+assert not any(r["action"] in ("shell", "bash", "write", "edit", "patch") for r in review)
+package = install_native_docker_plugin(gateway)
+config = native_gateway_config("openai/gpt-6-sol", "0123456789abcdef01234567", "fixed instruction",
+                              allowed_models=["openai/gpt-6-sol"])
+assert package == config["plugins"][1]["package"] == "./.opencode/plugins/docker-task"
+assert (gateway / ".opencode/plugins/docker-task/scripts/frontierharness-docker-task.mjs").read_bytes() == (Path(sys.argv[1]) / "frontierharness-docker-task.mjs").read_bytes()
+assert (gateway / ".opencode/plugins/docker-task/dist/plugin/docker-validation.js").read_bytes() == (Path(sys.argv[1]).parent / "dist/plugin/docker-validation.js").read_bytes()
+assert config["plugins"][1]["options"]["container"] == "0123456789abcdef01234567"
+root_rules = config["agents"]["dog-operator"]["permissions"]
+assert {"action": "subagent", "resource": "dog-reviewer-v010", "effect": "allow"} in root_rules
+assert {"action": "sortie_v010_finish_direct_unit", "resource": "*", "effect": "allow"} in root_rules
+review_rules = config["agents"]["dog-reviewer-v010"]["permissions"]
+assert {"action": "fh_docker_read", "resource": "*", "effect": "allow"} in review_rules
+assert not any(r["action"] == "fh_docker_exec" and r["effect"] == "allow" for r in review_rules)
+correction = product_agent_permissions("dog-reviewer-correction-v010-0123456789abcdef", (), correction=True)
+assert {"action": "fh_docker_exec", "resource": "*", "effect": "allow"} in correction
 print("PASS_GATEWAY_BOUNDARIES")
 `;
   try {
@@ -143,6 +181,17 @@ print("PASS_GATEWAY_BOUNDARIES")
     assert.equal(result.code, 0, result.stderr.toString("utf8"));
     assert.match(result.stdout.toString("utf8"), /PASS_GATEWAY_BOUNDARIES/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Frontier gateway and V2 consume the same logical-role tool-family schema", async () => {
+  const source = JSON.parse(await readFile(new URL("../src/plugin/frontierharness-agent-tool-registry.json", import.meta.url), "utf8"));
+  assert.deepEqual(V010_AGENT_TOOL_REGISTRY, source);
+  assert.equal(source.runtime_agents["dog-coordinator"], "dog-operator");
+  assert.equal(source.runtime_agents["dog-operator"], "dogs-coordinator");
+  assert.deepEqual(source.roles["dog-operator"].tool_families.unit_execution.slice(0, 3),
+    ["plan_units", "start_direct_unit", "finish_direct_unit"]);
+  assert.ok(source.roles["dog-operator"].children.includes("dog-reviewer"));
+  assert.deepEqual(source.roles["dog-worker"].native_tool_families.docker_task, ["fh_docker_exec"]);
 });
 
 test("V2 registration metadata is not mistaken for available operator and Worker routes", () => {

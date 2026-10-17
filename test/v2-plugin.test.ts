@@ -288,7 +288,7 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
   })).setup(fixture.context);
   const names = ["glob", "grep", "patch", "read", "shell", "skill", "sortie_v010_bind_write_gate",
     "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate",
-    "sortie_v010_repair_review", "websearch", "execute"];
+    "sortie_v010_repair_review", "websearch", "execute", "fh_docker_read", "fh_docker_exec"];
   const definitions = Object.fromEntries(names.map(name => [name, { description: name, input: { type: "object", properties: {} } }]));
   const event = (agent: string, order = names) => ({ sessionID: "review-author", agent, system: [], messages: [],
     tools: Object.fromEntries(order.map(name => [name, definitions[name]])) });
@@ -296,6 +296,8 @@ test("Reviewer model tool order keeps genuine read-only definitions as a determi
     const initial = event("dog-reviewer-v010");
     await fixture.sessionHooks.get("context")!(initial);
     assert.equal(initial.tools.shell, definitions.shell, "native shell observation is available before correction without replacement definitions");
+    assert.equal(initial.tools.fh_docker_read, definitions.fh_docker_read);
+    assert.ok(!Object.hasOwn(initial.tools, "fh_docker_exec"), "read-only Docker inspection is not author execution");
     for (const forbidden of ["patch", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]) {
       assert(!Object.hasOwn(initial.tools, forbidden), `${forbidden} is not advertised before real correction admission`);
     }
@@ -1638,6 +1640,26 @@ test("V2 Worker can observe status and repair its scope without acquiring Coordi
       const event = { sessionID: "worker", agent, system: [], tools: { ...exposed, read: {} } };
       await fixture.sessionHooks.get("context")!(event);
       assert.deepEqual(Object.keys(event.tools).sort(), ["read", "sortie_v010_bind_write_gate", "sortie_v010_expand_unit", "sortie_v010_operator_status", "sortie_v010_release_write_gate"]);
+    }
+  } finally { cleanup?.(); }
+});
+
+test("V2 exposes the fixed Docker task tool only to its schema-authorized Worker role", async () => {
+  const fixture = contextFixture();
+  const cleanup = await V2Plugin.setup(fixture.context);
+  try {
+    const exposed = Object.fromEntries(fixture.tools.map(tool => [tool.name, tool]));
+    const visibleTools = async (sessionID: string, agent: string) => {
+      const event = { sessionID, agent, system: [], tools: { ...exposed, read: {}, fh_docker_exec: { name: "fh_docker_exec" }, fh_docker_read: { name: "fh_docker_read" } } };
+      await fixture.sessionHooks.get("context")!(event);
+      return event.tools;
+    };
+    const workerTools = await visibleTools("worker", "dog-worker-v010");
+    assert.ok(Object.hasOwn(workerTools, "fh_docker_exec"));
+    assert.ok(Object.hasOwn(await visibleTools("reviewer", "dog-reviewer-v010"), "fh_docker_read"));
+    for (const [session, agent] of [["root", "dog-operator"], ["coordinator", "dogs-coordinator"], ["reviewer", "dog-reviewer-v010"]]) {
+      assert.equal(Object.hasOwn(await visibleTools(session, agent), "fh_docker_exec"), false,
+        `${agent} must not inherit the Worker-only Docker task tool`);
     }
   } finally { cleanup?.(); }
 });

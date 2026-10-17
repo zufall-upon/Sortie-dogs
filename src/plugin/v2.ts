@@ -17,6 +17,10 @@ import { modelLiveState } from "./model-live-state.js";
 import { serializeOperatorStatus } from "./operator-status-output.js";
 import { runtimeAssets as reviewerAssets } from "../runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../runtime-mission-assets.js";
+import agentToolRegistry from "./frontierharness-agent-tool-registry.json" with { type: "json" };
+import { canonicalAgent, V010_RUNTIME_PROFILE } from "../core/runtime-profile.js";
+
+export const V010_AGENT_TOOL_REGISTRY = agentToolRegistry;
 
 // Capture once when this module evaluates. A later package replacement must not make an old
 // process report the replacement's bytes as its loaded adapter.
@@ -381,7 +385,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 
 const correctionAgent = (agent: unknown): boolean => typeof agent === "string" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent);
 const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "sortie_v010_bind_write_gate",
-  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit"]);
+  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "fh_docker_exec"]);
 
 // Order only the genuine, already-filtered native definitions. Initial read-only
 // tools remain a deterministic prefix when correction admits additional tools;
@@ -432,6 +436,28 @@ function shippedReviewerBlock(rules: readonly NativePermissionRule[]): { start: 
     }
   }
   return undefined;
+}
+function correctionGatewayReviewerRules(rules: readonly NativePermissionRule[]): NativePermissionRule[] {
+  const role = agentToolRegistry.roles["dog-reviewer"];
+  // Match product_agent_permissions()'s exact generated block, in place. A user's
+  // surrounding agent rules and later session rules retain native last-match order.
+  const generated = (correcting: boolean): NativePermissionRule[] => {
+    const actions = [...new Set([...Object.values(role.tool_families),
+      ...(correcting ? Object.values(role.correction_tool_families) : [])].flat())].sort();
+    const native = [...new Set([...Object.values(role.native_tool_families),
+      ...(correcting ? Object.values(role.correction_native_tool_families) : [])].flat())].sort();
+    return [{ action: "*", resource: "*", effect: "deny" },
+      ...actions.map(action => ({ action: agentToolRegistry.tool_prefix + action, resource: "*", effect: "allow" as const })),
+      ...native.map(action => ({ action, resource: "*", effect: "allow" as const }))];
+  };
+  const original = generated(false);
+  for (let start = rules.length - original.length; start >= 0; start--) {
+    if (original.every((rule, offset) => {
+      const actual = rules[start + offset];
+      return actual?.action === rule.action && actual.resource === rule.resource && actual.effect === rule.effect;
+    })) return [...rules.slice(0, start), ...generated(true), ...rules.slice(start + original.length)];
+  }
+  return [...rules];
 }
 const correctionAgents = new WeakMap<OpenCodeV2Context, Map<string, { generation: number; registration: Registration }>>();
 
@@ -514,7 +540,7 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
     const registration = await context.agent.transform(editor => {
       const reviewer = editor.get?.("dog-reviewer-v010");
       if (!reviewer?.permissions) throw new Error("native-reviewer-correction-role-permissions-unavailable");
-      const rules = reviewer.permissions;
+      const rules = correctionGatewayReviewerRules(reviewer.permissions);
       const shipped = shippedReviewerBlock(rules);
       if (!shipped) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
       const inherited = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => !["edit", "shell"].includes(rule.action)),
@@ -522,8 +548,8 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
         ...rules.slice(shipped.start + shipped.rules.length)];
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
-        // Remove ONLY the shipped read-only edit/shell role entries. Native implementation
-        // defaults and every real configured rule keep their original order/effective meaning.
+        // Project only the exact generated gateway block and shipped read-only edit/shell
+        // role entries. Other configured rules keep their native order/effective meaning.
         // No edit/shell grants, copied historical denies, command scanner or session-rule replacement.
         // The existing correction-control tools stay exposed beneath the shipped sortie_* deny.
         // Common implementation gates own known output scope; the ordinary Reviewer is untouched.
@@ -787,18 +813,20 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     await reconcileCorrectionPermissions(String(event.sessionID));
     if (record(event.tools)) {
-      const visible: Record<string, string[]> = {
-        "dog-operator": ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"],
-        "dogs-coordinator": ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"],
-        "dog-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
-        "dog-luna-worker-v010": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
-        "dog-reviewer-v010": await hooks.reviewerCorrectionScope?.(String(event.sessionID)) ? ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit", "repair_review", "finish_direct_unit"] : ["repair_review"], "dog-scout-v010": [], "dog-advisor-v010": [],
-      };
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
-      const allowed = correctionAgent(event.agent) ? (correcting ? ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit", "repair_review", "finish_direct_unit"] : []) : visible[String(event.agent)];
+      const logicalRole = canonicalAgent(V010_RUNTIME_PROFILE, String(event.agent));
+      const role = logicalRole ? (agentToolRegistry.roles as Record<string, { tool_families: Record<string, string[]>;
+        correction_tool_families?: Record<string, string[]>; native_tool_families?: Record<string, string[]>;
+        correction_native_tool_families?: Record<string, string[]> }>)[logicalRole] : undefined;
+      const families = role ? [...Object.values(role.tool_families), ...(correcting ? Object.values(role.correction_tool_families ?? {}) : [])] : [];
+      const allowed = role ? [...new Set(families.flat())] : undefined;
+      const nativeFamilies = role ? [...Object.values(role.native_tool_families ?? {}),
+        ...(correcting ? Object.values(role.correction_native_tool_families ?? {}) : [])] : [];
+      const allowedNativeTools = new Set(nativeFamilies.flat());
       for (const key of Object.keys(event.tools)) {
         if ((event.agent === "dog-reviewer-v010" || correctionAgent(event.agent)) && !correcting &&
              ["edit", "write", "patch"].includes(key)) { delete event.tools[key]; continue; }
+        if (key.startsWith("fh_") && !allowedNativeTools.has(key)) { delete event.tools[key]; continue; }
         if (!key.startsWith("sortie_")) continue;
         if (!allowed || !key.startsWith("sortie_v010_") || !allowed.includes(key.slice("sortie_v010_".length))) delete event.tools[key];
       }
