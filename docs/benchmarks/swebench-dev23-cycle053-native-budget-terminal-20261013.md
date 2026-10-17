@@ -103,6 +103,60 @@ Retain the full failure and require a successful final integration run before
 claiming that candidate's full validation; do not automatically replay all tests
 merely because the server restarted.
 
+Final Linux validation on the v0.13.18 base completed all 122 files: 2,002 passes,
+two opt-in live tests skipped, zero failures; exit 0, 433,620 ms. The wrapper
+survived another server restart and retained its real terminal receipt. Source and
+test hashes match the fixed development candidate; later documentation edits do
+not require another product test run.
+
+## One practical attempt, native continuation and an invalid comparison
+
+The released `v0.13.18` tag and main both point to
+`08fc0cc9164300597d4f3eb85d8424b1785a2379`, the base of this change. Candidate
+`b554dc97b4bc8acb5c46bdbbb1315aa07f75c1a2` was fixed as a development archive,
+SHA-256 `d1f43f3094594233d50a7439f650b0c7dc72817a18c5eef165cb6d83d7d66a17`.
+Preflight passed without provider requests. The original public task body was
+unchanged; only its candidate-identification header changed. One $2 practical
+reservation was admitted before launch. No inference retry or new recovery prompt
+was sent.
+
+The practical controller was interrupted during a server restart at 796,988 ms;
+its receipt has `exit=null`, and its old supervisor state still says `running`.
+Its native sessions subsequently continued in the shared server. Absence of the
+old project process and service registration did **not** establish that all native
+writers had stopped. The read-only observer was reattached to the same native
+attempt, retaining the original $2 cap and deadline rather than restarting work.
+
+Native work completed: source-backed public dbt/postgres failure reproduced,
+523 original bytes preserved after the fix, 136 linter/CLI tests passed, independent
+Review PASS, Mission completed, acceptance receipt succeeded, and final root
+response and idle recorded. Root settlement took 1,190,407 ms. Actual Operator,
+Coordinator and Reviewer models were all `openai/gpt-6.1-sol#xhigh`; no matching
+Worker exists. Saved usage totals $1.7674084 with zero unpriced requests (Operator
+$0.2992188, Coordinator $1.2734784, Reviewer $0.1947112). Original CLI exit remains
+unknown. The recovered observation explicitly records controller interruption,
+`native_completed=false`, `accepted=false` and `worker_model_observed=false`;
+native task completion is reported separately, not promoted to strict acceptance.
+
+The installed candidate bytes still match the frozen package. However, the
+reloaded server reports the global Sortie plugin active and the project candidate
+plugin failed with `Duplicate plugin ID: sortie-dogs.v010`. The actual retained
+Coordinator result is **283,429 bytes**, still containing full protected recipes.
+This is **not** evidence that the corrected candidate executed, nor a measured
+improvement in its cost, latency or task correctness. Applying the correction's
+existing projection deterministically to that saved result gives 12,742 bytes,
+with evidence identities preserved; that remains a presentation comparison only.
+
+The regression-proven presentation correction and full test results are product
+validation, not a verified benchmark cycle. Matching immutable-candidate CLI
+qualification remains blocked by the reload/runtime mismatch, lost CLI exit and
+missing Worker/model coverage. Do not broaden to 23 cases, replay this finished
+task, alter global host configuration, or claim the raw cost difference as the
+correction's effect. The next usability issue is preserving the owned runtime and
+observer through host restart, using this retained evidence before another paid
+comparison. Raw histories, partial and settled snapshots, commands/exits/logs,
+recovered observation and accounting remain outside Git under `cycle-053/`.
+
 The retained official single remains **0/1**, resolved IDs `[]`; the separate old
 full23 result remains **9/23**, not the current main score. The correction does not
 address the implementation-coupled private-helper mismatch documented in Cycle052.
