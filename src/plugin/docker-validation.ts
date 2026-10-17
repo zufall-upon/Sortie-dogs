@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { posix } from "node:path";
 import { promisify } from "node:util";
+import { readDockerWorkspaceWithoutPython } from "./docker-workspace-read-fallback.js";
 
 const exec = promisify(execFile);
 const CONTAINER_ID = /^[a-f0-9]{12,64}$/u;
@@ -258,9 +259,25 @@ export async function readDockerWorkspaceFile(containerID: string, cwd: string, 
   if (!before || before.candidate !== candidate) throw new Error("docker-review-candidate-stale-or-unavailable");
   // An admitted 2000-name page (255-byte names) can expand sixfold in JSON;
   // the 64 KB file excerpt also needs escaping headroom. Keep the read limits.
-  const { stdout } = await exec("docker", ["exec", "--workdir", cwd, containerID, "python3", "-I", "-S", "-c", READ_WORKSPACE,
-    before.repository_root, path, String(offset), String(limit)], { encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+  let result: Record<string, unknown>;
+  try {
+    const { stdout } = await exec("docker", ["exec", "--workdir", cwd, containerID, "python3", "-I", "-S", "-c", READ_WORKSPACE,
+      before.repository_root, path, String(offset), String(limit)], { encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+    result = JSON.parse(stdout);
+  } catch (error) {
+    // A failed observation is not a reason to switch recipes. Use the existing
+    // shell reader only after the task itself confirms Python is absent.
+    let absent = false;
+    try {
+      const probe = await exec("docker", ["exec", "--workdir", cwd, containerID, "sh", "-c",
+        "if command -v python3 >/dev/null 2>&1; then printf 'SORTIE_PYTHON_PRESENT'; else printf 'SORTIE_PYTHON_ABSENT'; fi"],
+      { encoding: "utf8", timeout: 30_000, maxBuffer: 1024 });
+      absent = probe.stdout === "SORTIE_PYTHON_ABSENT";
+    } catch { /* Preserve the original read failure when capability is unknown. */ }
+    if (!absent) throw error;
+    result = await readDockerWorkspaceWithoutPython(containerID, cwd, before.repository_root, path, offset, limit);
+  }
   const after = await captureDockerWorkspaceSnapshot(containerID, cwd);
   if (!after || after.candidate !== candidate) throw new Error("docker-review-candidate-changed-during-read");
-  return { workspace: before, ...JSON.parse(stdout) };
+  return { workspace: before, ...result };
 }

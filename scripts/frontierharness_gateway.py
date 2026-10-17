@@ -135,8 +135,9 @@ def install_native_docker_plugin(directory):
         stream.write('export { default } from "./scripts/frontierharness-docker-task.mjs";\n')
     with (destination / "scripts/frontierharness-docker-task.mjs").open("xb") as stream:
         stream.write(Path(__file__).with_name("frontierharness-docker-task.mjs").read_bytes())
-    with (destination / "dist/plugin/docker-validation.js").open("xb") as stream:
-        stream.write((package / "dist/plugin/docker-validation.js").read_bytes())
+    for name in ("docker-validation.js", "docker-workspace-read-fallback.js"):
+        with (destination / "dist/plugin" / name).open("xb") as stream:
+            stream.write((package / "dist/plugin" / name).read_bytes())
     return "./.opencode/plugins/docker-task"
 
 
