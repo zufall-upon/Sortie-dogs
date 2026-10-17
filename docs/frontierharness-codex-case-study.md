@@ -32,10 +32,16 @@ and does not mint validation evidence. Stale/unavailable candidates are reported
 as such, not replaced by a new snapshot. Reviewer context, native permissions,
 and route/usage audits include this read-only path. Actual correction still uses
 the existing `repair_review` admission, scope, formal checks, and self-recheck.
+When that correction activates, only the exact generated gateway permission block
+is projected to the registry's correction tool families. Other configured agent
+rules and session rules retain their native order; the ordinary Reviewer stays
+read-only. The projection also survives a cold reload and is removed on settlement.
 
 The host captures the actual container workspace before and after a declared
 check. Python-enabled task images support non-Git workspaces and include ignored
-inputs, file modes, and link identity/content. Git-only images retain a Git-based
+inputs, file modes, and link identity/content. Snapshot and reader Python processes
+use `-I -S`, so candidate-local startup hooks and import paths are not executed as
+part of read-only observation. Git-only images retain a Git-based
 fallback. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
 candidate bytes do not become proof. The container is not represented by the
 unrelated gateway filesystem. Snapshot capture is conservative: a check that
@@ -55,6 +61,15 @@ Historical `campaign_runner.py` and its Code Mode plugin remain frozen. Selectin
 the native route for a future campaign requires its own pre-run artifact receipt;
 these development checks do not retroactively repair earlier results. Route,
 model-request, and usage audits remain enabled; missing cost stays unknown.
+
+PR #280 release review follow-up classified both retained native Reviewer Medium
+findings as valid: generated gateway correction permissions and Python startup
+side effects. Both are corrected above. The five-file targeted run passed 424
+tests with two live-Docker skips and one fixture failure: the shim discovered the
+host parent repository for its non-Git task. After matching the container's Git
+discovery boundary, both affected regressions passed (one live-Docker skip).
+The original Mission's 32-unit budget, findings and accounting remain retained;
+this release follow-up does not assert an independent final Mission PASS.
 
 ## Purpose
 

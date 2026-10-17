@@ -437,6 +437,28 @@ function shippedReviewerBlock(rules: readonly NativePermissionRule[]): { start: 
   }
   return undefined;
 }
+function correctionGatewayReviewerRules(rules: readonly NativePermissionRule[]): NativePermissionRule[] {
+  const role = agentToolRegistry.roles["dog-reviewer"];
+  // Match product_agent_permissions()'s exact generated block, in place. A user's
+  // surrounding agent rules and later session rules retain native last-match order.
+  const generated = (correcting: boolean): NativePermissionRule[] => {
+    const actions = [...new Set([...Object.values(role.tool_families),
+      ...(correcting ? Object.values(role.correction_tool_families) : [])].flat())].sort();
+    const native = [...new Set([...Object.values(role.native_tool_families),
+      ...(correcting ? Object.values(role.correction_native_tool_families) : [])].flat())].sort();
+    return [{ action: "*", resource: "*", effect: "deny" },
+      ...actions.map(action => ({ action: agentToolRegistry.tool_prefix + action, resource: "*", effect: "allow" as const })),
+      ...native.map(action => ({ action, resource: "*", effect: "allow" as const }))];
+  };
+  const original = generated(false);
+  for (let start = rules.length - original.length; start >= 0; start--) {
+    if (original.every((rule, offset) => {
+      const actual = rules[start + offset];
+      return actual?.action === rule.action && actual.resource === rule.resource && actual.effect === rule.effect;
+    })) return [...rules.slice(0, start), ...generated(true), ...rules.slice(start + original.length)];
+  }
+  return [...rules];
+}
 const correctionAgents = new WeakMap<OpenCodeV2Context, Map<string, { generation: number; registration: Registration }>>();
 
 /** Use 2.0.18's agent.transform/switchAgent BEFORE native tool snapshot selection; never mutate session rules. */
@@ -518,7 +540,7 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
     const registration = await context.agent.transform(editor => {
       const reviewer = editor.get?.("dog-reviewer-v010");
       if (!reviewer?.permissions) throw new Error("native-reviewer-correction-role-permissions-unavailable");
-      const rules = reviewer.permissions;
+      const rules = correctionGatewayReviewerRules(reviewer.permissions);
       const shipped = shippedReviewerBlock(rules);
       if (!shipped) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
       const inherited = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => !["edit", "shell"].includes(rule.action)),
@@ -526,8 +548,8 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
         ...rules.slice(shipped.start + shipped.rules.length)];
       editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
         model: { ...info.model as JsonObject },
-        // Remove ONLY the shipped read-only edit/shell role entries. Native implementation
-        // defaults and every real configured rule keep their original order/effective meaning.
+        // Project only the exact generated gateway block and shipped read-only edit/shell
+        // role entries. Other configured rules keep their native order/effective meaning.
         // No edit/shell grants, copied historical denies, command scanner or session-rule replacement.
         // The existing correction-control tools stay exposed beneath the shipped sortie_* deny.
         // Common implementation gates own known output scope; the ordinary Reviewer is untouched.

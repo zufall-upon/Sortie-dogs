@@ -648,7 +648,7 @@ for (const actualDocker of [false, true]) test(`native Docker validation binds t
     await writeFile(join(workspace, "check.sh"), source);
     await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
     await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
-    await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexec "$@"\n`);
+    await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexport GIT_CEILING_DIRECTORIES=${JSON.stringify(root)}\nexec "$@"\n`);
     await chmod(fakeDocker, 0o755);
     if (actualDocker) {
       const image = process.env.SORTIE_NATIVE_DOCKER_IMAGE!;
@@ -826,8 +826,14 @@ for (const actualDocker of [false, true]) test(`native Docker validation binds t
     assert.notEqual((await captureDockerWorkspaceSnapshot(containerID, workspace))?.candidate, withIgnored?.candidate,
       "Git ignore rules do not exclude task inputs from Docker proof");
     const plain = join(root, "non-git-task"); await mkdir(plain); await writeFile(join(plain, "logs.txt"), "original\n");
+    await writeFile(join(plain, "sitecustomize.py"), 'open("startup-side-effect.txt", "w").write("candidate startup executed\\n")\n');
     const plainBefore = await captureDockerWorkspaceSnapshot(containerID, plain);
+    await assert.rejects(readFile(join(plain, "startup-side-effect.txt")), { code: "ENOENT" }, "snapshot does not execute candidate Python startup code");
     assert.ok(plainBefore, "Terminal task workspaces need no Git initialization");
+    const plainRead = await dockerRead!.execute({ container_id: containerID, cwd: plain, candidate: plainBefore.candidate, path: "logs.txt" },
+      { agent: "dog-reviewer-v010", sessionID: "reviewer" });
+    assert.equal(JSON.parse(plainRead.content).lines[0][1], "original\n");
+    await assert.rejects(readFile(join(plain, "startup-side-effect.txt")), { code: "ENOENT" }, "read-only inspection does not execute candidate Python startup code");
     await writeFile(join(plain, "logs.txt"), "changed\n");
     assert.notEqual((await captureDockerWorkspaceSnapshot(containerID, plain))?.candidate, plainBefore.candidate);
     await cleanupPlugin();

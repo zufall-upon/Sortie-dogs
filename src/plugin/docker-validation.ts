@@ -58,7 +58,7 @@ print("0" * 64)
 const SNAPSHOT_COMMAND = [
   "set -eu",
   "if command -v python3 >/dev/null 2>&1; then",
-  "python3 - <<'SORTIE_WORKSPACE_PY'",
+  "python3 -I -S - <<'SORTIE_WORKSPACE_PY'",
   FILE_SNAPSHOT,
   "SORTIE_WORKSPACE_PY",
   "else",
@@ -153,7 +153,7 @@ export async function readDockerWorkspaceFile(containerID: string, cwd: string, 
   }
   const before = await captureDockerWorkspaceSnapshot(containerID, cwd);
   if (!before || before.candidate !== candidate) throw new Error("docker-review-candidate-stale-or-unavailable");
-  const { stdout } = await exec("docker", ["exec", "--workdir", cwd, containerID, "python3", "-c", READ_WORKSPACE,
+  const { stdout } = await exec("docker", ["exec", "--workdir", cwd, containerID, "python3", "-I", "-S", "-c", READ_WORKSPACE,
     before.repository_root, path, String(offset), String(limit)], { encoding: "utf8", timeout: 30_000, maxBuffer: 256 * 1024 });
   const after = await captureDockerWorkspaceSnapshot(containerID, cwd);
   if (!after || after.candidate !== candidate) throw new Error("docker-review-candidate-changed-during-read");

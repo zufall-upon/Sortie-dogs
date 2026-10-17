@@ -2456,6 +2456,40 @@ test("shipped Reviewer remains read-only and retains Sol/xhigh", () => {
   assert.deepEqual(convertedAssetPermissions(asset), nativeReviewerRoleRules, "native role-block projection is grounded in the actual shipped header");
 });
 
+test("generated gateway Reviewer permissions follow correction while preserving configured rules", async () => {
+  const f = await fixture();
+  try {
+    const { stdout } = await exec("python3", ["-c", "import json,sys; sys.path.insert(0,sys.argv[1]); from frontierharness_gateway import native_gateway_config; print(json.dumps(native_gateway_config('openai/gpt-6-sol','0123456789abcdef01234567','fixture',allowed_models=['openai/gpt-6-sol'])['agents']['dog-reviewer-v010']['permissions']))", resolve("scripts")],
+      { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+    const generated: Rule[] = JSON.parse(stdout);
+    const custom: Rule[] = [{ action: "fh_docker_exec", resource: "user-denied", effect: "deny" },
+      { action: "sortie_v010_finish_direct_unit", resource: "user-approval", effect: "ask" }];
+    f.agentRules["dog-reviewer-v010"] = [...generated, ...custom];
+    await f.start();
+    await initial(f);
+    assert.equal(await f.permission("author", "fh_docker_read", "*"), "allow");
+    assert.equal(await f.permission("author", "fh_docker_exec", "*"), "deny");
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    for (const cold of [false, true]) {
+      if (cold) await f.start();
+      assert.equal(await f.permission("author", "fh_docker_exec", "*"), "allow");
+      assert.equal(await f.permission("author", "sortie_v010_finish_direct_unit", "*"), "allow");
+      assert.equal(await f.permission("author", "fh_docker_exec", "user-denied"), "deny");
+      assert.equal(await f.permission("author", "sortie_v010_finish_direct_unit", "user-approval"), "ask");
+      f.agents.author!.permissions = [{ action: "fh_docker_exec", resource: "*", effect: "deny" }];
+      assert.equal(await f.permission("author", "fh_docker_exec", "*"), "deny");
+      delete f.agents.author!.permissions;
+      assert.equal(await f.permission("author", "shell", "anything"), "deny", "gateway shell policy is retained");
+      assert.deepEqual(f.registry()["dog-reviewer-v010"]!.permissions.slice(-generated.length - custom.length), [...generated, ...custom]);
+    }
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(await f.permission("author", "fh_docker_exec", "*"), "deny");
+  } finally { await f.dispose(); }
+});
+
 test("correction admission cannot bypass an original Reviewer parent-session deny", async () => {
   const f = await fixture();
   try {
