@@ -9,7 +9,7 @@ import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["ignored-mode", "tracked-mode", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
+for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
   test(`Git-only Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" }, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const root = await mkdtemp(resolve("_testenv/docker-git-fallback-"));
@@ -47,6 +47,25 @@ for (const mode of ["ignored-mode", "tracked-mode", "link-target", "hash-failure
         await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "tracked fixture"], { cwd: workspace });
         await exec(git, ["config", "core.filemode", "false"], { cwd: workspace });
       }
+      if (mode === "tracked-link-bytes" || mode === "tracked-link-failure") {
+        await writeFile(join(root, "reference.txt"), "before\n");
+        await symlink(join(root, "reference.txt"), join(workspace, "tracked-link"));
+        await exec(git, ["add", "tracked-link"], { cwd: workspace });
+        await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "tracked link fixture"], { cwd: workspace });
+      }
+      if (mode.endsWith("directory-link")) {
+        const target = join(mode === "internal-directory-link" ? workspace : root, "linked-directory");
+        await mkdir(target); await writeFile(join(target, "input.txt"), "before\n");
+        await symlink(target, join(workspace, "tracked-directory"));
+        await exec(git, ["add", "tracked-directory"], { cwd: workspace });
+        await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "directory link fixture"], { cwd: workspace });
+      }
+      if (mode === "tracked-deletion") {
+        await writeFile(join(workspace, "obsolete.txt"), "deleted candidate input\n");
+        await exec(git, ["add", "obsolete.txt"], { cwd: workspace });
+        await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "deletion fixture"], { cwd: workspace });
+        await unlink(join(workspace, "obsolete.txt"));
+      }
       process.env.PATH = `${bin}:${oldPath ?? ""}`;
       delete process.env.SORTIE_FIXTURE_HASH_FAILURE; delete process.env.SORTIE_FIXTURE_GIT_FAILURE; delete process.env.SORTIE_FIXTURE_STAT_FAILURE; delete process.env.SORTIE_FIXTURE_FIND_FAILURE;
       if (mode === "link-target") {
@@ -58,14 +77,23 @@ for (const mode of ["ignored-mode", "tracked-mode", "link-target", "hash-failure
         await unlink(join(workspace, "ignored-quote' and\nnewline.txt"));
       }
       const before = await captureDockerWorkspaceSnapshot(container, workspace);
+      if (mode === "external-directory-link") { assert.equal(before, undefined, "external directory bytes are not silently omitted"); return; }
       assert.ok(before);
       assert.deepEqual(await captureDockerWorkspaceSnapshot(container, workspace), before, "unchanged fallback is deterministic");
-      if (mode === "empty") return;
+      if (mode === "empty" || mode === "tracked-deletion") return;
       if (mode.endsWith("-mode")) {
         const check = mode === "tracked-mode" ? "tracked-check.sh" : "ignored-check.sh";
         assert.equal((await exec(`./${check}`, [], { cwd: workspace })).stdout, "PASS\n");
         await chmod(join(workspace, check), 0o644);
         await assert.rejects(exec(`./${check}`, [], { cwd: workspace }));
+      } else if (mode === "internal-directory-link") {
+        await writeFile(join(workspace, "linked-directory", "input.txt"), "after\n");
+      } else if (mode === "tracked-link-failure") {
+        process.env.SORTIE_FIXTURE_HASH_FAILURE = "./tracked-link";
+      } else if (mode === "tracked-link-bytes") {
+        assert.equal(await readFile(join(workspace, "tracked-link"), "utf8"), "before\n");
+        await writeFile(join(root, "reference.txt"), "after\n");
+        assert.equal(await readFile(join(workspace, "tracked-link"), "utf8"), "after\n");
       } else if (mode === "link-target") {
         await unlink(join(workspace, "ignored-link"));
         await symlink(join(root, "second"), join(workspace, "ignored-link"));
@@ -78,7 +106,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "link-target", "hash-failure
       if (mode.endsWith("failure")) assert.equal(after, undefined, "failed observation cannot mint an empty-data proof");
       else {
         assert.ok(after); assert.equal(after.source, before.source);
-        assert.notEqual(after.candidate, before.candidate, "unchanged input bytes do not hide mode/link identity changes");
+        assert.notEqual(after.candidate, before.candidate, "changed input bytes or mode/link identity cannot leave proof fresh");
       }
     } finally {
       process.env.PATH = oldPath;

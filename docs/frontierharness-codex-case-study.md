@@ -43,7 +43,11 @@ inputs, file modes, and link identity/content. Snapshot and reader Python proces
 use `-I -S`, so candidate-local startup hooks and import paths are not executed as
 part of read-only observation. Git-only images retain a Git-based
 fallback that also binds actual workspace modes and symlink targets, including
-ignored files and tracked executable bits when `core.filemode=false`. Failed
+ignored files and tracked executable bits when `core.filemode=false`. It also hashes
+regular-file bytes reached through tracked symlinks, rather than treating their
+unchanged link text as unchanged input. Internal directory links reuse the captured
+workspace; external directory trees that cannot be captured remain unavailable.
+Candidates without regular-file links retain their existing fallback hash recipe. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
 hash of empty/partial data. Its older mode-blind identities are not reused as fresh
 proof; the Python snapshot recipe is unchanged. A declared symlink CWD keeps its logical Docker `cwd` for the registered
