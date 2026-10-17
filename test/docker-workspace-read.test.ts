@@ -10,8 +10,8 @@ import { captureDockerWorkspaceSnapshot, readDockerWorkspaceFile } from "../dist
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["directory-page", "escaped-directory-page", "escaped-file"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
-  skip: process.platform === "win32",
+for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
+  skip: process.platform === "win32" || (mode === "long-line" && process.platform !== "linux"),
 }, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/docker-workspace-read-"));
@@ -21,11 +21,15 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file"])
     await mkdir(workspace); await mkdir(bin);
     // Execute the actual fixed snapshot and Python reader, with the same
     // isolated container Git discovery boundary; no fabricated output or model.
-    await writeFile(join(bin, "docker"), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]!=='exec'||a[1]!=='--workdir'||a[3]!==${JSON.stringify(container)})process.exit(125);\nconst r=spawnSync(a[4],a.slice(5),{cwd:a[2],env:{...process.env,GIT_CEILING_DIRECTORIES:${JSON.stringify(root)}},stdio:'inherit'});\nprocess.exit(r.status??125);\n`);
+    await writeFile(join(bin, "docker"), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]!=='exec'||a[1]!=='--workdir'||a[3]!==${JSON.stringify(container)})process.exit(125);\n// Test-only memory pressure on the reader, not snapshots or product policy.\nif(${mode === "long-line"}&&a[4]==='python3'&&a[7]==='-c')a[8]='import resource; resource.setrlimit(resource.RLIMIT_AS, (64*1024*1024, 64*1024*1024))\\n'+a[8];\nconst r=spawnSync(a[4],a.slice(5),{cwd:a[2],env:{...process.env,GIT_CEILING_DIRECTORIES:${JSON.stringify(root)}},stdio:'inherit'});\nprocess.exit(r.status??125);\n`);
     await chmod(join(bin, "docker"), 0o755);
     const directory = mode.endsWith("directory-page");
     const names = Array.from({ length: 2001 }, (_, i) => `${String(i).padStart(4, "0")}-${mode === "escaped-directory-page" ? String.fromCharCode(1).repeat(250) : "entry".repeat(40)}`);
-    const bytes = Buffer.alloc(64000, 1);
+    const bytes = mode === "long-line" ? Buffer.concat([Buffer.alloc(48 * 1024 * 1024, 0x61), Buffer.from("\nαβγ\nlast")])
+      : mode === "empty-file" ? Buffer.alloc(0)
+      : mode === "line-shapes" ? Buffer.from(`\n\r\nαβγ\n${"x".repeat(63988)}😀\nlast`)
+      : mode === "line-boundary" ? Buffer.from(`${"x".repeat(63999)}\nlast\n`)
+      : Buffer.alloc(64000, 1);
     if (directory) {
       for (let i = 0; i < names.length; i += 100) await Promise.all(names.slice(i, i + 100).map(name => writeFile(join(workspace, name), "")));
       assert.ok(Buffer.byteLength(JSON.stringify(names.slice(0, 2000))) > 256 * 1024, "valid requested page really exceeds the old stdout cap");
@@ -42,9 +46,25 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file"])
       await writeFile(join(workspace, "changed.txt"), "changed candidate\n");
     } else {
       const file = await readDockerWorkspaceFile(container, workspace, candidate.candidate, "escaped.txt", 1, 2000);
-      assert.equal(file.kind, "file"); assert.equal(file.total_lines, 1);
+      const logical: Buffer[] = [];
+      for (let start = 0; start < bytes.length;) {
+        const newline = bytes.indexOf(10, start), end = newline < 0 ? bytes.length : newline + 1;
+        logical.push(bytes.subarray(start, end)); start = end;
+      }
+      const expected = (offset: number, limit: number): [number, string][] => {
+        let budget = 64000;
+        return logical.slice(offset - 1, offset - 1 + limit).flatMap((line, i) => {
+          if (!budget) return [];
+          const retained = line.subarray(0, budget); budget -= retained.length;
+          return [[offset + i, retained.toString("utf8")] as [number, string]];
+        });
+      };
+      assert.equal(file.kind, "file"); assert.equal(file.total_lines, logical.length);
       assert.equal(file.sha256, createHash("sha256").update(bytes).digest("hex"));
-      assert.deepEqual(file.lines, [[1, bytes.toString("utf8")]]);
+      assert.deepEqual(file.lines, expected(1, 2000));
+      const tail = await readDockerWorkspaceFile(container, workspace, candidate.candidate, "escaped.txt", 2, 2);
+      assert.deepEqual(tail.lines, expected(2, 2));
+      assert.equal(tail.total_lines, logical.length); assert.equal(tail.sha256, file.sha256);
       await writeFile(join(workspace, "escaped.txt"), "changed candidate\n");
     }
     await assert.rejects(readDockerWorkspaceFile(container, workspace, candidate.candidate, "."), /candidate-stale/);
