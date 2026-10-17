@@ -74,7 +74,20 @@ const SNAPSHOT_COMMAND = [
   "tracked=${tracked%% *}",
   // A NUL on enumeration failure is an invalid empty filename, so xargs fails
   // rather than treating a failed Git listing as an empty untracked set.
-  "untracked_bytes=$({ git ls-files -z --others || printf '\\0'; } | xargs -0 -r sha256sum --)",
+  // An untracked internal directory alias is already covered at its target.
+  // Filter only that case before the batched hash; retain all producer failures.
+  "untracked_bytes=$({",
+  "{ git ls-files -z --others || printf '\\0'; } | xargs -0 -r sh -c '",
+  "root=$1; shift",
+  "for path do",
+  "  [ -n \"$path\" ] || exit 1",
+  "  if [ -L \"$path\" ] && [ -d \"$path\" ]; then",
+  "    target=$(readlink -f -- \"$path\") || exit 1",
+  "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
+  "  else printf \"%s\\0\" \"$path\"",
+  "  fi",
+  "done' sh \"$root\" || printf '\\0'",
+  "} | xargs -0 -r sha256sum --)",
   // Git may ignore tracked executable-bit changes (core.filemode=false).
   // Observe workspace modes/links independently, excluding only Git bookkeeping.
   "workspace_modes=$({ find . -path ./.git -prune -o -print0 || printf '\\0'; } | LC_ALL=C QUOTING_STYLE=c xargs -0 -r stat -c '%f %N' --)",

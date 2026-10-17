@@ -45,8 +45,9 @@ part of read-only observation. Git-only images retain a Git-based
 fallback that also binds actual workspace modes and symlink targets, including
 ignored files and tracked executable bits when `core.filemode=false`. It also hashes
 regular-file bytes reached through tracked symlinks, rather than treating their
-unchanged link text as unchanged input. Internal directory links reuse the captured
-workspace; external directory trees that cannot be captured remain unavailable.
+unchanged link text as unchanged input. Tracked and untracked internal directory
+links reuse the captured workspace rather than hashing a directory as a file;
+external directory trees that cannot be captured remain unavailable.
 Candidates without regular-file links retain their existing fallback hash recipe. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
 hash of empty/partial data. Its older mode-blind identities are not reused as fresh

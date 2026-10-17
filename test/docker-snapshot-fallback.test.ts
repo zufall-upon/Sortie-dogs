@@ -9,7 +9,7 @@ import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
+for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
   test(`Git-only Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" }, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const root = await mkdtemp(resolve("_testenv/docker-git-fallback-"));
@@ -54,11 +54,13 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "track
         await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "tracked link fixture"], { cwd: workspace });
       }
       if (mode.endsWith("directory-link")) {
-        const target = join(mode === "internal-directory-link" ? workspace : root, "linked-directory");
+        const target = join(mode.includes("internal-directory") ? workspace : root, "linked-directory");
         await mkdir(target); await writeFile(join(target, "input.txt"), "before\n");
         await symlink(target, join(workspace, "tracked-directory"));
-        await exec(git, ["add", "tracked-directory"], { cwd: workspace });
-        await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "directory link fixture"], { cwd: workspace });
+        if (!mode.startsWith("untracked-")) {
+          await exec(git, ["add", "tracked-directory"], { cwd: workspace });
+          await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "directory link fixture"], { cwd: workspace });
+        }
       }
       if (mode === "tracked-deletion") {
         await writeFile(join(workspace, "obsolete.txt"), "deleted candidate input\n");
@@ -77,7 +79,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "track
         await unlink(join(workspace, "ignored-quote' and\nnewline.txt"));
       }
       const before = await captureDockerWorkspaceSnapshot(container, workspace);
-      if (mode === "external-directory-link") { assert.equal(before, undefined, "external directory bytes are not silently omitted"); return; }
+      if (mode.includes("external-directory-link")) { assert.equal(before, undefined, "external directory bytes are not silently omitted"); return; }
       assert.ok(before);
       assert.deepEqual(await captureDockerWorkspaceSnapshot(container, workspace), before, "unchanged fallback is deterministic");
       if (mode === "empty" || mode === "tracked-deletion") return;
@@ -86,7 +88,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-bytes", "track
         assert.equal((await exec(`./${check}`, [], { cwd: workspace })).stdout, "PASS\n");
         await chmod(join(workspace, check), 0o644);
         await assert.rejects(exec(`./${check}`, [], { cwd: workspace }));
-      } else if (mode === "internal-directory-link") {
+      } else if (mode.includes("internal-directory-link")) {
         await writeFile(join(workspace, "linked-directory", "input.txt"), "after\n");
       } else if (mode === "tracked-link-failure") {
         process.env.SORTIE_FIXTURE_HASH_FAILURE = "./tracked-link";
