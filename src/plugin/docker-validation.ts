@@ -179,14 +179,26 @@ if os.path.isdir(path):
 elif stat.S_ISREG(os.stat(path).st_mode):
     h = hashlib.sha256()
     lines, total, size = [], 0, 0
+    excerpt, pending = bytearray(), False
     with open(path, "rb") as stream:
-        for line in stream:
-            h.update(line)
-            total += 1
-            if offset <= total < offset + limit and size < 64000:
-                text = line[:64000-size].decode("utf-8", errors="replace")
-                lines.append([total, text])
-                size += len(line[:64000-size])
+        # Bound allocations even when a logical line is a large generated file.
+        for block in iter(lambda: stream.readline(64000), b""):
+            h.update(block)
+            pending = True
+            if offset <= total + 1 < offset + limit and size < 64000:
+                retained = block[:64000-size]
+                excerpt.extend(retained)
+                size += len(retained)
+            if block.endswith(b"\n"):
+                total += 1
+                if excerpt:
+                    lines.append([total, excerpt.decode("utf-8", errors="replace")])
+                    excerpt.clear()
+                pending = False
+    if pending:
+        total += 1
+        if excerpt:
+            lines.append([total, excerpt.decode("utf-8", errors="replace")])
     result = {"kind": "file", "lines": lines, "total_lines": total, "sha256": h.hexdigest()}
 else:
     raise ValueError("candidate-file-not-readable")
