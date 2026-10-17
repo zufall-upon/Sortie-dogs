@@ -9,6 +9,7 @@ const SNAPSHOT_MARKER = "SORTIE_DOCKER_WORKSPACE_V1";
 // Terminal tasks need not contain Git at all. Capture actual bytes and file
 // identity, including ignored inputs; timestamps alone are not candidate edits.
 const FILE_SNAPSHOT = String.raw`
+import errno
 import hashlib, json, os, stat, subprocess
 cwd = os.path.realpath(os.getcwd())
 root = cwd
@@ -40,11 +41,25 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=lambda er
             value = [relative, "file", mode, digest(path)]
         elif stat.S_ISLNK(info.st_mode):
             target = os.path.realpath(path)
+            # Missing/cyclic targets retain their literal link identity. Do not
+            # let isfile/isdir turn permission or I/O errors into missing input.
+            try:
+                referent = os.stat(path)
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    raise
+                referent = None
+            is_file = referent is not None and stat.S_ISREG(referent.st_mode)
+            is_directory = referent is not None and stat.S_ISDIR(referent.st_mode)
+            if referent is not None and not (is_file or is_directory):
+                raise RuntimeError("unsupported-workspace-file-type")
             # Internal directory targets are captured at their own lexical path.
             # External directory trees are not silently omitted from a proof.
-            if os.path.isdir(path) and os.path.commonpath([root, target]) != root:
+            if is_directory and os.path.commonpath([root, target]) != root:
                 raise RuntimeError("external-directory-link-snapshot-unavailable")
-            value = [relative, "link", mode, os.readlink(path), digest(path) if os.path.isfile(path) else None]
+            value = [relative, "link", mode, os.readlink(path), digest(path) if is_file else None]
+            if is_file or is_directory:
+                value.extend([target, stat.S_IMODE(referent.st_mode)])
         elif stat.S_ISDIR(info.st_mode):
             value = [relative, "directory", mode]
         else:
@@ -100,12 +115,24 @@ const SNAPSHOT_COMMAND = [
   "root=$1; shift",
   "for path do",
   "  [ -n \"$path\" ] || exit 1",
-  "  if [ -f \"$path\" ]; then sha256sum -- \"$path\" || exit 1",
-  "  elif [ -d \"$path\" ]; then",
-  "    target=$(readlink -f -- \"$path\") || exit 1",
+  // find's target type distinguishes known missing/cyclic links (N/L) from
+  // failed observations; shell -f/-d predicates hide permission and I/O errors.
+  "  kind=$(find \"$path\" -maxdepth 0 -printf \"%Y\") || exit 1",
+  "  case \"$kind\" in",
+  "    f) sha256sum -- \"$path\" || exit 1 ;;",
+  "    d) : ;;",
+  "    N|L) continue ;;",
+  "    *) exit 1 ;;",
+  "  esac",
+  // Pair the lexical link with its resolved target/mode before hashing. Keeping
+  // each pair together prevents swapping equal-byte targets between two links.
+  "  target=$(readlink -fn -- \"$path\" && printf .) || exit 1",
+  "  target=${target%.}",
+  "  if [ \"$kind\" = d ]; then",
   "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
-  "  elif [ -e \"$path\" ]; then exit 1",
   "  fi",
+  "  referent=$(LC_ALL=C QUOTING_STYLE=c stat -L -c \"%f %N\" -- \"$path\" \"$target\") || exit 1",
+  "  printf \"%s\" \"$referent\" | sha256sum || exit 1",
   "done' sh \"$root\")",
   "link_bytes=$(printf '%s' \"$link_bytes\" | LC_ALL=C sort)",
   "if [ -n \"$link_bytes\" ]; then",

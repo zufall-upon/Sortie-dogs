@@ -50,22 +50,31 @@ part of read-only observation. Git-only images retain a Git-based
 fallback that also binds actual workspace modes and symlink targets, including
 ignored files and tracked executable bits when `core.filemode=false`. It also hashes
 regular-file bytes reached through tracked symlinks, rather than treating their
-unchanged link text as unchanged input. Tracked and untracked internal directory
+unchanged link text as unchanged input. Both snapshot paths also bind each
+regular-file or supported internal-directory link to its resolved final target
+and referent mode. Execution-bit
+changes or intermediate-link retargeting cannot reuse an old proof just because
+the reached bytes stay equal; target identity stays paired with its lexical link.
+Tracked and untracked internal directory
 links reuse the captured workspace rather than hashing a directory as a file;
 external directory trees that cannot be captured remain unavailable.
-Candidates without regular-file links retain their existing fallback hash recipe. Failed
+Candidates without symlinks retain their existing fallback hash recipe. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
-hash of empty/partial data. Its older mode-blind identities are not reused as fresh
+hash of empty/partial data. Referent classification distinguishes known
+missing/cyclic targets (the existing literal-link identity) from permission or
+I/O errors: explicit stat in Python and the existing GNU find target-type
+observation in Git-only images. Failed observations and unsupported special-file
+referents are not serialized as absent input. Its older mode-blind identities are not reused as fresh
 proof. Python snapshots retain a discovered repository root even before the first
 commit, so validation from a nested directory still covers root and sibling inputs.
 Root-path whitespace is retained as path data rather than stripped or normalized
-as a text newline. Ordinary committed and truly non-Git workspaces keep their
-existing identity recipe.
+as a text newline. Apart from the strengthened symlink referent identity,
+ordinary committed and truly non-Git workspaces keep their existing identity recipe.
 A declared symlink CWD keeps its logical Docker `cwd` for the registered
 check and records the resolved `actual_cwd`. The candidate binds that physical
 execution directory too: retargeting the alias, even within the same unchanged
-repository, makes the old proof stale. Non-alias identities of the unchanged
-Python snapshot recipe stay unchanged. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
+repository, makes the old proof stale. Workspaces without symlinks
+retain their existing non-alias identity recipes. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
 candidate bytes do not become proof. The container is not represented by the
 unrelated gateway filesystem. Snapshot capture is conservative: a check that
 changes workspace files needs a stable candidate before it can supply proof.
