@@ -51,6 +51,8 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=lambda er
                 referent = None
             is_file = referent is not None and stat.S_ISREG(referent.st_mode)
             is_directory = referent is not None and stat.S_ISDIR(referent.st_mode)
+            if referent is not None and not (is_file or is_directory):
+                raise RuntimeError("unsupported-workspace-file-type")
             # Internal directory targets are captured at their own lexical path.
             # External directory trees are not silently omitted from a proof.
             if is_directory and os.path.commonpath([root, target]) != root:
@@ -113,16 +115,20 @@ const SNAPSHOT_COMMAND = [
   "root=$1; shift",
   "for path do",
   "  [ -n \"$path\" ] || exit 1",
-  "  if [ -f \"$path\" ]; then sha256sum -- \"$path\" || exit 1",
-  "  elif [ -d \"$path\" ]; then :",
-  "  elif [ -e \"$path\" ]; then exit 1",
-  "  else continue",
-  "  fi",
+  // find's target type distinguishes known missing/cyclic links (N/L) from
+  // failed observations; shell -f/-d predicates hide permission and I/O errors.
+  "  kind=$(find \"$path\" -maxdepth 0 -printf \"%Y\") || exit 1",
+  "  case \"$kind\" in",
+  "    f) sha256sum -- \"$path\" || exit 1 ;;",
+  "    d) : ;;",
+  "    N|L) continue ;;",
+  "    *) exit 1 ;;",
+  "  esac",
   // Pair the lexical link with its resolved target/mode before hashing. Keeping
   // each pair together prevents swapping equal-byte targets between two links.
   "  target=$(readlink -fn -- \"$path\" && printf .) || exit 1",
   "  target=${target%.}",
-  "  if [ -d \"$path\" ]; then",
+  "  if [ \"$kind\" = d ]; then",
   "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
   "  fi",
   "  referent=$(LC_ALL=C QUOTING_STYLE=c stat -L -c \"%f %N\" -- \"$path\" \"$target\") || exit 1",

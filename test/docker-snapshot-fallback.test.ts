@@ -9,8 +9,8 @@ import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
-  test(`${mode.startsWith("python-") ? "Python" : "Git-only"} Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" }, async () => {
+for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "tracked-link-permission-failure", "python-link-permission-failure", "tracked-link-dangling", "tracked-link-not-directory", "tracked-link-loop", "tracked-link-special-failure", "python-link-special-failure", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
+  test(`${mode.startsWith("python-") ? "Python" : "Git-only"} Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" || (mode.endsWith("link-permission-failure") && process.getuid?.() === 0) }, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const root = await mkdtemp(resolve("_testenv/docker-git-fallback-"));
     const workspace = join(root, "task"), bin = join(root, "bin");
@@ -64,10 +64,12 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
         await exec(git, ["add", "tracked-link"], { cwd: workspace });
         await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "link chain fixture"], { cwd: workspace });
       }
-      if (mode.endsWith("link-mode") || mode === "tracked-link-referent-failure" || ["python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop"].includes(mode)) {
-        await writeFile(join(root, "reference.sh"), "#!/bin/sh\nprintf 'PASS\\n'\n");
-        await chmod(join(root, "reference.sh"), 0o755);
-        await symlink(join(root, "reference.sh"), join(workspace, "tracked-link"));
+      if (mode.endsWith("link-mode") || mode === "tracked-link-referent-failure" || ["python-link-observation-failure", "python-link-io-failure"].includes(mode) || mode.endsWith("link-dangling") || mode.endsWith("link-not-directory") || mode.endsWith("link-loop") || mode.endsWith("link-permission-failure") || mode.endsWith("link-special-failure")) {
+        const parent = mode.endsWith("link-permission-failure") ? join(root, "restricted") : root;
+        if (parent !== root) await mkdir(parent);
+        await writeFile(join(parent, "reference.sh"), "#!/bin/sh\nprintf 'PASS\\n'\n");
+        await chmod(join(parent, "reference.sh"), 0o755);
+        await symlink(join(parent, "reference.sh"), join(workspace, "tracked-link"));
         await exec(git, ["add", "tracked-link"], { cwd: workspace });
         await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "executable link fixture"], { cwd: workspace });
       }
@@ -154,10 +156,17 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
         await unlink(join(workspace, "ignored-link"));
         await symlink(join(root, "second"), join(workspace, "ignored-link"));
         assert.equal(await readFile(join(workspace, "ignored-link"), "utf8"), "same bytes\n");
-      } else if (mode === "python-link-dangling") await unlink(join(root, "reference.sh"));
-      else if (mode === "python-link-not-directory" || mode === "python-link-loop") {
+      } else if (mode.endsWith("link-special-failure")) {
+        await unlink(join(root, "reference.sh"));
+        await exec("mkfifo", [join(root, "reference.sh")]);
+      } else if (mode.endsWith("link-permission-failure")) {
+        assert.equal((await exec("./tracked-link", [], { cwd: workspace })).stdout, "PASS\n");
+        await chmod(join(root, "restricted"), 0);
+        await assert.rejects(exec("./tracked-link", [], { cwd: workspace }), { code: "EACCES" });
+      } else if (mode.endsWith("link-dangling")) await unlink(join(root, "reference.sh"));
+      else if (mode.endsWith("link-not-directory") || mode.endsWith("link-loop")) {
         await unlink(join(workspace, "tracked-link"));
-        await symlink(mode === "python-link-loop" ? "tracked-link" : join(root, "reference.sh", "missing"), join(workspace, "tracked-link"));
+        await symlink(mode.endsWith("link-loop") ? "tracked-link" : join(root, "reference.sh", "missing"), join(workspace, "tracked-link"));
       } else if (mode === "python-link-observation-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "python-permission";
       else if (mode === "python-link-io-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "python-io";
       else if (mode === "tracked-link-referent-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "referent";
@@ -178,6 +187,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
       if (oldGitFailure === undefined) delete process.env.SORTIE_FIXTURE_GIT_FAILURE; else process.env.SORTIE_FIXTURE_GIT_FAILURE = oldGitFailure;
       if (oldStatFailure === undefined) delete process.env.SORTIE_FIXTURE_STAT_FAILURE; else process.env.SORTIE_FIXTURE_STAT_FAILURE = oldStatFailure;
       if (oldFindFailure === undefined) delete process.env.SORTIE_FIXTURE_FIND_FAILURE; else process.env.SORTIE_FIXTURE_FIND_FAILURE = oldFindFailure;
+      if (mode.endsWith("link-permission-failure")) await chmod(join(root, "restricted"), 0o755).catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   });
