@@ -84,10 +84,19 @@ const SNAPSHOT_COMMAND = [
   "actual_cwd=$(pwd -P)",
   "root=$(git rev-parse --show-toplevel)",
   "cd \"$root\"",
-  "tree=$(git rev-parse --verify 'HEAD^{tree}')",
+  // Only a missing symbolic target is an unborn repository. An existing/broken
+  // ref target or failed observation must not become an invented empty base.
+  "if tree=$(git rev-parse --verify 'HEAD^{tree}' 2>/dev/null); then",
   // Capture successful producer output before hashing: POSIX pipelines otherwise
   // hide failed Git/file reads behind a successful hash of empty/partial data.
   "tracked=$(git diff --binary HEAD -- && printf '.')",
+  "else",
+  "ref=$(git symbolic-ref -q HEAD) || exit 1",
+  "if git show-ref --verify --quiet \"$ref\"; then exit 1; else [ \"$?\" = 1 ] || exit 1; fi",
+  // hash-object without -w computes the repository-format empty tree, no writes.
+  "tree=$(git hash-object -t tree --stdin </dev/null)",
+  "tracked=$(git diff --binary \"$tree\" -- && printf '.')",
+  "fi",
   "tracked=${tracked%.}",
   "tracked=$(printf '%s' \"$tracked\" | sha256sum)",
   "tracked=${tracked%% *}",

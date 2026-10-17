@@ -9,7 +9,7 @@ import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", "tracked-skip-worktree", "tracked-byte-failure", "regular-listing-failure", "stable-file-recreation", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "tracked-link-permission-failure", "python-link-permission-failure", "tracked-link-dangling", "tracked-link-not-directory", "tracked-link-loop", "tracked-link-special-failure", "python-link-special-failure", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
+for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", "tracked-skip-worktree", "tracked-byte-failure", "regular-listing-failure", "stable-file-recreation", "unborn-symbolic-ref-failure", "unborn-ref-probe-failure", "unborn-empty-tree-failure", "unborn-diff-failure", "unborn-broken-ref-failure", "unborn-detached-failure", "committed-head-failure", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "tracked-link-permission-failure", "python-link-permission-failure", "tracked-link-dangling", "tracked-link-not-directory", "tracked-link-loop", "tracked-link-special-failure", "python-link-special-failure", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
   test(`${mode.startsWith("python-") ? "Python" : "Git-only"} Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" || (mode.endsWith("link-permission-failure") && process.getuid?.() === 0) }, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const root = await mkdtemp(resolve("_testenv/docker-git-fallback-"));
@@ -28,7 +28,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", 
       await exec(git, ["init", "--quiet"], { cwd: workspace });
       await writeFile(join(workspace, ".gitignore"), "ignored*\n");
       await exec(git, ["add", ".gitignore"], { cwd: workspace });
-      await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"], { cwd: workspace });
+      if (!mode.startsWith("unborn-")) await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"], { cwd: workspace });
       await writeFile(join(workspace, "ignored-check.sh"), "#!/bin/sh\nprintf 'PASS\\n'\n");
       await chmod(join(workspace, "ignored-check.sh"), 0o755);
       await writeFile(join(workspace, "ignored-quote' and\nnewline.txt"), "unusual names are ordinary input\n");
@@ -37,7 +37,7 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", 
       const statFault = `import errno\n_real_stat = os.stat\ndef _fixture_stat(path, *args, **kwargs):\n    fault = os.environ.get("SORTIE_FIXTURE_STAT_FAILURE")\n    if os.fspath(path).endswith("/tracked-link") and fault in ("python-permission", "python-io"):\n        raise OSError(errno.EACCES if fault == "python-permission" else errno.EIO, "fixture referent observation", path)\n    return _real_stat(path, *args, **kwargs)\nos.stat = _fixture_stat\n`;
       await writeFile(join(bin, "docker"), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]!=='exec'||a[1]!=='--workdir'||a[3]!==${JSON.stringify(container)}||a[4]!=='sh'||a[5]!=='-lc')process.exit(125);\nconst probe='if command -v python3 >/dev/null 2>&1; then';\nif(!a[6].includes(probe))process.exit(124);\nif(${mode === "python-link-observation-failure" || mode === "python-link-io-failure"})a[6]=a[6].replace('import hashlib, json, os, stat, subprocess','import hashlib, json, os, stat, subprocess\\n'+${JSON.stringify(statFault)});\nconst result=spawnSync('/bin/sh',['-c',${mode.startsWith("python-")} ? a[6] : a[6].replace(probe,'if false; then')],{cwd:a[2],env:process.env,stdio:'inherit'});\nprocess.exit(result.status??125);\n`);
       await writeFile(join(bin, "sha256sum"), `#!/bin/sh\nif [ -n "$SORTIE_FIXTURE_HASH_FAILURE" ]; then\n  for arg do [ "$arg" != "$SORTIE_FIXTURE_HASH_FAILURE" ] || exit 9; done\nfi\nexec ${JSON.stringify(sha)} "$@"\n`);
-      await writeFile(join(bin, "git"), `#!/bin/sh\nif [ -n "$SORTIE_FIXTURE_GIT_FAILURE" ] && [ "$1" = "$SORTIE_FIXTURE_GIT_FAILURE" ]; then exit 9; fi\nexec ${JSON.stringify(git)} "$@"\n`);
+      await writeFile(join(bin, "git"), `#!/bin/sh\nif [ "$SORTIE_FIXTURE_GIT_FAILURE" = head-tree ] && [ "$1" = rev-parse ] && [ "$2" = --verify ]; then exit 9; fi\nif [ -n "$SORTIE_FIXTURE_GIT_FAILURE" ] && [ "$1" = "$SORTIE_FIXTURE_GIT_FAILURE" ]; then exit 9; fi\nexec ${JSON.stringify(git)} "$@"\n`);
       await writeFile(join(bin, "stat"), `#!/bin/sh\n[ "$SORTIE_FIXTURE_STAT_FAILURE" != yes ] || exit 9\nif [ "$SORTIE_FIXTURE_STAT_FAILURE" = referent ] && [ "$1" = -L ]; then exit 9; fi\nexec ${JSON.stringify(stat)} "$@"\n`);
       await writeFile(join(bin, "find"), `#!/bin/sh\n[ "$SORTIE_FIXTURE_FIND_FAILURE" != yes ] || exit 9\nif [ "$SORTIE_FIXTURE_FIND_FAILURE" = regular ]; then\n  for arg do [ "$arg" != f ] || exit 9; done\nfi\nexec ${JSON.stringify(find)} "$@"\n`);
       for (const name of ["docker", "git", "sha256sum", "stat", "find"]) await chmod(join(bin, name), 0o755);
@@ -142,7 +142,17 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", 
         assert.equal((await readFile(join(workspace, "tracked-check.sh"))).length, size, "actual same-size byte changes, not size-only metadata");
         await assert.rejects(exec("./tracked-check.sh", [], { cwd: workspace }), { code: 7 });
         assert.equal((await exec(stat, ["-c", "%a", "tracked-check.sh"], { cwd: workspace })).stdout, permissions);
-      } else if (mode.endsWith("directory-chain")) {
+      } else if (mode === "unborn-broken-ref-failure") {
+        const ref = (await exec(git, ["symbolic-ref", "HEAD"], { cwd: workspace })).stdout.trim();
+        await writeFile(join(workspace, ".git", ref), `${"1".repeat(40)}\n`);
+      } else if (mode === "unborn-detached-failure") {
+        await writeFile(join(workspace, ".git", "HEAD"), `${"1".repeat(40)}\n`);
+      } else if (mode === "unborn-symbolic-ref-failure") process.env.SORTIE_FIXTURE_GIT_FAILURE = "symbolic-ref";
+      else if (mode === "unborn-ref-probe-failure") process.env.SORTIE_FIXTURE_GIT_FAILURE = "show-ref";
+      else if (mode === "unborn-empty-tree-failure") process.env.SORTIE_FIXTURE_GIT_FAILURE = "hash-object";
+      else if (mode === "unborn-diff-failure") process.env.SORTIE_FIXTURE_GIT_FAILURE = "diff";
+      else if (mode === "committed-head-failure") process.env.SORTIE_FIXTURE_GIT_FAILURE = "head-tree";
+      else if (mode.endsWith("directory-chain")) {
         assert.equal((await exec("cat", ["tracked-directory/input.txt"], { cwd: workspace })).stdout, "first\n");
         await unlink(join(root, "directory-current"));
         await symlink(join(workspace, "second"), join(root, "directory-current"));

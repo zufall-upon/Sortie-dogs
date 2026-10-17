@@ -84,8 +84,13 @@ missing/cyclic targets (the existing literal-link identity) from permission or
 I/O errors: explicit stat in Python and the existing GNU find target-type
 observation in Git-only images. Failed observations and unsupported special-file
 referents are not serialized as absent input. Its older mode-blind identities are not reused as fresh
-proof. Python snapshots retain a discovered repository root even before the first
+proof. Both recipes retain a discovered repository root even before the first
 commit, so validation from a nested directory still covers root and sibling inputs.
+For a Git-only unborn repository, the symbolic HEAD target must actually be absent;
+an existing/broken ref or observation error remains unavailable. The empty base is
+computed with `git hash-object` without `-w`, then compared directly with the
+working tree. Inspection creates no initial commit, tree object, or task setup
+requirement; staged and untracked inputs remain covered by the actual-byte scan.
 Root-path whitespace is retained as path data rather than stripped or normalized
 as a text newline. The Python recipe is unchanged by this Git-only regular-byte
 correction; its ordinary committed and truly non-Git workspace identities remain
