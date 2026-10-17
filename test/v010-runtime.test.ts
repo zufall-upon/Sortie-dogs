@@ -3556,7 +3556,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
   await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "operator", callID: "denied-call" },
     { args: { ...next.task, prompt: `${next.task.prompt}\nchanged` } }), /not-authorized/);
 
-  const admitted = { args: next.task };
+  const admitted = { args: { ...next.task, description: "Implement the first unit" } };
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: "operator", callID: "worker-call" }, admitted);
   assert.equal(admitted.args.prompt, next.task.prompt, "native Task input must retain the opaque reference in operator history");
   const nestedMessage = {

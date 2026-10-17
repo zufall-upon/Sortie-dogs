@@ -280,7 +280,7 @@ test("mission Coordinator owns a single Worker unit without a proposal or root a
   const state = await operators.prepareMission("root", missionPlan(mission, [unit]), { sessionID: "coordinator", callID: "coordinator-call" });
   const next = await operators.next("root", "coordinator") as { task: typeof task };
   await assert.rejects(operators.admitWorker("root", "root", "forged", next.task), /owner-mismatch/);
-  await operators.admitWorker("root", "coordinator", "worker-call", next.task);
+  await operators.admitWorker("root", "coordinator", "worker-call", { ...next.task, description: "Fix the result" });
   await assert.rejects(operators.claimAdmittedWorkerPrompt("root", "root", "worker", next.task.prompt), /parent-mismatch/);
   const admitted = await operators.claimAdmittedWorkerPrompt("root", "coordinator", "worker", next.task.prompt);
   assert.match(admitted.prompt, /^contract_reference: handoff$/m);
