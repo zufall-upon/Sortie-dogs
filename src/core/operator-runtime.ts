@@ -1462,7 +1462,9 @@ export class OperatorRuntime {
         args.description === expected.description && args.prompt === expected.prompt;
     }
     if (unit.reviewerCorrection ? args.task_id !== unit.reviewerCorrection.author : args.task_id !== undefined && args.task_id !== "") return false;
-    if (args.subagent_type !== unit.task.subagent_type || args.description !== unit.task.description) return false;
+    // The caller's display label does not change the retained task or its signed
+    // reference. Keep agent, continuation identity and exact prompt authoritative.
+    if (args.subagent_type !== unit.task.subagent_type || typeof args.description !== "string") return false;
     return args.prompt === unit.task.prompt || args.prompt === this.workerTask(state, unit).prompt;
   }
   matchesRecordedWorkerTask(state: OperatorState, unitID: string, args: unknown): boolean {
