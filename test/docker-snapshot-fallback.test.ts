@@ -9,7 +9,7 @@ import { captureDockerWorkspaceSnapshot } from "../dist/plugin/docker-validation
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "tracked-link-permission-failure", "python-link-permission-failure", "tracked-link-dangling", "tracked-link-not-directory", "tracked-link-loop", "tracked-link-special-failure", "python-link-special-failure", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
+for (const mode of ["ignored-mode", "tracked-mode", "tracked-assume-unchanged", "tracked-skip-worktree", "tracked-byte-failure", "regular-listing-failure", "stable-file-recreation", "tracked-link-mode", "python-link-mode", "tracked-link-chain", "python-link-chain", "tracked-link-swap", "python-link-swap", "tracked-link-referent-failure", "python-link-observation-failure", "python-link-io-failure", "python-link-dangling", "python-link-not-directory", "python-link-loop", "tracked-link-permission-failure", "python-link-permission-failure", "tracked-link-dangling", "tracked-link-not-directory", "tracked-link-loop", "tracked-link-special-failure", "python-link-special-failure", "internal-directory-chain", "python-internal-directory-chain", "tracked-link-bytes", "tracked-link-failure", "internal-directory-link", "untracked-internal-directory-link", "external-directory-link", "untracked-external-directory-link", "tracked-deletion", "link-target", "hash-failure", "git-failure", "listing-failure", "stat-failure", "find-failure", "empty"]) {
   test(`${mode.startsWith("python-") ? "Python" : "Git-only"} Docker snapshot retains input identity and observation failures: ${mode}`, { skip: process.platform === "win32" || (mode.endsWith("link-permission-failure") && process.getuid?.() === 0) }, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const root = await mkdtemp(resolve("_testenv/docker-git-fallback-"));
@@ -39,14 +39,15 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
       await writeFile(join(bin, "sha256sum"), `#!/bin/sh\nif [ -n "$SORTIE_FIXTURE_HASH_FAILURE" ]; then\n  for arg do [ "$arg" != "$SORTIE_FIXTURE_HASH_FAILURE" ] || exit 9; done\nfi\nexec ${JSON.stringify(sha)} "$@"\n`);
       await writeFile(join(bin, "git"), `#!/bin/sh\nif [ -n "$SORTIE_FIXTURE_GIT_FAILURE" ] && [ "$1" = "$SORTIE_FIXTURE_GIT_FAILURE" ]; then exit 9; fi\nexec ${JSON.stringify(git)} "$@"\n`);
       await writeFile(join(bin, "stat"), `#!/bin/sh\n[ "$SORTIE_FIXTURE_STAT_FAILURE" != yes ] || exit 9\nif [ "$SORTIE_FIXTURE_STAT_FAILURE" = referent ] && [ "$1" = -L ]; then exit 9; fi\nexec ${JSON.stringify(stat)} "$@"\n`);
-      await writeFile(join(bin, "find"), `#!/bin/sh\n[ "$SORTIE_FIXTURE_FIND_FAILURE" != yes ] || exit 9\nexec ${JSON.stringify(find)} "$@"\n`);
+      await writeFile(join(bin, "find"), `#!/bin/sh\n[ "$SORTIE_FIXTURE_FIND_FAILURE" != yes ] || exit 9\nif [ "$SORTIE_FIXTURE_FIND_FAILURE" = regular ]; then\n  for arg do [ "$arg" != f ] || exit 9; done\nfi\nexec ${JSON.stringify(find)} "$@"\n`);
       for (const name of ["docker", "git", "sha256sum", "stat", "find"]) await chmod(join(bin, name), 0o755);
-      if (mode === "tracked-mode") {
-        await writeFile(join(workspace, "tracked-check.sh"), "#!/bin/sh\nprintf 'PASS\\n'\n");
+      if (mode === "tracked-mode" || mode === "tracked-assume-unchanged" || mode === "tracked-skip-worktree" || mode === "tracked-byte-failure") {
+        await writeFile(join(workspace, "tracked-check.sh"), "#!/bin/sh\nprintf 'PASS\\n'\n" + (mode === "tracked-mode" ? "" : "exit 0\n"));
         await chmod(join(workspace, "tracked-check.sh"), 0o755);
         await exec(git, ["add", "tracked-check.sh"], { cwd: workspace });
         await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "tracked fixture"], { cwd: workspace });
-        await exec(git, ["config", "core.filemode", "false"], { cwd: workspace });
+        if (mode === "tracked-mode") await exec(git, ["config", "core.filemode", "false"], { cwd: workspace });
+        else if (mode !== "tracked-byte-failure") await exec(git, ["update-index", mode === "tracked-assume-unchanged" ? "--assume-unchanged" : "--skip-worktree", "tracked-check.sh"], { cwd: workspace });
       }
       if (mode.endsWith("link-chain") || mode.endsWith("link-swap")) {
         for (const name of ["first", "second"]) {
@@ -98,6 +99,10 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
           await exec(git, ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "directory link fixture"], { cwd: workspace });
         }
       }
+      if (mode === "stable-file-recreation") {
+        await writeFile(join(workspace, "order-a"), "alpha\n");
+        await writeFile(join(workspace, "order-b"), "beta\n");
+      }
       if (mode === "tracked-deletion") {
         await writeFile(join(workspace, "obsolete.txt"), "deleted candidate input\n");
         await exec(git, ["add", "obsolete.txt"], { cwd: workspace });
@@ -119,7 +124,25 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
       assert.ok(before);
       assert.deepEqual(await captureDockerWorkspaceSnapshot(container, workspace), before, "unchanged fallback is deterministic");
       if (mode === "empty" || mode === "tracked-deletion") return;
-      if (mode.endsWith("directory-chain")) {
+      if (mode === "stable-file-recreation") {
+        const content = (await exec("cat", ["order-a", "order-b"], { cwd: workspace })).stdout;
+        await unlink(join(workspace, "order-a")); await unlink(join(workspace, "order-b"));
+        await writeFile(join(workspace, "order-b"), "beta\n"); await writeFile(join(workspace, "order-a"), "alpha\n");
+        assert.equal((await exec("cat", ["order-a", "order-b"], { cwd: workspace })).stdout, content);
+        assert.deepEqual(await captureDockerWorkspaceSnapshot(container, workspace), before, "recreating identical inputs is not an inode/time/order edit");
+        return;
+      }
+      if (mode === "tracked-assume-unchanged" || mode === "tracked-skip-worktree") {
+        assert.match((await exec(git, ["ls-files", "-v", "tracked-check.sh"], { cwd: workspace })).stdout,
+          mode === "tracked-assume-unchanged" ? /^h / : /^S /, "the actual index visibility flag is active");
+        assert.equal((await exec("./tracked-check.sh", [], { cwd: workspace })).stdout, "PASS\n");
+        const permissions = (await exec(stat, ["-c", "%a", "tracked-check.sh"], { cwd: workspace })).stdout;
+        const size = (await readFile(join(workspace, "tracked-check.sh"))).length;
+        await writeFile(join(workspace, "tracked-check.sh"), "#!/bin/sh\nprintf 'FAIL\\n'\nexit 7\n");
+        assert.equal((await readFile(join(workspace, "tracked-check.sh"))).length, size, "actual same-size byte changes, not size-only metadata");
+        await assert.rejects(exec("./tracked-check.sh", [], { cwd: workspace }), { code: 7 });
+        assert.equal((await exec(stat, ["-c", "%a", "tracked-check.sh"], { cwd: workspace })).stdout, permissions);
+      } else if (mode.endsWith("directory-chain")) {
         assert.equal((await exec("cat", ["tracked-directory/input.txt"], { cwd: workspace })).stdout, "first\n");
         await unlink(join(root, "directory-current"));
         await symlink(join(workspace, "second"), join(root, "directory-current"));
@@ -170,6 +193,8 @@ for (const mode of ["ignored-mode", "tracked-mode", "tracked-link-mode", "python
       } else if (mode === "python-link-observation-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "python-permission";
       else if (mode === "python-link-io-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "python-io";
       else if (mode === "tracked-link-referent-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "referent";
+      else if (mode === "tracked-byte-failure") process.env.SORTIE_FIXTURE_HASH_FAILURE = "./tracked-check.sh";
+      else if (mode === "regular-listing-failure") process.env.SORTIE_FIXTURE_FIND_FAILURE = "regular";
       else if (mode === "hash-failure") process.env.SORTIE_FIXTURE_HASH_FAILURE = "ignored-check.sh";
       else if (mode === "stat-failure") process.env.SORTIE_FIXTURE_STAT_FAILURE = "yes";
       else if (mode === "find-failure") process.env.SORTIE_FIXTURE_FIND_FAILURE = "yes";

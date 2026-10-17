@@ -74,7 +74,10 @@ the reached bytes stay equal; target identity stays paired with its lexical link
 Tracked and untracked internal directory
 links reuse the captured workspace rather than hashing a directory as a file;
 external directory trees that cannot be captured remain unavailable.
-Candidates without symlinks retain their existing fallback hash recipe. Failed
+The Git-only fallback also binds sorted filename/hash pairs for all actual
+regular files, independently of `assume-unchanged`, `skip-worktree`, or Git's
+stat cache. These strengthened fallback identities intentionally replace the
+older diff-only recipe; unchanged size or mode cannot hide different bytes. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
 hash of empty/partial data. Referent classification distinguishes known
 missing/cyclic targets (the existing literal-link identity) from permission or
@@ -84,13 +87,14 @@ referents are not serialized as absent input. Its older mode-blind identities ar
 proof. Python snapshots retain a discovered repository root even before the first
 commit, so validation from a nested directory still covers root and sibling inputs.
 Root-path whitespace is retained as path data rather than stripped or normalized
-as a text newline. Apart from the strengthened symlink referent identity,
-ordinary committed and truly non-Git workspaces keep their existing identity recipe.
+as a text newline. The Python recipe is unchanged by this Git-only regular-byte
+correction; its ordinary committed and truly non-Git workspace identities remain
+as before.
 A declared symlink CWD keeps its logical Docker `cwd` for the registered
 check and records the resolved `actual_cwd`. The candidate binds that physical
 execution directory too: retargeting the alias, even within the same unchanged
-repository, makes the old proof stale. Workspaces without symlinks
-retain their existing non-alias identity recipes. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
+repository, makes the old proof stale. This binding does not add timestamps or
+inode identity. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
 candidate bytes do not become proof. The container is not represented by the
 unrelated gateway filesystem. Snapshot capture is conservative: a check that
 changes workspace files needs a stable candidate before it can supply proof.
