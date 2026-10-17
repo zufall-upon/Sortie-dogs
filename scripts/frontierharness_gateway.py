@@ -3,6 +3,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 import subprocess
+import re
 
 
 @lru_cache(maxsize=1)
@@ -29,6 +30,8 @@ def _runtime_agent(role):
 
 
 def _logical_role(role):
+    if re.fullmatch(r"dog-reviewer-correction-v010-[a-f0-9]{16}", role):
+        return "dog-reviewer"
     runtime_agents = _agent_registry()["runtime_agents"]
     runtime_role = next((logical for logical, runtime in runtime_agents.items() if runtime == role), None)
     if runtime_role is not None:
@@ -124,10 +127,16 @@ def install_native_docker_plugin(directory):
     Call from the existing runner's gateway preparation after runtime assets are
     copied. Keep the returned package entry in the ordinary V2 plugins list.
     """
-    destination = Path(directory) / ".opencode/plugins/docker-task/index.js"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("xb") as stream:
+    package = Path(__file__).resolve().parents[1]
+    destination = Path(directory) / ".opencode/plugins/docker-task"
+    (destination / "scripts").mkdir(parents=True, exist_ok=True)
+    (destination / "dist/plugin").mkdir(parents=True, exist_ok=True)
+    with (destination / "index.js").open("x", encoding="utf-8") as stream:
+        stream.write('export { default } from "./scripts/frontierharness-docker-task.mjs";\n')
+    with (destination / "scripts/frontierharness-docker-task.mjs").open("xb") as stream:
         stream.write(Path(__file__).with_name("frontierharness-docker-task.mjs").read_bytes())
+    with (destination / "dist/plugin/docker-validation.js").open("xb") as stream:
+        stream.write((package / "dist/plugin/docker-validation.js").read_bytes())
     return "./.opencode/plugins/docker-task"
 
 

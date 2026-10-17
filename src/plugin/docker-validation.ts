@@ -116,3 +116,46 @@ export function isDockerWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && posix.isAbsolute(value) &&
     posix.normalize(value) === value && !value.includes("\0");
 }
+
+const READ_WORKSPACE = String.raw`
+import hashlib, json, os, stat, sys
+root, requested, offset, limit = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+path = os.path.realpath(os.path.join(root, requested))
+if os.path.commonpath([root, path]) != root:
+    raise ValueError("file-outside-candidate-workspace")
+if os.path.isdir(path):
+    entries = sorted(os.listdir(path))
+    result = {"kind": "directory", "entries": entries[offset - 1:offset - 1 + limit], "total": len(entries)}
+elif stat.S_ISREG(os.stat(path).st_mode):
+    h = hashlib.sha256()
+    lines, total, size = [], 0, 0
+    with open(path, "rb") as stream:
+        for line in stream:
+            h.update(line)
+            total += 1
+            if offset <= total < offset + limit and size < 64000:
+                text = line[:64000-size].decode("utf-8", errors="replace")
+                lines.append([total, text])
+                size += len(line[:64000-size])
+    result = {"kind": "file", "lines": lines, "total_lines": total, "sha256": h.hexdigest()}
+else:
+    raise ValueError("candidate-file-not-readable")
+print(json.dumps({"path": path, **result}, ensure_ascii=True))
+`;
+
+/** Inspect bytes, never execute caller-supplied code. The Review envelope's
+ * immutable Docker candidate must match both before and after the read. */
+export async function readDockerWorkspaceFile(containerID: string, cwd: string, candidate: string, path: string,
+  offset = 1, limit = 200): Promise<Record<string, unknown>> {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(candidate) || typeof path !== "string" || path.includes("\0") ||
+      !Number.isSafeInteger(offset) || offset < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 2000) {
+    throw new Error("docker-candidate-read-invalid");
+  }
+  const before = await captureDockerWorkspaceSnapshot(containerID, cwd);
+  if (!before || before.candidate !== candidate) throw new Error("docker-review-candidate-stale-or-unavailable");
+  const { stdout } = await exec("docker", ["exec", "--workdir", cwd, containerID, "python3", "-c", READ_WORKSPACE,
+    before.repository_root, path, String(offset), String(limit)], { encoding: "utf8", timeout: 30_000, maxBuffer: 256 * 1024 });
+  const after = await captureDockerWorkspaceSnapshot(containerID, cwd);
+  if (!after || after.candidate !== candidate) throw new Error("docker-review-candidate-changed-during-read");
+  return { workspace: before, ...JSON.parse(stdout) };
+}

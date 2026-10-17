@@ -20,7 +20,18 @@ entrypoint. It is not a new controller. The native tool takes `container_id`,
 absolute `cwd`, and `command`; register that same container directory in each
 unit's `validation_cwd`. Role/tool families come from the shared runtime registry,
 including root-owned independent Review. Host shell and mutation tools remain
-outside this isolated gateway, and the Docker execution tool remains Worker-only.
+outside this isolated gateway. `fh_docker_exec` is available to the Worker and
+the existing native-admitted Reviewer correction role, not initial Review.
+
+Independent Review uses `fh_docker_read`, copying `container_id`, `cwd`, and
+`candidate` from the Review envelope's `protected_binding_ref.docker_workspace`.
+Read `path: "."` to list the candidate directory or a source/test file path to
+inspect its numbered contents and SHA-256. The tool checks the exact candidate
+before and after the read, uses a fixed reader rather than caller-supplied shell,
+and does not mint validation evidence. Stale/unavailable candidates are reported
+as such, not replaced by a new snapshot. Reviewer context, native permissions,
+and route/usage audits include this read-only path. Actual correction still uses
+the existing `repair_review` admission, scope, formal checks, and self-recheck.
 
 The host captures the actual container workspace before and after a declared
 check. Python-enabled task images support non-Git workspaces and include ignored
@@ -32,7 +43,9 @@ changes workspace files needs a stable candidate before it can supply proof.
 
 The regression fixture installs and loads the plugin through these preparation
 functions with the public V2 `ctx.location.directory` shape. It checks native
-evidence attachment and Worker settlement with a fake-Docker shim. A separate
+evidence attachment, Worker settlement, independent candidate inspection, and
+the final Mission receipt with a fake-Docker shim. The same regression can use
+an immutable local Docker image by setting `SORTIE_NATIVE_DOCKER_IMAGE`. A separate
 opt-in `native Docker smoke` test uses only a local immutable image and synthetic
 files, with no model request, task replay, or official grading. It checks actual
 Docker execution, non-Git snapshots, successful/failed exits, and stale inputs;

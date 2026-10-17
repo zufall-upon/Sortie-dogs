@@ -385,7 +385,7 @@ export function createV2ReturnReportFinalizer(context: OpenCodeV2Context, hooks:
 
 const correctionAgent = (agent: unknown): boolean => typeof agent === "string" && /^dog-reviewer-correction-v010-[a-f0-9]{16}$/u.test(agent);
 const reviewerCorrectionOnlyTools = new Set(["edit", "write", "patch", "sortie_v010_bind_write_gate",
-  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit"]);
+  "sortie_v010_release_write_gate", "sortie_v010_operator_status", "sortie_v010_expand_unit", "sortie_v010_finish_direct_unit", "fh_docker_exec"]);
 
 // Order only the genuine, already-filtered native definitions. Initial read-only
 // tools remain a deterministic prefix when correction admits additional tools;

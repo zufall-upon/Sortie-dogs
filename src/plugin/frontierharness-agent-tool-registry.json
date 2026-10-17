@@ -40,6 +40,8 @@
     "dog-scout": {"tool_families": {}, "children": []},
     "dog-reviewer": {
       "tool_families": {"review": ["repair_review"]},
+      "native_tool_families": {"docker_review": ["fh_docker_read"]},
+      "correction_native_tool_families": {"docker_task": ["fh_docker_exec"]},
       "correction_tool_families": {
         "workspace": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
         "correction": ["repair_review", "finish_direct_unit"]

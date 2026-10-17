@@ -623,14 +623,17 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-test("native Docker validation binds the task container CWD and candidate through Worker settlement", async () => {
+for (const actualDocker of [false, true]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${actualDocker ? "actual" : "shim"})`, {
+  skip: actualDocker && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
+}, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/native-docker-formal-"));
   const gateway = join(root, "gateway"), workspace = join(root, "workspace"), bin = join(root, "bin");
-  const containerID = "0123456789abcdef01234567", priorPath = process.env.PATH, priorContainer = process.env.FAKE_DOCKER_CONTAINER;
+  let containerID = "0123456789abcdef01234567", ownedContainer: string | undefined;
+  const priorPath = process.env.PATH, priorContainer = process.env.FAKE_DOCKER_CONTAINER;
   await mkdir(gateway); await mkdir(workspace); await mkdir(bin);
   const fakeDocker = join(bin, "docker");
-  const source = `import { readFileSync } from "node:fs"; if (readFileSync("input.txt", "utf8") !== "fixed\\n") process.exit(7); console.log("PASS");\n`;
+  const source = 'test "$(cat input.txt)" = fixed || exit 7\nprintf "PASS\\n"\n';
   try {
     for (const dir of [gateway, workspace]) {
       await exec("git", ["init", "--quiet"], { cwd: dir });
@@ -642,12 +645,19 @@ test("native Docker validation binds the task container CWD and candidate throug
     await exec("git", ["add", "--", "instruction.md", "host-canary.txt"], { cwd: gateway });
     await exec("git", ["commit", "--quiet", "-m", "gateway fixture"], { cwd: gateway });
     await writeFile(join(workspace, "input.txt"), "fixed\n");
-    await writeFile(join(workspace, "check.mjs"), source);
-    await exec("git", ["add", "--", "input.txt", "check.mjs"], { cwd: workspace });
+    await writeFile(join(workspace, "check.sh"), source);
+    await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
     await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
-    await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\n[ "$1" = sh ] && [ "$2" = -lc ] || exit 125\nshift 2\ncd "$workdir"\nexec /bin/sh -lc "$1"\n`);
+    await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexec "$@"\n`);
     await chmod(fakeDocker, 0o755);
-    process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
+    if (actualDocker) {
+      const image = process.env.SORTIE_NATIVE_DOCKER_IMAGE!;
+      assert.match(image, /^sha256:[a-f0-9]{64}$/);
+      ownedContainer = (await exec("docker", ["create", "--network", "none", "--mount", `type=bind,src=${root},dst=${root}`,
+        "--entrypoint", "/bin/sh", image, "-c", "sleep 240"])).stdout.trim();
+      containerID = ownedContainer;
+      await exec("docker", ["start", containerID]);
+    } else process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${priorPath ?? ""}`;
     process.env.FAKE_DOCKER_CONTAINER = containerID;
 
     const requiredTools = ["sortie_v010_start_mission", "sortie_v010_operator_next", "sortie_v010_plan_units",
@@ -657,21 +667,26 @@ test("native Docker validation binds the task container CWD and candidate throug
       ...["execute", "subagent", "read", "task", "shell", "edit", ...requiredTools].map(id => ({ id })),
     ];
     let dockerDefinition: { options?: { codemode?: boolean }; execute(input: unknown, context: Record<string, unknown>): Promise<{ content: string }> } | undefined;
+    let dockerRead: typeof dockerDefinition;
     const nativeHooks = new Map<string, (event: any) => void>();
     const context = {
       location: { directory: gateway },
       options: { container: containerID, instruction: "fixed instruction", model: "openai/gpt-6-sol", allowedModels: ["openai/gpt-6-sol"] },
       session: {
-        get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, agent: "dog-worker-v010", parentID: "coordinator" }),
+        get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, agent: sessionID === "reviewer" ? "dog-reviewer-v010" : "dog-worker-v010", parentID: "coordinator" }),
         context: async () => [{ id: "usage", type: "assistant", agent: "dog-worker-v010", time: { completed: 2 },
           model: { providerID: "openai", id: "gpt-6-luna-fast" }, tokens: { input: 3, output: 2, cache: { read: 1, write: 0 } } }],
         hook: async (name: string, callback: (event: any) => void) => { nativeHooks.set(name, callback); return { dispose: async () => {} }; },
       },
-      event: { subscribe: () => ({ async *[Symbol.asyncIterator]() { yield { type: "session.idle", data: { sessionID: "worker" } }; } }) },
+      event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {
+        yield { type: "session.idle", data: { sessionID: "worker" } };
+        yield { type: "session.created", data: { sessionID: "reviewer" } };
+      } }) },
       tool: {
         list: async () => registeredTools,
         transform: async (change: (editor: { namespace(): void; add(tool: any): void; list(): typeof registeredTools; remove(id: string): void }) => void) => {
-          change({ namespace() {}, add(tool) { dockerDefinition = { ...tool, options: tool.options, execute: tool.execute }; registeredTools.push({ id: "fh_docker_exec" }); },
+          change({ namespace() {}, add(tool) { if (tool.name === "docker_exec") dockerDefinition = tool; else if (tool.name === "docker_read") dockerRead = tool;
+            registeredTools.push({ id: `fh_${tool.name}` }); },
             list: () => registeredTools, remove(id) { registeredTools = registeredTools.filter(tool => tool.id !== id); } });
         },
       },
@@ -710,8 +725,8 @@ test("native Docker validation binds the task container CWD and candidate throug
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
     await chat("coordinator", started.task.prompt);
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validate task workspace",
-       objective: "Run the declared check inside the fixed task container", read: ["instruction.md"], write: [], validation: ["node check.mjs"],
-       validation_cwd: { "node check.mjs": workspace } }] },
+       objective: "Run the declared check inside the fixed task container", read: ["instruction.md"], write: [], validation: ["sh check.sh"],
+       validation_cwd: { "sh check.sh": workspace } }] },
     { sessionID: "coordinator" }));
     const workerTask = { args: structuredClone(planned.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
@@ -723,8 +738,8 @@ test("native Docker validation binds the task container CWD and candidate throug
       manifest_path: unit.manifestPath }, { sessionID: "worker" })).status, "bound");
 
     const wrongCwd = join(workspace, "other");
-    await mkdir(wrongCwd); await writeFile(join(wrongCwd, "input.txt"), "fixed\n"); await writeFile(join(wrongCwd, "check.mjs"), source);
-    const wrongArgs = { container_id: containerID, cwd: wrongCwd, command: "node check.mjs" };
+    await mkdir(wrongCwd); await writeFile(join(wrongCwd, "input.txt"), "fixed\n"); await writeFile(join(wrongCwd, "check.sh"), source);
+    const wrongArgs = { container_id: containerID, cwd: wrongCwd, command: "sh check.sh" };
     await hooks["tool.execute.before"]!({ tool: "fh_docker_exec", sessionID: "worker", callID: "wrong-cwd-success" }, { args: wrongArgs });
     const wrongResult = await dockerDefinition!.execute(wrongArgs, { agent: "dog-worker-v010", sessionID: "worker" });
     assert.match(wrongResult.content, /^exit_code=0\n/);
@@ -732,7 +747,7 @@ test("native Docker validation binds the task container CWD and candidate throug
       { output: wrongResult.content, metadata: { status: "completed" } });
     assert.equal((await new OperatorRuntime(gateway, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence.length, 0,
       "a real successful check in another container CWD is not the registered proof");
-    const args = { container_id: containerID, cwd: workspace, command: "node check.mjs" }, callID = "native-docker-check";
+    const args = { container_id: containerID, cwd: workspace, command: "sh check.sh" }, callID = "native-docker-check";
     await hooks["tool.execute.before"]!({ tool: "fh_docker_exec", sessionID: "worker", callID }, { args });
     const startedAt = Date.now();
     const result = await dockerDefinition!.execute(args, { agent: "dog-worker-v010", sessionID: "worker" });
@@ -750,7 +765,7 @@ test("native Docker validation binds the task container CWD and candidate throug
     const settled = await new OperatorRuntime(gateway, V010_RUNTIME_PROFILE).required("root"), evidence = settled.units[0]!.evidence;
     assert.equal(settled.units[0]!.status, "succeeded");
     assert.equal(evidence.length, 1, "native Docker result must be formally attached before Worker settlement");
-    assert.equal(evidence[0]!.execution.command[0], "node check.mjs");
+    assert.equal(evidence[0]!.execution.command[0], "sh check.sh");
     assert.equal(evidence[0]!.execution.exit_code, 0);
     assert.equal(evidence[0]!.execution.outcome, "pass");
     const dockerBinding = evidence[0]!.protected_binding?.docker_workspace;
@@ -764,6 +779,36 @@ test("native Docker validation binds the task container CWD and candidate throug
     const binding = evidence[0]!.protected_binding!;
     const unchanged = await refreshProtectedSnapshot(gateway, binding);
     assert.equal(unchanged?.candidate, dockerBinding.candidate);
+    const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], mode: "independent" }, { sessionID: "coordinator" }));
+    assert.ok(review.task, JSON.stringify(review));
+    const reviewDispatch = { args: structuredClone(review.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "docker-review-call" }, reviewDispatch);
+    assert.ok(reviewDispatch.args.prompt.includes(dockerBinding.candidate), "expanded native Review envelope contains the actual candidate identity");
+    const reviewerContext = { agent: "dog-reviewer-v010", system: [] as { text: string }[] };
+    nativeHooks.get("context")!(reviewerContext);
+    assert.match(reviewerContext.system.map(part => part.text).join("\n"), /fh_docker_read/);
+    const readArgs = { container_id: containerID, cwd: workspace, candidate: dockerBinding.candidate, path: "check.sh" };
+    await hooks["tool.execute.before"]!({ tool: "fh_docker_read", sessionID: "reviewer", callID: "docker-review-source" }, { args: readArgs });
+    const inspected = await dockerRead!.execute(readArgs, { agent: "dog-reviewer-v010", sessionID: "reviewer" });
+    const inspectedFile = JSON.parse(inspected.content);
+    assert.equal(inspectedFile.sha256, createHash("sha256").update(source).digest("hex"));
+    assert.equal(inspectedFile.workspace.candidate, dockerBinding.candidate);
+    assert.equal(inspectedFile.lines.map((row: [number, string]) => row[1]).join(""), source);
+    await hooks["tool.execute.after"]!({ tool: "fh_docker_read", sessionID: "reviewer", callID: "docker-review-source", args: readArgs },
+      { output: inspected.content, metadata: { status: "completed" } });
+    await assert.rejects(dockerDefinition!.execute(args, { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /author-only/);
+    assert.equal((await new OperatorRuntime(gateway, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence.length, 1,
+      "read-only inspection does not produce extra validation evidence");
+    identities.reviewer!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "docker-review-call" },
+      { output: "PASS\nRead the exact Docker candidate check.sh and confirmed its input assertion.", metadata: { sessionId: "reviewer" } });
+    const receipt = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
+    assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+    const reviewed = await new OperatorMissionRuntime(gateway, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(reviewed.review?.verdict, "PASS");
+    assert.equal(reviewed.review?.mode, "independent");
+    assert.equal(reviewed.review?.child, "reviewer");
+    assert.ok(!reviewed.sourceAuthors?.includes("reviewer"), "the Reviewer is not a candidate author");
     await writeFile(join(gateway, "host-canary.txt"), "changed gateway bytes after the Docker proof\n");
     const gatewayOnlyChange = await refreshProtectedSnapshot(gateway, binding);
     assert.equal(gatewayOnlyChange?.candidate, dockerBinding.candidate,
@@ -772,6 +817,7 @@ test("native Docker validation binds the task container CWD and candidate throug
     const changedTaskInput = await refreshProtectedSnapshot(gateway, binding);
     assert.notEqual(changedTaskInput?.candidate, dockerBinding.candidate,
       "changed task-workspace bytes invalidate the saved Docker candidate binding");
+    await assert.rejects(dockerRead!.execute(readArgs, { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /candidate-stale/);
     await writeFile(join(workspace, "input.txt"), "fixed\n");
     await writeFile(join(workspace, ".gitignore"), "ignored-input.txt\n");
     await writeFile(join(workspace, "ignored-input.txt"), "before\n");
@@ -790,12 +836,14 @@ test("native Docker validation binds the task container CWD and candidate throug
     assert.match(requestAudit, /openai\/gpt-6-luna-fast/);
     assert.match(usageAudit, /"message_id":"usage"/);
     assert.match(usageAudit, /"cost":null/, "unreported cost is retained as unknown, not zero");
+    assert.match(await readFile(join(gateway, "sortie-agent-route-audit.ndjson"), "utf8"), /dog-reviewer-v010/);
     const audit = await readFile(join(gateway, "docker-exec-audit.ndjson"), "utf8");
     assert.match(audit, new RegExp(`"container_id":"${containerID}"`));
     assert.match(audit, new RegExp(`"cwd":"${workspace.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}"`));
   } finally {
     process.env.PATH = priorPath;
     if (priorContainer === undefined) delete process.env.FAKE_DOCKER_CONTAINER; else process.env.FAKE_DOCKER_CONTAINER = priorContainer;
+    if (ownedContainer) await exec("docker", ["rm", "-f", ownedContainer]);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -826,7 +874,7 @@ test("native Docker smoke uses a fixed local image and a non-Git task workspace"
       location: { directory: gateway },
       options: { container, instruction: "synthetic smoke only", model: "openai/gpt-6-sol", allowedModels: ["openai/gpt-6-sol"] },
       tool: { list: async () => tools, transform: async (fn: (editor: any) => void) => fn({ namespace() {},
-        add(tool: any) { definition = tool; tools.push({ id: "fh_docker_exec" }); }, list: () => tools,
+        add(tool: any) { if (tool.name === "docker_exec") definition = tool; tools.push({ id: `fh_${tool.name}` }); }, list: () => tools,
         remove(id: string) { tools = tools.filter(tool => tool.id !== id); } }) },
       session: { hook: async () => ({ dispose: async () => {} }), context: async () => [], get: async () => ({}) },
       event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
