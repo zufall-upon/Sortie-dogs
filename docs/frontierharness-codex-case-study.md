@@ -60,7 +60,9 @@ links reuse the captured workspace rather than hashing a directory as a file;
 external directory trees that cannot be captured remain unavailable.
 Candidates without symlinks retain their existing fallback hash recipe. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
-hash of empty/partial data. Its older mode-blind identities are not reused as fresh
+hash of empty/partial data. Python referent classification likewise distinguishes a
+missing/cyclic target (the existing literal-link identity) from permission or I/O errors;
+failed stat observations are not serialized as absent input. Its older mode-blind identities are not reused as fresh
 proof. Python snapshots retain a discovered repository root even before the first
 commit, so validation from a nested directory still covers root and sibling inputs.
 Root-path whitespace is retained as path data rather than stripped or normalized

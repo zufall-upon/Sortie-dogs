@@ -9,6 +9,7 @@ const SNAPSHOT_MARKER = "SORTIE_DOCKER_WORKSPACE_V1";
 // Terminal tasks need not contain Git at all. Capture actual bytes and file
 // identity, including ignored inputs; timestamps alone are not candidate edits.
 const FILE_SNAPSHOT = String.raw`
+import errno
 import hashlib, json, os, stat, subprocess
 cwd = os.path.realpath(os.getcwd())
 root = cwd
@@ -40,13 +41,23 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=lambda er
             value = [relative, "file", mode, digest(path)]
         elif stat.S_ISLNK(info.st_mode):
             target = os.path.realpath(path)
+            # Missing/cyclic targets retain their literal link identity. Do not
+            # let isfile/isdir turn permission or I/O errors into missing input.
+            try:
+                referent = os.stat(path)
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    raise
+                referent = None
+            is_file = referent is not None and stat.S_ISREG(referent.st_mode)
+            is_directory = referent is not None and stat.S_ISDIR(referent.st_mode)
             # Internal directory targets are captured at their own lexical path.
             # External directory trees are not silently omitted from a proof.
-            if os.path.isdir(path) and os.path.commonpath([root, target]) != root:
+            if is_directory and os.path.commonpath([root, target]) != root:
                 raise RuntimeError("external-directory-link-snapshot-unavailable")
-            value = [relative, "link", mode, os.readlink(path), digest(path) if os.path.isfile(path) else None]
-            if os.path.isfile(path) or os.path.isdir(path):
-                value.extend([target, stat.S_IMODE(os.stat(path).st_mode)])
+            value = [relative, "link", mode, os.readlink(path), digest(path) if is_file else None]
+            if is_file or is_directory:
+                value.extend([target, stat.S_IMODE(referent.st_mode)])
         elif stat.S_ISDIR(info.st_mode):
             value = [relative, "directory", mode]
         else:
