@@ -37,7 +37,9 @@ and does not mint validation evidence. A candidate-local regular-file symlink ca
 be read through that link even when its snapshot-bound referent is outside the
 repository. Direct outside paths and file/../ traversal are not admitted; a
 normalized directory hop cannot substitute a different link for the candidate
-entry. External directory trees remain unavailable. Stale/unavailable candidates are reported
+entry. Links in root Git bookkeeping (including aliases into it) are not captured
+and cannot grant outside-file reads; captured nested `.git` directories are not
+blanket-denied. External directory trees remain unavailable. Stale/unavailable candidates are reported
 as such, not replaced by a new snapshot. Reviewer context, native permissions,
 and route/usage audits include this read-only path. Actual correction still uses
 the existing `repair_review` admission, scope, formal checks, and self-recheck.

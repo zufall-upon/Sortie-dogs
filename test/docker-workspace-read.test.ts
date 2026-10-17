@@ -10,7 +10,7 @@ import { captureDockerWorkspaceSnapshot, readDockerWorkspaceFile } from "../dist
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root", "external-file-link", "external-file-chain", "external-directory-link"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
+for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root", "external-file-link", "external-file-chain", "external-file-git-metadata", "external-file-git-alias", "external-file-nested-git", "external-directory-link"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
   skip: process.platform === "win32" || (mode === "long-line" && process.platform !== "linux"),
 }, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -50,6 +50,15 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", 
       await mkdir(join(root, "deep", "task"));
       await symlink(join(root, "deep", "leaf"), join(root, "external-hop"));
       await symlink(join(root, "uncaptured.txt"), join(root, "deep", "task", "input-link"));
+      if (mode === "external-file-nested-git") {
+        await mkdir(join(workspace, "sub", ".git"), { recursive: true });
+        await symlink(join(root, "external.txt"), join(workspace, "sub", ".git", "nested-link"));
+      }
+      if (mode === "external-file-git-metadata" || mode === "external-file-git-alias") {
+        await mkdir(join(workspace, ".git"));
+        await symlink(join(root, "uncaptured.txt"), join(workspace, ".git", "excluded-link"));
+        if (mode === "external-file-git-alias") await symlink(join(workspace, ".git"), join(workspace, "git-metadata-alias"));
+      }
       if (mode === "external-directory-link") {
         await mkdir(join(root, "external-directory"));
         await symlink(join(root, "external-directory"), join(workspace, "input-link"));
@@ -66,8 +75,18 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", 
     }
     assert.ok(candidate);
     if (mode.startsWith("external-file-")) {
+      if (mode === "external-file-git-metadata" || mode === "external-file-git-alias") {
+        await writeFile(join(root, "uncaptured.txt"), "changed but still not captured\n");
+        assert.deepEqual(await captureDockerWorkspaceSnapshot(container, cwd), candidate, "Git bookkeeping referents are not candidate input");
+        await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate,
+          mode === "external-file-git-metadata" ? ".git/excluded-link" : "git-metadata-alias/excluded-link"), /file-outside-candidate-workspace/);
+      }
       for (const path of [join(root, "external.txt"), join(root, "uncaptured.txt"), "../uncaptured.txt", "input-link/../uncaptured.txt", "../external-hop/../task/input-link"]) {
         await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate, path), /file-outside-candidate-workspace/);
+      }
+      if (mode === "external-file-nested-git") {
+        const nested = await readDockerWorkspaceFile(container, cwd, candidate.candidate, "sub/.git/nested-link");
+        assert.deepEqual(nested.lines, [[1, "captured external input\n"]], "only root Git bookkeeping is pruned by snapshot");
       }
       const read = await readDockerWorkspaceFile(container, cwd, candidate.candidate, "input-link");
       assert.deepEqual(read.lines, [[1, "captured external input\n"]]);

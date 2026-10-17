@@ -205,9 +205,12 @@ path = os.path.realpath(requested_path)
 if os.path.commonpath([root, path]) != root:
     # Admit only the actual candidate entry and its bound regular-file target.
     # A canceled outside-directory hop can normalize inside root yet reach a
-    # different link; file/../ hops must not create an entry either.
-    entry = os.path.abspath(requested_path)
-    if (os.path.commonpath([root, entry]) != root or not os.path.islink(entry) or
+    # different link; file/../ hops must not create an entry either. Resolve the
+    # parent to exclude root Git bookkeeping even through directory aliases.
+    lexical = os.path.abspath(requested_path)
+    entry = os.path.join(os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical))
+    if (os.path.commonpath([root, lexical]) != root or os.path.commonpath([root, entry]) != root or
+            os.path.relpath(entry, root).split(os.sep)[0] == ".git" or not os.path.islink(entry) or
             os.path.realpath(entry) != path or not os.path.islink(requested_path) or
             not stat.S_ISREG(os.stat(entry).st_mode)):
         raise ValueError("file-outside-candidate-workspace")
