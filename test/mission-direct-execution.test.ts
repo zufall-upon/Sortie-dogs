@@ -623,7 +623,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only", "shim-git-only-external-file", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
+for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only", "shim-git-only-external-file", "shim-git-only-assume-unchanged", "shim-git-only-skip-worktree", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
   skip: mode === "actual" && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
 }, async () => {
   const actualDocker = mode === "actual", noPython = mode.includes("git-only");
@@ -654,6 +654,11 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only",
     } else await writeFile(join(workspace, "check.sh"), source);
     await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
     await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
+    if (mode.endsWith("assume-unchanged") || mode.endsWith("skip-worktree")) {
+      await exec("git", ["update-index", mode.endsWith("assume-unchanged") ? "--assume-unchanged" : "--skip-worktree", "input.txt"], { cwd: workspace });
+      assert.match((await exec("git", ["ls-files", "-v", "input.txt"], { cwd: workspace })).stdout,
+        mode.endsWith("assume-unchanged") ? /^h / : /^S /);
+    }
     await writeFile(fakeDocker, `#!/bin/sh\nset -eu\n[ "$1" = exec ] || exit 125\nshift\n[ "$1" = --workdir ] || exit 125\nworkdir=$2\nshift 2\n[ "$1" = "$FAKE_DOCKER_CONTAINER" ] || exit 125\nshift\ncd "$workdir"\nexport GIT_CEILING_DIRECTORIES=${JSON.stringify(root)}\nexec "$@"\n`);
     if (noPython) await writeFile(fakeDocker, `#!${process.execPath}\nimport {spawnSync} from 'node:child_process';\nconst a=process.argv.slice(2);\nif(a[0]!=='exec'||a[1]!=='--workdir'||a[3]!==process.env.FAKE_DOCKER_CONTAINER)process.exit(125);\nif(a[4]==='python3')process.exit(127);\nif(a[4]==='sh')a[6]=a[6].replace('if command -v python3 >/dev/null 2>&1; then','if false; then');\nconst r=spawnSync(a[4],a.slice(5),{cwd:a[2],env:{...process.env,GIT_CEILING_DIRECTORIES:${JSON.stringify(root)}},stdio:'inherit'});\nprocess.exit(r.status??125);\n`);
     await chmod(fakeDocker, 0o755);

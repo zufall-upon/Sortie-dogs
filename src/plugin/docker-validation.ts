@@ -111,6 +111,10 @@ const SNAPSHOT_COMMAND = [
   // Observe workspace modes/links independently, excluding only Git bookkeeping.
   "workspace_modes=$({ find . -path ./.git -prune -o -print0 || printf '\\0'; } | LC_ALL=C QUOTING_STYLE=c xargs -0 -r stat -c '%f %N' --)",
   "workspace_modes=$(printf '%s' \"$workspace_modes\" | LC_ALL=C sort)",
+  // Index visibility flags and Git's stat cache can hide changed tracked bytes.
+  // Observe actual regular files independently, with stable filename/hash pairs.
+  "workspace_bytes=$({ find . -path ./.git -prune -o -type f -print0 || printf '\\0'; } | xargs -0 -r sha256sum --)",
+  "workspace_bytes=$(printf '%s' \"$workspace_bytes\" | LC_ALL=C sort)",
   // Git records a tracked link's text, not the regular-file bytes it reads.
   "link_bytes=$({ find . -path ./.git -prune -o -type l -print0 || printf '\\0'; } | xargs -0 -r sh -c '",
   "root=$1; shift",
@@ -137,9 +141,9 @@ const SNAPSHOT_COMMAND = [
   "done' sh \"$root\")",
   "link_bytes=$(printf '%s' \"$link_bytes\" | LC_ALL=C sort)",
   "if [ -n \"$link_bytes\" ]; then",
-  "untracked=$(printf '%s\\0%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" \"$link_bytes\" | sha256sum)",
+  "untracked=$(printf '%s\\0%s\\0%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" \"$workspace_bytes\" \"$link_bytes\" | sha256sum)",
   "else",
-  "untracked=$(printf '%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" | sha256sum)",
+  "untracked=$(printf '%s\\0%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" \"$workspace_bytes\" | sha256sum)",
   "fi",
   "untracked=${untracked%% *}",
   "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' 'SORTIE_DOCKER_WORKSPACE_V1' \"$actual_cwd\" \"$root\" \"$tree\" \"$tracked\" \"$untracked\"",
