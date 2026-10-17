@@ -8,6 +8,7 @@ import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 import type { OperationManifest } from "../core/types.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { validationScratchPaths } from "./validation-scratch.js";
+import { captureDockerWorkspaceSnapshot } from "./docker-validation.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -450,9 +451,32 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
     candidate_paths: candidatePaths.map(path => evidencePath(path).replaceAll("\\", "/")) }, source, candidate };
 }
 
+/** Capture a task workspace that exists only inside the fixed Docker task container. */
+export async function protectedDockerSnapshot(authorization: { manifestPath: string; manifestHash: string; projectRoot: string },
+  containerID: string, cwd: string): Promise<{ readonly binding: Binding; readonly source: string; readonly candidate: string } | undefined> {
+  const manifestSource = await readFile(authorization.manifestPath).catch(() => undefined);
+  if (manifestSource === undefined) return undefined;
+  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
+  if (manifestHash !== authorization.manifestHash) return undefined;
+  const relativePath = relative(authorization.projectRoot, authorization.manifestPath).replaceAll("\\", "/");
+  if (relativePath.startsWith("../") || isAbsolute(relativePath)) return undefined;
+  const workspace = await captureDockerWorkspaceSnapshot(containerID, cwd);
+  if (!workspace) return undefined;
+  return { binding: { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
+    manifest_path: relativePath, source_policy: "declared-paths-v1", source_paths: [], candidate_paths: [],
+    docker_workspace: workspace }, source: workspace.source, candidate: workspace.candidate };
+}
+
 export async function refreshProtectedSnapshot(projectRoot: string, binding: Binding): Promise<{
   readonly source: string; readonly candidate: string;
 } | undefined> {
+  if (binding.docker_workspace) {
+    if (resolve(projectRoot) !== resolve(binding.project_root) || !await snapshotManifest(projectRoot, binding)) return undefined;
+    const workspace = await captureDockerWorkspaceSnapshot(binding.docker_workspace.container_id, binding.docker_workspace.cwd);
+    if (!workspace || workspace.container_id !== binding.docker_workspace.container_id ||
+        workspace.cwd !== binding.docker_workspace.cwd || workspace.repository_root !== binding.docker_workspace.repository_root) return undefined;
+    return { source: workspace.source, candidate: workspace.candidate };
+  }
   const current = await snapshotManifest(projectRoot, binding);
   if (!current) return undefined;
   if (binding.validation_policy === "inputs-and-concrete-outputs-v1") {

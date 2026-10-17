@@ -1642,6 +1642,25 @@ test("V2 Worker can observe status and repair its scope without acquiring Coordi
   } finally { cleanup?.(); }
 });
 
+test("V2 exposes the fixed Docker task tool only to its schema-authorized Worker role", async () => {
+  const fixture = contextFixture();
+  const cleanup = await V2Plugin.setup(fixture.context);
+  try {
+    const exposed = Object.fromEntries(fixture.tools.map(tool => [tool.name, tool]));
+    const visibleTools = async (sessionID: string, agent: string) => {
+      const event = { sessionID, agent, system: [], tools: { ...exposed, read: {}, fh_docker_exec: { name: "fh_docker_exec" } } };
+      await fixture.sessionHooks.get("context")!(event);
+      return event.tools;
+    };
+    const workerTools = await visibleTools("worker", "dog-worker-v010");
+    assert.ok(Object.hasOwn(workerTools, "fh_docker_exec"));
+    for (const [session, agent] of [["root", "dog-operator"], ["coordinator", "dogs-coordinator"], ["reviewer", "dog-reviewer-v010"]]) {
+      assert.equal(Object.hasOwn(await visibleTools(session, agent), "fh_docker_exec"), false,
+        `${agent} must not inherit the Worker-only Docker task tool`);
+    }
+  } finally { cleanup?.(); }
+});
+
 test("V2 exposes the approved cumulative Mission budget extension to root Operator, not its delegated Coordinator", async () => {
   const fixture = contextFixture();
   const cleanup = await V2Plugin.setup(fixture.context);

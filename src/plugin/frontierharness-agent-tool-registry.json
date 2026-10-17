@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "tool_prefix": "sortie_v010_",
+  "core_tools": ["execute", "subagent", "read"],
+  "runtime_agents": {
+    "dog-coordinator": "dog-operator",
+    "dog-worker": "dog-worker-v010",
+    "dog-luna-worker": "dog-luna-worker-v010",
+    "dog-scout": "dog-scout-v010",
+    "dog-reviewer": "dog-reviewer-v010",
+    "dog-advisor": "dog-advisor-v010",
+    "dog-operator": "dogs-coordinator"
+  },
+  "roles": {
+    "dog-coordinator": {
+      "tool_families": {
+        "mission_lifecycle": ["start_mission", "operator_next", "operator_status", "extend_mission_budget", "complete_mission", "cancel_operator", "reflection"],
+        "unit_execution": ["plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "expand_unit"],
+        "review": ["review_mission", "repair_review"]
+      },
+      "children": ["dog-operator", "dog-worker"]
+    },
+    "dog-worker": {
+      "tool_families": {
+        "workspace": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"]
+      },
+      "native_tool_families": {
+        "docker_task": ["fh_docker_exec"]
+      },
+      "core_tools": ["execute", "read"],
+      "children": []
+    },
+    "dog-luna-worker": {
+      "tool_families": {
+        "workspace": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"]
+      },
+      "core_tools": ["execute", "read"],
+      "children": []
+    },
+    "dog-scout": {"tool_families": {}, "children": []},
+    "dog-reviewer": {
+      "tool_families": {"review": ["repair_review"]},
+      "correction_tool_families": {
+        "workspace": ["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"],
+        "correction": ["repair_review", "finish_direct_unit"]
+      },
+      "children": []
+    },
+    "dog-advisor": {"tool_families": {}, "children": []},
+    "dog-operator": {
+      "tool_families": {
+        "mission_lifecycle": ["operator_next", "operator_status", "submit_mission", "skip_mission_consultation"],
+        "unit_execution": ["plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "rescue_mission_unit", "expand_unit"],
+        "review": ["review_mission", "repair_review"]
+      },
+      "children": ["dog-worker", "dog-reviewer"]
+    }
+  }
+}

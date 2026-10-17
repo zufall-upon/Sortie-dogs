@@ -1,14 +1,45 @@
 """Small adapter-side boundaries for an isolated FrontierHarness CLI gateway."""
+import json
+from functools import lru_cache
 from pathlib import Path
 import subprocess
 
 
-# Both are ordinary candidate routes: a single-unit Operator can dispatch the
-# Worker directly; a multi-unit Mission delegates through its Coordinator.
+@lru_cache(maxsize=1)
+def _agent_registry():
+    package = Path(__file__).resolve().parents[1]
+    candidates = (package / "src/plugin/frontierharness-agent-tool-registry.json",
+                  package / "dist/plugin/frontierharness-agent-tool-registry.json")
+    for path in candidates:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("roles"), dict):
+            raise RuntimeError("frontierharness-agent-tool-registry-invalid")
+        return value
+    raise RuntimeError("frontierharness-agent-tool-registry-missing")
+
+
+def _runtime_agent(role):
+    try:
+        return _agent_registry()["runtime_agents"][role]
+    except KeyError as error:
+        raise ValueError("unknown FrontierHarness agent role") from error
+
+
+def _logical_role(role):
+    runtime_agents = _agent_registry()["runtime_agents"]
+    runtime_role = next((logical for logical, runtime in runtime_agents.items() if runtime == role), None)
+    if runtime_role is not None:
+        return runtime_role
+    return role if role in _agent_registry()["roles"] else None
+
+
+# Keep the runtime profile's logical MkII roles and external V010 names distinct.
 CHILD_ROUTES = {
-    "dog-operator": ("dogs-coordinator", "dog-worker-v010"),
-    "dogs-coordinator": ("dog-worker-v010",),
-    "dog-worker-v010": (),
+    _runtime_agent(role): tuple(_runtime_agent(child) for child in policy["children"])
+    for role, policy in _agent_registry()["roles"].items()
 }
 
 
@@ -19,31 +50,71 @@ def product_worker_chain(sessions, mission_roots):
     the first Coordinator loses later, equally valid Worker calls. Keep the
     first entries for the existing display contract, but validate all siblings.
     """
+    operator_agent = _runtime_agent("dog-coordinator")
+    coordinator_agent = _runtime_agent("dog-operator")
+    worker_agent = _runtime_agent("dog-worker")
     operators = {row["session_id"]: row for row in sessions
-                 if row["agent"] == "dog-operator" and row["parent_id"] is None}
+                 if row["agent"] == operator_agent and row["parent_id"] is None}
     # Observed Operators are a fallback, not alternatives to a selected Mission.
     roots = set(mission_roots) or operators.keys()
     for root in sorted(roots):
-        coordinators = [row for row in sessions if row["agent"] == "dogs-coordinator"
+        coordinators = [row for row in sessions if row["agent"] == coordinator_agent
                         and row["parent_id"] == root]
         coordinator_ids = {row["session_id"] for row in coordinators}
-        workers = [row for row in sessions if row["agent"] == "dog-worker-v010"
+        workers = [row for row in sessions if row["agent"] == worker_agent
                    and row["parent_id"] in {root, *coordinator_ids}]
         if workers:
-            return {"dog-operator": operators.get(root),
-                    "dogs-coordinator": coordinators[0] if coordinators else None,
-                    "dog-worker-v010": workers[0], "workers": workers, "root": root,
+            return {operator_agent: operators.get(root),
+                    coordinator_agent: coordinators[0] if coordinators else None,
+                    worker_agent: workers[0], "workers": workers, "root": root,
                     "coordinator_session_ids": sorted(coordinator_ids)}
     return None
 
 
-def product_agent_permissions(role, tools, *, allow_execute=False):
+def _role_actions(role, *, correction=False):
+    logical = _logical_role(role)
+    if logical is None:
+        raise ValueError("unknown FrontierHarness agent role")
+    policy = _agent_registry()["roles"][logical]
+    families = [policy.get("tool_families", {})]
+    if correction:
+        families.append(policy.get("correction_tool_families", {}))
+    return {action for family in families for actions in family.values() for action in actions}
+
+
+def _role_native_tools(role, *, correction=False):
+    logical = _logical_role(role)
+    if logical is None:
+        raise ValueError("unknown FrontierHarness agent role")
+    policy = _agent_registry()["roles"][logical]
+    families = [policy.get("native_tool_families", {})]
+    if correction:
+        families.append(policy.get("correction_native_tool_families", {}))
+    return {tool for family in families for tools in family.values() for tool in tools}
+
+
+def product_agent_permissions(role, tools, *, allow_execute=False, correction=False):
+    registry = _agent_registry()
+    logical = _logical_role(role)
+    if logical is None:
+        raise ValueError("unknown FrontierHarness agent role")
+    actions = _role_actions(role, correction=correction)
+    native_tools = _role_native_tools(role, correction=correction)
+    prefix = registry["tool_prefix"]
+    # The caller's list is the public request; the shared role/tool-family schema
+    # supplies missing members such as native direct start/finish and Reviewer.
+    requested = {tool[len(prefix):] if tool.startswith(prefix) else tool for tool in tools if isinstance(tool, str)}
+    unknown = requested - actions - native_tools
+    if unknown:
+        raise ValueError("caller requested a tool outside the registered role family")
+    granted = actions
     permissions = [{"action": "*", "resource": "*", "effect": "deny"}]
-    if allow_execute:
+    if allow_execute and "execute" in registry["roles"][logical].get("core_tools", []):
         permissions.append({"action": "execute", "resource": "*", "effect": "allow"})
-    permissions.extend({"action": tool, "resource": "*", "effect": "allow"} for tool in tools)
-    permissions.extend({"action": "subagent", "resource": agent, "effect": "allow"}
-                       for agent in CHILD_ROUTES[role])
+    permissions.extend({"action": prefix + tool, "resource": "*", "effect": "allow"} for tool in sorted(granted))
+    permissions.extend({"action": tool, "resource": "*", "effect": "allow"} for tool in sorted(native_tools))
+    permissions.extend({"action": "subagent", "resource": _runtime_agent(child), "effect": "allow"}
+                       for child in registry["roles"][logical]["children"])
     return permissions
 
 

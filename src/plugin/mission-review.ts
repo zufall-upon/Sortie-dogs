@@ -13,6 +13,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { declaredArtifacts } from "./declared-artifacts.js";
 import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers, normalizeCommand } from "./gate.js";
+import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
@@ -49,6 +50,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
         manifest_path: protected_binding.manifest_path,
         manifest_hash: protected_binding.manifest_hash,
         source_policy: protected_binding.source_policy,
+        ...(protected_binding.docker_workspace ? { docker_workspace: protected_binding.docker_workspace } : {}),
       } } : {}),
     })),
     ...(unit.reviewerCorrection ? { correction_checks: (unit.reviewerCorrection.checks ?? []).map(check => ({
@@ -70,11 +72,17 @@ function nativeToolText(value: unknown): string | undefined {
 }
 
 function dockerExecExitCode(state: Record<string, unknown>): number | null {
+  if (state.status !== "completed") return null;
+  const metadataStatus = record(state.metadata) ? state.metadata.status : undefined;
+  if (metadataStatus === "error" || metadataStatus === "cancel" || metadataStatus === "cancelled" ||
+      metadataStatus === "canceled" || metadataStatus === "interrupted") return null;
+  const metadataExit = record(state.metadata) ? state.metadata.exit : undefined;
   const output = nativeToolText(state.output) ?? nativeToolText(state.content);
-  const match = output?.match(/^exit_code=(0|[1-9]\d*|-[1-9]\d*)(?:\r?\n|$)/u);
-  if (!match) return null;
-  const exit = Number(match[1]);
-  return Number.isSafeInteger(exit) ? exit : null;
+  const match = output?.match(/^exit_code=(0|[1-9]\d*|-[1-9]\d*|unknown)(?:\r?\n|$)/u);
+  const outputExit = match && match[1] !== "unknown" ? Number(match[1]) : null;
+  const explicit = typeof metadataExit === "number" && Number.isSafeInteger(metadataExit) ? metadataExit : undefined;
+  if (explicit !== undefined && match && explicit !== outputExit) return null;
+  return explicit ?? outputExit;
 }
 
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
@@ -86,7 +94,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
   } {
   const declared = validation.map(normalizeCommand);
   const time = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-  type RawAttempt = { command: string; directory?: string; directory_status?: "unobserved";
+  type RawAttempt = { command: string; directory?: string; directory_status?: "unobserved"; docker?: boolean;
     exit_code: number | null; started_ms: number | null; completed_ms: number | null };
   const rawAttempts: RawAttempt[] = childSessionID === null ? [] : history.flatMap<RawAttempt>(message => {
     if (!record(message.info) || message.info.role !== "assistant" || message.info.sessionID !== childSessionID ||
@@ -105,6 +113,14 @@ export function observedMissionValidation(validation: readonly string[], childSe
           exit_code: typeof exit === "number" && Number.isSafeInteger(exit) ? exit : null,
           started_ms: started, completed_ms: completed }];
       }
+      if ((part.tool === "fh_docker_exec" || part.tool === "fh.docker_exec") && record(part.state.input) &&
+          typeof part.state.input.command === "string") {
+        const input = part.state.input;
+        return [{ command: part.state.input.command,
+          ...(isDockerWorkspacePath(input.cwd) ? { directory: input.cwd } : { directory_status: "unobserved" as const }),
+          docker: true, exit_code: dockerExecExitCode(part.state),
+          started_ms: started, completed_ms: completed }];
+      }
       // Codemode's outer `execute` record retains the real namespaced call in toolCalls,
       // while its result carries the Docker plugin's explicit exit_code header. Only a
       // single completed Docker call can be paired unambiguously with that result.
@@ -113,7 +129,9 @@ export function observedMissionValidation(validation: readonly string[], childSe
       const [call] = part.state.metadata.toolCalls;
       if (!record(call) || call.tool !== "fh.docker_exec" || call.status !== "completed" ||
           !record(call.input) || typeof call.input.command !== "string") return [];
-      return [{ command: call.input.command, directory_status: "unobserved" as const,
+      return [{ command: call.input.command,
+        ...(isDockerWorkspacePath(call.input.cwd) ? { directory: call.input.cwd } : { directory_status: "unobserved" as const }),
+        docker: true,
         exit_code: dockerExecExitCode(part.state), started_ms: started, completed_ms: completed }];
     });
   });
@@ -129,9 +147,10 @@ export function observedMissionValidation(validation: readonly string[], childSe
       if (command !== declared[occurrence]) occurrence = 0;
       if (command === declared[occurrence]) occurrence = (occurrence + 1) % declared.length;
     }
-    const { directory: actual, ...visible } = attempt;
-    return [{ ...visible, command: members.join(" && "), ...(!exact ? { native_command: attempt.command } : {}), ...(directory && actual && resolve(directory, actual) !== resolve(directory)
-      ? { directory: resolve(directory, actual ?? ".") } : {}), ...(members.length > 1 ? { observed_members: members } : {}) }];
+    const { directory: actual, docker, ...visible } = attempt;
+    return [{ ...visible, command: members.join(" && "), ...(!exact ? { native_command: attempt.command } : {}),
+      ...(actual && (docker || directory && resolve(directory, actual) !== resolve(directory))
+        ? { directory: docker ? actual : resolve(directory!, actual) } : {}), ...(members.length > 1 ? { observed_members: members } : {}) }];
   });
   // Retain early attempts and the latest checks if a Worker retried many times.
   const shown = attempts.length > 32 ? [...attempts.slice(0, 8), ...attempts.slice(-24)] : attempts;
@@ -150,7 +169,8 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   const declared = validation.map(normalizeCommand);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
   if (!declared.length) return { ready: false, reason: "mission-review-correction-validation-missing", nextOccurrence: 0 };
-  const attempts: { callID: string; command: string; directory?: string; exit: number | null; started: number; completed: number }[] = [];
+  const attempts: { callID: string; command: string; directory?: string; dockerWorkspace?: { container_id: string; cwd: string };
+    exit: number | null; started: number; completed: number }[] = [];
   const seen = new Set<string>();
   let editedAt = notBefore;
   // Unlike the display excerpt, this acceptance comparison scans ALL native attempts.
@@ -161,6 +181,22 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
           record(part.state) && part.state.status === "completed") {
         const end = record(part.time) ? part.time.completed : record(part.state.time) ? part.state.time.end : undefined;
         if (typeof end === "number" && Number.isFinite(end) && end >= notBefore) editedAt = Math.max(editedAt, end);
+        continue;
+      }
+      if (record(part) && part.type === "tool" && (part.tool === "fh_docker_exec" || part.tool === "fh.docker_exec") &&
+          record(part.state) && record(part.state.input) && typeof part.state.input.command === "string" &&
+          isDockerContainerID(part.state.input.container_id) && isDockerWorkspacePath(part.state.input.cwd)) {
+        const input = part.state.input, command = input.command, containerID = input.container_id, cwd = input.cwd;
+        const callID = typeof part.callID === "string" ? part.callID
+          : typeof part.id === "string" ? part.id : undefined;
+        const timing = record(part.time) ? { started: part.time.ran, completed: part.time.completed }
+          : record(part.state.time) ? { started: part.state.time.start, completed: part.state.time.end } : undefined;
+        if (!callID || seen.has(callID) || !timing || typeof timing.started !== "number" || typeof timing.completed !== "number" ||
+            !Number.isFinite(timing.started) || !Number.isFinite(timing.completed) || timing.started < notBefore || timing.completed < timing.started) continue;
+        seen.add(callID);
+        attempts.push({ callID, command: command as string, directory: cwd as string,
+          dockerWorkspace: { container_id: containerID as string, cwd: cwd as string }, exit: dockerExecExitCode(part.state),
+          started: timing.started, completed: timing.completed });
         continue;
       }
       if (!record(part) || part.type !== "tool" || !["bash", "shell", "powershell", "pwsh"].includes(String(part.tool)) ||
@@ -182,6 +218,14 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     }
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
+  const checkDirectoryMatches = (check: ReviewerCorrectionCheck, attempt: (typeof attempts)[number], command: string): boolean => {
+    if (attempt.dockerWorkspace) {
+      const workspace = check.binding.docker_workspace;
+      return workspace?.container_id === attempt.dockerWorkspace.container_id && workspace.cwd === attempt.dockerWorkspace.cwd &&
+        check.directory === attempt.dockerWorkspace.cwd;
+    }
+    return check.binding?.docker_workspace === undefined && validationDirectoryMatches([command], check.directory, directory, directories);
+  };
   // Reuse the completed-sequence binding predicate before retaining an incomplete
   // prefix too; an exit-zero call with an invalid saved check is not reusable proof.
   const bindingUnavailable = (item: (typeof matched)[number]): boolean => {
@@ -190,7 +234,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
     const check = checks.find(check => check.callID === item.callID && check.childSessionID === child);
     const attempt = attempts.find(attempt => attempt.callID === item.callID);
     return !check || !attempt || !check.fresh || check.exitCode !== 0 || check.command[item.member] !== command ||
-      !validationDirectoryMatches([command], check.directory, directory, directories) ||
+      !checkDirectoryMatches(check, attempt, command) ||
       directory !== undefined && resolve(directory, check.directory ?? ".") !== resolve(directory, attempt.directory ?? ".") ||
       !Number.isFinite(Date.parse(check.startedAt)) || !Number.isFinite(Date.parse(check.endedAt)) ||
       Date.parse(check.startedAt) < notBefore || Date.parse(check.endedAt) < Date.parse(check.startedAt);
@@ -224,7 +268,10 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         ?? (recorded && attempt.exit === 0 ? canonicalObservedValidationMembers(attempt.command, recipes, occurrence) : undefined);
       if (!commands || registeredAt && recorded && JSON.stringify(commands) !== JSON.stringify(recorded.command)) continue;
       const members = commands.flatMap((command, member) => required.includes(command) &&
-        validationDirectoryMatches([command], attempt.directory, directory, directories) &&
+        (attempt.dockerWorkspace
+          ? recorded?.binding?.docker_workspace?.container_id === attempt.dockerWorkspace.container_id &&
+            recorded.binding?.docker_workspace?.cwd === attempt.dockerWorkspace.cwd && recorded.directory === attempt.dockerWorkspace.cwd
+          : recorded?.binding?.docker_workspace === undefined && validationDirectoryMatches([command], attempt.directory, directory, directories)) &&
         (registeredAt?.[command] === undefined || Number.isFinite(Date.parse(registeredAt[command]!)) &&
           attempt.started >= Date.parse(registeredAt[command]!)) ? [{ command, member }] : []);
       if (!members.length || !registeredAt && members.length !== commands.length) continue;
