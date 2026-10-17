@@ -10,12 +10,13 @@ import { captureDockerWorkspaceSnapshot, readDockerWorkspaceFile } from "../dist
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
+for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root"]) test(`native candidate reader handles its declared output bounds: ${mode}`, {
   skip: process.platform === "win32" || (mode === "long-line" && process.platform !== "linux"),
 }, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/docker-workspace-read-"));
-  const workspace = join(root, "task"), bin = join(root, "bin");
+  const workspace = join(root, mode.startsWith("spaced-") ? "task " : mode.startsWith("carriage-") ? "task\r" : "task"), bin = join(root, "bin");
+  const repository = mode.endsWith("-root"), cwd = repository ? join(workspace, "nested") : workspace;
   const priorPath = process.env.PATH;
   try {
     await mkdir(workspace); await mkdir(bin);
@@ -34,9 +35,29 @@ for (const mode of ["directory-page", "escaped-directory-page", "escaped-file", 
       for (let i = 0; i < names.length; i += 100) await Promise.all(names.slice(i, i + 100).map(name => writeFile(join(workspace, name), "")));
       assert.ok(Buffer.byteLength(JSON.stringify(names.slice(0, 2000))) > 256 * 1024, "valid requested page really exceeds the old stdout cap");
     } else await writeFile(join(workspace, "escaped.txt"), bytes);
+    if (repository) {
+      await mkdir(cwd);
+      await exec("git", ["init", "--quiet"], { cwd: workspace });
+      if (mode.endsWith("committed-root")) {
+        await exec("git", ["add", "escaped.txt"], { cwd: workspace });
+        await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"], { cwd: workspace });
+      }
+    }
     process.env.PATH = `${bin}:${priorPath ?? ""}`;
-    const candidate = await captureDockerWorkspaceSnapshot(container, workspace);
+    const candidate = await captureDockerWorkspaceSnapshot(container, cwd);
     assert.ok(candidate);
+    if (repository) {
+      assert.deepEqual(await captureDockerWorkspaceSnapshot(container, cwd), candidate, "unchanged observation is deterministic");
+      await writeFile(join(workspace, "escaped.txt"), "changed root input\n");
+      const after = await captureDockerWorkspaceSnapshot(container, cwd);
+      assert.ok(after);
+      assert.notEqual(after.candidate, candidate.candidate, "nested cwd cannot omit the root input when Git has no HEAD yet");
+      assert.equal(after.repository_root, workspace);
+      await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate, "escaped.txt"), /candidate-stale/);
+      const read = await readDockerWorkspaceFile(container, cwd, after.candidate, "escaped.txt");
+      assert.deepEqual(read.lines, [[1, "changed root input\n"]]);
+      return;
+    }
     if (directory) {
       const first = await readDockerWorkspaceFile(container, workspace, candidate.candidate, ".", 1, 2000);
       assert.equal(first.kind, "directory"); assert.equal(first.total, names.length);

@@ -11,11 +11,14 @@ const SNAPSHOT_MARKER = "SORTIE_DOCKER_WORKSPACE_V1";
 const FILE_SNAPSHOT = String.raw`
 import hashlib, json, os, stat, subprocess
 cwd = os.path.realpath(os.getcwd())
+root = cwd
 try:
-    root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL, text=True).strip()
+    # Remove Git's terminating LF, not meaningful whitespace in the root path.
+    root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL).decode("utf-8")[:-1]
     head = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD^{tree}"], stderr=subprocess.DEVNULL, text=True).strip()
 except (OSError, subprocess.CalledProcessError):
-    root, head = cwd, "no-git"
+    # An unborn repository still has a root; missing HEAD must not narrow it.
+    head = "no-git"
 root = os.path.realpath(root)
 rows = []
 def digest(path):

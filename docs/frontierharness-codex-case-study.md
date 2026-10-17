@@ -56,7 +56,12 @@ external directory trees that cannot be captured remain unavailable.
 Candidates without regular-file links retain their existing fallback hash recipe. Failed
 Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
 hash of empty/partial data. Its older mode-blind identities are not reused as fresh
-proof; the Python snapshot recipe is unchanged. A declared symlink CWD keeps its logical Docker `cwd` for the registered
+proof. Python snapshots retain a discovered repository root even before the first
+commit, so validation from a nested directory still covers root and sibling inputs.
+Root-path whitespace is retained as path data rather than stripped or normalized
+as a text newline. Ordinary committed and truly non-Git workspaces keep their
+existing identity recipe.
+A declared symlink CWD keeps its logical Docker `cwd` for the registered
 check and records the resolved `actual_cwd`. The candidate binds that physical
 execution directory too: retargeting the alias, even within the same unchanged
 repository, makes the old proof stale. Non-alias identities of the unchanged
