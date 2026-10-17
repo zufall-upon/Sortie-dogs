@@ -98,6 +98,32 @@ runnerは次のmetadataを出力します。
 `missing`が空、`duplicate`がすべて0、`files`件のファイルが完了していることも確認してください。
 skipがある場合は理由を記録します。過去runの件数を現在の期待値として固定しません。
 
+### Reviewer correctionの対象別実行
+
+旧`test/reviewer-correction.test.ts`の回帰は、条件・assertionを維持して次に分割しています。
+単独の旧ファイル名は、現在は自己再確認・連続補正・基本lifecycleだけを表します。
+
+- `test/reviewer-correction.test.ts`: 自己再確認、連続補正、基本lifecycle。
+- `test/reviewer-correction-continuation.test.ts`: 同じReviewerの継続、再開、履歴・系譜。
+- `test/reviewer-correction-scope.test.ts`: admission、source/test scope補正、host Git lifecycle。
+- `test/reviewer-correction-validation.test.ts`: recipe/CWD、composite/occurrence、鮮度・実行証跡。
+- `test/reviewer-correction-permissions.test.ts`: native設定順、deny/ask、権限復元・モデル。
+- `test/reviewer-correction-fixture.test.ts`: fixture間のGit object/index・source・Mission状態の独立性。
+
+Reviewer全体を確認する場合は、Windowsでも展開に依存しない明示一覧を使います。
+
+```sh
+npm run test:targeted -- test/reviewer-correction.test.ts test/reviewer-correction-continuation.test.ts test/reviewer-correction-scope.test.ts test/reviewer-correction-validation.test.ts test/reviewer-correction-permissions.test.ts test/reviewer-correction-fixture.test.ts
+```
+
+共通helperは`test/helpers/reviewer-correction-fixture.ts`です。process内で再利用するのは、
+素の入力をcommitしたbase repositoryだけです。各fixtureは`fs.cp`でhardlinkを使わず、
+独立したcheckout・index・objectsを作成します。clone由来のremote/upstream設定も追加しません。
+Mission・ledger・native履歴・plugin・権限設定は
+毎回新規生成し、cold reloadも引き続き実際の保存状態から行います。baseはsuite終了時に削除します。
+fixture準備のGit起動は毎回5回から、processごとの初回5回だけになります。
+件数削減や製品側cacheではなく、対象の追いやすさと不要な素の準備反復の整理です。
+
 ### 時間上限
 
 - runner内部: **1790秒**。runner開始からの時間であり、pretest buildは含みません。
