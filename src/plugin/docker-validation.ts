@@ -45,6 +45,8 @@ for directory, dirs, files in os.walk(root, followlinks=False, onerror=lambda er
             if os.path.isdir(path) and os.path.commonpath([root, target]) != root:
                 raise RuntimeError("external-directory-link-snapshot-unavailable")
             value = [relative, "link", mode, os.readlink(path), digest(path) if os.path.isfile(path) else None]
+            if os.path.isfile(path) or os.path.isdir(path):
+                value.extend([target, stat.S_IMODE(os.stat(path).st_mode)])
         elif stat.S_ISDIR(info.st_mode):
             value = [relative, "directory", mode]
         else:
@@ -101,11 +103,19 @@ const SNAPSHOT_COMMAND = [
   "for path do",
   "  [ -n \"$path\" ] || exit 1",
   "  if [ -f \"$path\" ]; then sha256sum -- \"$path\" || exit 1",
-  "  elif [ -d \"$path\" ]; then",
-  "    target=$(readlink -f -- \"$path\") || exit 1",
-  "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
+  "  elif [ -d \"$path\" ]; then :",
   "  elif [ -e \"$path\" ]; then exit 1",
+  "  else continue",
   "  fi",
+  // Pair the lexical link with its resolved target/mode before hashing. Keeping
+  // each pair together prevents swapping equal-byte targets between two links.
+  "  target=$(readlink -fn -- \"$path\" && printf .) || exit 1",
+  "  target=${target%.}",
+  "  if [ -d \"$path\" ]; then",
+  "    case \"$target\" in \"$root\"|\"$root\"/*) : ;; *) exit 1 ;; esac",
+  "  fi",
+  "  referent=$(LC_ALL=C QUOTING_STYLE=c stat -L -c \"%f %N\" -- \"$path\" \"$target\") || exit 1",
+  "  printf \"%s\" \"$referent\" | sha256sum || exit 1",
   "done' sh \"$root\")",
   "link_bytes=$(printf '%s' \"$link_bytes\" | LC_ALL=C sort)",
   "if [ -n \"$link_bytes\" ]; then",
