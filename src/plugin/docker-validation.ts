@@ -66,8 +66,21 @@ const SNAPSHOT_COMMAND = [
   "root=$(git rev-parse --show-toplevel)",
   "cd \"$root\"",
   "tree=$(git rev-parse --verify 'HEAD^{tree}')",
-  "tracked=$(git diff --binary HEAD -- | sha256sum | cut -d' ' -f1)",
-  "untracked=$(git ls-files -z --others | sort -z | xargs -0 -r sha256sum -- | sha256sum | cut -d' ' -f1)",
+  // Capture successful producer output before hashing: POSIX pipelines otherwise
+  // hide failed Git/file reads behind a successful hash of empty/partial data.
+  "tracked=$(git diff --binary HEAD -- && printf '.')",
+  "tracked=${tracked%.}",
+  "tracked=$(printf '%s' \"$tracked\" | sha256sum)",
+  "tracked=${tracked%% *}",
+  // A NUL on enumeration failure is an invalid empty filename, so xargs fails
+  // rather than treating a failed Git listing as an empty untracked set.
+  "untracked_bytes=$({ git ls-files -z --others || printf '\\0'; } | xargs -0 -r sha256sum --)",
+  // Git may ignore tracked executable-bit changes (core.filemode=false).
+  // Observe workspace modes/links independently, excluding only Git bookkeeping.
+  "workspace_modes=$({ find . -path ./.git -prune -o -print0 || printf '\\0'; } | LC_ALL=C QUOTING_STYLE=c xargs -0 -r stat -c '%f %N' --)",
+  "workspace_modes=$(printf '%s' \"$workspace_modes\" | LC_ALL=C sort)",
+  "untracked=$(printf '%s\\0%s' \"$untracked_bytes\" \"$workspace_modes\" | sha256sum)",
+  "untracked=${untracked%% *}",
   "printf '%s\\n%s\\n%s\\n%s\\n%s\\n%s\\n' 'SORTIE_DOCKER_WORKSPACE_V1' \"$actual_cwd\" \"$root\" \"$tree\" \"$tracked\" \"$untracked\"",
   "fi",
 ].join("\n");

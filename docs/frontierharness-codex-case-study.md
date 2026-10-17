@@ -42,11 +42,15 @@ check. Python-enabled task images support non-Git workspaces and include ignored
 inputs, file modes, and link identity/content. Snapshot and reader Python processes
 use `-I -S`, so candidate-local startup hooks and import paths are not executed as
 part of read-only observation. Git-only images retain a Git-based
-fallback. A declared symlink CWD keeps its logical Docker `cwd` for the registered
+fallback that also binds actual workspace modes and symlink targets, including
+ignored files and tracked executable bits when `core.filemode=false`. Failed
+Git/filesystem enumeration, diff, or file/metadata reads return unavailable, not a successful
+hash of empty/partial data. Its older mode-blind identities are not reused as fresh
+proof; the Python snapshot recipe is unchanged. A declared symlink CWD keeps its logical Docker `cwd` for the registered
 check and records the resolved `actual_cwd`. The candidate binds that physical
 execution directory too: retargeting the alias, even within the same unchanged
-repository, makes the old proof stale. Non-alias/legacy candidate identities stay
-unchanged. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
+repository, makes the old proof stale. Non-alias identities of the unchanged
+Python snapshot recipe stay unchanged. Unsupported snapshots, failed/unknown exits, a different CWD, or changed
 candidate bytes do not become proof. The container is not represented by the
 unrelated gateway filesystem. Snapshot capture is conservative: a check that
 changes workspace files needs a stable candidate before it can supply proof.
