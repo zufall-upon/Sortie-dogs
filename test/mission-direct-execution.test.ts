@@ -623,7 +623,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only", "shim-git-only-external-file", "shim-git-only-assume-unchanged", "shim-git-only-skip-worktree", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
+for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only", "shim-git-only-external-file", "shim-git-only-assume-unchanged", "shim-git-only-skip-worktree", "shim-git-only-unborn", "shim-git-only-unborn-untracked", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
   skip: mode === "actual" && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
 }, async () => {
   const actualDocker = mode === "actual", noPython = mode.includes("git-only");
@@ -640,8 +640,10 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only",
   try {
     for (const dir of [gateway, workspace]) {
       await exec("git", ["init", "--quiet"], { cwd: dir });
-      await exec("git", ["config", "user.name", "test"], { cwd: dir });
-      await exec("git", ["config", "user.email", "test@example.invalid"], { cwd: dir });
+      if (dir === gateway || !mode.includes("unborn")) {
+        await exec("git", ["config", "user.name", "test"], { cwd: dir });
+        await exec("git", ["config", "user.email", "test@example.invalid"], { cwd: dir });
+      }
     }
     await writeFile(join(gateway, "instruction.md"), "Validate the task workspace through its fixed container.\n");
     await writeFile(join(gateway, "host-canary.txt"), "gateway bytes are not the task candidate\n");
@@ -652,8 +654,9 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only",
       await writeFile(join(root, "captured-check.sh"), source);
       await fs.symlink(join(root, "captured-check.sh"), join(workspace, "check.sh"));
     } else await writeFile(join(workspace, "check.sh"), source);
-    await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
-    await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
+    if (!mode.endsWith("unborn-untracked")) await exec("git", ["add", "--", "input.txt", "check.sh"], { cwd: workspace });
+    if (!mode.includes("unborn")) await exec("git", ["commit", "--quiet", "-m", "task fixture"], { cwd: workspace });
+    const taskObjectsBefore = mode.includes("unborn") ? (await exec("git", ["count-objects", "-v"], { cwd: workspace })).stdout : undefined;
     if (mode.endsWith("assume-unchanged") || mode.endsWith("skip-worktree")) {
       await exec("git", ["update-index", mode.endsWith("assume-unchanged") ? "--assume-unchanged" : "--skip-worktree", "input.txt"], { cwd: workspace });
       assert.match((await exec("git", ["ls-files", "-v", "input.txt"], { cwd: workspace })).stdout,
@@ -823,6 +826,10 @@ for (const mode of ["shim", "shim-alias", "shim-external-file", "shim-git-only",
       { output: "PASS\nRead the exact Docker candidate check.sh and confirmed its input assertion.", metadata: { sessionId: "reviewer" } });
     const receipt = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(receipt.status, "succeeded", JSON.stringify(receipt));
+    if (taskObjectsBefore !== undefined) {
+      await assert.rejects(exec("git", ["rev-parse", "--verify", "HEAD"], { cwd: workspace }), "native inspection does not create a commit");
+      assert.equal((await exec("git", ["count-objects", "-v"], { cwd: workspace })).stdout, taskObjectsBefore, "native observation never writes Git objects");
+    }
     const reviewed = await new OperatorMissionRuntime(gateway, V010_RUNTIME_PROFILE).required("root");
     assert.equal(reviewed.review?.verdict, "PASS");
     assert.equal(reviewed.review?.mode, "independent");

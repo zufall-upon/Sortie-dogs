@@ -10,7 +10,7 @@ import { captureDockerWorkspaceSnapshot, readDockerWorkspaceFile } from "../dist
 const exec = promisify(execFile);
 const container = "0123456789abcdef01234567";
 
-for (const variant of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root", "external-file-link", "external-file-chain", "external-file-git-metadata", "external-file-git-alias", "external-file-nested-git", "external-directory-link", "git-only-escaped-file", "git-only-directory-page", "git-only-escaped-directory-page", "git-only-long-line", "git-only-empty-file", "git-only-line-shapes", "git-only-line-boundary", "git-only-external-file-link", "git-only-external-file-chain", "git-only-external-file-git-metadata", "git-only-external-file-git-alias", "git-only-external-file-nested-git", "git-only-external-directory-link", "git-only-read-failure", "git-only-change-during-read", "python-reader-failure", "binary-file", "git-only-binary-file", "git-only-empty-directory", "git-only-invalid-name", "git-only-coreutils-file", "git-only-coreutils-directory-page"]) test(`native candidate reader handles its declared output bounds: ${variant}`, {
+for (const variant of ["directory-page", "escaped-directory-page", "escaped-file", "long-line", "empty-file", "line-shapes", "line-boundary", "unborn-root", "committed-root", "spaced-unborn-root", "spaced-committed-root", "carriage-committed-root", "external-file-link", "external-file-chain", "external-file-git-metadata", "external-file-git-alias", "external-file-nested-git", "external-directory-link", "git-only-escaped-file", "git-only-directory-page", "git-only-escaped-directory-page", "git-only-long-line", "git-only-empty-file", "git-only-line-shapes", "git-only-line-boundary", "git-only-external-file-link", "git-only-external-file-chain", "git-only-external-file-git-metadata", "git-only-external-file-git-alias", "git-only-external-file-nested-git", "git-only-external-directory-link", "git-only-read-failure", "git-only-change-during-read", "python-reader-failure", "binary-file", "git-only-binary-file", "git-only-empty-directory", "git-only-invalid-name", "git-only-coreutils-file", "git-only-coreutils-directory-page", "git-only-unborn-root", "git-only-unborn-untracked-root", "git-only-spaced-unborn-root", "git-only-carriage-unborn-root"]) test(`native candidate reader handles its declared output bounds: ${variant}`, {
   skip: process.platform === "win32" || (variant.endsWith("long-line") && process.platform !== "linux"),
 }, async () => {
   const noPython = variant.startsWith("git-only-");
@@ -56,8 +56,8 @@ for (const variant of ["directory-page", "escaped-directory-page", "escaped-file
     if (mode === "invalid-name") await writeFile(Buffer.concat([Buffer.from(join(workspace, "invalid-")), Buffer.from([255])]), "input\n");
     if (noPython) {
       await exec("git", ["init", "--quiet"], { cwd: workspace });
-      await exec("git", ["add", "."], { cwd: workspace });
-      await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Git-only fixture"], { cwd: workspace });
+      if (!mode.includes("untracked")) await exec("git", ["add", "."], { cwd: workspace });
+      if (!mode.includes("unborn")) await exec("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Git-only fixture"], { cwd: workspace });
       if (directory) names.unshift(".git");
     }
     if (mode.startsWith("external-")) {
@@ -85,6 +85,7 @@ for (const variant of ["directory-page", "escaped-directory-page", "escaped-file
       }
     }
     process.env.PATH = `${bin}:${priorPath ?? ""}`;
+    const objectsBefore = noPython && mode.includes("unborn") ? (await exec("git", ["count-objects", "-v"], { cwd: workspace })).stdout : undefined;
     const candidate = await captureDockerWorkspaceSnapshot(container, cwd);
     if (mode === "external-directory-link") {
       assert.equal(candidate, undefined, "uncaptured external directory trees remain unavailable");
@@ -157,6 +158,10 @@ for (const variant of ["directory-page", "escaped-directory-page", "escaped-file
       await assert.rejects(readDockerWorkspaceFile(container, cwd, candidate.candidate, "escaped.txt"), /candidate-stale/);
       const read = await readDockerWorkspaceFile(container, cwd, after.candidate, "escaped.txt");
       assert.deepEqual(read.lines, [[1, "changed root input\n"]]);
+      if (objectsBefore !== undefined) {
+        await assert.rejects(exec("git", ["rev-parse", "--verify", "HEAD"], { cwd: workspace }), "inspection does not create an initial commit");
+        assert.equal((await exec("git", ["count-objects", "-v"], { cwd: workspace })).stdout, objectsBefore, "inspection does not write Git objects");
+      }
       return;
     }
     if (directory) {
