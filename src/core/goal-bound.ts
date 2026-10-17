@@ -52,6 +52,8 @@ export interface GoalEvidence {
     readonly docker_workspace?: {
       readonly container_id: string;
       readonly cwd: string;
+      /** Physical Docker CWD for a declared logical alias; absent on legacy/non-alias proof. */
+      readonly actual_cwd?: string;
       readonly repository_root: string;
       readonly source: string;
       readonly candidate: string;
@@ -315,6 +317,7 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
      (protectedBinding.validation_policy === undefined || protectedBinding.validation_policy === "inputs-and-concrete-outputs-v1") &&
      (dockerWorkspace === undefined || (typeof dockerWorkspace.container_id === "string" && /^[a-f0-9]{12,64}$/u.test(dockerWorkspace.container_id) &&
        typeof dockerWorkspace.cwd === "string" && dockerWorkspace.cwd.startsWith("/") &&
+       (dockerWorkspace.actual_cwd === undefined || typeof dockerWorkspace.actual_cwd === "string" && dockerWorkspace.actual_cwd.startsWith("/")) &&
        typeof dockerWorkspace.repository_root === "string" && dockerWorkspace.repository_root.startsWith("/") &&
        HASH.test(dockerWorkspace.source) && HASH.test(dockerWorkspace.candidate))) &&
     (protectedBinding.freshness === undefined || (protectedBinding.freshness !== null && typeof protectedBinding.freshness === "object" &&

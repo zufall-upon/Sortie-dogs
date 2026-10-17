@@ -623,15 +623,18 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     if (externalDirectory) await rm(externalDirectory, { recursive: true, force: true }); }
 });
 
-for (const actualDocker of [false, true]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${actualDocker ? "actual" : "shim"})`, {
-  skip: actualDocker && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
+for (const mode of ["shim", "shim-alias", "actual"]) test(`native Docker validation binds the task container CWD and candidate through Worker settlement and independent Review (${mode})`, {
+  skip: mode === "actual" && !process.env.SORTIE_NATIVE_DOCKER_IMAGE,
 }, async () => {
+  const actualDocker = mode === "actual";
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/native-docker-formal-"));
-  const gateway = join(root, "gateway"), workspace = join(root, "workspace"), bin = join(root, "bin");
+  const gateway = join(root, "gateway"), physicalWorkspace = join(root, "workspace"), bin = join(root, "bin");
+  const workspace = mode === "shim-alias" ? join(root, "workspace-link") : physicalWorkspace;
   let containerID = "0123456789abcdef01234567", ownedContainer: string | undefined;
   const priorPath = process.env.PATH, priorContainer = process.env.FAKE_DOCKER_CONTAINER;
-  await mkdir(gateway); await mkdir(workspace); await mkdir(bin);
+  await mkdir(gateway); await mkdir(physicalWorkspace); await mkdir(bin);
+  if (mode === "shim-alias") await fs.symlink(physicalWorkspace, workspace, "dir");
   const fakeDocker = join(bin, "docker");
   const source = 'test "$(cat input.txt)" = fixed || exit 7\nprintf "PASS\\n"\n';
   try {
@@ -772,7 +775,9 @@ for (const actualDocker of [false, true]) test(`native Docker validation binds t
     assert.ok(dockerBinding);
     assert.equal(dockerBinding.container_id, containerID);
     assert.equal(dockerBinding.cwd, workspace);
-    assert.equal(dockerBinding.repository_root, workspace);
+    assert.equal(dockerBinding.repository_root, physicalWorkspace);
+    assert.equal(dockerBinding.actual_cwd, mode === "shim-alias" ? physicalWorkspace : undefined,
+      "retain native physical CWD without replacing the declared logical Docker CWD");
     assert.equal(dockerBinding.source, evidence[0]!.identity.source);
     assert.equal(dockerBinding.candidate, evidence[0]!.identity.candidate);
     assert.equal(evidence[0]!.protected_binding?.source_paths.length, 0, "Docker paths are not misrepresented as gateway host paths");
@@ -836,6 +841,20 @@ for (const actualDocker of [false, true]) test(`native Docker validation binds t
     await assert.rejects(readFile(join(plain, "startup-side-effect.txt")), { code: "ENOENT" }, "read-only inspection does not execute candidate Python startup code");
     await writeFile(join(plain, "logs.txt"), "changed\n");
     assert.notEqual((await captureDockerWorkspaceSnapshot(containerID, plain))?.candidate, plainBefore.candidate);
+    if (mode === "shim-alias") {
+      const nested = join(physicalWorkspace, "nested");
+      await mkdir(nested); await writeFile(join(nested, "input.txt"), "fixed\n");
+      const beforeAlias = await captureDockerWorkspaceSnapshot(containerID, workspace);
+      assert.ok(beforeAlias);
+      await fs.unlink(workspace); await fs.symlink(nested, workspace, "dir");
+      const retargeted = await captureDockerWorkspaceSnapshot(containerID, workspace);
+      assert.ok(retargeted);
+      assert.equal(retargeted.source, beforeAlias.source, "retargeting an external CWD alias does not edit repository bytes");
+      assert.notEqual(retargeted.candidate, beforeAlias.candidate, "same repository bytes cannot hide a different actual execution CWD");
+      assert.equal(retargeted.actual_cwd, nested);
+      await assert.rejects(dockerRead!.execute({ ...readArgs, candidate: beforeAlias.candidate },
+        { agent: "dog-reviewer-v010", sessionID: "reviewer" }), /candidate-stale/);
+    }
     await cleanupPlugin();
     const requestAudit = await readFile(join(gateway, "model-request-audit.ndjson"), "utf8");
     const usageAudit = await readFile(join(gateway, "model-usage-audit.ndjson"), "utf8");

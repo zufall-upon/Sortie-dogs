@@ -74,7 +74,10 @@ const SNAPSHOT_COMMAND = [
 
 export interface DockerWorkspaceSnapshot {
   readonly container_id: string;
+  /** Declared Docker --workdir; keep its logical alias for validation matching. */
   readonly cwd: string;
+  /** Physical CWD when Docker resolves the declared path through an alias. */
+  readonly actual_cwd?: string;
   readonly repository_root: string;
   readonly source: string;
   readonly candidate: string;
@@ -98,11 +101,15 @@ export async function captureDockerWorkspaceSnapshot(containerID: string, cwd: s
     };
     if (line() !== SNAPSHOT_MARKER) return undefined;
     const actualCwd = line(), repositoryRoot = line(), tree = line(), tracked = line(), untracked = line();
-    if (actualCwd !== cwd || !repositoryRoot || !posix.isAbsolute(repositoryRoot) || !tree || !/^[a-f0-9]{40,64}$/u.test(tree) ||
+    if (!actualCwd || !isDockerWorkspacePath(actualCwd) || !repositoryRoot || !posix.isAbsolute(repositoryRoot) || !tree || !/^[a-f0-9]{40,64}$/u.test(tree) ||
         !tracked || !/^[a-f0-9]{64}$/u.test(tracked) || !untracked || !/^[a-f0-9]{64}$/u.test(untracked) || offset !== output.length) return undefined;
     const source = `sha256:${createHash("sha256").update(`git-tree\0${repositoryRoot}\0${tree}`).digest("hex")}`;
-    const candidate = `sha256:${createHash("sha256").update(JSON.stringify([containerID, cwd, repositoryRoot, tree, tracked, untracked])).digest("hex")}`;
-    return { container_id: containerID, cwd, repository_root: repositoryRoot, source, candidate };
+    // Preserve existing non-alias identities. For aliases bind the real execution
+    // directory too: retargeting within the same repository must stale the proof.
+    const physicalCwd = actualCwd === cwd ? [] : [actualCwd];
+    const candidate = `sha256:${createHash("sha256").update(JSON.stringify([containerID, cwd, repositoryRoot, tree, tracked, untracked, ...physicalCwd])).digest("hex")}`;
+    return { container_id: containerID, cwd, ...(actualCwd === cwd ? {} : { actual_cwd: actualCwd }),
+      repository_root: repositoryRoot, source, candidate };
   } catch {
     return undefined;
   }
