@@ -200,9 +200,20 @@ export function isDockerWorkspacePath(value: unknown): value is string {
 const READ_WORKSPACE = String.raw`
 import hashlib, json, os, stat, sys
 root, requested, offset, limit = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
-path = os.path.realpath(os.path.join(root, requested))
+requested_path = os.path.join(root, requested)
+path = os.path.realpath(requested_path)
 if os.path.commonpath([root, path]) != root:
-    raise ValueError("file-outside-candidate-workspace")
+    # Admit only the actual candidate entry and its bound regular-file target.
+    # A canceled outside-directory hop can normalize inside root yet reach a
+    # different link; file/../ hops must not create an entry either. Resolve the
+    # parent to exclude root Git bookkeeping even through directory aliases.
+    lexical = os.path.abspath(requested_path)
+    entry = os.path.join(os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical))
+    if (os.path.commonpath([root, lexical]) != root or os.path.commonpath([root, entry]) != root or
+            os.path.relpath(entry, root).split(os.sep)[0] == ".git" or not os.path.islink(entry) or
+            os.path.realpath(entry) != path or not os.path.islink(requested_path) or
+            not stat.S_ISREG(os.stat(entry).st_mode)):
+        raise ValueError("file-outside-candidate-workspace")
 if os.path.isdir(path):
     entries = sorted(os.listdir(path))
     result = {"kind": "directory", "entries": entries[offset - 1:offset - 1 + limit], "total": len(entries)}
