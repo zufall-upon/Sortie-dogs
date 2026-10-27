@@ -516,7 +516,7 @@ export class OperatorMissionRuntime {
         corrections: (state.corrections ?? []).map(({ initialPrompt: _prompt, inlineReview: _inline, ...correction }) => correction),
         retained_review: state.review ? { run_id: state.review.runID, verdict: state.review.verdict,
           mode: state.review.mode, author: state.review.child, result: state.review.result, self_recheck: state.review.selfRecheck } : null,
-        guidance: "Current original_requests/requirements govern; older plans remain historical. Continue from known decisions, environment, completed work, retained findings and failures. A new plan or author does not resolve findings or turn self-recheck into independent approval. Read snapshot JSON entries by message/call IDs only for a relevant gap. Recheck mutable facts when needed or conflicting; do not repeat unchanged setup/investigation/checks merely because ownership changed. Successful evidence remains with its actual author/call and input bindings; historical results are not new authority." } };
+        guidance: "Current original_requests/requirements govern; older plans remain historical. Original attachments are in sources[].attachments, ordered within each message; read their path/URL when relevant, not a prose substitute. Message IDs and indices preserve provenance, not an inferred mapping to user-assigned image numbers. Continue from known decisions, environment, completed work, retained findings and failures. A new plan or author does not resolve findings or turn self-recheck into independent approval. Read snapshot JSON entries by message/call IDs only for a relevant gap. Recheck mutable facts when needed or conflicting; do not repeat unchanged setup/investigation/checks merely because ownership changed. Successful evidence remains with its actual author/call and input bindings; historical results are not new authority." } };
   }
   private async load<T>(file: string): Promise<T | undefined> {
     try { return JSON.parse(await readFile(file, "utf8")) as T; }
@@ -978,6 +978,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       }
     })));
   return { original_requests: mission.requests, requirements: mission.requirements,
+    original_attachments: (mission.continuity?.sources ?? []).flatMap(source =>
+      (source.attachments ?? []).map(file => ({ session_id: source.session_id, ...file }))),
     operation: missionOperationSummary(mission),
     history: { status: missingAnchors.length ? "unavailable" : history.status,
       ...(history.reason ? { reason: history.reason } : missingAnchors.length ? { reason: "accepted-handoff-anchor-unavailable" } : {}),
@@ -995,7 +997,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       observation: mission.deliveryObservation && mission.deliveryObservation.run_id === current?.runID ? mission.deliveryObservation : null,
       observation_source: "persisted operator Git lifecycle and formal validation records; no new Git inspection",
       clean: mission.deliveryObservation && mission.deliveryObservation.run_id === current?.runID ? mission.deliveryObservation.clean : "not independently observed by this projection" },
-    interpretation: "Compare original requests with the submitted candidate and actual evidence. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
+    interpretation: "Compare original requests (including relevant original attachments) with the submitted candidate and what the actual evidence exercises. Functional PASS, Review PASS, or an honestly recorded unverified limitation does not establish a required visual comparison. If a mandatory outcome remains unmet, continue authorized retrieval, inspection or correction without waiting for the user. Optional caveats, valid alternative checks and reusable evidence need not block acceptance; do not reject on the word unverified alone or repeat all checks yourself. No new approval, proof file, extra Reviewer, universal screenshots or pixel-exact matching is required. Historical PASS is not current PASS. Inspect concrete gaps, not routine archive searches or full source rereads. Existing completion and Review guards still apply." };
 }
 
 export function missionReviewIndependent(mission: OperatorMission, child: string | undefined): boolean {

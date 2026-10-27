@@ -44,7 +44,8 @@ const SERIAL_OPTIONAL_ARGUMENTS = new Map<string, ReadonlySet<string>>([
     "scope", "trigger", "cause", "prevention", "evidence", "evidenceRef", "id", "promotedRef", "confirmation",
   ])],
 ]);
-const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
+const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6.1-terra", variant: "max" });
+const PREVIEW_LUNA_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
 /**
  * Contract authorship, not throughput. Qualification observed a cheaper operations model emit
@@ -57,7 +58,7 @@ const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-6.1-sol", varia
 const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-6.1-sol", variant: "xhigh" });
 /** Every preview route the profile can bind a role to. Catalog declaration reads this one list. */
 const PREVIEW_ROUTES: readonly { readonly model: string; readonly variant: string }[] = Object.freeze([
-  PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE,
+  PREVIEW_PRIMARY_ROUTE, PREVIEW_WORKER_ROUTE, PREVIEW_LUNA_WORKER_ROUTE, PREVIEW_SCOUT_ROUTE, PREVIEW_OPERATIONS_ROUTE,
   PREVIEW_REVIEW_ROUTE,
 ]);
 
@@ -3452,7 +3453,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const name = profileAgent(profile, role);
           const agent = record(agents[name]) ? agents[name] : undefined;
           if (!agent) continue;
-          const route = role === "dog-scout" ? PREVIEW_SCOUT_ROUTE : PREVIEW_WORKER_ROUTE;
+          const route = role === "dog-scout" ? PREVIEW_SCOUT_ROUTE : PREVIEW_LUNA_WORKER_ROUTE;
           agent.model ??= route.model;
           if (agent.variant === undefined && agent.model === route.model) agent.variant = route.variant;
         }

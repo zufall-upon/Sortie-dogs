@@ -1,5 +1,5 @@
 export const MODEL_COST_PRICING_SNAPSHOT = {
-  checkedAt: "2026-09-30",
+  checkedAt: "2026-10-27",
   currency: "USD",
   unit: "1M tokens",
   sources: [
@@ -7,6 +7,7 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/models/gpt-6-sol",
     "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+    "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
     "https://developers.openai.com/api/docs/guides/fast-mode",
     "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
@@ -18,8 +19,9 @@ export const MODEL_COST_PRICING_SNAPSHOT = {
     "OpenAI Standard pricing; requests above 272,000 total input/cache tokens use 2x input/cache and 1.5x output pricing.",
     "Anthropic Standard pricing with the 5-minute cache-write rate; Batch, Flex, regional, tool, and subscription charges are excluded.",
     "variant and serviceTier are separate; model variants do not alter the selected Standard token price.",
+    "GPT-6.1 Terra Standard uses $1 input, $0.05 cache read, $1.25 30-minute cache write and $5 output per 1M tokens; subscription usage/limits are separate from this API-equivalent estimate.",
     "GPT-6 Sol, GPT-6.1 Sol, and GPT-6 Luna use their official Standard schedules; the OpenCode gpt-6-luna-fast selector sends API model gpt-6-luna with priority service tier.",
-    "For GPT-6 Sol, GPT-6.1 Sol, and GPT-6 Luna, Fast mode (service_tier fast or priority, including the gpt-6.1-sol-fast selector) multiplies applicable Standard rates by 2, including cache and long-context multipliers.",
+    "For GPT-6 Sol, GPT-6.1 Sol, GPT-6.1 Terra, and GPT-6 Luna, Fast mode (service_tier fast or priority, including the gpt-6.1-sol-fast selector) multiplies applicable Standard rates by 2, including cache and long-context multipliers.",
     "gpt-5.6-luna-fast is retained only as a compatibility price for historical host catalog entries; it has no published model page and is exactly twice the GPT-5.6 Luna Standard schedule.",
   ],
 } as const;
@@ -45,6 +47,7 @@ const OPENAI: Readonly<Record<string, Prices>> = {
   "gpt-6-astra": { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
   "gpt-6-sol": { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
   "gpt-6.1-sol": { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
+  "gpt-6.1-terra": { input: 1, cacheRead: 0.05, cacheWrite: 1.25, output: 5 },
   "gpt-6-luna": { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
   "gpt-5.6-sol": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
   "gpt-5.6": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
@@ -69,7 +72,7 @@ export function estimateModelUsageCost(usage: ModelCostUsage): ModelCostEstimate
   const sol61FastAlias = usage.providerID?.toLowerCase() === "openai" && usage.modelID === "gpt-6.1-sol-fast";
   const alias = lunaFastAlias || sol61FastAlias;
   const fast = alias || (["fast", "priority"].includes(usage.serviceTier?.toLowerCase() ?? "") &&
-    usage.providerID?.toLowerCase() === "openai" && ["gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"].includes(usage.modelID ?? ""));
+    usage.providerID?.toLowerCase() === "openai" && ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"].includes(usage.modelID ?? ""));
   if (usage.serviceTier !== undefined && !(fast ? ["standard", "default", "fast", "priority"] : ["standard", "default"]).includes(usage.serviceTier.toLowerCase())) {
     return { status: "unpriced", reason: "unsupported-service-tier" };
   }

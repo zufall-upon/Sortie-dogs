@@ -208,7 +208,8 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff", "
     assert.equal(transports.length, mode === "handoff-retry" ? 4 : handoff ? 3 : 2);
     assert.equal(transports[1]!.threadRequests[0].model, "gpt-6.1-sol");
     if (handoff) {
-      assert.equal(transports[2]!.threadRequests[0].model, "gpt-6-luna");
+      assert.equal(transports[2]!.threadRequests[0].model, "gpt-6.1-terra");
+      assert.equal(transports[2]!.threadRequests[0].serviceTier, undefined);
       assert.equal(mission.attempts![0]!.status, "handed-off");
       // The public Mission budget above also proves the existing single reservation settled once.
       assert.equal(mission.attempts!.filter(item => item.status === "succeeded").length, 1);
@@ -768,12 +769,12 @@ for (const unit of [false, true]) test(`packaged Codex ${unit ? "worker" : "coor
     assert.equal(transports[0].threadRequests[0].model, "gpt-6.1-sol");
     assert.equal(transports[0].turnRequests[0].effort, "xhigh");
     assert.equal(transports[0].turnRequests[0].serviceTier, undefined);
-    assert.equal(child.threadRequests[0].model, unit ? "gpt-6-luna" : "gpt-6.1-sol");
-    assert.equal(child.turnRequests[0].model, unit ? "gpt-6-luna" : "gpt-6.1-sol");
+    assert.equal(child.threadRequests[0].model, unit ? "gpt-6.1-terra" : "gpt-6.1-sol");
+    assert.equal(child.turnRequests[0].model, unit ? "gpt-6.1-terra" : "gpt-6.1-sol");
     assert.equal(child.turnRequests[0].effort, unit ? "max" : "xhigh");
-    assert.equal(child.threadRequests[0].serviceTier, unit ? "priority" : undefined);
-    assert.equal(child.turnRequests[0].serviceTier, unit ? "priority" : undefined);
-    assert.equal((result.sessions[1].model as Json).serviceTier, unit ? "priority" : undefined);
+    assert.equal(child.threadRequests[0].serviceTier, undefined);
+    assert.equal(child.turnRequests[0].serviceTier, undefined);
+    assert.equal((result.sessions[1].model as Json).serviceTier, undefined);
   } finally { await adapter?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

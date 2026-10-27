@@ -210,7 +210,7 @@ release証跡は`_testenv/releases/0.13.5/`。起動確認はtask完遂ではな
 
 PR #152を統合。`plan_units(executor="self")`、`start_direct_unit`、`finish_direct_unit`で
 Coordinator/Operatorが同session内の実装・正式検証を担当できる。既知の単一unitはMission開始と
-計画をまとめられる。既定WorkerはLuna Fast/maxを維持。明示Read行範囲が生成contract全体を
+計画をまとめられる。通常Workerの既定はTerra 6.1 Standard/max。明示Read行範囲が生成contract全体を
 覆う場合は全文を保持する。background起動通知やroot idleをMission完了と取り違えない。
 
 最初の独立Reviewerは、元のnative Taskを終了・再委譲せず、調査→修正→継承check→Git delivery→
@@ -402,7 +402,8 @@ Worker交代や文書編集だけを理由に無関係な検証を繰り返さ�
 
 - `dog-operator`: `openai/gpt-6.1-sol` / `xhigh`
 - `dogs-coordinator`: `openai/gpt-6.1-sol` / `xhigh`
-- `dog-worker-v010`: `openai/gpt-6-luna-fast` / `max`
+- `dog-worker-v010`: `openai/gpt-6.1-terra` / `max`（Standard、Fast/priorityなし）
+- `dog-luna-worker-v010`: `openai/gpt-6-luna-fast` / `max`（専用経路は維持）
 - `dog-scout-v010`: `openai/gpt-6-luna-fast` / `max`
 - `dog-reviewer-v010`: `openai/gpt-6.1-sol` / `xhigh`
 - `dog-advisor-v010`: `openai/gpt-6.1-sol` / `xhigh`

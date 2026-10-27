@@ -3,15 +3,20 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { OperatorMissionRuntime, missionConversationContext } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { nativeContractReadView } from "../dist/plugin/native-contract-read.js";
+import { retainMissionContext, missionContextView } from "../dist/core/mission-context.js";
 
 const exec = promisify(execFile);
 const text = (id: string, role: string, value: string) => ({ info: { id, role }, parts: [{ type: "text", text: value }] });
+// Anonymous one-pixel image; never copy the private incident's requests or images into fixtures.
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", "base64");
+const file = (id: string) => ({ type: "file", id, mime: "image/png", filename: "reference.png", url: `data:image/png;base64,${png.toString("base64")}` });
 async function fixture(run: (directory: string) => Promise<void>) {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-context-"));
@@ -65,6 +70,28 @@ test("public continuity retains old/long text and tool results across cold/parti
   assert.equal(JSON.parse(await readFile(restored.continuity!.sources[0]!.path, "utf8")).entries.length, history.length + 1);
 }));
 
+test("original attachment bytes and message order survive file-only, compacted and cold handoffs without a history gate", async () => fixture(async directory => {
+  const history = [{ info: { id: "references", role: "user" }, parts: [file("first"), file("second")] },
+    text("request", "user", "Compare the reference design with the actual desktop/mobile screens.")];
+  const first = await retainMissionContext(directory, "root", history);
+  assert.equal(first.entries.length, 2, "attachment-only messages must not disappear");
+  const refs = first.source.attachments!;
+  assert.deepEqual(refs.map(ref => [ref.message_id, ref.index, ref.part_id]), [["references", 0, "first"], ["references", 1, "second"]]);
+  assert.equal(refs[0]!.path, refs[1]!.path, "identical bytes share storage, not attachment identity/order");
+  assert.equal(refs[0]!.sha256, createHash("sha256").update(png).digest("hex"));
+  assert.deepEqual(await readFile(refs[0]!.path!), png);
+  assert(!JSON.stringify(first).includes(png.toString("base64")), "handoffs carry read references, not repeated inline payloads");
+  const partial = await retainMissionContext(directory, "root", [text("references", "user", "Compacted text only")], first.source);
+  assert.deepEqual(partial.source.attachments, refs, "the same message without files must not erase retained originals");
+  const cold = await retainMissionContext(directory, "root", [], JSON.parse(JSON.stringify(partial.source)));
+  assert.equal(cold.source.history_available, false);
+  assert.deepEqual(missionContextView(cold.source, cold.entries, ["request"]).attachments, refs);
+  const uri = "https://example.invalid/original.pdf";
+  const external = await retainMissionContext(directory, "root", [{ info: { id: "external", role: "user" },
+    parts: [{ type: "file", url: uri, mime: "application/pdf" }] }]);
+  assert.equal(external.source.attachments![0]!.url, uri, "retain references without fetching or adding an availability gate");
+}));
+
 for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode} passes available context into the native Worker read without a history gate`, async () => fixture(async directory => {
   const actor = mode === "coordinator" ? "coordinator" : "root";
   await exec("git", ["init", "--quiet"], { cwd: directory });
@@ -73,7 +100,8 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     worker: { agent: "dog-worker-v010", parentID: actor },
   };
-  const history: Record<string, Record<string, unknown>[]> = { root: [text("decision", "assistant", "Use existing ready helper; do not reinstall.")] };
+  const history: Record<string, Record<string, unknown>[]> = { root: [text("decision", "assistant", "Use existing ready helper; do not reinstall."),
+    { info: { id: "original-reference", role: "user" }, parts: [file("reference-file")] }] };
   const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
     messages: async ({ path }: { path: { id: string } }) => {
@@ -114,6 +142,11 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
   if (mode !== "unavailable-history") {
     assert.match(native!, /Use existing ready helper; do not reinstall/);
     assert.match(native!, /READY_EXISTING/);
+    const original = continuity.sources.find((source: any) => source.session_id === "root").attachments[0];
+    assert.equal(original.message_id, "original-reference");
+    assert.equal(original.index, 0);
+    assert.match(native!, new RegExp(original.sha256));
+    assert.deepEqual(await readFile(original.path), png, "the actual Worker handoff points at readable original image bytes");
   } else assert.equal(continuity.sources[0].history_available, false);
   assert.match(native!, /Prior failure: wrong helper path/);
   if (actor === "coordinator") {

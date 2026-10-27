@@ -276,7 +276,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   }
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const asset = previewAssets.find(item => item.name === name)!.content;
-    assert.match(asset, /^model: openai\/gpt-6-luna-fast#max$/m);
+    assert.match(asset, name === "dog-worker-v010" ? /^model: openai\/gpt-6.1-terra#max$/m : /^model: openai\/gpt-6-luna-fast#max$/m);
     assert.match(asset, /^permission:\r?\n  bash: allow\r?\n  sortie_v010_bind_write_gate: allow\r?\n  sortie_v010_release_write_gate: allow$/mu);
     if (name === "dog-worker-v010") {
       assert.match(asset, /Pre-change oracles, not new tests/u);
@@ -377,8 +377,9 @@ test("operations defaults do not overwrite an explicit native model variant", as
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
   assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6.1-sol", variant: "xhigh" });
-  const otherRoles = { agent: { "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
+  const otherRoles = { agent: { "dog-worker-v010": { mode: "subagent" }, "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
   await hooks.config(otherRoles);
+  assert.deepEqual(otherRoles.agent["dog-worker-v010"], { mode: "subagent", model: "openai/gpt-6.1-terra", variant: "max" });
   for (const name of ["dog-scout-v010", "dog-luna-worker-v010"] as const) assert.deepEqual(otherRoles.agent[name], {
     mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
   });
@@ -1776,11 +1777,13 @@ test("preview host adapter pins the native worker route and forwards terminal te
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
     "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
+    "gpt-6.1-terra": { id: "gpt-6.1-terra" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never, { modelCatalog: { global: [
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-6-sol", variants: ["low", "medium", "high", "xhigh"] },
     { model: "openai/gpt-6-luna-fast", variants: ["max", "high", "xhigh"] },
+    { model: "openai/gpt-6.1-terra", variants: ["max"] },
   ] } });
   const config = { agent: {
     "dog-operator": { mode: "primary", model: "user/selected", variant: "custom" },
@@ -1788,7 +1791,7 @@ test("preview host adapter pins the native worker route and forwards terminal te
   } };
   await (hooks as typeof hooks & { config(value: Record<string, unknown>): Promise<void> }).config(config);
   assert.deepEqual(config.agent["dog-worker-v010"], {
-    mode: "subagent", model: "openai/gpt-6-luna-fast", variant: "max",
+    mode: "subagent", model: "openai/gpt-6.1-terra", variant: "max",
   });
   assert.deepEqual(config.agent["dog-operator"], { mode: "primary", model: "user/selected", variant: "custom" });
   const explicit = { agent: { "dog-worker-v010": { mode: "subagent", model: "openai/gpt-6-astra", variant: "low" } } };
@@ -1810,15 +1813,16 @@ test("preview host adapter pins the native worker route and forwards terminal te
   assert.equal(premature.text, "status: IN_PROGRESS — accepted criteria remain unproved; same-session recovery required");
 }));
 
-test("preview worker routing keeps Luna Fast max when the V2 host never calls the config hook", async () => fixture(async root => {
+test("preview worker routing uses Terra Standard max without the V2 config hook and leaves Scout unchanged", async () => fixture(async root => {
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-sol": { id: "gpt-6-sol" }, "gpt-6-luna-fast": { id: "gpt-6-luna-fast" },
+    "gpt-6.1-terra": { id: "gpt-6.1-terra" },
   } }] } }) } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client } as never);
   for (const agent of ["dog-worker-v010", "dog-scout-v010"]) {
     const message = { message: { agent, model: { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" } }, parts: [] };
     await hooks["chat.message"]!({ sessionID: `${agent}-child`, messageID: `${agent}-user`, agent }, message);
-    assert.deepEqual(message.message.model, { providerID: "openai", modelID: "gpt-6-luna-fast", variant: "max" }, agent);
+    assert.deepEqual(message.message.model, { providerID: "openai", modelID: agent === "dog-worker-v010" ? "gpt-6.1-terra" : "gpt-6-luna-fast", variant: "max" }, agent);
   }
 }));
 

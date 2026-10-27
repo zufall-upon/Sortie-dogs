@@ -24,7 +24,7 @@ async function fixture(rescueWorks: boolean) {
   await exec("git", ["add", "check.mjs"], { cwd: root });
   await exec("git", ["commit", "--quiet", "-m", "validator"], { cwd: root });
   let models = [
-    { providerID: "openai", id: "gpt-6-luna-fast", enabled: true },
+    { providerID: "openai", id: "gpt-6.1-terra", enabled: true },
   ];
   const identities: Record<string, Record<string, unknown>> = {
     root: { agent: "dog-operator" }, coordinator: { agent: coordinatorRole, parentID: "root" },
@@ -59,7 +59,7 @@ async function fixture(rescueWorks: boolean) {
 
   const dispatch = async (task: Record<string, unknown>, childID: string, callID: string, astra = false) => {
     identities[childID] = { agent: workerRole, parentID: "coordinator", outcome: "succeeded",
-      model: { providerID: "openai", id: astra ? "gpt-6-astra" : "gpt-6-luna-fast", variant: astra ? "low" : "max" } };
+      model: { providerID: "openai", id: astra ? "gpt-6-astra" : "gpt-6.1-terra", variant: astra ? "low" : "max" } };
     const output = { args: structuredClone(task) as Record<string, unknown> };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID }, output);
     const message = await chat(childID, String(output.args.prompt));

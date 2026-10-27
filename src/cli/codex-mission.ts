@@ -8,7 +8,8 @@ Runs the existing Mission Operator, Coordinator, Worker and Reviewer through Cod
 --model and --effort explicitly override all roles; otherwise packaged role defaults apply.
 --permissions explicitly selects an existing native profile; omission retains native defaults.
 Windows uses existing PowerShell 7; --trusted-pwsh pins its absolute executable path.
-The packaged Luna-fast worker maps to native gpt-6-luna with the priority (Fast) service tier.
+The packaged ordinary worker uses native gpt-6.1-terra/max, Standard (no Fast/priority).
+The retained Luna-fast alias maps to native gpt-6-luna with the priority (Fast) service tier.
 Uses existing ChatGPT authentication and native Codex permissions.`;
 
 export async function runCodexMissionCommand(argv: readonly string[]): Promise<number> {
