@@ -364,8 +364,18 @@ function toolContentText(content: unknown): string | undefined {
 }
 
 function replaceToolContent(result: JsonObject, text: string): JsonObject {
-  return typeof result.content === "string" ? { ...result, content: text }
-    : { ...result, content: [{ type: "text", text }] };
+  if (toolContentText(result.content) === text) return result;
+  if (typeof result.content === "string") return { ...result, content: text };
+  let replaced = false;
+  const content = array(result.content).flatMap(item => {
+    if (!record(item) || item.type !== "text" || typeof item.text !== "string") return [item];
+    if (replaced) return [];
+    replaced = true;
+    return [{ ...item, text }];
+  });
+  // Only the legacy textual projection changed. Native file/image blocks must still reach
+  // the host's model-input lowering, including images returned through Code Mode.
+  return { ...result, content: replaced ? content : [...content, { type: "text", text }] };
 }
 
 function assistantText(message: unknown): string | undefined {

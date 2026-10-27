@@ -1357,6 +1357,45 @@ test("V2 return report publishes nothing without a host-rendered succeeded recei
   assert.deepEqual(fixture.synthetic, []);
 });
 
+test("V2 native image results survive after hooks and reach model context without replacing pixels with success text", async () => {
+  const image = { type: "file", mime: "image/png", uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", name: "screenshot.png" };
+  const pdf = { type: "file", mime: "application/pdf", uri: "data:application/pdf;base64,JVBERg==", name: "reference.pdf" };
+  for (const rewrite of [false, true]) {
+    const fixture = contextFixture();
+    const cleanup = await createSortieDogsV2Plugin(async () => ({
+      "tool.execute.after": async (_input, output) => { if (rewrite) output.output = "Updated report"; },
+      "experimental.chat.system.transform": async () => {},
+    })).setup(fixture.context);
+    try {
+      for (const tool of ["read", "execute"]) {
+        const content = [{ type: "text", text: "Image read successfully" }, image, pdf, { type: "text", text: "native detail" }];
+        const metadata = { truncated: false, native: "preserve" };
+        const original = structuredClone(content);
+        const result = { content, metadata };
+        const event = { tool, sessionID: "root", id: `image-${tool}`, status: "completed", input: {}, result };
+        await fixture.toolHooks.get("execute.after")!(event);
+        assert.deepEqual(content, original, "do not mutate the native result while adapting the textual report");
+        assert.equal(event.result.metadata, metadata);
+        assert.deepEqual(event.result.content.filter(part => part.type === "file"), [image, pdf]);
+        for (const file of [image, pdf]) assert(event.result.content.includes(file), "preserve original file blocks, metadata and order");
+        if (!rewrite) assert.equal(event.result, result, "unchanged text must leave the whole multimodal result untouched");
+        else assert.deepEqual(event.result.content, [{ type: "text", text: "Updated report" }, image, pdf]);
+        const messages = [{ role: "tool", content: [{ type: "tool-result", id: event.id, name: tool,
+          result: { type: "content", value: event.result.content } }] }];
+        const request = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+        await fixture.sessionHooks.get("context")!(request);
+        assert.deepEqual(request.messages[0], messages[0], "the outgoing context retains the image-bearing native result");
+      }
+      const filesOnly = { tool: "read", sessionID: "root", id: "files-only", status: "completed", input: {}, result: { content: [image] } };
+      await fixture.toolHooks.get("execute.after")!(filesOnly);
+      assert.deepEqual(filesOnly.result.content, rewrite ? [image, { type: "text", text: "Updated report" }] : [image]);
+      const textOnly = { tool: "read", sessionID: "root", id: "text-only", status: "completed", input: {}, result: { content: "plain text" } };
+      await fixture.toolHooks.get("execute.after")!(textOnly);
+      assert.equal(textOnly.result.content, rewrite ? "Updated report" : "plain text");
+    } finally { cleanup?.(); }
+  }
+});
+
 test("V2 original files reach Mission handoff and acceptance with bytes/order, not prose-only visual claims", async () => {
   const fixture = contextFixture();
   await mkdir(resolve("_testenv"), { recursive: true });
