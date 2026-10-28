@@ -22,7 +22,7 @@ evidence-backed result, not more agents for their own sake.
 **Current release: [v0.14.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.14.7)**
 · [Release notes](docs/release-v0.14.7.md) · [Execution vision](docs/v0.14.0-execution-vision.md)
 
-[Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
+[When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
 [Measured results](#measured-results) · [Configuration](#configuration) · [Documentation](#documentation)
 
 > **Beta:** the package is still stabilizing before 1.0. Both host integrations are
@@ -45,6 +45,26 @@ evidence-backed result, not more agents for their own sake.
   the harness owns bookkeeping. [Instruction design](docs/worker-instruction-design.md).
 - **Coexistence:** explicit invocation, existing authentication and host settings, one shared
   Mission lifecycle. Normal OpenCode/Codex use and user-owned files remain yours.
+
+## When to use Sortie-dogs
+
+Use Sortie with an existing **OpenCode V2 or Codex CLI** when a bounded coding task needs:
+
+- The original goal and constraints retained across investigation, multi-file implementation,
+  validation, review and correction.
+- Either a direct author or delegated work, with edits, valid checks and cumulative budget retained
+  when the author changes.
+- A handoff that distinguishes actual commands, test results, unresolved issues and acceptance
+  from a model's completion claim.
+
+For example, request a bug fix with a regression test, preservation of unrelated local work, and
+delivery as a reviewed PR. Define the required checks and delivery boundary in the request.
+
+**Use the host directly** for ordinary questions or small edits that do not need this lifecycle.
+Sortie is not a replacement for either host, a way to bypass native permissions, or a guarantee of
+unattended completion, lower cost or better benchmark scores. Budget, model access and environment
+requirements still matter. See [host setup](#quick-start) and [evidence and limitations](#measured-results)
+before choosing it.
 
 ## Quick start
 
@@ -158,6 +178,12 @@ subscription limits faster than Standard. Subscription USD cost and remaining al
 inferred from token totals.
 
 ## Measured results
+
+**Evidence and limitations:** these are recorded runs with fixed packages, models, tasks and
+execution conditions, not a general performance guarantee or a controlled comparison with the
+native hosts or other harnesses. Historical results do not measure the current release or its
+current default Worker. Mission acceptance, official task scoring and leaderboard acceptance are
+different outcomes; the records below keep them separate.
 
 ### Codex end-to-end completion
 

@@ -1,10 +1,12 @@
 {
   "name": "sortie-dogs",
   "version": "0.14.7",
-  "description": "Bounded agent harness and validated orchestration loop plugin for OpenCode",
+  "description": "Adaptive execution harness for OpenCode and Codex: goal retention, validation, review, and evidence-backed handoff",
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "codex",
+    "codex-cli",
     "ai-orchestration",
     "multi-agent",
     "agent-harness",
