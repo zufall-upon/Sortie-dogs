@@ -161,13 +161,28 @@ function legacyPart(value: unknown, session: string, message: string): JsonObjec
       ...(output === undefined ? {} : { output }) } };
 }
 
+/** Resolved V2 files carry the original bytes, even when their source URI is no longer readable. */
+function legacyUserParts(text: string, files: unknown, session: string, message: string): JsonObject[] {
+  return [{ id: `${message}-text`, sessionID: session, messageID: message, type: "text", text },
+    ...array(files).flatMap((file, index) => {
+      if (!record(file)) return [];
+      const mime = string(file.mime) ?? "application/octet-stream";
+      const url = typeof file.data === "string" ? `data:${mime};base64,${file.data}`
+        : string(file.uri); // The prompt hook runs before URI resolution.
+      if (!url) return [];
+      return [{ id: `${message}-file-${index}`, sessionID: session, messageID: message, type: "file", mime, url,
+        ...(typeof file.name === "string" ? { filename: file.name } : {}),
+        ...(record(file.source) ? { source: file.source } : {}) }];
+    })];
+}
+
 function legacyMessage(value: unknown, session: string, agent?: string): JsonObject | undefined {
   if (!record(value) || typeof value.id !== "string" || typeof value.type !== "string") return undefined;
   const id = value.id;
   const originalAgent = record(value.metadata) ? string(value.metadata.agent) ?? agent : agent;
   if (value.type === "user") {
     return { info: { id, sessionID: session, role: "user", agent: originalAgent, time: value.time },
-      parts: [{ id: `${id}-text`, sessionID: session, messageID: id, type: "text", text: String(value.text ?? "") }] };
+      parts: legacyUserParts(String(value.text ?? ""), value.files, session, id) };
   }
   if (value.type !== "assistant") {
     if (value.type === "synthetic") return { info: { id, sessionID: session, role: "user", agent: originalAgent, time: value.time },
@@ -349,8 +364,18 @@ function toolContentText(content: unknown): string | undefined {
 }
 
 function replaceToolContent(result: JsonObject, text: string): JsonObject {
-  return typeof result.content === "string" ? { ...result, content: text }
-    : { ...result, content: [{ type: "text", text }] };
+  if (toolContentText(result.content) === text) return result;
+  if (typeof result.content === "string") return { ...result, content: text };
+  let replaced = false;
+  const content = array(result.content).flatMap(item => {
+    if (!record(item) || item.type !== "text" || typeof item.text !== "string") return [item];
+    if (replaced) return [];
+    replaced = true;
+    return [{ ...item, text }];
+  });
+  // Only the legacy textual projection changed. Native file/image blocks must still reach
+  // the host's model-input lowering, including images returned through Code Mode.
+  return { ...result, content: replaced ? content : [...content, { type: "text", text }] };
 }
 
 function assistantText(message: unknown): string | undefined {
@@ -584,7 +609,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       ["dog-reviewer-v010", "gpt-6.1-sol", "xhigh"],
       ["dog-scout-v010", "gpt-6-luna-fast", "max"],
       ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
-      ["dog-worker-v010", "gpt-6-luna-fast", "max"],
+      ["dog-worker-v010", "gpt-6.1-terra", "max"],
     ]) editor.update(name, agent => { agent.model ??= { providerID: "openai", id, variant }; });
     editor.update("dog-reviewer-v010", agent => {
       // Location-only candidate loading may retain released assets. Update only
@@ -784,7 +809,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       selectedChildModels.add(String(event.sessionID));
     }
     const output = { message: { id: String(event.messageID ?? ""), agent: string(info.agent), model },
-      parts: [{ type: "text", text: legacyText }] };
+      parts: legacyUserParts(legacyText, event.prompt.files, String(event.sessionID), String(event.messageID ?? "")) };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
     await reconcileCorrectionPermissions(String(event.sessionID));

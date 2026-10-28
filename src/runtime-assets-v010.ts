@@ -429,7 +429,8 @@ export const runtimeAssets: readonly RuntimeAsset[] = Object.freeze([
       content = content.replace("mode: subagent\n", "mode: subagent\nhidden: true\n");
     }
     if (["dog-worker", "dog-luna-worker", "dog-scout"].includes(asset.name)) {
-      content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6-luna-fast#max\n");
+      const model = asset.name === "dog-worker" ? "openai/gpt-6.1-terra#max" : "openai/gpt-6-luna-fast#max";
+      content = content.replace("mode: subagent\n", `mode: subagent\nmodel: ${model}\n`);
     }
     if (["dog-reviewer", "dog-advisor"].includes(asset.name)) {
       content = content.replace("mode: subagent\n", "mode: subagent\nmodel: openai/gpt-6.1-sol#xhigh\n");

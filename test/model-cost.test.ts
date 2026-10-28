@@ -7,9 +7,10 @@ const estimate = (modelID: string, overrides: Partial<Parameters<typeof estimate
     cacheReadTokens: 100_000, cacheWriteTokens: 10_000, outputTokens: 10_000, reasoningTokens: 5_000, ...overrides });
 
 test("snapshot identifies the checked official sources and Standard assumptions", () => {
-  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-09-30");
+  assert.equal(MODEL_COST_PRICING_SNAPSHOT.checkedAt, "2026-10-27");
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("developers.openai.com")));
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.includes("https://developers.openai.com/api/docs/models/gpt-6.1-sol"));
+  assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.includes("https://developers.openai.com/api/docs/models/gpt-6.1-terra"));
   assert.ok(MODEL_COST_PRICING_SNAPSHOT.sources.some(source => source.includes("platform.claude.com")));
   assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /Standard[\s\S]*5-minute/u);
 });
@@ -53,6 +54,21 @@ test("prices the Luna fast route so a routed worker never audits as unpriced", (
   assert.deepEqual(luna, { status: "priced", usd: 0.0425, longContext: false, priceKey: "openai/gpt-5.6-luna" });
   assert.deepEqual(fast, { status: "priced", usd: 0.085, longContext: false, priceKey: "openai/gpt-5.6-luna-fast" });
   assert.match(MODEL_COST_PRICING_SNAPSHOT.assumptions.join(" "), /gpt-5\.6-luna-fast[\s\S]*twice the GPT-5\.6 Luna Standard schedule/u);
+});
+
+test("prices the Terra Standard worker, long context and explicit native Fast without changing its default", () => {
+  const standard = { status: "priced", usd: 0.1925, longContext: false, priceKey: "openai/gpt-6.1-terra" };
+  assert.deepEqual(estimate("gpt-6.1-terra"), standard);
+  assert.deepEqual(estimate("gpt-6.1-terra", { serviceTier: "default" }), standard);
+  assert.deepEqual(estimate("gpt-6.1-terra", { serviceTier: "standard" }), standard);
+  assert.deepEqual(estimate("gpt-6.1-terra", { serviceTier: "priority" }), {
+    status: "priced", usd: 0.385, longContext: false, priceKey: "openai/gpt-6.1-terra#fast",
+  });
+  assert.deepEqual(estimate("gpt-6.1-terra", { uncachedInputTokens: 272_001, cacheReadTokens: 0, cacheWriteTokens: 0,
+    outputTokens: 10_000, reasoningTokens: 0 }), {
+    status: "priced", usd: 0.619002, longContext: true, priceKey: "openai/gpt-6.1-terra",
+  });
+  assert.deepEqual(estimate("gpt-6.1-terra", { serviceTier: "batch" }), { status: "unpriced", reason: "unsupported-service-tier" });
 });
 
 test("applies the OpenAI long-context band to each request instead of aggregate usage", () => {

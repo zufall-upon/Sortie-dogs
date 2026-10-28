@@ -32,7 +32,7 @@ Use the natural-language Mission route on POSIX and Windows:
 
 Forward `--model`, `--effort`, or `--permissions` only when the user selected those values. Never silently widen the native permission profile. If an existing Mission is reported, resume only its exact root with `--resume`; do not launch replacement work.
 
-Leave `--model` unset to retain role-specific defaults: Sol 6.1 Operator/Coordinator/Reviewer and Luna-fast Worker. The Codex adapter maps the shared Luna-fast alias to native `gpt-6-luna` plus the `priority` (Fast) service tier; it does not alter OpenCode defaults. Fast consumes subscription limits faster than Standard; no metered API fallback is allowed.
+Leave `--model` unset to retain role-specific defaults: Sol 6.1 Operator/Coordinator/Reviewer and ordinary Terra 6.1 Standard/max Worker (no Fast/priority). Scout and dedicated Luna routes remain unchanged. The Codex adapter retains the shared Luna-fast alias mapping to native `gpt-6-luna` plus the `priority` (Fast) service tier. Fast consumes subscription limits faster than Standard; no metered API fallback is allowed.
 
 On Windows the same Mission command resolves existing PowerShell 7 automatically. Add `--trusted-pwsh <absolute-pwsh.exe>` only when an exact existing executable needs to be selected; do not add a separate shell preflight or approval step.
 

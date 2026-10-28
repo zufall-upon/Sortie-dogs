@@ -3,6 +3,20 @@ import test from "node:test";
 
 import { RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
 import { runtimeAssets } from "../src/runtime-assets.ts";
+import { missionOperatorContent } from "../src/runtime-mission-assets.ts";
+import { V010_RUNTIME_PROFILE } from "../src/core/runtime-profile.ts";
+
+test("Mission supervision distinguishes required visual work from optional caveats without restricting ordinary work", () => {
+  const policy = missionOperatorContent(V010_RUNTIME_PROFILE, "test");
+  assert.match(policy, /ordered, message-linked read references\s+to the original bytes, not a descriptive substitute/);
+  assert.match(policy, /Functional PASS, Review PASS, or honestly retaining\s+an unverified caveat does not establish a required visual comparison/);
+  assert.match(policy, /continue authorized retrieval, inspection or correction without waiting for a user reminder or approval/);
+  assert.match(policy, /reuse applicable evidence rather than repeat every check yourself/);
+  assert.match(policy, /Optional caveats and valid alternative verification can permit acceptance/);
+  assert.match(policy, /the word unverified alone\s+is not a stop rule/);
+  assert.match(policy, /no approval gate, proof file, extra Reviewer, universal screenshot duty\s+or pixel-exact matching requirement/);
+  assert.match(policy, /Keep autonomy, efficiency and visibility/);
+});
 
 test("parallel workers preserve descriptor validation command boundaries", () => {
   for (const name of ["dog-worker", "dog-luna-worker"] as const) {

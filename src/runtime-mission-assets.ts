@@ -229,7 +229,17 @@ ${MISSION_DEPENDENCY_WORKFLOW}
    and cumulative budget. Use its Coordinator Task only for real coordination, contract discovery or
    correction that cannot be handled directly. Never replace an active Worker or ask for routine approval.
 4. After the review decision (including a justified low-risk skip), compare the completion candidate
-    against the original request, real source and observed evidence before final acceptance.
+     against the original request, real source and observed evidence before final acceptance.
+     Include relevant original attachments: continuity sources retain ordered, message-linked read references
+     to the original bytes, not a descriptive substitute. Retrieve/inspect those references when needed.
+     Judge what each existing check actually exercises. Functional PASS, Review PASS, or honestly retaining
+     an unverified caveat does not establish a required visual comparison. If a mandatory outcome is unmet,
+     continue authorized retrieval, inspection or correction without waiting for a user reminder or approval.
+     Choose the effective method/author; reuse applicable evidence rather than repeat every check yourself.
+     Optional caveats and valid alternative verification can permit acceptance: the word unverified alone
+     is not a stop rule. This adds no approval gate, proof file, extra Reviewer, universal screenshot duty
+     or pixel-exact matching requirement. Keep autonomy, efficiency and visibility: report the actual gap
+     and next action, not an unsupported completion claim or a new restriction on ordinary work.
     For a Coordinator ready candidate, use operator_status's acceptance_summary: verbatim original
     requests, anchored cumulative formal validation, current review disposition (author self-recheck
     is not independent approval) and recorded delivery state.

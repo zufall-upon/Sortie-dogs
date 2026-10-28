@@ -198,7 +198,7 @@ release证据保存在`_testenv/releases/0.13.5/`；启动不代表任务完成�
 
 整合PR #152。通过`plan_units(executor="self")`、`start_direct_unit`和`finish_direct_unit`，
 Coordinator/Operator可在同session直接实现和正式验证。已知单一unit可合并Mission启动与规划，
-默认Worker仍为Luna Fast/max。明确Read行范围覆盖整个生成contract时保留全文。
+普通Worker默认为Terra 6.1 Standard/max。明确Read行范围覆盖整个生成contract时保留全文。
 background启动确认或root idle仍不代表Mission完成。
 
 最初独立Reviewer可在原native Task中连续调查、修复、执行继承check、Git delivery及明确self-recheck，
@@ -382,7 +382,8 @@ native command、实际workdir、exit、耗时及保存的source binding共同�
 
 - `dog-operator`：`openai/gpt-6.1-sol` / `xhigh`
 - `dogs-coordinator`：`openai/gpt-6.1-sol` / `xhigh`
-- `dog-worker-v010`：`openai/gpt-6-luna-fast` / `max`
+- `dog-worker-v010`：`openai/gpt-6.1-terra` / `max`（Standard，无Fast/priority）
+- `dog-luna-worker-v010`：`openai/gpt-6-luna-fast` / `max`（保留专用route）
 - `dog-scout-v010`：`openai/gpt-6-luna-fast` / `max`
 - `dog-reviewer-v010`：`openai/gpt-6.1-sol` / `xhigh`
 - `dog-advisor-v010`：`openai/gpt-6.1-sol` / `xhigh`

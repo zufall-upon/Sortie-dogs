@@ -71,12 +71,18 @@ Codex threads with existing authentication; no OpenCode settings are imported.
 ### Models and shells
 
 - Operator, Coordinator, Reviewer and Advisor retain native Sol 6.1/xhigh defaults.
-- The shared Luna-fast/max alias maps **only in Codex** to native `gpt-6-luna`, effort `max`,
-  with separate `serviceTier: "priority"` (Fast). OpenCode routing is unchanged. Fast consumes
+- The ordinary Worker defaults to native `gpt-6.1-terra`, effort `max`, Standard (no priority/Fast).
+  OpenCode's corresponding default is `openai/gpt-6.1-terra#max`. Scout and dedicated Luna routes remain unchanged.
+- The retained Luna-fast/max alias maps **only in Codex** to native `gpt-6-luna`, effort `max`,
+  with separate `serviceTier: "priority"` (Fast). Fast consumes
   subscription limits faster than Standard; it does not switch to a metered API.
 - CLI `--model` and `--effort` override all roles explicitly. SDK `roleModels` overrides individual
   roles. Unsupported native model names fail rather than silently selecting another model;
   availability depends on the signed-in account.
+- API-equivalent Terra estimates use Standard $1 input / $0.05 cache read / $1.25 30-minute
+  cache write / $5 output per 1M tokens. Above 272K input/cache tokens, input/cache rates double
+  and output rates multiply by 1.5; explicitly observed Fast/priority doubles applicable rates.
+  This is not subscription billing or remaining allowance, and unknown usage is not zero cost.
 - Commands use `/bin/bash` on POSIX or existing PowerShell 7 with
   `pwsh.exe -NoProfile -NonInteractive -Command` on Windows. The compatibility tool is named
   `bash` on both platforms, but Windows input must be PowerShell syntax.

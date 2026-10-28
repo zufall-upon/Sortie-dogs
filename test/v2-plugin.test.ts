@@ -24,7 +24,7 @@ import { planWorkQuantity } from "../dist/core/work-quantity.js";
 import { publishMissionProgress } from "../dist/plugin/mission-progress.js";
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
-import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
+import { OperatorMissionRuntime, missionPlan, missionAcceptanceSummary } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation, observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
@@ -68,7 +68,7 @@ function contextFixture() {
       remove: async (key: string) => { state.delete(key); },
     }; })(),
     agent: { transform: async () => ({ dispose() {} }), get: async ({ agentID }) => ({ model: {
-      providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol",
+      providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6.1-terra" : "gpt-6-sol",
       variant: agentID === "dog-worker-v010" ? "max" : "xhigh",
     } }) },
     event: { subscribe: async function* ({ signal } = {}) {
@@ -1258,7 +1258,7 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   const fixture = contextFixture();
   const models = new Map<string, { providerID: string; id: string; variant?: string } | undefined>([
     ["dog-operator", undefined], ["dogs-coordinator", undefined],
-    ["dog-worker-v010", undefined], ["dog-reviewer-v010", undefined], ["dog-advisor-v010", undefined],
+    ["dog-worker-v010", undefined], ["dog-luna-worker-v010", undefined], ["dog-reviewer-v010", undefined], ["dog-advisor-v010", undefined],
     ["dog-scout-v010", { providerID: "anthropic", id: "custom", variant: "high" }],
   ]);
   const context: OpenCodeV2Context = { ...fixture.context, agent: { transform: async callback => {
@@ -1274,7 +1274,8 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   try {
     assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
-    assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
+    assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6.1-terra", variant: "max" });
+    assert.deepEqual(models.get("dog-luna-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
     assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-advisor-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-scout-v010"), { providerID: "anthropic", id: "custom", variant: "high" });
@@ -1354,6 +1355,92 @@ test("V2 return report publishes nothing without a host-rendered succeeded recei
     "experimental.text.complete": async () => {},
   })("root");
   assert.deepEqual(fixture.synthetic, []);
+});
+
+test("V2 native image results survive after hooks and reach model context without replacing pixels with success text", async () => {
+  const image = { type: "file", mime: "image/png", uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", name: "screenshot.png" };
+  const pdf = { type: "file", mime: "application/pdf", uri: "data:application/pdf;base64,JVBERg==", name: "reference.pdf" };
+  for (const rewrite of [false, true]) {
+    const fixture = contextFixture();
+    const cleanup = await createSortieDogsV2Plugin(async () => ({
+      "tool.execute.after": async (_input, output) => { if (rewrite) output.output = "Updated report"; },
+      "experimental.chat.system.transform": async () => {},
+    })).setup(fixture.context);
+    try {
+      for (const tool of ["read", "execute"]) {
+        const content = [{ type: "text", text: "Image read successfully" }, image, pdf, { type: "text", text: "native detail" }];
+        const metadata = { truncated: false, native: "preserve" };
+        const original = structuredClone(content);
+        const result = { content, metadata };
+        const event = { tool, sessionID: "root", id: `image-${tool}`, status: "completed", input: {}, result };
+        await fixture.toolHooks.get("execute.after")!(event);
+        assert.deepEqual(content, original, "do not mutate the native result while adapting the textual report");
+        assert.equal(event.result.metadata, metadata);
+        assert.deepEqual(event.result.content.filter(part => part.type === "file"), [image, pdf]);
+        for (const file of [image, pdf]) assert(event.result.content.includes(file), "preserve original file blocks, metadata and order");
+        if (!rewrite) assert.equal(event.result, result, "unchanged text must leave the whole multimodal result untouched");
+        else assert.deepEqual(event.result.content, [{ type: "text", text: "Updated report" }, image, pdf]);
+        const messages = [{ role: "tool", content: [{ type: "tool-result", id: event.id, name: tool,
+          result: { type: "content", value: event.result.content } }] }];
+        const request = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+        await fixture.sessionHooks.get("context")!(request);
+        assert.deepEqual(request.messages[0], messages[0], "the outgoing context retains the image-bearing native result");
+      }
+      const filesOnly = { tool: "read", sessionID: "root", id: "files-only", status: "completed", input: {}, result: { content: [image] } };
+      await fixture.toolHooks.get("execute.after")!(filesOnly);
+      assert.deepEqual(filesOnly.result.content, rewrite ? [image, { type: "text", text: "Updated report" }] : [image]);
+      const textOnly = { tool: "read", sessionID: "root", id: "text-only", status: "completed", input: {}, result: { content: "plain text" } };
+      await fixture.toolHooks.get("execute.after")!(textOnly);
+      assert.equal(textOnly.result.content, rewrite ? "Updated report" : "plain text");
+    } finally { cleanup?.(); }
+  }
+});
+
+test("V2 original files reach Mission handoff and acceptance with bytes/order, not prose-only visual claims", async () => {
+  const fixture = contextFixture();
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-original-files-"));
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", "base64");
+  const data = image.toString("base64");
+  const original = "Compare the attached reference with the actual desktop/mobile screens.";
+  const files = [{ data, mime: "image/png", source: { type: "inline" }, name: "reference.png" },
+    { data: Buffer.from("original text").toString("base64"), mime: "text/plain", source: { type: "uri", uri: "file:///expired-note.txt" }, name: "note.txt" }];
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator" });
+  const messages = [{ id: "original", type: "user", text: original, files },
+    { id: "image-only", type: "user", files: [files[0]] },
+    { id: "worker-result", type: "assistant", content: [{ type: "text", text: "Functional checks PASS; original visual comparison unverified." }] }];
+  fixture.context.message = { list: async () => ({ data: messages, cursor: {} }) };
+  let client: any, admitted: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => {
+    client = input.client;
+    return { "chat.message": async (_chat, output) => { admitted = output; } };
+  }).setup(fixture.context);
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "original", prompt: { text: original, files } });
+    assert.equal(admitted.parts[1].url, `data:image/png;base64,${data}`);
+    const history = (await client.session.messages({ path: { id: "root" } })).data;
+    assert.equal(history[0].parts[2].filename, "note.txt");
+    const runtime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await runtime.capture("root", { id: "original", text: original });
+    await runtime.start("root", [original], false);
+    const state = await runtime.retainContext("root", "root", history);
+    const handoff = await runtime.handoffContext(state) as any;
+    const refs = handoff.continuity.sources[0].attachments;
+    assert.deepEqual(refs.map((ref: any) => [ref.message_id, ref.index]), [["original", 0], ["original", 1], ["image-only", 0]]);
+    assert.deepEqual(await readFile(refs[0].path), image);
+    assert.equal(await readFile(refs[1].path, "utf8"), "original text", "use resolved bytes, not the expired source URI");
+    assert.match(runtime.brief(state), new RegExp(refs[0].sha256), "Coordinator's initial brief includes the original read reference");
+    const summary = await missionAcceptanceSummary(state, undefined, new OperatorRuntime(directory, V010_RUNTIME_PROFILE)) as any;
+    assert.deepEqual(summary.original_requests, [{ id: "original", text: original }]);
+    assert.deepEqual(summary.original_attachments, refs.map((ref: any) => ({ session_id: "root", ...ref })));
+    assert.match(JSON.stringify(handoff), /visual comparison unverified/);
+    assert.match(summary.interpretation, /does not establish a required visual comparison/);
+    assert.match(summary.interpretation, /continue authorized retrieval, inspection or correction without waiting for the user/);
+    assert.match(summary.interpretation, /valid alternative checks and reusable evidence need not block acceptance/);
+    assert.equal(summary.independent_review, null, "attachment transport does not add a Reviewer or fabricate verification");
+    assert.equal(state.phase, "open", "neither retained attachments nor an honest caveat establish completion");
+    assert.deepEqual(messages[0].files, files, "the native message is unchanged");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test("V2 report accounting traverses native pages and retains child model, tool and timing evidence", async () => {
@@ -1802,7 +1889,7 @@ test("V2 child prompt uses its role model before the first request but preserves
     await fixture.sessionHooks.get("prompt")!({ sessionID: "child-one", messageID: "user-1",
       prompt: { text: "You are a subagent spawned by another session.\nfirst task" } });
     assert.deepEqual(fixture.modelSwitches, [{ sessionID: "child-one",
-      model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }]);
+      model: { providerID: "openai", id: "gpt-6.1-terra", variant: "max" } }]);
     await fixture.toolHooks.get("execute.before")!({ tool: "subagent", sessionID: "root", id: "call-2",
       input: { agent: "dog-worker-v010", prompt: "explicit task", model: "anthropic/custom#high" } });
     await fixture.sessionHooks.get("prompt")!({ sessionID: "child-two", messageID: "user-2",
