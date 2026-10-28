@@ -32,13 +32,13 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.equal(fastFirst.runtimeProfile, "v010", "the v0.13 release retains the actual Mission runtime");
   assert.equal(fastFirst.markerFile, V010_RUNTIME_PROFILE.markerFile);
   assert.equal(fastFirst.markerExport, "V010_RUNTIME_ASSET_VERSION");
-  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.14.6-attachment-terra-v1");
+  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.14.7-visible-recovery-v1");
   assert.deepEqual(githubReleaseFlags(fastFirst), ["--target", "main"]);
   assert.equal(missionReleaseSmokeMode(fastFirst.id), "start", "candidate smoke observes Worker/model, not a claimed solution");
   assert.equal(missionReleaseSmokeMode(restored.id), "complete", "historical v012 contract remains intact");
   assert.equal(missionReleaseSmokeMode("stable"), null);
   const autonomous = releaseProfile("v014");
-  validateReleaseProfile(autonomous, "0.14.6", "main", root, isolated);
+  validateReleaseProfile(autonomous, "0.14.7", "main", root, isolated);
   assert.equal(autonomous.runtimeProfile, "v010");
   assert.equal(missionReleaseSmokeMode(autonomous.id), "start");
   assert.throws(() => validateReleaseProfile(fastFirst, "0.12.25", "main", root, isolated), /profile/);
