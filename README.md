@@ -264,6 +264,11 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
 - **Releases:** [v0.14.6](docs/release-v0.14.6.md) · [v0.14.5](docs/release-v0.14.5.md) · [v0.14.4](docs/release-v0.14.4.md) · [v0.14.3](docs/release-v0.14.3.md) · [v0.14.2](docs/release-v0.14.2.md) · [v0.14.1](docs/release-v0.14.1.md) · [v0.14.0](docs/release-v0.14.0.md) · [v0.13.22](docs/release-v0.13.22.md) · [v0.13.21](docs/release-v0.13.21.md) · [v0.13.20](docs/release-v0.13.20.md) · [v0.13.19](docs/release-v0.13.19.md) · [v0.13.18](docs/release-v0.13.18.md) · [v0.13.17](docs/release-v0.13.17.md) · [v0.13.16](docs/release-v0.13.16.md) · [v0.13.15](docs/release-v0.13.15.md) · [v0.13.14](docs/release-v0.13.14.md) · [v0.13.13](docs/release-v0.13.13.md) · [v0.13.12](docs/release-v0.13.12.md) · [v0.13.11](docs/release-v0.13.11.md) · [v0.13.10](docs/release-v0.13.10.md) ·
   [v0.13.9](docs/release-v0.13.9.md) · [All GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases).
 
+## Support
+
+[GitHub Sponsors](https://github.com/sponsors/zufall-upon) — sponsorships become available
+once the maintainer's Sponsors profile is approved and published.
+
 ## Community
 
 [Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) ·
