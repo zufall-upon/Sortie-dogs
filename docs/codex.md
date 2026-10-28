@@ -18,7 +18,7 @@ refuses non-ChatGPT authentication. Recorded trials used Codex 0.160.1 on Ubuntu
 Install in the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.14.7
+npm install --save-dev sortie-dogs@0.14.8
 npx --no-install sortie-dogs codex init .
 npx --no-install sortie-dogs codex mission --help
 ```
