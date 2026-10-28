@@ -295,6 +295,12 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
 [GitHub Sponsors](https://github.com/sponsors/zufall-upon) — sponsorships become available
 once the maintainer's Sponsors profile is approved and published.
 
+[☕ Support development / 開発を応援する](https://ko-fi.com/zufallupon)
+
+If you find this project useful, you can buy me a coffee. Support is entirely optional.
+
+このプロジェクトが役に立ったら、開発を応援できます。支援は完全に任意です。
+
 ## Community
 
 [Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) ·
