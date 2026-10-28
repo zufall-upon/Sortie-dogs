@@ -17,13 +17,15 @@ model routingが必要なtaskだけSortieを起動する。
 
 このページはOpenCodeガイド。Codexにも対応済みで、Ubuntu／Windowsで実Missionの完了・受入を記録している。
 Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。OpenCodeの初期化手順はCodexへ適用しない。
+用途の適合条件と不向きな用途は[README](../README.md#when-to-use-sortie-dogs)、実績と制約は
+[測定結果](../README.md#measured-results)を参照。
 
-**現行release: [v0.13.20](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.13.20)**
-（[release notes](release-v0.13.20.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**現行release: [v0.14.7](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.14.7)**
+（[release notes](release-v0.14.7.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.13.20-review-followup-v1`。
+現行asset markerは`0.14.7-visible-recovery-v1`。
 
-> **Beta:** v0.13.xは安定化中。1.0まではruntime behavior、設定、生成assetが
+> **Beta:** 1.0に向けて安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
 
 ## まず試す
@@ -33,8 +35,8 @@ Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。
 対象projectで実行する。
 
 ```sh
-npm install --save-dev sortie-dogs@latest
-npx sortie-dogs init .
+npm install --save-dev sortie-dogs@0.14.7
+npx --no-install sortie-dogs init .
 ```
 
 既定は`v010` Mission profile。`init`が無関係な既存設定を保持しながら、
@@ -437,7 +439,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.13.20
+npm install --global sortie-dogs@0.14.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -449,7 +451,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.13.20
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.14.7
 sortie-dogs init --global --profile v010
 ```
 
@@ -462,15 +464,15 @@ OpenCode V2の`opencode plugin list` / `opencode plugin update`も使える。�
 Project-local更新はdependencyを置換し、initを再実行してOpenCodeを完全再起動する。
 
 ```sh
-npm install --save-dev sortie-dogs@latest
-npx sortie-dogs init .
+npm install --save-dev sortie-dogs@0.14.7
+npx --no-install sortie-dogs init .
 ```
 
 `init`は冪等。認識済みSortie-owned assetを更新しversionを記録する。user configを保持し、
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.13.20-review-followup-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+`0.14.7-visible-recovery-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
