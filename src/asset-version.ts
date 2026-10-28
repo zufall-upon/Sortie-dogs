@@ -3,8 +3,8 @@
  * installed project marker without importing every asset body.
  */
 export const RUNTIME_ASSET_VERSION = "0.3.89-completion-proof-v1";
-export const V010_RUNTIME_ASSET_VERSION = "0.14.5-unborn-proof-v1";
-export const CODEX_SKILL_ASSET_VERSION = "0.13.11-codex-skill-v2";
+export const V010_RUNTIME_ASSET_VERSION = "0.14.6-attachment-terra-v1";
+export const CODEX_SKILL_ASSET_VERSION = "0.14.6-codex-skill-v1";
 
 export type RuntimeAssetVersion =
   | typeof RUNTIME_ASSET_VERSION
