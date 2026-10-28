@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
@@ -115,4 +118,115 @@ for (const readOnly of [false, true]) test(`returned recoverable mission Worker 
     assert.deepEqual((await ledger()).records.filter(({ event }) => event.kind === "unit.settled"),
       settled.records.filter(({ event }) => event.kind === "unit.settled"));
   } finally { Date.now = clock; await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const actor of ["second", "coordinator"]) for (const action of ["handoff", "cancel", "blocked", "needs-decision"]) test(`${actor} overlapping direct writer manages ${action} without evicting a live owner`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/direct-overlap-"));
+  try {
+    await writeFile(join(directory, "check.mjs"), 'import { readFileSync } from "node:fs"; if (readFileSync("result.txt", "utf8") !== "fixed\\n") process.exit(1);\n');
+    await writeFile(join(directory, "result.txt"), "before\n");
+    const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      first: { agent: "dog-operator" }, second: { agent: "dog-operator" },
+      coordinator: { agent: "dogs-coordinator", parentID: "second" },
+    };
+    const history: Record<string, object[]> = {};
+    const aborted: string[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(agents)
+        .filter(([, value]) => value.parentID === path.id).map(([id, value]) => ({ id, ...value })) }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }),
+      abort: async ({ path }: { path: { id: string } }) => {
+        aborted.push(path.id); agents[path.id]!.outcome = "interrupted"; return { data: true };
+      },
+    } } } as never);
+    const chat = async (id: string, text: string, messageID: string) => hooks["chat.message"]!(
+      { sessionID: id, messageID, agent: agents[id]!.agent },
+      { message: { id: messageID, agent: agents[id]!.agent, model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+        parts: [{ type: "text", text }] });
+    const tool = async (id: string, name: string, args: object = {}, callID = `${id}-${name}`) => {
+      await hooks["tool.execute.before"]!({ sessionID: id, callID, tool: `sortie_v010_${name}` }, { args });
+      return JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id, callID }));
+    };
+    const state = (id: string) => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required(id);
+    const unit = { title: "Fix result", objective: "Write and validate result.txt", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] };
+    let coordinatorTask: object | undefined;
+    for (const id of ["first", "second"]) {
+      await chat(id, "Write result.txt and run the real check", `${id}-request`);
+      const started = await tool(id, "start_mission", { requirements: ["Write and validate result.txt"] });
+      if (id === "second") coordinatorTask = started.task;
+    }
+    if (actor === "coordinator") {
+      const task = { args: structuredClone(coordinatorTask!) } as { args: { prompt: string } };
+      await hooks["tool.execute.before"]!({ sessionID: "second", callID: "coordinator-call", tool: "task" }, task);
+      await chat("coordinator", task.args.prompt, "coordinator-request");
+    }
+    assert.equal((await tool("first", "plan_units", { executor: "self", units: [unit] })).status, "direct-unit-running");
+    await assert.rejects(tool(actor, "plan_units", { executor: "self", units: [unit] }), /mission-direct-activation:manifest-overlap/);
+    const before = await state("second"), missionID = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("second")).id;
+    await chat("second", "お願い", "second-continue");
+    const status = await tool(actor, "operator_status");
+    assert.equal(status.budget.reserved_units, 1);
+    const write = async (id: string, callID: string) => {
+      const args = { filePath: join(directory, "result.txt"), content: "fixed\n" };
+      await hooks["tool.execute.before"]!({ sessionID: id, callID, tool: "write" }, { args });
+      await writeFile(args.filePath, args.content);
+      (history[id] ??= []).push({ info: { role: "assistant", sessionID: id }, parts: [{ type: "tool", tool: "write", callID,
+        state: { status: "completed", input: args, time: { end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ sessionID: id, callID, tool: "write", args }, { output: "written" });
+    };
+    const check = async (id: string, callID: string) => {
+      const args = { command: "node check.mjs", workdir: directory }, start = Date.now();
+      await hooks["tool.execute.before"]!({ sessionID: id, callID, tool: "bash" }, { args });
+      await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: directory });
+      (history[id] ??= []).push({ info: { role: "assistant", sessionID: id }, parts: [{ type: "tool", tool: "bash", callID,
+        state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ sessionID: id, callID, tool: "bash", args }, { output: "", metadata: { exit: 0, status: "completed" } });
+    };
+    if (action !== "handoff") {
+      if (action === "cancel") await tool("second", "cancel_operator", { reason: "plain" });
+      else await tool(actor, "submit_mission", { status: action, summary: "The overlapping writer is still active; retain this incomplete work." });
+      const stopped = await state("second"), settled = await tool("second", "operator_status");
+      assert.equal(stopped.runID, before.runID);
+      assert.equal(stopped.units[0]!.status, action === "cancel" ? "cancelled" : "failed");
+      assert.deepEqual(stopped.units[0]!.evidence, [], "management is never successful validation");
+      assert.equal(settled.mission_id, missionID);
+      assert.equal(settled.budget.reserved_units, 0);
+      assert.equal(settled.budget.consumed_units, 1);
+      assert.deepEqual(aborted, action === "cancel" && actor === "coordinator" ? ["coordinator"] : []);
+      assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "before\n", "management preserves existing artifacts");
+      assert.equal((await state("first")).units[0]!.status, "running", "management does not revoke another owner's writer");
+      await write("first", "first-write-after-management");
+      await check("first", "first-check-after-management");
+      assert.notEqual((await tool("first", "finish_direct_unit")).status, "direct-unit-awaits-validation");
+      assert.equal((await state("first")).units[0]!.status, "succeeded");
+      return;
+    }
+    const handoff = await tool(actor, "plan_units", { executor: "worker", handoff_context: "Continue the same requested work." }, "handoff");
+    assert.ok(handoff.task, JSON.stringify(handoff));
+    assert.equal((await state("second")).runID, before.runID);
+    assert.equal((await state("second")).units[0]!.status, "pending");
+    assert.equal((await state("first")).units[0]!.status, "running", "the live parallel owner remains active");
+    await write("first", "first-write");
+    await check("first", "first-check");
+    assert.notEqual((await tool("first", "finish_direct_unit")).status, "direct-unit-awaits-validation");
+    agents.worker = { agent: "dog-worker-v010", parentID: actor };
+    const task = { args: structuredClone(handoff.task) };
+    await hooks["tool.execute.before"]!({ sessionID: actor, callID: "worker-call", tool: "task" }, task);
+    await chat("worker", task.args.prompt, "worker-request");
+    await write("worker", "worker-write");
+    await check("worker", "worker-check");
+    agents.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ sessionID: actor, callID: "worker-call", tool: "task" },
+      { output: "Done", metadata: { sessionId: "worker" } });
+    const after = await state("second"), settled = await tool("second", "operator_status");
+    assert.equal(after.runID, before.runID);
+    assert.equal(after.units[0]!.status, "succeeded");
+    assert.equal(settled.mission_id, missionID);
+    assert.equal(settled.budget.reserved_units, 0);
+    assert.equal(settled.budget.consumed_units, 1);
+    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "fixed\n");
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
