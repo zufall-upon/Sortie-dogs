@@ -677,6 +677,18 @@ test("completion observations leave startup, status and response-only probe outp
   }
 });
 
+test("current Worker observations require Terra without rewriting historical Luna coverage", () => {
+  const terra = { ...worker, model: { ...worker.model, id: "gpt-6.1-terra" } };
+  for (const version of ["0.14.6", "0.14.7"]) {
+    const observation = { ...directCompletion, package_version: version, models: [terra] };
+    assert.deepEqual(completeProbeObservations(observation), { native_completed: true, worker_model_observed: true });
+    assert.equal(completeProbeObservations({ ...observation, models: [worker] }).worker_model_observed, false);
+    assert.equal(completeProbeObservations({ ...observation, models: [{ ...terra, model: { ...terra.model, variant: "high" } }] }).worker_model_observed, false);
+  }
+  assert.equal(completeProbeObservations({ ...directCompletion, package_version: "0.14.5", models: [worker] }).worker_model_observed, true);
+  assert.equal(completeProbeObservations({ ...directCompletion, models: [terra] }).worker_model_observed, false);
+});
+
 test("normal CLI close observes an already-started Worker before teardown, not just the next interval", () => {
   const observed = { models: [root, { agent: "dog-worker-v010", started_ms: 14_082,
     model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }],

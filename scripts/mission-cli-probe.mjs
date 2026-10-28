@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, spawnPromptCLI, command, missionDatabasePath } from './release-cli.mjs';
+import { installedFixture, startV2ReleaseServer, stopProcessGroup, nativeCLI, spawnPromptCLI, command, missionDatabasePath, missionWorkerModelID } from './release-cli.mjs';
 import { estimateModelUsageCost } from '../dist/plugin/model-cost.js';
 import { nativeRunPending, waitForNativeSettlement } from './native-run-settlement.mjs';
 
@@ -97,7 +97,7 @@ export function completeProbeObservations(result, schemaRejected = false) {
     native_completed: !schemaRejected && result.stopped === false && result.code === 0 &&
       result.mission_phase === 'completed' && result.receipt_status === 'succeeded',
     worker_model_observed: result.models.some(item => item.agent === 'dog-worker-v010' &&
-      item.model?.providerID === 'openai' && item.model.id === 'gpt-6-luna-fast' && item.model.variant === 'max'),
+      item.model?.providerID === 'openai' && item.model.id === missionWorkerModelID(result.package_version) && item.model.variant === 'max'),
   };
 }
 
@@ -482,7 +482,7 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         buildStart ? !result.errors.length && (stopped === 'build-responded' || (!stopped && code === 0)) &&
         result.responses.some(item => item.agent === 'build') &&
         result.models.some(item => item.agent === 'build' && item.model?.id === 'gpt-6.1-sol') :
-        !schemaRejected && worker?.model?.id === 'gpt-6-luna-fast' && worker.model.variant === 'max' &&
+        !schemaRejected && worker?.model?.providerID === 'openai' && worker.model.id === missionWorkerModelID(result.package_version) && worker.model.variant === 'max' &&
         workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
         (mode === 'start' ? stopped === 'worker-started'
           : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
