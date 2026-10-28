@@ -8741,11 +8741,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return settled;
     },
     releaseDirectUnit: async actor => {
-      await releaseWriteGate(actor);
+      const released = JSON.parse(await releaseWriteGate(actor));
+      if (released.status === "denied") throw new Error(`mission-direct-release:${released.reason}`);
       releaseSessionEnforcement(actor);
     },
     assertDirectUnitQuiescent: async actor => {
       if (activeSessions.get(actor)?.inFlightCalls.size) throw new Error("mission-direct-tools-running");
+      if (bindingOperations.has(actor)) throw new Error("mission-direct-binding-in-flight");
     },
     failDirectUnit: async (root, actor) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);

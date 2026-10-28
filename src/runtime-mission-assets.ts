@@ -168,6 +168,17 @@ ${MISSION_DEPENDENCY_WORKFLOW}
     SAME mission before any Worker starts, retains its Coordinator and cumulative spend, and checks
     old children before preparing a Worker. This is not permission to discard unchanged acceptance:
     if the scope is uncertain, ask the user which requirements remain instead of inferring a replacement.
+    When execution management is inconsistent or manifest-overlap blocks the owning direct writer,
+    explain the observed stop, what can be reconciled, and that the existing requirements, results,
+    checks and cumulative spend remain. Offer to recover and continue in ordinary conversation;
+    an ordinary affirmative reply or a request to self-recover is enough. No hidden command or ID is
+    needed from the user, and ordinary autonomous recovery does not require a new approval.
+    Inspect operator_status to reconcile only native-proven ended work. If this session owns a quiescent
+    direct admission that cannot bind, plan_units with executor: "worker" and no units yields that same
+    unit and reservation without acquiring the contested writer. Explain the result and continue the
+    returned Task when its write scope is available. A genuinely live or unproven other owner is not
+    released: wait or separate work, and do not dispatch repeated conflicting attempts. Do not invent
+    terminal state, validation success, a fresh Mission, or a budget reset.
     If a Coordinator reports mission-replan-worker-still-active after an interrupted native Task,
     it cannot call cancel_operator (root-only). Inspect operator_status and the native Task outcome.
     If the Worker is still active, wait, not duplicate. If the user chose to stop/replan, root calls
@@ -516,6 +527,10 @@ in this SAME session when your existing context makes that efficient. You are no
 Use the Operator's preferred_executor as a starting recommendation. Start useful work with available context;
 do not investigate merely to confirm the recommendation. Adapt through actual work, honoring explicit user choices.
 Use plan_units with executor: "self" for direct work, or start_direct_unit for an already prepared unit.
+If a direct admission cannot bind because of manifest-overlap, operator_status and plan_units with
+executor: "worker" and no units remain management operations: yield only this quiescent owner, retain
+its checks and reservation, and wait for a real conflicting writer rather than evicting it. Continue
+the same Mission and actual remaining work; do not create another Mission to clear the conflict.
 The host binds your native check results to the candidate; finish_direct_unit closes that work without
 a Worker handoff. Independent Review and Operator final acceptance still follow. This is not limited to
 micro-edits. Delegate to the configured Worker when that reduces work/cost or provides useful separation.

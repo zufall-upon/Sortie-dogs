@@ -1394,7 +1394,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       const directActor = (await operators.read(root))?.units.find(unit => unit.status === "running" && unit.directExecution)?.directExecution?.actor;
-      if (directActor) await activateDirect(directActor);
+      // Stopping owned execution does not write its artifacts. Its existing reservation
+      // is reconciled by cancelChildren, even when activation never acquired a writer.
       if (retireRoot) retired.add(root);
       if (retireRoot) await control?.stopAutomaticRecovery(root);
       const proposal = await proposals.read(root);
@@ -2101,7 +2102,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             record(part.state.metadata) && ["running", "pending", "unknown"].includes(String(part.state.metadata.status)))) {
           return JSON.stringify({ status: "direct-handoff-awaits-tools", next_action: "Finish the existing native command before handing off this unit; retain its result and continue here or delegate afterwards." });
         }
-        await activateDirect(actor);
+        // Yielding execution is management, not an artifact write. In particular, a
+        // direct admission can exist even when its writer could not bind because another
+        // live owner overlaps. Do not require that contested binding to hand it off.
         const mission = await missions.retainContext(root, actor, history, notes);
         await operators.handoffDirect(root, actor, await missions.handoffContext(mission));
       }
@@ -3278,7 +3281,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           } else if (args.status === "blocked" || args.status === "needs-decision") {
             // This owner is stopping its direct work, not validating it. Keep the
             // failed checks/candidate and settle its existing reservation once.
-            const direct = await activateDirect(context.sessionID);
+            const direct = await directExecution(context.sessionID);
             if (direct) await control!.failDirectUnit(root, context.sessionID);
           }
           const updated = await missions.update(root, state => { state.phase = "submitted";
@@ -3623,7 +3626,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const root = await rootFor(request.sessionID);
         if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
         if (request.tool.startsWith("sortie_") && !request.tool.startsWith(profile.toolPrefix)) throw new Error("runtime-profile-tool-mismatch");
-        const direct = await activateDirect(request.sessionID);
+        // Management can reconcile, yield, stop or report the owner's admission.
+        // They must remain reachable when its artifact binding is the thing in conflict.
+        // Ordinary tools and the parts of planning that actually write still activate it.
+        const direct = request.tool === status || request.tool === planUnits || request.tool === cancel || request.tool === submitMission
+          ? await directExecution(request.sessionID) : await activateDirect(request.sessionID);
         const writer = who.role === "dog-worker" || !!direct || !!await reviewerCorrection(request.sessionID);
         if (who.role === "dog-reviewer" && writer) {
           const correction = (await reviewerCorrection(request.sessionID))!;
