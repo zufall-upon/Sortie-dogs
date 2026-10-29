@@ -45,6 +45,12 @@ V2 は既存の tool-result transport を使う。通常の最終要求には正
 
 自動テストは tool 結果、通常のモデル要求、compaction、既存 final hook の非重複を検証する。これは実 OpenCode CLI/UI の最終表示を実証するものではない。固定された統合候補の実モデルによる最終表示確認は、実運用検証で別途必要。
 
+## PR #306 レビュー指摘の分類
+
+- `discussion_r4409246918`（P2、有効）: ユーザー本文とtext添付にhostのsynthetic説明・展開が混在すると、記憶captureがturn全体を捨てていた。既存 `realAttachmentParts` を共有し、原文本文と添付だけを保存する。metadata付きsynthetic指示等の既存判定は維持。通常hook callerで本文・添付保存と展開文の除外をassert。
+- `discussion_r4409246925`（P2、有効）: Git checkoutのsymlink別名で異なる記憶IDになった。未作成のlease suffixを生成せず、存在する祖先のrealpathから同じIDを計算する。既存common-dir/worktree fixtureにrepository symlinkの同一性assertを追加。別cloneをremote URLで統合しない。
+- review本文は上記2件を参照する自動レビュー受領文。通常コメントはその実行状況要約であり、別の実装指摘ではない。CI成功だけを指摘解消とせず、両件ともsource補正と関連回帰を実施。追加再レビューを完了条件にしない。
+
 ## 実CLI launcherの再利用
 
 隔離setupの `environment.json` を再利用して `node scripts/qualification-turn.mjs <label> <session|-> <message>`。別setupは `SORTIE_QUALIFICATION_ENV`、CLIは `SORTIE_QUALIFICATION_CLI` で指定する。結果はsetupのbaseへ保存し、費用unknownを維持する。`SORTIE_QUALIFICATION_TIMEOUT_MS` は1000〜900000、既定180000。

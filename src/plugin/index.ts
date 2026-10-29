@@ -870,7 +870,7 @@ function safeFilePart(part: Record<string, unknown>): FreshSessionFilePart | und
  * Those derived text parts carry no user authority and are never copied into a fresh prompt.
  * A ticket-bearing synthetic turn (or a turn without real user text and a safe file) stays synthetic.
  */
-function realAttachmentParts(parts: readonly unknown[]): readonly unknown[] {
+export function realAttachmentParts(parts: readonly unknown[]): readonly unknown[] {
   const hasUserText = parts.some((part) => isRecord(part) && part.type === "text" &&
     part.synthetic !== true && typeof part.text === "string" && part.text.trim().length > 0);
   const hasFile = parts.some((part) => isRecord(part) && part.type === "file" && part.synthetic !== true && safeFilePart(part) !== undefined);

@@ -5,7 +5,7 @@ import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
   type CanonicalAgentRole, type RuntimeProfile } from "../core/runtime-profile.js";
-import { SortieDogsPlugin as canonicalPlugin, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
+import { SortieDogsPlugin as canonicalPlugin, realAttachmentParts, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import type { MissionImplementationAdmission, RuntimeBridge } from "./runtime-bridge.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -3494,13 +3494,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const previous = canonicalAgent(profile, selected.get(chat.sessionID));
         if (actual !== undefined) selected.set(chat.sessionID, actual);
         const role = canonicalAgent(profile, actual);
+        const memoryParts = realAttachmentParts(output.parts);
         if (memoryStartup && (role === "dog-coordinator" || role === "dog-operator") &&
-            !output.parts.some(part => record(part) && part.synthetic === true) && !(await identity(chat.sessionID)).parent) {
+            !memoryParts.some(part => record(part) && part.synthetic === true) && !(await identity(chat.sessionID)).parent) {
           const message = chat.messageID ?? output.message.id;
-          if (typeof message === "string" && output.parts.some(part => record(part) && (part.type === "text" || part.type === "file"))) {
+          if (typeof message === "string" && memoryParts.some(part => record(part) && (part.type === "text" || part.type === "file"))) {
             await projectMemory.capture({ id: `${chat.sessionID}:${message}`, session: chat.sessionID, message, actor: "user",
-              text: output.parts.filter(record).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text).join("\n"),
-              attachments: output.parts.filter(record).flatMap(part => part.type === "file" && typeof part.url === "string"
+              text: memoryParts.filter(record).filter(part => part.type === "text" && typeof part.text === "string").map(part => part.text).join("\n"),
+              attachments: memoryParts.filter(record).flatMap(part => part.type === "file" && typeof part.url === "string"
                 ? [{ url: part.url, ...(typeof part.mime === "string" ? { mime: part.mime } : {}), ...(typeof part.filename === "string" ? { filename: part.filename } : {}) }] : [])
             }).then(() => { memoryError = undefined; }).catch(error => { memoryError = String(error); });
           }

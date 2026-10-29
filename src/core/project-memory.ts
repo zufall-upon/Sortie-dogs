@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { durableScopeRoot } from "./durable-scope-root.ts";
 import { configRoot } from "../reflection/config.ts";
 
@@ -33,10 +33,13 @@ const sourceView = (source: MemorySource, fullText = false) => ({ ...source,
 
 /** Stable repository identity uses local Git common-dir, never remote URL or a worktree path. */
 export async function projectMemoryFile(root: string): Promise<string> {
-  const identity = await durableScopeRoot(root) ?? await realpath(root).catch(error => {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return resolve(root);
+  // The lease suffix need not exist yet; canonicalize its existing ancestors
+  // without creating metadata merely to compute the memory identity.
+  const canonical = async (path: string): Promise<string> => realpath(path).catch(async error => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || dirname(path) === path) throw error;
+    return join(await canonical(dirname(path)), basename(path));
   });
+  const identity = await canonical(await durableScopeRoot(root) ?? resolve(root));
   return join(configRoot(), "sortie-dogs", "project-memory", `${hash(identity)}.json`);
 }
 

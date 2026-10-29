@@ -98,6 +98,9 @@ test("project memory scope isolation, competing updates and Git common-dir ident
   await writeFile(join(workspace, ".git"), `gitdir: ${join(common, "worktrees", "w")}\n`);
   await writeFile(join(common, "worktrees", "w", "commondir"), "../..\n");
   assert.equal(await projectMemoryFile(join(root, "repository")), await projectMemoryFile(workspace));
+  const alias = join(root, "repository-alias");
+  await symlink(join(root, "repository"), alias, "dir");
+  assert.equal(await projectMemoryFile(alias), await projectMemoryFile(workspace), "Git directory aliases share the same opt-in and history");
   assert.notEqual(await projectMemoryFile(root), await projectMemoryFile(workspace));
   const file = await projectMemoryFile(root), a = new ProjectMemory(file), b = new ProjectMemory(file);
   await a.configure(true);
@@ -172,6 +175,17 @@ test("opted-in plugin naturally captures image-only turns, recalls after reload 
   await assert.rejects(turn("child", "not-public"), /SORTIE_FRESH_SESSION_REQUIRED/);
   await assert.rejects(turn("root", "synthetic", true), /ticket-required/);
   assert.equal((await store.recall(root)).pending_count, 1);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "text-attachment", agent: "dog-operator" }, {
+    message: { id: "text-attachment", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } }, parts: [
+      { type: "text", text: "Keep these requirements" },
+      { type: "text", text: "User attached notes.txt", synthetic: true },
+      { type: "text", text: "Decoded host expansion", synthetic: true },
+      { type: "file", url: "file:///notes.txt", mime: "text/plain", filename: "notes.txt" },
+    ],
+  });
+  const attached = await store.source("root:text-attachment");
+  assert.equal(attached?.text, "Keep these requirements");
+  assert.deepEqual(attached?.attachments, [{ url: "file:///notes.txt", mime: "text/plain", filename: "notes.txt" }]);
   const reloaded = await create(), system = { system: [] as string[] };
   await reloaded["experimental.chat.system.transform"]!({ sessionID: "new-session" }, system);
   assert.match(system.system.join("\n"), /image-only/);
