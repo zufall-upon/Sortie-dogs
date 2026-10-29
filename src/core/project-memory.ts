@@ -165,13 +165,21 @@ export class ProjectMemory {
     const snapshot = [...current.values()].filter(event => (event.scope === "project" ||
       event.scope === "workspace" && event.context === workspace || event.scope === "mission" && event.context === mission));
     const terms = query.toLocaleLowerCase().split(/\s+/u).filter(Boolean);
-    snapshot.sort((a, b) => terms.filter(term => b.text.toLocaleLowerCase().includes(term)).length -
-      terms.filter(term => a.text.toLocaleLowerCase().includes(term)).length || b.at.localeCompare(a.at));
+    const protectedCondition = (event: MemoryEvent) => event.scope === "project" && event.status === "adopted" &&
+      (event.kind === "vision" || event.kind === "constraint");
+    // Preserve the current adopted purpose on ordinary resume, not obsolete or
+    // merely proposed guidance. Explicit searches retain their relevance ordering.
+    snapshot.sort((a, b) => (terms.length === 0 ? Number(protectedCondition(b)) - Number(protectedCondition(a)) :
+      terms.filter(term => b.text.toLocaleLowerCase().includes(term)).length -
+      terms.filter(term => a.text.toLocaleLowerCase().includes(term)).length) || b.at.localeCompare(a.at));
+    const selected = snapshot.slice(0, 24);
     const pending = state.sources.filter(source => !Object.hasOwn(state.processed, source.id));
     const excerpt = (source: MemorySource) => sourceView(source);
-    return { enabled: true as const, snapshot: snapshot.slice(0, 24), pending: pending.slice(0, 8).map(excerpt),
+    return { enabled: true as const, snapshot: selected,
+      protected_omitted: snapshot.filter(protectedCondition).length - selected.filter(protectedCondition).length,
+      pending: pending.slice(0, 8).map(excerpt),
       pending_count: pending.length, oldest_pending: pending[0]?.observedAt ?? null,
       last_success: Object.values(state.processed).map(item => item.at).sort().at(-1) ?? null,
-      sources: state.sources.filter(source => snapshot.slice(0, 24).some(event => event.source === source.id)).slice(-24).map(excerpt) };
+      sources: state.sources.filter(source => selected.some(event => event.source === source.id)).slice(-24).map(excerpt) };
   }
 }

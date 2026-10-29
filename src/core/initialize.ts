@@ -170,11 +170,12 @@ function classifyVersionTransition(installedValue: string, currentValue: string,
   const adjacentPreOneLine = installed.major === 0 && current.major === 0 &&
     current.minor === installed.minor + 1;
   // v0.11 used a different runtime. The v010 asset migration restores the 0.10
-  // preview into the 0.12–0.14 Mission line without selecting a v0.11 execution path.
+  // preview into the 0.12–0.15 Mission line without selecting a v0.11 execution path.
   const restoredPreview = v010Restore && installed.major === 0 && installed.minor === 10 &&
-    current.major === 0 && [12, 13, 14].includes(current.minor);
-  const retainedMission = v010Restore && installed.major === 0 && installed.minor === 12 &&
-    current.major === 0 && current.minor === 14;
+    current.major === 0 && [12, 13, 14, 15].includes(current.minor);
+  const retainedMission = v010Restore && installed.major === 0 &&
+    ((installed.minor === 12 && current.minor === 14) || ([12, 13].includes(installed.minor) && current.minor === 15)) &&
+    current.major === 0;
   return sameLine || adjacentPreOneLine || restoredPreview || retainedMission ? "compatible-update" : "incompatible";
 }
 

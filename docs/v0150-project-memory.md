@@ -16,6 +16,8 @@ v010の公開ユーザーturn（画像only含む）を安定session/message ID�
 - Event: vision/constraint/decision/unresolved/result、提案/採用/撤回/未検証、理由、supersedes、出典、操作ID。Advisorの既存ID/native callID・採否・効果（改善/不変/悪化/未検証）も関連付け可能。
 - Snapshot: Eventから都度再構築。撤回を除去して古い採用案を復活させない。workspace案をproject visionへ自動昇格しない。
 
+通常の空query想起はscopeと最新訂正を確定した後、現在のadopted project vision/constraintを先に確保し、残枠を既存の新しい判断・結果へ使う。上限24件は維持し、保護対象だけで超える場合は `protected_omitted` に省略数を返す。全て想起したとは主張しない。withdrawn/proposedや他workspace・Mission GOを保護対象へ昇格せず、query指定時の関連度順は維持する。30件の結果追加と訂正・撤回を経た新sessionの実system注入callerも回帰検証する。
+
 既存のMission開始・単位結果・Review・提出・正式完了tool結果と、native Advisor/Scout相談の実応答も別actorのSourceとして保持する。ユーザー発言と偽らず、native outcome・child/model/callIDと意味上の採否/効果を分離。処理済みユーザーSourceを改変せず、その後の結果・採否変更を新SourceからEventへ追加できる。
 
 Mission外の通常PM相談も、既存Advisorの応答・質問・callID・child/modelをSourceへ保持する。背景起動のackだけを相談完了と扱わない。通常Operatorが採否をEventへ関連付けるまで、応答は観測・未処理のままであり、採用や効果をhostが推測しない。

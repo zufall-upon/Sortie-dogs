@@ -113,6 +113,48 @@ test("project memory scope isolation, competing updates and Git common-dir ident
   assert.equal(await readFile(file, "utf8"), previous, "no partial event or processed marker on rejected batch");
 }));
 
+test("ordinary new-session memory retains current adopted project vision and constraints under result saturation", async () => fixture(async root => {
+  const file = await projectMemoryFile(root), store = new ProjectMemory(file);
+  await store.configure(true);
+  const apply = async (id: string, changes: Parameters<ProjectMemory["apply"]>[3]) => {
+    await store.capture({ id, session: "old-session", message: id, actor: "user", text: id, attachments: [] });
+    await store.apply(id, id, "operator", changes);
+  };
+  const vision = { key: "vision", scope: "project" as const, context: "project", kind: "vision" as const,
+    status: "adopted" as const, text: "Preserve existing Mission stability", reason: "user vision" };
+  const constraint = { ...vision, key: "reflection", kind: "constraint" as const, text: "Preserve existing reflection contract" };
+  await apply("initial", [vision, constraint, { ...vision, key: "direction", text: "Create a new Observer" }]);
+  const old = (await store.recall(root)).snapshot!.find(event => event.key === "direction")!;
+  await apply("correction", [{ ...vision, key: "direction", text: "Use existing Operator responsibility", supersedes: old.id }]);
+  const current = (await store.recall(root)).snapshot!.find(event => event.key === "direction")!;
+  await apply("withdraw", [{ ...vision, key: "direction", status: "withdrawn", text: "Observer proposal withdrawn", supersedes: current.id },
+    { ...vision, key: "pm", text: "Keep PM with the existing Operator" },
+    { ...vision, key: "foreign-workspace", scope: "workspace", context: "other-workspace", text: "Foreign workspace only" },
+    { ...vision, key: "foreign-go", scope: "mission", context: "other-mission", text: "Foreign Mission GO only" }]);
+  await apply("results", Array.from({ length: 30 }, (_, i) => ({ ...vision, key: `result-${i}`, kind: "result" as const,
+    text: `Recent result ${i}` })));
+  const resumed = await new ProjectMemory(file).recall(root);
+  assert.equal(resumed.snapshot!.length, 24);
+  for (const key of ["vision", "reflection", "pm"]) assert.ok(resumed.snapshot!.some(event => event.key === key));
+  assert.ok(!resumed.snapshot!.some(event => /foreign-/.test(event.key)));
+  assert.ok(!resumed.snapshot!.some(event => event.key === "direction" && event.status === "adopted"));
+  assert.equal((await store.recall(root, undefined, "Recent result 29")).snapshot![0]!.key, "result-29", "explicit query retains relevance ordering");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { agent: "dog-operator" } }),
+  } } } as never);
+  const system = { system: [] as string[] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "new-session" }, system);
+  const injected = system.system.join("\n");
+  for (const text of [vision.text, constraint.text, "Keep PM with the existing Operator"]) assert.ok(injected.includes(text));
+  assert.ok(!injected.includes("Create a new Observer"));
+  assert.ok(!injected.includes("Use existing Operator responsibility"));
+  assert.ok(!injected.includes("Foreign Mission GO only"));
+  await apply("many-constraints", Array.from({ length: 26 }, (_, i) => ({ ...constraint, key: `constraint-${i}`, text: `Condition ${i}` })));
+  const overflow = await store.recall(root);
+  assert.equal(overflow.snapshot!.length, 24);
+  assert.equal((overflow as { protected_omitted?: number }).protected_omitted, 5, "overflow of current adopted project conditions is observable");
+}));
+
 test("opted-in plugin naturally captures image-only turns, recalls after reload and stops live when off", async () => fixture(async root => {
   const file = await projectMemoryFile(root), store = new ProjectMemory(file);
   const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
