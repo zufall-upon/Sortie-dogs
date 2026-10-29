@@ -135,9 +135,18 @@ test("opted-in plugin naturally captures image-only turns, recalls after reload 
   assert.match(system.system.join("\n"), /image-only/);
   assert.match(system.system.join("\n"), /independent evaluation before revealing/);
   await hooks.tool!.sortie_v010_project_memory.execute({ request_json: JSON.stringify({ action: "apply", source: "root:image-only", operation: "no-change", changes: [] }) }, { sessionID: "root" });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "pm-advisor",
+    args: { subagent_type: "dog-advisor-v010", prompt: "strategy_trigger: material-uncertainty\nGoal: independent assessment" } },
+    { output: "Independent assessment: photographs do not establish wayfinding usability.", metadata: { status: "completed" } });
+  const consultation = (await store.recall(root)).pending.find(source => source.id === "root:consultation:pm-advisor");
+  assert.equal(consultation?.actor, "dog-advisor");
+  assert.match(consultation?.text ?? "", /photographs do not establish wayfinding usability/);
+  assert.match(consultation?.text ?? "", /not adoption, effect or Review PASS/);
   await store.configure(false);
   const retained = await readFile(file, "utf8");
   await turn("root", "off");
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "off-advisor",
+    args: { subagent_type: "dog-advisor-v010", prompt: "question" } }, { output: "off advice", metadata: { status: "completed" } });
   assert.equal(await readFile(file, "utf8"), retained);
   const off = { system: [] as string[] };
   await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, off);

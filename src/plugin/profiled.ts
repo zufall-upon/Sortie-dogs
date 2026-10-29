@@ -4018,6 +4018,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           await core["tool.execute.after"]?.({ ...request, ...(ownership ? { sessionID: ownership.root } : {}) }, output);
           return;
         }
+        // PM consultations outside an active Mission have no taskOwners entry.
+        // Retain their native response too, without creating Mission authority.
+        if (memoryStartup && !ownership && request.tool === "task" && request.callID &&
+            args.subagent_type === profileAgent(profile, "dog-advisor") &&
+            await projectMemory.enabled().catch(error => { memoryError = String(error); return false; }) &&
+            ["dog-coordinator", "dog-operator"].includes((await identity(id)).role ?? "") && await rootFor(id)) {
+          const child = taskChildSessionID(output);
+          const observed = child ? await observedSessionModel(child) : { outcome: "unknown" as const };
+          await rememberObservation(id, `consultation:${request.callID}`, "dog-advisor",
+            JSON.stringify({ callID: request.callID, childSessionID: child, ...observed,
+              prompt: args.prompt, result: returnedOutput,
+              authority: "Advice only; outcome is native observation, not adoption, effect or Review PASS." }));
+        }
         if (ownership?.mission) {
           const current = await missions.required(ownership.root);
           // Native completion can arrive after cancellation/acceptance or an agent switch.
