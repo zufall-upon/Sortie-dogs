@@ -498,9 +498,10 @@ test("v0.13 restore does not accept a v0.11 runtime marker", async () => fixture
   await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
 }));
 
-test("v0.13 refresh accepts the installed v0.12 Mission marker", async () => fixture(async root => {
+for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1"])
+test(`Mission refresh accepts the retained marker ${installed}`, async () => fixture(async root => {
   await initializeProject(root, "v010");
-  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.12.25-mission-continuity-v1\n");
+  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), `${installed}\n`);
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
