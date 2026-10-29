@@ -894,7 +894,7 @@ function freshSessionPrompt(parts: readonly unknown[]): readonly FreshSessionPro
       prompt.push(attachment);
     } else return undefined;
   }
-  return prompt.length > 0 && prompt.some((part) => part.type === "text" && part.text.trim().length > 0)
+  return prompt.length > 0 && prompt.some((part) => part.type === "file" || part.type === "text" && part.text.trim().length > 0)
     ? prompt : undefined;
 }
 

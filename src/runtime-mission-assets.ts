@@ -135,7 +135,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection", "project_memory"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -517,7 +517,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
+${controls(profile, ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit", "project_memory"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 

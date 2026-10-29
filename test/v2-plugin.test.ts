@@ -26,10 +26,40 @@ import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan, missionAcceptanceSummary } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { ProjectMemory, projectMemoryFile } from "../dist/core/project-memory.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation, observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../dist/runtime-mission-assets.js";
+
+test("V2 exposes opted-in Project Memory to existing controllers only and preserves off recall", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "v2-memory-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(root, "config");
+  let cleanup: (() => void) | undefined;
+  try {
+    const fixture = contextFixture();
+    fixture.context.location.directory = root;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    const memory = new ProjectMemory(await projectMemoryFile(root));
+    await memory.configure(true);
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup(fixture.context) as () => void;
+    assert.ok(fixture.tools.some(tool => tool.name === "sortie_v010_project_memory"));
+    for (const agent of ["dog-operator", "dogs-coordinator", "dog-worker-v010", "dog-advisor-v010"]) {
+      const event = { sessionID: "root", agent, system: [], messages: [], tools: { sortie_v010_project_memory: {} } };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.equal(Object.hasOwn(event.tools, "sortie_v010_project_memory"), ["dog-operator", "dogs-coordinator"].includes(agent));
+    }
+    await memory.configure(false);
+    const event = { sessionID: "root", agent: "dog-operator", system: [] as unknown[], messages: [] as unknown[], tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    assert.doesNotMatch(JSON.stringify(event), /SORTIE_PROJECT_MEMORY \(/);
+  } finally {
+    cleanup?.();
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{

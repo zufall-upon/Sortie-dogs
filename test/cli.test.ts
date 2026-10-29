@@ -12,7 +12,8 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--manifest <operation-manifest.json>]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
-  [--format text|json] [--quiet] [--strict]\n`;
+  [--format text|json] [--quiet] [--strict]
+Project Memory (opt-in): sortie-dogs memory on|off|status [project-root]\n`;
 
 interface CliResult {
   exit: number | null;
@@ -43,11 +44,12 @@ async function runCliEntry(
   entry: string,
   args: readonly string[],
   stdin: string = "",
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--experimental-strip-types", entry, ...args], {
       cwd: process.cwd(),
-      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+      env: { ...process.env, NODE_NO_WARNINGS: "1", ...environment },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -72,6 +74,28 @@ function handoff(id: string): object {
     verification: [],
   };
 }
+
+test("Project Memory CLI opt-in, status and off retain project data without touching reflection", async () => {
+  const directory = await fixtureDirectory();
+  try {
+    const environment = { XDG_CONFIG_HOME: join(directory, "config") };
+    const command = (action: string) => runCliEntry(ENTRY, ["memory", action, directory], "", environment);
+    const unset = await command("status");
+    assert.equal(unset.exit, 0, unset.stderr);
+    assert.deepEqual(JSON.parse(unset.stdout), { enabled: false });
+    const on = await command("on");
+    assert.equal(on.exit, 0, on.stderr);
+    assert.equal(JSON.parse(on.stdout).enabled, true);
+    const off = await command("off");
+    assert.equal(off.exit, 0, off.stderr);
+    assert.deepEqual(JSON.parse(off.stdout), { enabled: false });
+    const again = await command("on");
+    assert.equal(again.exit, 0, again.stderr);
+    assert.equal(JSON.parse(again.stdout).pending_count, 0);
+    assert.equal((await command("delete")).exit, 2, "off is not implicit deletion");
+    await assert.rejects(stat(join(directory, "config", "opencode", "sortie-dogs", "reflection")), { code: "ENOENT" });
+  } finally { await clean(directory); }
+});
 
 function handoffWithWarning(): object {
   return {

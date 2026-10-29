@@ -1,4 +1,28 @@
-# v0.15.x: 帰還報告の復元
+# v0.15.x: Project Memory と帰還報告
+
+## Project Memory の有効化
+
+初回だけ `sortie-dogs memory on [project-root]`。その後プロジェクトのプラグインをreload。共有サービスの再起動・global候補差替えは不要。`init` と CLI help にもこの導線を表示する。既存の未設定projectは新しい記憶file・専用tool・記憶注入なし。
+
+`sortie-dogs memory status [project-root]` で現在像、pending件数・最古日時・最終成功を確認。`memory off` は実行中インスタンスでもcapture/recallを停止し、保存データは保持する。最初のopt-in前に生成済みのpluginインスタンスではreloadが必要。再有効化は既存履歴を再利用。削除はoffとは別の明示ファイル削除操作であり、自動削除しない。
+
+保存先はユーザーconfig配下 `opencode/sortie-dogs/project-memory/<local-identity-sha256>.json`。local Git common-dir（既存のdurable scope identity）を使い、同一repositoryの短命worktreeから参照可能。remote URLで別cloneを統合しない。Gitなしでは実project pathを使う。project vision、workspace仮案、Mission今回GOはscope/contextで分離。長期記憶にTTLなし。reflection v1/default/明示設定/TTL/managed同期とは独立し、Advisor助言をreflectionへ混入しない。
+
+## 通常判断の処理
+
+v010の公開ユーザーturn（画像only含む）を安定session/message IDのSourceとして保持。synthetic入力やchild Taskをユーザー原文と扱わない。原文と画像URL/MIMEを保持し、画像を見た・画像が永続的に取得可能という証明にはしない。外部任意会話は自動取得しない。通常Operatorが専用 `sortie_v010_project_memory` 一つへ意味差分を返す。専用の毎turnモデル・新役職・schedulerなし。
+
+- Source: 観測した原文、actor、出典、添付参照、availability。
+- Event: vision/constraint/decision/unresolved/result、提案/採用/撤回/未検証、理由、supersedes、出典、操作ID。Advisorの既存ID/native callID・採否・効果（改善/不変/悪化/未検証）も関連付け可能。
+- Snapshot: Eventから都度再構築。撤回を除去して古い採用案を復活させない。workspace案をproject visionへ自動昇格しない。
+
+既存のMission開始・単位結果・Review・提出・正式完了tool結果と、native Advisor/Scout相談の実応答も別actorのSourceとして保持する。ユーザー発言と偽らず、native outcome・child/model/callIDと意味上の採否/効果を分離。処理済みユーザーSourceを改変せず、その後の結果・採否変更を新SourceからEventへ追加できる。
+
+toolの `request_json` は `action: recall|source|apply`。recallはqueryに関連する現在像と未処理原文を返す。原文excerptが切られた場合はsourceで全文取得。applyはsource/operation/changesを受け、`changes: []` は明示no-change。訂正は新Sourceと現Eventのsupersedesを指定。Snapshot競合なら再想起して訂正し、同じ処理の再送は同一operationで冪等。SourceとEventを混同せず、processedとEventは同一atomic renameでcommitする。排他競合はbounded retry、失敗時はpendingを残す。中断でlockが残った場合はエラーに出たlockのowner停止を確認してそのlockだけ除去し同じ処理を再送。壊れた/将来schemaのデータを空で上書きしない。
+
+次の通常判断/新sessionでpendingとSnapshotを提示して漏れを回復する。意味抽出の完全性・追加費用ゼロは保証しない。モデルの採否/効果記録は実測証拠の代わりではない。PM判断とAdvisor独立評価の改善はopt-inに従属しない。元要求→実物→正式check→Review→delivery→未達を照合し、必要画像は実際に取得評価する。既存native AdvisorへGoal→Constraints→Observed facts→Questionを送り、自己推奨案は初回独立評価後。既存相談上限・モデル差替えを維持し、助言/記憶を権限・Review PASS・正式検証にしない。製品にブラウザ自動操作を必須化しない。
+
+実装fixtureだけを実運用完遂と扱わない。固定統合候補による実OpenCode/実モデルで自然訂正・新session想起・Advisor実派遣・採否効果想起・未完成報告のPM判断・画像評価・off/通常Mission非回帰を別途検証する。Codex側への自然capture接続はこのv010 OpenCode経路とは別で、未検証。
 
 ## 欠落経路と変更時期
 
