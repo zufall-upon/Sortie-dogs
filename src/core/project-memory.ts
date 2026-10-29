@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { durableScopeRoot } from "./durable-scope-root.ts";
 import { configRoot } from "../reflection/config.ts";
 
@@ -27,7 +27,10 @@ const text = (value: unknown, max = 8000): value is string => typeof value === "
 
 /** Stable repository identity uses local Git common-dir, never remote URL or a worktree path. */
 export async function projectMemoryFile(root: string): Promise<string> {
-  const identity = await durableScopeRoot(root) ?? await realpath(root);
+  const identity = await durableScopeRoot(root) ?? await realpath(root).catch(error => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return resolve(root);
+  });
   return join(configRoot(), "sortie-dogs", "project-memory", `${hash(identity)}.json`);
 }
 
