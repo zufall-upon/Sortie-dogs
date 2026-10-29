@@ -26,10 +26,94 @@ import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { OperatorMissionRuntime, missionPlan, missionAcceptanceSummary } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { ProjectMemory, projectMemoryFile } from "../dist/core/project-memory.js";
 import { missionProgressReader } from "../dist/plugin/mission-progress.js";
 import { completedMissionReviewPrompts, observedMissionValidation, observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../dist/runtime-mission-assets.js";
+
+test("V2 exposes opted-in Project Memory to existing controllers only and preserves off recall", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "v2-memory-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(root, "config");
+  let cleanup: (() => void) | undefined;
+  try {
+    const fixture = contextFixture();
+    fixture.context.location.directory = root;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    const memory = new ProjectMemory(await projectMemoryFile(root));
+    await memory.configure(true);
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup(fixture.context) as () => void;
+    assert.ok(fixture.tools.some(tool => tool.name === "sortie_v010_project_memory"));
+    for (const agent of ["dog-operator", "dogs-coordinator", "dog-worker-v010", "dog-advisor-v010"]) {
+      const event = { sessionID: "root", agent, system: [], messages: [], tools: { sortie_v010_project_memory: {} } };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.equal(Object.hasOwn(event.tools, "sortie_v010_project_memory"), ["dog-operator", "dogs-coordinator"].includes(agent));
+    }
+    await memory.configure(false);
+    const event = { sessionID: "root", agent: "dog-operator", system: [] as unknown[], messages: [] as unknown[], tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    assert.doesNotMatch(JSON.stringify(event), /SORTIE_PROJECT_MEMORY \(/);
+  } finally {
+    cleanup?.();
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("V2 Project Memory keeps inline image bytes out of recall and retrieves the original on demand", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "v2-memory-inline-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(root, "config");
+  let cleanup: (() => void) | undefined;
+  try {
+    const fixture = contextFixture();
+    fixture.context.location.directory = root;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    const memory = new ProjectMemory(await projectMemoryFile(root));
+    await memory.configure(true);
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup(fixture.context) as () => void;
+    const bytes = Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", "base64"), Buffer.alloc(3 * 1024 * 1024, 0xa5)]);
+    const data = bytes.toString("base64"), source = "root:inline-reference";
+    const originalText = "Use this original reference, not a generated replacement.\n" + "original detail ".repeat(200);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "inline-reference",
+      prompt: { text: originalText, files: [{ data, mime: "image/png", name: "reference.png" }] } });
+    const pending = await memory.recall(root);
+    assert.ok(JSON.stringify(pending).length < 16000, "automatic pending recall must not contain base64 image bytes");
+    assert.equal(pending.pending[0].attachments[0].url, undefined);
+    assert.equal(pending.pending[0].attachments[0].source, source);
+    assert.equal(pending.pending[0].attachments[0].index, 0);
+    const definition = fixture.tools.find(tool => tool.name === "sortie_v010_project_memory") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    const executeMemory = async (request: object) => JSON.parse((await definition.execute(
+      { request_json: JSON.stringify(request) }, { sessionID: "root" })).content);
+    const original = await executeMemory({ action: "source", source });
+    assert.equal(original.source.text, originalText, "full original text remains available without fetching base64 image payloads");
+    assert.ok(JSON.stringify(original).length < 16000);
+    assert.equal((await memory.source(source))!.attachments[0].url, `data:image/png;base64,${data}`, "projection must not rewrite the retained original");
+    const image = await executeMemory({ action: "attachment", source, index: 0 });
+    assert.equal(image.attachment.mime, "image/png");
+    assert.deepEqual(await readFile(image.attachment.path), bytes, "native read gets the exact original bytes through an on-demand file reference");
+    assert.equal((await executeMemory({ action: "attachment", source, index: 0 })).attachment.path, image.attachment.path);
+    await executeMemory({ action: "apply", source, operation: "retain-reference", changes: [{ key: "original-reference", scope: "project", context: "project",
+      kind: "constraint", status: "adopted", text: "Use the original reference", reason: "User requirement" }] });
+    const processed = await new ProjectMemory(memory.file).recall(root);
+    assert.ok(JSON.stringify(processed).length < 16000, "processed source projection must also omit base64");
+    assert.equal(processed.sources![0].attachments[0].source, source);
+    const event = { sessionID: "root", agent: "dog-operator", system: [] as any[], messages: [], tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    const injection = event.system.find(part => part.text?.startsWith("SORTIE_PROJECT_MEMORY ("));
+    assert.ok(injection && injection.text.length < 16000, "the real model system injection remains bounded for this image-bearing source");
+    assert.ok(!injection.text.includes(data));
+    await memory.configure(false);
+    assert.deepEqual(await executeMemory({ action: "attachment", source, index: 0 }), { attachment: null }, "off must not expose retained image bytes");
+  } finally {
+    cleanup?.();
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
@@ -446,12 +530,12 @@ test("Reviewer model tool order never changes other agents' native tool set or i
   } finally { cleanup?.(); }
 });
 
-test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
+test("V2 final request retains the verbatim host return card; only compaction omits it without mutating history", async () => {
   const fixture = contextFixture();
   const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";
   const packet = { status: "succeeded", run_id: "run", acceptance_fingerprint: "sha256:accepted",
     receipt: { status: "succeeded", goal_id: "goal", evidence_refs: ["sha256:check"] },
-    limitations: ["unknown usage"], return_report: card, return_report_instruction: "do not transcribe" };
+    limitations: ["unknown usage"], return_report: card, return_report_instruction: "Append return_report verbatim once" };
   const result = (name: string, value: unknown) => ({ type: "tool-result", id: name, name, result: value,
     metadata: { keep: true }, providerMetadata: { openai: { keep: true } } });
   const file = { type: "file", uri: "file:///saved-evidence", mime: "text/plain" };
@@ -473,18 +557,29 @@ test("V2 model context omits only the retained completion card, preserving recei
     "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
   })).setup(fixture.context);
   try {
+    const pending = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+    await fixture.sessionHooks.get("compaction")!(pending);
+    assert.deepEqual(pending.messages, original, "compaction before final delivery must retain the current turn's exact card and instruction");
     for (const hook of ["context", "compaction"]) {
-      const event = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+      const event = { sessionID: "root", agent: "dog-operator", system: [],
+        messages: [...messages, { role: "user", content: [{ type: "text", text: "Next request" }] }], tools: {} };
       await fixture.sessionHooks.get(hook)!(event);
       assert.deepEqual(messages, original, "projection never changes saved messages or packet objects");
       for (const index of [2, 3, 4]) {
         const part = event.messages[index].content[0] as any;
         const projected = part.result.type === "json" ? part.result.value
           : JSON.parse(part.result.type === "text" ? part.result.value : part.result.value[0].text);
-        const { return_report: _card, ...preserved } = packet;
-        assert.deepEqual(projected, { ...preserved, return_report_retained: projected.return_report_retained });
-        assert.match(projected.return_report_retained, /saved in this tool result/);
-        assert.equal(projected.return_report, undefined);
+        if (hook === "context") {
+          assert.deepEqual(projected, packet, "the actual final model request must contain the exact host metrics and delivery instruction");
+          assert.equal(projected.return_report, card);
+        } else {
+          const { return_report: _card, return_report_instruction: _instruction, ...preserved } = packet;
+          assert.deepEqual(projected, { ...preserved, return_report_retained: projected.return_report_retained,
+            return_report_instruction: projected.return_report_instruction });
+          assert.match(projected.return_report_retained, /saved in this tool result/);
+          assert.match(projected.return_report_instruction, /Do not regenerate or repeat/);
+          assert.equal(projected.return_report, undefined);
+        }
         assert.deepEqual(part.metadata, { keep: true });
         assert.deepEqual(part.providerMetadata, { openai: { keep: true } });
         assert.equal(Object.getPrototypeOf(event.messages[index]), Object.getPrototypeOf(messages[index]));

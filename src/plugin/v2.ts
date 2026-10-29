@@ -830,7 +830,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   });
   if (hooks["experimental.chat.system.transform"]) await context.session.hook("context", async event => {
     reconcileOperatorContext(event);
-    if (Array.isArray(event.messages)) event.messages = completionReportModelMessages(event.messages);
+    // V2 has no public assistant-message/part update API. The normal completion
+    // request must retain the host-authored card for verbatim final delivery;
+    // the terminal observer below is accounting-only, not a display transport.
     await background.resume(String(event.sessionID ?? ""));
     await background.reconcile(String(event.sessionID ?? ""));
     if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);

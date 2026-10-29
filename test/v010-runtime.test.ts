@@ -29,6 +29,7 @@ import { createProjectPaths, createWriteGate, normalizeCommand } from "../dist/p
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
+import { ProjectMemory, projectMemoryFile } from "../dist/core/project-memory.js";
 import { decoratePreviewHeadings, receiptBoundTerminalText } from "../dist/plugin/receipt-presentation.js";
 import { inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
   MAX_ACCEPTANCE_CRITERIA } from "../dist/core/acceptance-continuity.js";
@@ -49,6 +50,166 @@ async function fixture(run: (root: string) => Promise<void>) {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test("project memory commits semantic corrections and processed markers atomically across sessions", async () => fixture(async root => {
+  const file = await projectMemoryFile(root), store = new ProjectMemory(file);
+  assert.equal(await store.enabled(), false);
+  await store.capture({ id: "ignored", session: "s", message: "m", actor: "user", text: "off", attachments: [] });
+  await assert.rejects(readFile(file), { code: "ENOENT" });
+  await store.configure(true);
+  const capture = (id: string, value: string) => store.capture({ id, session: "old-session", message: id, actor: "user", text: value,
+    attachments: [{ url: "file:///original.png", mime: "image/png" }] });
+  await capture("s1", "Keep the game UX");
+  await capture("s1", "Keep the game UX");
+  const change = { key: "return-report", scope: "project" as const, context: "project", kind: "vision" as const,
+    status: "adopted" as const, text: "Keep game UX", reason: "original requirement" };
+  assert.equal(await store.apply("s1", "op1", "operator", [change]), "applied");
+  assert.equal(await store.apply("s1", "op1", "operator", [change]), "already-processed");
+  await assert.rejects(store.apply("s1", "other", "operator", []), /operation-conflict/);
+  const before = await readFile(file, "utf8");
+  await capture("s2", "Withdraw previous direction");
+  const current = (await store.recall(root)).snapshot![0]!;
+  await assert.rejects(store.apply("s2", "op2", "operator", [change]), /snapshot-conflict/);
+  assert.equal((await store.recall(root)).pending_count, 1);
+  assert.equal(await store.apply("s2", "op2", "operator", [{ ...change, status: "withdrawn", supersedes: current.id,
+    reason: "user correction", consultation: { id: "advice", callID: "native-call", disposition: "rejected", effect: "unverified" } }]), "applied");
+  const resumed = await new ProjectMemory(file).recall("new-workspace", undefined, "game");
+  assert.equal(resumed.snapshot![0]!.status, "withdrawn");
+  assert.equal(resumed.snapshot![0]!.consultation!.effect, "unverified");
+  assert.equal(resumed.sources![0]!.attachments[0]!.url, "file:///original.png");
+  assert.equal(resumed.pending_count, 0);
+  assert.ok(resumed.last_success);
+  assert.notEqual(await readFile(file, "utf8"), before);
+  await capture("s3", "Ordinary unrelated chat");
+  assert.equal(await store.apply("s3", "op3", "operator", []), "no-change");
+  await store.configure(false);
+  const retained = await readFile(file, "utf8");
+  assert.deepEqual(await store.recall(root), { enabled: false });
+  await capture("s4", "Must not capture");
+  assert.equal(await readFile(file, "utf8"), retained);
+  await store.configure(true);
+  assert.equal((await store.recall(root)).snapshot![0]!.status, "withdrawn");
+}));
+
+test("project memory scope isolation, competing updates and Git common-dir identity", async () => fixture(async root => {
+  const common = join(root, "repository", ".git"), workspace = join(root, "worktree");
+  await mkdir(join(common, "worktrees", "w"), { recursive: true });
+  await mkdir(workspace);
+  await writeFile(join(workspace, ".git"), `gitdir: ${join(common, "worktrees", "w")}\n`);
+  await writeFile(join(common, "worktrees", "w", "commondir"), "../..\n");
+  assert.equal(await projectMemoryFile(join(root, "repository")), await projectMemoryFile(workspace));
+  const alias = join(root, "repository-alias");
+  await symlink(join(root, "repository"), alias, "dir");
+  assert.equal(await projectMemoryFile(alias), await projectMemoryFile(workspace), "Git directory aliases share the same opt-in and history");
+  assert.notEqual(await projectMemoryFile(root), await projectMemoryFile(workspace));
+  const file = await projectMemoryFile(root), a = new ProjectMemory(file), b = new ProjectMemory(file);
+  await a.configure(true);
+  for (const id of ["one", "two", "three"]) await a.capture({ id, session: "s", message: id, actor: "user", text: id, attachments: [] });
+  const change = { key: "trial", scope: "workspace" as const, context: root, kind: "decision" as const,
+    status: "proposed" as const, text: "workspace trial only", reason: "experiment" };
+  const settled = await Promise.allSettled([a.apply("one", "o1", "a", [change]), b.apply("two", "o2", "b", [change])]);
+  assert.equal(settled.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal((await a.recall("another-workspace")).snapshot!.length, 0);
+  assert.equal((await a.recall(root)).snapshot![0]!.status, "proposed");
+  const previous = await readFile(file, "utf8");
+  await assert.rejects(a.apply("three", "invalid", "a", [{ ...change, key: "valid" }, { ...change, status: "bogus" } as never]), /invalid-change/);
+  assert.equal(await readFile(file, "utf8"), previous, "no partial event or processed marker on rejected batch");
+}));
+
+test("ordinary new-session memory retains current adopted project vision and constraints under result saturation", async () => fixture(async root => {
+  const file = await projectMemoryFile(root), store = new ProjectMemory(file);
+  await store.configure(true);
+  const apply = async (id: string, changes: Parameters<ProjectMemory["apply"]>[3]) => {
+    await store.capture({ id, session: "old-session", message: id, actor: "user", text: id, attachments: [] });
+    await store.apply(id, id, "operator", changes);
+  };
+  const vision = { key: "vision", scope: "project" as const, context: "project", kind: "vision" as const,
+    status: "adopted" as const, text: "Preserve existing Mission stability", reason: "user vision" };
+  const constraint = { ...vision, key: "reflection", kind: "constraint" as const, text: "Preserve existing reflection contract" };
+  await apply("initial", [vision, constraint, { ...vision, key: "direction", text: "Create a new Observer" }]);
+  const old = (await store.recall(root)).snapshot!.find(event => event.key === "direction")!;
+  await apply("correction", [{ ...vision, key: "direction", text: "Use existing Operator responsibility", supersedes: old.id }]);
+  const current = (await store.recall(root)).snapshot!.find(event => event.key === "direction")!;
+  await apply("withdraw", [{ ...vision, key: "direction", status: "withdrawn", text: "Observer proposal withdrawn", supersedes: current.id },
+    { ...vision, key: "pm", text: "Keep PM with the existing Operator" },
+    { ...vision, key: "foreign-workspace", scope: "workspace", context: "other-workspace", text: "Foreign workspace only" },
+    { ...vision, key: "foreign-go", scope: "mission", context: "other-mission", text: "Foreign Mission GO only" }]);
+  await apply("results", Array.from({ length: 30 }, (_, i) => ({ ...vision, key: `result-${i}`, kind: "result" as const,
+    text: `Recent result ${i}` })));
+  const resumed = await new ProjectMemory(file).recall(root);
+  assert.equal(resumed.snapshot!.length, 24);
+  for (const key of ["vision", "reflection", "pm"]) assert.ok(resumed.snapshot!.some(event => event.key === key));
+  assert.ok(!resumed.snapshot!.some(event => /foreign-/.test(event.key)));
+  assert.ok(!resumed.snapshot!.some(event => event.key === "direction" && event.status === "adopted"));
+  assert.equal((await store.recall(root, undefined, "Recent result 29")).snapshot![0]!.key, "result-29", "explicit query retains relevance ordering");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { agent: "dog-operator" } }),
+  } } } as never);
+  const system = { system: [] as string[] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "new-session" }, system);
+  const injected = system.system.join("\n");
+  for (const text of [vision.text, constraint.text, "Keep PM with the existing Operator"]) assert.ok(injected.includes(text));
+  assert.ok(!injected.includes("Create a new Observer"));
+  assert.ok(!injected.includes("Use existing Operator responsibility"));
+  assert.ok(!injected.includes("Foreign Mission GO only"));
+  await apply("many-constraints", Array.from({ length: 26 }, (_, i) => ({ ...constraint, key: `constraint-${i}`, text: `Condition ${i}` })));
+  const overflow = await store.recall(root);
+  assert.equal(overflow.snapshot!.length, 24);
+  assert.equal((overflow as { protected_omitted?: number }).protected_omitted, 5, "overflow of current adopted project conditions is observable");
+}));
+
+test("opted-in plugin naturally captures image-only turns, recalls after reload and stops live when off", async () => fixture(async root => {
+  const file = await projectMemoryFile(root), store = new ProjectMemory(file);
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: any) => ({ data: { agent: "dog-operator", ...(path.id === "child" ? { parentID: "root" } : {}) } }),
+  } } } as never);
+  const unset = await create();
+  assert.equal(unset.tool!.sortie_v010_project_memory, undefined);
+  await store.configure(true);
+  const hooks = await create();
+  assert.ok(hooks.tool!.sortie_v010_project_memory);
+  const turn = (sessionID: string, messageID: string, synthetic = false) => hooks["chat.message"]!({ sessionID, messageID, agent: "dog-operator" }, {
+    message: { id: messageID, agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } }, parts: [{ type: "file", url: "file:///image.png", mime: "image/png", ...(synthetic ? { synthetic: true } : {}) }],
+  });
+  await turn("root", "image-only");
+  await assert.rejects(turn("child", "not-public"), /SORTIE_FRESH_SESSION_REQUIRED/);
+  await assert.rejects(turn("root", "synthetic", true), /ticket-required/);
+  assert.equal((await store.recall(root)).pending_count, 1);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "text-attachment", agent: "dog-operator" }, {
+    message: { id: "text-attachment", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } }, parts: [
+      { type: "text", text: "Keep these requirements" },
+      { type: "text", text: "User attached notes.txt", synthetic: true },
+      { type: "text", text: "Decoded host expansion", synthetic: true },
+      { type: "file", url: "file:///notes.txt", mime: "text/plain", filename: "notes.txt" },
+    ],
+  });
+  const attached = await store.source("root:text-attachment");
+  assert.equal(attached?.text, "Keep these requirements");
+  assert.deepEqual(attached?.attachments, [{ url: "file:///notes.txt", mime: "text/plain", filename: "notes.txt" }]);
+  const reloaded = await create(), system = { system: [] as string[] };
+  await reloaded["experimental.chat.system.transform"]!({ sessionID: "new-session" }, system);
+  assert.match(system.system.join("\n"), /image-only/);
+  assert.match(system.system.join("\n"), /independent evaluation before revealing/);
+  await hooks.tool!.sortie_v010_project_memory.execute({ request_json: JSON.stringify({ action: "apply", source: "root:image-only", operation: "no-change", changes: [] }) }, { sessionID: "root" });
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "pm-advisor",
+    args: { subagent_type: "dog-advisor-v010", prompt: "strategy_trigger: material-uncertainty\nGoal: independent assessment" } },
+    { output: "Independent assessment: photographs do not establish wayfinding usability.", metadata: { status: "completed" } });
+  const consultation = (await store.recall(root)).pending.find(source => source.id === "root:consultation:pm-advisor");
+  assert.equal(consultation?.actor, "dog-advisor");
+  assert.match(consultation?.text ?? "", /photographs do not establish wayfinding usability/);
+  assert.match(consultation?.text ?? "", /not adoption, effect or Review PASS/);
+  await store.configure(false);
+  const retained = await readFile(file, "utf8");
+  await turn("root", "off");
+  await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "off-advisor",
+    args: { subagent_type: "dog-advisor-v010", prompt: "question" } }, { output: "off advice", metadata: { status: "completed" } });
+  assert.equal(await readFile(file, "utf8"), retained);
+  const off = { system: [] as string[] };
+  await hooks["experimental.chat.system.transform"]!({ sessionID: "root" }, off);
+  assert.doesNotMatch(off.system.join("\n"), /SORTIE_PROJECT_MEMORY \(/);
+  assert.match(off.system.join("\n"), /SORTIE_PM_JUDGMENT/);
+  await assert.rejects(hooks.tool!.sortie_v010_project_memory.execute({ request_json: JSON.stringify({ action: "apply", source: "root:image-only", operation: "no-change", changes: [] }) }, { sessionID: "root" }), /memory-off/);
+}));
 function plan() {
   return { schema_version: "0.1", acceptance: ["Preserve all accepted behavior", "Do not modify the oracle"], acceptance_proof: [["first", "second"], ["first", "second"]],
     source_refs: ["fixture:original-request"], goal_declaration: {
@@ -351,9 +512,10 @@ test("v0.13 restore does not accept a v0.11 runtime marker", async () => fixture
   await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
 }));
 
-test("v0.13 refresh accepts the installed v0.12 Mission marker", async () => fixture(async root => {
+for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1"])
+test(`Mission refresh accepts the retained marker ${installed}`, async () => fixture(async root => {
   await initializeProject(root, "v010");
-  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.12.25-mission-continuity-v1\n");
+  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), `${installed}\n`);
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
@@ -450,6 +612,8 @@ test("every preview role preserves user language and protocol keys without dupli
 test("preview keeps canonical game-style guidance and does not decorate unproved text as success", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission")));
+  assert.doesNotMatch(primary, /do not transcribe the card/u, "the shipped system policy must not contradict verbatim return-report delivery");
+  assert.match(primary, /append that host-authored Markdown verbatim exactly once/u);
   for (const icon of ["🎯", "📊", "🔍", "➡️", "🐾"]) assert.ok(primary.includes(icon));
   const unfinished = "## 確認結果\n検証は未完。";
   assert.equal(receiptBoundTerminalText(unfinished, undefined), unfinished);
@@ -2288,7 +2452,9 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
   assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
-  assert.match(complete.return_report_instruction, /do not transcribe this card/);
+  assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
+  assert.match(complete.return_report_instruction, /No host-side card will be appended/);
+  assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 

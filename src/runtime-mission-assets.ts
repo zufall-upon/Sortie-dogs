@@ -135,7 +135,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection"])}
+${controls(profile, ["start_mission", "plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "operator_next", "operator_status", "extend_mission_budget", "expand_unit", "review_mission", "repair_review", "complete_mission", "cancel_operator", "reflection", "project_memory"])}
 ---
 # ${profileAgent(profile, "dog-coordinator")}
 
@@ -310,9 +310,10 @@ ${MISSION_RESULT_HOLD_POLICY}
 
 ${MISSION_REFLECTION_WORKFLOW}
 
-Retain 🐾 Sortie presentation. The host-authored measured return panel is retained in complete_mission's
-tool result. Give a concise final outcome and key checks; do not transcribe the card or spend another model
-turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
+Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
+Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
+Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
+spend another model turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
 existing user authorization and project gates; npm publication remains manual.
 `;
 }
@@ -517,7 +518,7 @@ permission:
     ${profileAgent(profile, "dog-advisor")}: allow
 tools:
   "sortie_*": false
-${controls(profile, ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit"])}
+${controls(profile, ["plan_units", "start_direct_unit", "finish_direct_unit", "operator_next", "operator_status", "expand_unit", "review_mission", "repair_review", "submit_mission", "skip_mission_consultation", "retry_mission_unit", "rescue_mission_unit", "project_memory"])}
 ---
 # ${profileAgent(profile, "dog-operator")}
 

@@ -40,7 +40,8 @@ const USAGE = `Usage: sortie-dogs lint <handoff.json> [<handoff.json> ...]
   [--manifest <operation-manifest.json>]
   [--changed-paths-from <file|->]
   [--changed-path <path> ...]
-  [--format text|json] [--quiet] [--strict]`;
+  [--format text|json] [--quiet] [--strict]
+Project Memory (opt-in): sortie-dogs memory on|off|status [project-root]`;
 const INIT_USAGE = `Usage: sortie-dogs init [project-root] [--profile stable|v010]
        sortie-dogs init --global [--profile stable|v010]
 This beta package defaults to the v010 profile.`;
@@ -265,6 +266,17 @@ function render(output: readonly CliDiagnostic[], format: OutputFormat): string 
 }
 
 export async function run(argv: readonly string[]): Promise<number> {
+  if (argv[0] === "memory") {
+    if (!["on", "off", "status"].includes(argv[1] ?? "") || argv.length > 3 || argv[2]?.startsWith("-")) {
+      process.stderr.write("Usage: sortie-dogs memory on|off|status [project-root]\nOpt-in once per local project; off retains data and stops capture/recall.\n"); return 2;
+    }
+    try {
+      const memoryModule: typeof import("../core/project-memory.js") = await import(`../core/project-memory.${import.meta.url.endsWith(".ts") ? "ts" : "js"}`);
+      const memory = new memoryModule.ProjectMemory(await memoryModule.projectMemoryFile(resolve(argv[2] ?? ".")));
+      if (argv[1] !== "status") await memory.configure(argv[1] === "on");
+      process.stdout.write(JSON.stringify(await memory.recall(resolve(argv[2] ?? "."))) + "\n"); return 0;
+    } catch (error) { process.stderr.write(`Project Memory: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
+  }
   if (argv[0] === "codex") {
     if (argv[1] === "init") {
       if (argv[2] === "--help" && argv.length === 3) { process.stdout.write(`${CODEX_INIT_USAGE}\n`); return 0; }
@@ -354,6 +366,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       if (initialized.preservedLegacyPaths.length > 0) {
         process.stdout.write(`Preserved legacy runtime files: ${initialized.preservedLegacyPaths.join(", ")}.\n`);
       }
+      if (profile === "v010") process.stdout.write("Optional Project Memory: sortie-dogs memory on [project-root]. Off stops capture/recall and retains data. Reload the project plugin after first opt-in.\n");
       const override = profile === "v010"
         ? await initializer.coordinatorModelOverride(global ? target! : resolve(initArgs[0] ?? process.cwd()), global).catch(() => undefined)
         : undefined;

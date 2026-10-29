@@ -84,7 +84,7 @@ export const releaseSmokeWorkerStarted = (events, records, unitID) =>
   events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed') ||
   records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
 /** v0.13 only needs native Worker start and actual model identity at the CLI gate. */
-export const missionReleaseSmokeMode = profileId => ['v013', 'v014'].includes(profileId) ? 'start' : profileId === 'v012' ? 'complete' : null;
+export const missionReleaseSmokeMode = profileId => ['v013', 'v014', 'v015'].includes(profileId) ? 'start' : profileId === 'v012' ? 'complete' : null;
 // Keep retained/pre-versioned observations on their historical ordinary Worker route.
 export const missionWorkerModelID = version => typeof version === 'string' && compareReleaseVersions(version, '0.14.6') >= 0
   ? 'gpt-6.1-terra' : 'gpt-6-luna-fast';

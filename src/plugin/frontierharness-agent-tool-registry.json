@@ -14,7 +14,7 @@
   "roles": {
     "dog-coordinator": {
       "tool_families": {
-        "mission_lifecycle": ["start_mission", "operator_next", "operator_status", "extend_mission_budget", "complete_mission", "cancel_operator", "reflection"],
+        "mission_lifecycle": ["start_mission", "operator_next", "operator_status", "extend_mission_budget", "complete_mission", "cancel_operator", "reflection", "project_memory"],
         "unit_execution": ["plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "expand_unit"],
         "review": ["review_mission", "repair_review"]
       },
@@ -51,7 +51,7 @@
     "dog-advisor": {"tool_families": {}, "children": []},
     "dog-operator": {
       "tool_families": {
-        "mission_lifecycle": ["operator_next", "operator_status", "submit_mission", "skip_mission_consultation"],
+        "mission_lifecycle": ["operator_next", "operator_status", "submit_mission", "skip_mission_consultation", "project_memory"],
         "unit_execution": ["plan_units", "start_direct_unit", "finish_direct_unit", "retry_mission_unit", "rescue_mission_unit", "expand_unit"],
         "review": ["review_mission", "repair_review"]
       },
