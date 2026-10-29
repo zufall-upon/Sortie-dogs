@@ -22,8 +22,11 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
       size = ids.size;
       for (const session of sessions) if (ids.has(session.parent_id)) ids.add(session.id);
     }
+    // V2 2.2 removed session_pending; queued delivery remains in session_inbox.
+    // Only this known optional table is omitted, never swallow other read errors.
+    const hasPending = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_pending'").get());
     for (const session of sessions.filter(s => ids.has(s.id))) {
-      if (db.prepare('SELECT 1 FROM session_pending WHERE session_id = ? LIMIT 1').get(session.id) ||
+      if ((hasPending && db.prepare('SELECT 1 FROM session_pending WHERE session_id = ? LIMIT 1').get(session.id)) ||
           db.prepare('SELECT 1 FROM session_inbox WHERE session_id = ? LIMIT 1').get(session.id)) return true;
       const row = db.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq DESC LIMIT 1").get(session.id);
       if (!row) {
