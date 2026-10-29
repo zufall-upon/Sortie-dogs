@@ -67,7 +67,7 @@ mock callbackテスト、formatterテスト、ここに記載したsource確認�
 
 正式receiptとhost生成 `return_report` が正本。モデルには逐語で一度だけ最終本文へ添付させる。
 V2 finalizerはaccounting-onlyで、後から本文を永続化するものではない。
-今回、正常経路での最終本文・保存・実画面までの到達は未検証。
+初回候補では正常経路の到達は未検証だった。後述の通常Missionで最終本文と保存までを確認し、実UIはroot確認を残す。
 既存のcontext保持と逐語指示は維持するが、指示追加だけを配送保証とは呼ばない。
 
 ## 相談と採否
@@ -80,7 +80,7 @@ V2 finalizerはaccounting-onlyで、後から本文を永続化するもので�
 理由：追加モデル呼出し・偽Task・履歴編集を増やさずDirectにも適用できるため。
 効果：静的案内と回帰テストの範囲のみ。実表示効果は未検証。これはChatGPT相談や独立SourceReviewの代替ではない。
 
-本Coordinatorのbrowserは `browser.disconnected`。再試行・再送せず、rootの接続済み窓口で具体candidateと観測を既存ChatGPT会話へ戻す作業を残す。
+本Coordinatorのbrowserは `browser.disconnected`。再試行・再送せず、rootの接続済み窓口へ具体candidate相談を引き継いだ（下記のとおり相談完了）。
 
 2026-10-29追記：rootが既存会話へPR #311の具体source・観測・制約・未達を送信し、回答「Sortie-dogs PR #311 — 独立評価と残作業の推奨」を全文回収した。
 採用：一発完遂の三重表示を「静かな一撃 — 一発完遂」に集約、未完了の連携称号を未授与へ変更、詳細根拠はCOST/PACK/戦歴の後へ移動。
@@ -88,6 +88,50 @@ V2 finalizerはaccounting-onlyで、後から本文を永続化するもので�
 将来称号を恣意的に授与せず構想保持する案も採用。通常本文を正式な進捗経路として実証し、リアルタイムTask字幕の修復や自動補完保証とは区別する。
 この小補正は関連46件PASS（build 8.925秒、test 0.240秒）。実表示効果は別途確認が必要。
 rootは正規pair済みOpenCode WebUIから実本文を閲覧可能になった。候補の正規読込・同一Mission保存確認後、rootが実UIを確認する。スクリーンショット取得は未成立であり成功と扱わない。
+
+## 正規候補の通常Mission実行（保存まで確認）
+
+`scripts/return-report-ui-run.mjs` はprepare/run/collect/verifyを共有するrunner。
+runはlaunch.jsonが存在すれば新規起動を拒否し、既存結果はcollectで収集する。
+既存serviceを利用し、isolated projectのlocal pluginだけを正規読込。global設定・共有hostの起動/再起動・差替えはしない。
+collectorの修正は再収集のみで確認し、実Missionを再起動していない。
+
+- 候補runtime source：`e7b5fd51bbb15b1542fc96eac734661d3d481be1`。
+- 固定local package SHA-256：`4c1a6f2ec7e6811505a012b300fa35cdc1ff426e02e0a2f8cc0d7fed9de94eae`。公開済み同versionの成果物ではなく、今回だけのlocal candidate。
+- host：OpenCode 2.2.0、既存pid 2101816、`http://127.0.0.1:4096`。
+- local loaded adapter SHA-256：`74cfa9db283594da18cee05eca88dd31d171cfa0162c054ec57e5fe757c4d24c`（adapter本体は今回無変更）。
+- local module SHA-256：sortie-debrief `a27d250a21c71003c8f6a1c97f3252440aeb7d77bb3d529fa5c84f6d82763d55`、run-metrics `2d1f02e9aa876cf7edac71b089e797a94f3e9cb48c140c0656274b25ee6f6861`。setup/observerに読込locationとhashを保存。実パネルも補正後の表示を含む。
+- run command：`node scripts/return-report-ui-run.mjs run _testenv/return-report-live/run-1`、exit 0。timeout/cost停止なし。
+- root session：`ses_e7836423bffeVnKlsx1CqqpK4A`、Operator実モデル `openai/gpt-6.1-sol#xhigh`。
+- child session：`ses_e7835ef6dffeTLqzwTbbUW667g`、Coordinator直実行、実モデル `openai/gpt-6.1-sol#default`。実装Workerの新規派遣なし。
+- Mission：`mission-ca7bfecf-9a79-4a6e-8b47-ef98dfc27c4b`。実際の観測inputから `delivery-observation.md` を作り、既存 `node verify.mjs` がPASS。架空ledgerや手書きassistant出力は使っていない。
+- 正式receiptの任務時間：2026-10-29T13:11:48.294Z〜13:13:09.947Z（81.653秒）。最終応答生成・収集時間とは別。
+- 全native assistant usageの換算観測：$0.2297492、未換算0件。host費用0計上は無料を意味しない。最終パネルは最終応答前の$0.2027であり、collectorの全履歴額と置き換えない。外部相談を含む全費用はunknown。
+
+### 同じ実行の進捗対応
+
+hostの `work_quantity_display` → その後の通常assistant textへの逐語転記を、API保存履歴で照合。
+
+- root：0% `call_f256aea33203404b934b76005d58dfbd` → `msg_187ca10df001fQAzQvR3khNcfz`。
+- Coordinator：61% `call_d4fdd0ed67044b36a41f3a607d73c171` → `msg_187ca7bf1001aIpbrZNMx3MyEV`。
+- Coordinator：78% `call_53bb0add506f45dc837afe655553d117` → `msg_187ca947d001D6EQ6v48ojZKru`。
+- Coordinator：92% `call_54651bc9aa144ffd843f3c5a4739a5a9` → `msg_187cab042001w60fwWkA0Dbtqz`。
+- root正式完了：100% `call_525426954db54c0b9ac845a75a3996de` → `msg_187cafecc0010Cf3xBf44FoS03`。
+
+これらは実行中に算出された全体作業量。今回の文書化入力にある過去の0%→38%とは別の値であり、混同しない。
+rootの背景Task字幕自体は未修復。中間値はCoordinatorの通常本文に保存されており、そのsessionの正規UIで確認する。
+追加の進捗専用turn・model callなし。Directには偽Taskを作っていない。
+
+### 正式帰還の対応
+
+rootの `complete_mission` call `call_525426954db54c0b9ac845a75a3996de`、message `msg_187caedd2001K1D2j0VCUjHpnu` が正式receipt succeededとhost `return_report` を返した。
+その同じpanel bytesが最終assistant message `msg_187cafecc0010Cf3xBf44FoS03` に1回だけ存在することをverifyで確認。
+外側のコードフェンスで全panelを包まず、通常のdetailsと内部text fenceを保持。
+モデルの前文「候補表示確認済み」は実UI証拠ではない。collectorは明示的に `ui_verified:false` とし、rootの実UI確認を残す。
+一般的な転記漏れの自動補完保証や、ネイティブDesktop画像取得に成功したという意味ではない。
+
+証拠：`_testenv/return-report-live/run-1/{setup,launch,terminal,observation,native-history}.json`、`native-observer.jsonl`、`final.md`。
+package・ログ・usageを保持。projectのlocal `.opencode`/node_modulesはroot実UI確認用にまだ必要なので、不要とみなして削除しない。
 
 ## 元PRレビュー回収
 

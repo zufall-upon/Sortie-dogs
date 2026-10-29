@@ -157,10 +157,14 @@ if (mode === 'run' || mode === 'collect') {
   const finals = root.messages.filter(m => m.type === 'assistant' && m.finish === 'stop' && text(m.content).trim());
   const hostLabels = tools.flatMap(p => { try {
     const v = JSON.parse(text(p.state?.content)); return v.work_quantity_display ? [{ sessionID: p.sessionID,
-      callID: p.id, label: v.work_quantity_display, scope_id: v.work_quantity?.scope_id }] : [];
+      messageID: p.messageID, callID: p.id, label: v.work_quantity_display, scope_id: v.work_quantity?.scope_id }] : [];
   } catch { return []; } });
-  const deliveredLabels = hostLabels.filter(x => histories.some(h => h.info.id === x.sessionID && h.messages.some(m =>
-    m.type === 'assistant' && text(m.content).includes(x.label))));
+  const deliveredLabels = hostLabels.flatMap(x => {
+    const h = histories.find(h => h.info.id === x.sessionID);
+    const sourceIndex = h.messages.findIndex(m => m.id === x.messageID);
+    const matches = h.messages.slice(sourceIndex + 1).filter(m => m.type === 'assistant' && text(m.content).includes(x.label));
+    return matches.length ? [{ ...x, assistant_message_ids: matches.map(m => m.id) }] : [];
+  });
   const models = histories.flatMap(h => h.messages.filter(m => m.type === 'assistant').map(m => ({ sessionID: h.info.id, agent: m.agent, model: m.model })));
   let usd = 0, unpriced = 0;
   for (const h of histories) for (const m of h.messages) if (m.type === 'assistant') {
@@ -176,7 +180,8 @@ if (mode === 'run' || mode === 'collect') {
     root_state: await client.session.get({ sessionID: launch.root }), models: [...new Map(models.map(m => [m.sessionID + JSON.stringify(m.model), m])).values()],
     host_labels: hostLabels, delivered_labels: deliveredLabels, completions, final_message_id: final?.id ?? null,
     exact_return_report_occurrences: occurrences, priced_usd: usd, unpriced_requests: unpriced,
-    ui_verified: false, ui_note: 'Saved native messages only; root must inspect the normal WebUI.' };
+    collector_sha256: hash(await readFile(new URL(import.meta.url))),
+    ui_verified: false, ui_note: 'Saved native messages only; root must inspect the normal WebUI. Model prose claiming display confirmation is not UI evidence.' };
   await save('observation.json', observation);
   await writeFile(join(output, 'final.md'), finalText);
   console.log(JSON.stringify({ root: launch.root, final_message_id: observation.final_message_id, delivered_labels: deliveredLabels,
@@ -191,9 +196,10 @@ if (mode === 'verify') {
   assert(o.models.length > 0 && o.models.every(m => m.model?.providerID === 'openai' && m.model?.id === 'gpt-6.1-sol'));
   assert(o.completions.some(c => c.value.status === 'succeeded' || c.value.phase === 'completed' || c.value.receipt?.status === 'succeeded'));
   assert.equal(o.exact_return_report_occurrences, 1, 'Formal host return_report must be copied once byte-for-byte');
+  const n = a => Number(/(\d+)%/u.exec(a.label)?.[1]);
   assert(o.delivered_labels.some((a, i, all) => all.some((b, j) => i !== j && a.scope_id === b.scope_id &&
-    /\d+%/u.exec(a.label)?.[0] !== /\d+%/u.exec(b.label)?.[0])),
-    'Two different whole-request labels must reach ordinary native assistant text in the same Mission');
+    a.sessionID === b.sessionID && n(a) > 0 && n(a) < 100 && n(b) > 0 && n(b) < 100 && n(a) !== n(b))),
+    'Two different intermediate whole-request labels must follow their host results in ordinary native assistant text of the same session/Mission');
   const final = await readFile(join(output, 'final.md'), 'utf8');
   assert(final.includes('TACTICAL DESK / 作戦卓'));
   assert((await readFile(join(project, 'delivery-observation.md'), 'utf8')).includes('未修復'));
