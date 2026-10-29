@@ -99,7 +99,7 @@ export function v013StartupReceipt(result) {
   assert(worker?.model?.providerID === 'openai' && worker.model.id === workerID && worker.model.variant === 'max' &&
     Number.isFinite(worker.started_ms) && worker.started_ms >= 0,
     `Mission Worker must actually start on ${workerID === 'gpt-6.1-terra' ? 'Terra Standard' : 'Luna Fast'}/max`);
-  assert(/^0\.(?:13|14)\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
+  assert(/^0\.(?:13|14|15)\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
     'v013 candidate version and installed Mission marker do not match');
   return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
     sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,

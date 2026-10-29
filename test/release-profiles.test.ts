@@ -88,6 +88,8 @@ test("v0.14.6 startup requires Terra max while historical releases still require
     { sessionID: "ses_worker", agent: "dog-worker-v010", started_ms: 10_000,
       model: { providerID: "openai", id: "gpt-6.1-terra", variant: "max" } }] };
   assert.equal(v013StartupReceipt(observed).workerModel.id, "gpt-6.1-terra");
+  assert.equal(v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.15.0-project-memory-v1" }).version, "0.15.0");
+  assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.14.9-optional-kofi-v1" }), /marker/u);
   for (const model of [
     { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" },
     { providerID: "openai", id: "gpt-6.1-terra", variant: "high" },
