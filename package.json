@@ -1,6 +1,6 @@
 {
   "name": "sortie-dogs",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Adaptive execution harness for OpenCode and Codex: goal retention, validation, review, and evidence-backed handoff",
   "keywords": [
     "opencode",
