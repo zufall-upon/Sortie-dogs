@@ -13,14 +13,20 @@ export function returnReportPanel(rendered: string): string | undefined {
 type ModelObject = Record<string, unknown>;
 const modelObject = (value: unknown): value is ModelObject => value !== null && typeof value === "object" && !Array.isArray(value);
 
-/** Request-only projection: the full host card remains in persisted native tool history. */
+/** Compaction-only projection: normal final delivery still needs the original host card. */
 export function completionReportModelMessages(messages: readonly unknown[]): unknown[] {
+  // A summary may run between completion and the final reply. Never discard the
+  // current turn's card there: it is still the only supported V2 delivery path.
+  let lastUser = -1;
+  messages.forEach((message, index) => { if (modelObject(message) && message.role === "user") lastUser = index; });
   const packet = (value: unknown): unknown => {
     if (!modelObject(value) || value.status !== "succeeded" || !modelObject(value.receipt) ||
         value.receipt.status !== "succeeded" || typeof value.return_report !== "string" ||
         returnReportPanel(value.return_report) === undefined) return value;
     const { return_report: _card, ...rest } = value;
-    return { ...rest, return_report_retained: "Full host card saved in this tool result; reply with concise outcome and key checks, without regenerating it." };
+    return { ...rest,
+      return_report_instruction: "Historical host card retained in native tool history. Do not regenerate or repeat it from this summary; presentation is not unfinished Mission work.",
+      return_report_retained: "Full host card saved in this tool result; not reproduced in the compaction summary." };
   };
   const text = (value: unknown): unknown => {
     if (typeof value !== "string") return value;
@@ -29,7 +35,8 @@ export function completionReportModelMessages(messages: readonly unknown[]): unk
       return compact === original ? value : JSON.stringify(compact);
     } catch { return value; }
   };
-  return messages.map(message => {
+  return messages.map((message, index) => {
+    if (index > lastUser) return message;
     if (!modelObject(message) || message.role !== "tool" || !Array.isArray(message.content)) return message;
     let changed = false;
     const content = message.content.map(part => {

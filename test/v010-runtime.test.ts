@@ -2288,7 +2288,9 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
   assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
-  assert.match(complete.return_report_instruction, /do not transcribe this card/);
+  assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
+  assert.match(complete.return_report_instruction, /No host-side card will be appended/);
+  assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 

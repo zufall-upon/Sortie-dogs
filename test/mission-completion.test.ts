@@ -384,6 +384,12 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     const completed = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
+    assert.match(completed.return_report_instruction, /Append return_report verbatim once/u);
+    assert.match(completed.return_report_instruction, /unknown values and caveats/u);
+    const delivered = { text: `Result collected.\n\n${completed.return_report}` };
+    await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "operator-final", partID: "operator-text" }, delivered);
+    assert.equal(delivered.text, `Result collected.\n\n${completed.return_report}`,
+      "the tool-result transport must not append a second host panel to the Operator's final reply");
     if (failure) {
       assert.equal(completed.operation.status, "execution-failed", "Mission receipt success is not operation success");
       assert.equal(completed.operation.process_succeeded, false);

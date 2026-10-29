@@ -446,12 +446,12 @@ test("Reviewer model tool order never changes other agents' native tool set or i
   } finally { cleanup?.(); }
 });
 
-test("V2 model context omits only the retained completion card, preserving receipt and native history", async () => {
+test("V2 final request retains the verbatim host return card; only compaction omits it without mutating history", async () => {
   const fixture = contextFixture();
   const card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\nfull host metrics\n\n</details>";
   const packet = { status: "succeeded", run_id: "run", acceptance_fingerprint: "sha256:accepted",
     receipt: { status: "succeeded", goal_id: "goal", evidence_refs: ["sha256:check"] },
-    limitations: ["unknown usage"], return_report: card, return_report_instruction: "do not transcribe" };
+    limitations: ["unknown usage"], return_report: card, return_report_instruction: "Append return_report verbatim once" };
   const result = (name: string, value: unknown) => ({ type: "tool-result", id: name, name, result: value,
     metadata: { keep: true }, providerMetadata: { openai: { keep: true } } });
   const file = { type: "file", uri: "file:///saved-evidence", mime: "text/plain" };
@@ -473,18 +473,29 @@ test("V2 model context omits only the retained completion card, preserving recei
     "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
   })).setup(fixture.context);
   try {
+    const pending = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+    await fixture.sessionHooks.get("compaction")!(pending);
+    assert.deepEqual(pending.messages, original, "compaction before final delivery must retain the current turn's exact card and instruction");
     for (const hook of ["context", "compaction"]) {
-      const event = { sessionID: "root", agent: "dog-operator", system: [], messages, tools: {} };
+      const event = { sessionID: "root", agent: "dog-operator", system: [],
+        messages: [...messages, { role: "user", content: [{ type: "text", text: "Next request" }] }], tools: {} };
       await fixture.sessionHooks.get(hook)!(event);
       assert.deepEqual(messages, original, "projection never changes saved messages or packet objects");
       for (const index of [2, 3, 4]) {
         const part = event.messages[index].content[0] as any;
         const projected = part.result.type === "json" ? part.result.value
           : JSON.parse(part.result.type === "text" ? part.result.value : part.result.value[0].text);
-        const { return_report: _card, ...preserved } = packet;
-        assert.deepEqual(projected, { ...preserved, return_report_retained: projected.return_report_retained });
-        assert.match(projected.return_report_retained, /saved in this tool result/);
-        assert.equal(projected.return_report, undefined);
+        if (hook === "context") {
+          assert.deepEqual(projected, packet, "the actual final model request must contain the exact host metrics and delivery instruction");
+          assert.equal(projected.return_report, card);
+        } else {
+          const { return_report: _card, return_report_instruction: _instruction, ...preserved } = packet;
+          assert.deepEqual(projected, { ...preserved, return_report_retained: projected.return_report_retained,
+            return_report_instruction: projected.return_report_instruction });
+          assert.match(projected.return_report_retained, /saved in this tool result/);
+          assert.match(projected.return_report_instruction, /Do not regenerate or repeat/);
+          assert.equal(projected.return_report, undefined);
+        }
         assert.deepEqual(part.metadata, { keep: true });
         assert.deepEqual(part.providerMetadata, { openai: { keep: true } });
         assert.equal(Object.getPrototypeOf(event.messages[index]), Object.getPrototypeOf(messages[index]));
