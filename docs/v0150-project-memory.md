@@ -62,3 +62,13 @@ OpenCode 2.2.0/SOLで、自然訂正・新session想起・off、独立Advisorの
 保存観測は `_testenv/v0150-qualification/`（Git対象外）。`native-mission.json` の成功完了toolから取得した `return_report` と、同じsessionの最終assistant本文（`normal-mission-final.md`）を完全一致で照合し、一度だけ含まれることを確認した。対象goalは `sha256:38e3e624e7d3ca652df059fa1ea92d0df1dae5efc4e55567da434a357c594b64`。実装・Advisor・独立Reviewerのnative assistant modelは全て `openai/gpt-6.1-sol`。報告パネルの費用予測は累計実費と同一視せず、今回の費用はunknownのまま保持する。
 
 再起動時のunit process-defectと、製品のsource検証失敗は別である。完了済みの実モデル推論を再実行せず、残存native記録を照合する。`ca0590e` の一般PM相談応答capture補正後は統合候補の正式検証が必要。開発中ChatGPTの結果相談、独立source Review、PRレビュー回収・main統合・固定成果物によるreleaseは別途完了が必要で、CLI小成果やunitの成功だけでは満たさない。
+
+## 安定版からの移行と障害復帰
+
+`afc7839` は、明示許可されたsymlink自体の更新とリンク先書込みを区別し、無許可ターゲットやsymlink directory経由の逸脱拒否を保持する。prepared Missionの部分登録は同一run/goalで冪等復帰し、登録完了前には実行をadmitしない。作業unit予算とvalidation累計を分離し、過去消費・証拠・重複防止を保持したまま正規revisionを可能にした。関連回帰と独立Review PASSは当該変更範囲の証拠であり、出荷承認ではない。
+
+`scripts/stability-qualification.mjs` は既存の隔離0.14.9環境を固定候補へ更新し、11ファイルと明示reflection設定の保持、Memory off、実SOLによる中断後の同一Mission/unit復帰、正式検証・独立Review・Acceptance・帰還報告一度を確認した。baseline 51.077秒、中断59.237秒（exit 130）、resume 73.749秒。controllerの早期server停止とV2 2.2にない`session_pending`参照は補正し、保持DBから再収集した。モデル推論は再実行していない。失敗履歴・費用unknownは`_testenv/v0150-stability/summary.json`に保持する。
+
+不足していた非空reflectionは同runnerの`reflection-migration`で別専用fixtureを使用する。0.14.9の正規`sortie_v010_reflection` APIでproject entryを作成・同scope再発を記録し、更新前のsystem transformでid/hits=2とprevention本文を観測する。その後、既存固定候補（SHA-256 `20e126e74906284c64feeae5779edd5872700988a850f58c6e482422c41e78c4`）をinstall/initし、候補ではrecordしない。保存bucket・明示opt-in設定・caller-visible注入の同一性、実行中のkill switch停止と再有効化を確認した。設定や注入を更新後のsetupで供給する試験ではない。`reflection-migration/result.json`と`reflection-*.json`に実command・exit・elapsedと前後結果を保存する。モデル呼出しなし。これは保存データと公開plugin hookの互換性確認であり、モデルが指示に従うこと、GUI描画、全障害からの普遍的復帰は保証しない。
+
+過去qualificationと今回の非空reflection証拠は変更せず保持する。最終統合mainの固定artifact/preflight/full、exact-commit Windows CI、PR各種レビュー回収とrootによるChatGPTへの結果返却は別条件である。共有global適用・tag・GitHub Release・npm publishは出荷判断前に進めない。

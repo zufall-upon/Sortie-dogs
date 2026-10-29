@@ -43,6 +43,15 @@ test('root turn exit does not settle a native background Worker, inbox or unfini
     assert.equal(nativeRunPending(project, path, { since: 100 }), false);
     await writeFile(mission, JSON.stringify({ phase: 'cancelled' }));
     assert.equal(nativeRunPending(project, path, { since: 100 }), false);
+    db.exec('DROP TABLE session_pending');
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), false, 'V2 2.2 inbox-only schema can settle');
+    db.exec("INSERT INTO session_inbox VALUES ('root')");
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'inbox-only schema retains queued work');
+    db.exec('DELETE FROM session_inbox');
+    db.exec("UPDATE session_v2 SET time_idle = NULL, idle_outcome = NULL WHERE id = 'worker'");
+    assert.equal(nativeRunPending(project, path, { root: 'root' }), true, 'inbox-only schema still waits for descendants');
+    db.exec('DROP TABLE session_inbox');
+    assert.throws(() => nativeRunPending(project, path, { root: 'root' }), /no such table/, 'unknown schema failure is not settlement');
   } finally { db.close(); await rm(project, { recursive: true, force: true }); }
 });
 

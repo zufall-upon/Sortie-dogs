@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -246,6 +248,71 @@ test("external directory scope rejects symlink escape when the host permits syml
     await rm(root, { recursive: true, force: true });
     await rm(external, { recursive: true, force: true });
   }
+});
+
+test("explicit symlink entry permits native unlink/replacement but never target writes or changed parent escape", async t => {
+  if (process.platform === "win32") return t.skip("POSIX unlink/mv entry semantics");
+  const root = await mkdtemp(join(tmpdir(), "sortie-link-project-")), external = await mkdtemp(join(tmpdir(), "sortie-link-external-"));
+  const exec = promisify(execFile);
+  try {
+    const target = join(external, "private.txt"), link = join(external, "bin", "entry"), source = join(external, "source");
+    await mkdir(join(external, "bin")); await writeFile(target, "private"); await writeFile(source, "replacement"); await symlink(target, link);
+    const gate = await createWriteGate(await createProjectPaths(root), { ...makeManifest(), write: [link, source] });
+    const check = (command: string) => gate.check({ tool: "bash", sessionID: "worker", callID: command }, { args: { command } });
+    await assert.rejects(gate.checkPath(link), /write scope/);
+    await assert.rejects(check(`printf bad > '${link}'; unlink '${link}'`), /write scope/);
+    await assert.rejects(check(`cp '${source}' '${link}'`), /write scope/);
+    await assert.rejects(check(`mv '${source}' '${link}'`), /write scope/);
+    await assert.rejects(check(`mv -t '${link}' '${source}'`), /write scope/);
+    await check(`unlink '${link}'`); await exec("unlink", [link]);
+    await symlink(target, link);
+    await check(`mv -T '${source}' '${link}'`); await exec("mv", ["-T", source, link]);
+    assert.equal(await readFile(link, "utf8"), "replacement"); assert.equal(await readFile(target, "utf8"), "private");
+    await rm(link); await symlink(root, link);
+    await assert.rejects(gate.checkPath(join(link, "escape")), /write scope|project-root/);
+    await assert.rejects(check(`unlink '${link}/'`), /write scope|project-root/);
+    // Same-project links must not turn exact entry permission into permission to follow.
+    await writeFile(join(root, "private"), "private"); await symlink(join(root, "private"), join(root, "entry"));
+    const relativeGate = await createWriteGate(await createProjectPaths(root), { ...makeManifest(), write: ["entry"] });
+    await assert.rejects(relativeGate.checkPath("entry"), /write scope/);
+    await mkdir(join(root, "holder")); await mkdir(join(root, "other"));
+    await symlink(target, join(root, "holder", "link")); await writeFile(join(root, "other", "link"), "private");
+    const nestedGate = await createWriteGate(await createProjectPaths(root), { ...makeManifest(), write: ["holder/link"] });
+    await rm(join(root, "holder"), { recursive: true }); await symlink(join(root, "other"), join(root, "holder"));
+    await assert.rejects(nestedGate.check({ tool: "bash", sessionID: "worker", callID: "changed-parent" },
+      { args: { command: "unlink holder/link" } }), /write scope/);
+    await rm(join(external, "bin"), { recursive: true }); await symlink(root, join(external, "bin"));
+    await assert.rejects(check(`unlink '${link}'`), /write scope|project-root/);
+  } finally { await rm(root, { recursive: true, force: true }); await rm(external, { recursive: true, force: true }); }
+});
+
+test("native npm update replaces an existing explicitly scoped bin symlink without declaring its parent", async t => {
+  if (process.platform === "win32") return t.skip("npm POSIX bin symlink");
+  const directory = await mkdtemp(join(tmpdir(), "sortie-npm-link-")), exec = promisify(execFile);
+  try {
+    const project = join(directory, "project"), prefix = join(directory, "prefix"), cache = join(directory, "cache");
+    await mkdir(project);
+    const install = async (version: number, gate?: Awaited<ReturnType<typeof createWriteGate>>) => {
+      const pkg = join(directory, `pkg-${version}`); await mkdir(pkg);
+      await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "sortie-link-fixture", version: `${version}.0.0`, bin: { "sortie-link-fixture": `cli-${version}.js` } }));
+      await writeFile(join(pkg, `cli-${version}.js`), `#!/usr/bin/env node\nconsole.log(${version});\n`);
+      const args = ["install", "--prefix", prefix, "--cache", cache, "--install-links", "--ignore-scripts", "--no-audit", "--no-fund", "--no-save", "--package-lock=false", pkg];
+      await gate?.check({ tool: "bash", sessionID: "worker", callID: "npm-update" },
+        { args: { command: `npm ${args.map(arg => `'${arg}'`).join(" ")}` } }, { investigativeShell: true });
+      await exec("npm", args, { timeout: 30_000 });
+    };
+    await install(1);
+    const link = join(prefix, "node_modules/.bin/sortie-link-fixture");
+    assert.match(await readlink(link), /cli-1.js$/);
+    const gate = await createWriteGate(await createProjectPaths(project), { ...makeManifest(),
+      write: [link, join(prefix, "node_modules/sortie-link-fixture"), join(prefix, "node_modules/.package-lock.json"), cache] });
+    await install(2, gate);
+    assert.match(await readlink(link), /cli-2.js$/);
+    assert.equal((await exec(process.execPath, [link])).stdout.trim(), "2");
+    await gate.checkPath(link); // This package directory is independently writable.
+    await rm(link); await writeFile(join(directory, "private"), "private"); await symlink(join(directory, "private"), link);
+    await assert.rejects(gate.checkPath(link), /write scope/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("missing ancestor plus child declaration scopes descendants without widening lone missing paths", async () => {
