@@ -78,7 +78,7 @@ V2 finalizerはaccounting-onlyで、後から本文を永続化するもので�
 今回のnative Advisor相談はTaskカード断点・API制約・禁止事項を提示して独立評価を取得。
 「既存返却値→通常本文を優先、Task字幕更新は正規購読/更新APIなしでは未成立、保存とDesktop到達を別記録」の助言を採用。
 理由：追加モデル呼出し・偽Task・履歴編集を増やさずDirectにも適用できるため。
-効果：静的案内と回帰テストの範囲のみ。実表示効果は未検証。これはChatGPT相談や独立SourceReviewの代替ではない。
+初回相談時点の効果は静的案内と回帰テストの範囲のみだった。後述の通常Missionとroot実WebUI照合で本文配送を確認。これは独立SourceReviewの代替ではない。
 
 本Coordinatorのbrowserは `browser.disconnected`。再試行・再送せず、rootの接続済み窓口へ具体candidate相談を引き継いだ（下記のとおり相談完了）。
 
@@ -87,9 +87,9 @@ V2 finalizerはaccounting-onlyで、後から本文を永続化するもので�
 理由：同一事実の報酬重複と未完了の成功誤読を避け、MISSIONを先に読めるようにする。カウンタと正式根拠は変えない。
 将来称号を恣意的に授与せず構想保持する案も採用。通常本文を正式な進捗経路として実証し、リアルタイムTask字幕の修復や自動補完保証とは区別する。
 この小補正は関連46件PASS（build 8.925秒、test 0.240秒）。実表示効果は別途確認が必要。
-rootは正規pair済みOpenCode WebUIから実本文を閲覧可能になった。候補の正規読込・同一Mission保存確認後、rootが実UIを確認する。スクリーンショット取得は未成立であり成功と扱わない。
+rootは正規pair済みOpenCode WebUIから実本文を閲覧可能になり、候補の正規読込・同一Mission保存確認後に下記の実UI照合を完了した。スクリーンショット取得は未成立であり成功と扱わない。
 
-## 正規候補の通常Mission実行（保存まで確認）
+## 正規候補の通常Mission実行（保存・root実WebUI照合）
 
 `scripts/return-report-ui-run.mjs` はprepare/run/collect/verifyを共有するrunner。
 runはlaunch.jsonが存在すれば新規起動を拒否し、既存結果はcollectで収集する。
@@ -119,7 +119,7 @@ hostの `work_quantity_display` → その後の通常assistant textへの逐語
 - root正式完了：100% `call_525426954db54c0b9ac845a75a3996de` → `msg_187cafecc0010Cf3xBf44FoS03`。
 
 これらは実行中に算出された全体作業量。今回の文書化入力にある過去の0%→38%とは別の値であり、混同しない。
-rootの背景Task字幕自体は未修復。中間値はCoordinatorの通常本文に保存されており、そのsessionの正規UIで確認する。
+rootの背景Task字幕自体は未修復。中間値はCoordinatorの通常本文に保存されており、rootがそのsessionの正規UIで確認した。
 追加の進捗専用turn・model callなし。Directには偽Taskを作っていない。
 
 ### 正式帰還の対応
@@ -127,11 +127,25 @@ rootの背景Task字幕自体は未修復。中間値はCoordinatorの通常本�
 rootの `complete_mission` call `call_525426954db54c0b9ac845a75a3996de`、message `msg_187caedd2001K1D2j0VCUjHpnu` が正式receipt succeededとhost `return_report` を返した。
 その同じpanel bytesが最終assistant message `msg_187cafecc0010Cf3xBf44FoS03` に1回だけ存在することをverifyで確認。
 外側のコードフェンスで全panelを包まず、通常のdetailsと内部text fenceを保持。
-モデルの前文「候補表示確認済み」は実UI証拠ではない。collectorは明示的に `ui_verified:false` とし、rootの実UI確認を残す。
+モデルの前文「候補表示確認済み」は実UI証拠ではない。collectorの `ui_verified:false` は収集時点の保存確認範囲を正確に表すため変更しない。後続rootの実UI確認は下記へ別記録する。
 一般的な転記漏れの自動補完保証や、ネイティブDesktop画像取得に成功したという意味ではない。
 
 証拠：`_testenv/return-report-live/run-1/{setup,launch,terminal,observation,native-history}.json`、`native-observer.jsonl`、`final.md`。
-package・ログ・usageを保持。projectのlocal `.opencode`/node_modulesはroot実UI確認用にまだ必要なので、不要とみなして削除しない。
+package・ログ・usageを保持。projectのlocal `.opencode`/node_modulesは後続の最終照合終了まで保持し、非稼働・不要と確定する前に削除しない。
+
+### 後続rootによる正規WebUI照合
+
+2026-10-29、rootが正規pair済みOpenCode WebUIで同じ候補sessionを直接開き、以下を確認した（Coordinatorへ観測結果を引継ぎ）。
+
+- Coordinator `ses_e7835ef6dffeTLqzwTbbUW667g` の通常本文に61%・78%・92%を実render。上記のhost返却値・保存messageと同じMissionの値であり、過去入力0%→38%ではない。
+- root `ses_e7836423bffeVnKlsx1CqqpK4A` の正式完了100%と帰還パネルを実render。detailsは1個、展開して作戦卓・COST・費用ゲージ・PACK累積戦歴・unknown・根拠後段・NEXTを確認。
+- パネルのpre幅696、fontはIBM Plex Mono。巨大ASCII枠・文字送り・常時演出は追加されていない。
+- これは正規WebUIのDOM/render確認。スクリーンショットはvisible制約で取得できておらず、native Desktop frameや画像capture成功とは扱わない。元添付画像のroot直接確認と、この候補の実render確認は区別する。
+
+これにより、通常応答経路の進捗到達・更新、および正常完了時のhostパネル配送を保存→実画面まで確認した。
+Task字幕リアルタイム更新の未修復、モデル転記漏れの一般的自動補完保証なし、未来称号の条件未確立という留保は変えない。
+runtime・固定package・実行済みMissionは変更/再起動していない。`e7b5fd5..8e765a4` の差分はdocsとcollectorのみで、今回も文書追記だけ。既存の46 PASS、先行264 PASS / 2 skip、公開caller1 PASS、実行1回exit 0 / 98.824秒を再利用する。
+文書追記後は保存済み結果のverifyとdiff checkのみを行い、無変更のruntimeテストや実Missionを再実行しない。
 
 ## 元PRレビュー回収
 
@@ -144,7 +158,7 @@ package・ログ・usageを保持。projectのlocal `.opencode`/node_modulesはr
 - continuationへの動的進捗混入：`missionPacket(mission, run, false)` とbyte不変回帰。
 
 今回この3件を再実装しない。元PRの修復記録を保持し、現候補の進捗表現変更と混同しない。
-新PRの既存本文・通常/行レビューも統合前に別途回収・分類する。
+PR #311の現本文・通常コメント2件・review本文0件・行コメント0件を回収。本文の実UI未確認/Draft継続記述は今回の観測に合わせて更新する。通常2件は作者自身の過去段階の状況記録であり、新たな修正要求ではない。有効な追加指摘なし。既存独立ReviewのEVIDENCE_GAPS/Major・Mediumなしと作者再確認・低risk skipは保持し、独立PASSへ読み替えない。
 
 ## この候補の検証
 
