@@ -44,6 +44,37 @@ if(phase==='setup') {
   await fs.writeFile(path.join(project,'check.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';import {execFileSync} from 'node:child_process';const r=JSON.parse(execFileSync(process.execPath,['tools/inventory.mjs','input.json'],{encoding:'utf8'}));assert.deepEqual(r,{items:[{sku:'A',quantity:3,total:375},{sku:'B',quantity:3,total:240}],total:615});assert.deepEqual(JSON.parse(fs.readFileSync('result.json','utf8')),r);console.log('INVENTORY_PASS');\n`);
   await save(envFile,{root,base,project,installed,env,credentialSource,stable_tgz:stableTgz,stable_sha256:sha(await fs.readFile(stableTgz))});
   console.log(envFile);
+} else if(phase==='reflection-migration') {
+  const retained=await json(envFile),candidate=await json(path.join(base,'candidate.json'));
+  const output=path.join(base,'reflection-migration');
+  await assert.rejects(fs.stat(output),{code:'ENOENT'});
+  assert.equal(sha(await fs.readFile(retained.stable_tgz)),retained.stable_sha256);
+  assert.equal(sha(await fs.readFile(candidate.tgz)),candidate.sha256);
+  const fixture=await installedFixture(retained.stable_tgz,output,'v014',{nested:false});
+  const {project,installed,env}=fixture;
+  // Opt-in and reminder are established on stable only, never supplied by upgrade.
+  await save(path.join(project,'.opencode/sortie-dogs.json'),{reflection:{enabled:true,layers:{run:false,project:true,global:false},maxInjectedEntries:2,maxInjectedTokens:400}});
+  await command('reflection-git-init','git',['init'],project);
+  const probe=path.join(root,'scripts/reflection-migration-probe.mjs');
+  const before=JSON.parse(await command('reflection-stable','node',[probe,installed,project,'seed'],project,env));
+  const files={};
+  async function snapshot(dir) {
+    for(const e of await fs.readdir(dir,{withFileTypes:true})) {
+      const p=path.join(dir,e.name);if(e.isDirectory())await snapshot(p);else if(e.isFile())files[p]=sha(await fs.readFile(p));
+    }
+  }
+  await snapshot(path.join(env.XDG_CONFIG_HOME,'opencode/sortie-dogs-v010/reflection'));
+  for(const name of ['sortie-dogs.json','opencode.json']) {const p=path.join(project,'.opencode',name);files[p]=sha(await fs.readFile(p));}
+  await save(path.join(output,'before.json'),{before,files});
+  await command('reflection-install','npm',['install','--force','--save-exact',candidate.tgz],path.join(project,'.opencode'),env);
+  await command('reflection-init','node',[path.join(installed,'dist/cli/main.js'),'init',project,'--profile','v010'],project,env);
+  const after=JSON.parse(await command('reflection-candidate','node',[probe,installed,project,'read'],project,env));
+  assert.deepEqual(after.bucket,before.bucket);
+  assert.deepEqual(after.injected,before.injected);
+  for(const [p,h] of Object.entries(files))assert.equal(sha(await fs.readFile(p)),h,p);
+  const result={reflection_migration:true,stable_sha256:retained.stable_sha256,candidate_sha256:candidate.sha256,
+    project,files,before,after,model_calls:0,limitations:['Native plugin API and caller-visible system transform; no model inference or GUI rendering.']};
+  await save(path.join(output,'result.json'),result);console.log(JSON.stringify(result));
 } else if(phase==='init-project') {
   const {project}=await json(envFile);
   await command('fixture-init','git',['init'],project);

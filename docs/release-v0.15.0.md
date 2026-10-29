@@ -27,6 +27,20 @@ and a bounded implementation Mission with formal checks, independent Review, rec
 exactly-once host panel in the native final reply. These are not universal completion guarantees,
 desktop-rendering or image-generation measurements. Costs remain unknown, not zero.
 
+Stability corrections distinguish scoped symlink replacement from unauthorized target writes,
+resume partial Mission registration idempotently on the retained run, and preserve validation
+consumption independently of implementation-unit budgets. An isolated 0.14.9-to-fixed-candidate
+upgrade retained existing state and explicit reflection settings. Real SOL interruption/recovery
+continued through formal validation, independent Review, Acceptance and one return panel.
+Controller failures were diagnosed and the same retained database recollected without replaying
+model work; failure history remains part of the evidence.
+
+A separate nonempty reflection migration uses the stable public API to create a recurring reminder
+before upgrade. Candidate read/injection preserves the bucket, id, hit count, prevention text and
+existing opt-in configuration; the live kill switch and re-enable path are also checked. No reminder
+is seeded after upgrade and no additional model inference is used. See the qualification record for
+fixed hashes, timings, retained failures and limits. These bounded observations are not release approval.
+
 Development used the requested browser ChatGPT consultations; the shipped Advisor remains
 model-replaceable and does not require browser automation. Before release, preserve the fixed
 main commit, one tarball/SHA-256, candidate preflight, mandatory full suite, installed-byte/asset
