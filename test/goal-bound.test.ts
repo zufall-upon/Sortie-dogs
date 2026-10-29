@@ -383,11 +383,72 @@ test("accepted budget revision synchronizes validation limit without resetting c
   const next = { ...request, operation_id: "second", candidate: "candidate-2" };
   assert.equal((await ledger.reserveValidation(next, 3)).decision, "ALLOW");
   assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 2);
-  await assert.rejects(ledger.appendGoal({ kind: "goal.revised", at, goal_id: request.run_id,
+  const reduced = await ledger.appendGoal({ kind: "goal.revised", at, goal_id: request.run_id,
     revision: 3, scope_epoch: 3, acceptance_fingerprint: acceptance, origin_user_message_id: "user-3",
     session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
     budget: { max_units: 1, time_ms: null, cost_usd: null, source: "user-revision" },
-    acceptance_contract: null }), RunFlightLedgerError);
+    acceptance_contract: null });
+  assert.equal(reduced.budget!.max_units, 1);
+  assert.equal(reduced.validation_budget.limit, 3, "unit ceiling does not lower validation capacity");
+});
+
+test("48/50 implementation units and 51/51 validations revise without increasing unit budget or rewriting old ledger", async () => {
+  const { ledger } = await accepted("separate-budgets", 50), goalID = "goal-separate-budgets";
+  for (let i = 0; i < 48; i++) {
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, reservation_id: `u${i}`, unit_id: `u${i}`, session_id: "root-session", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, reservation_id: `u${i}`, unit_id: `u${i}`, receipt_id: `r${i}`,
+      disposition: "succeeded", progress_fingerprint: null, evidence: [], elapsed_ms: 10, cost_usd: null });
+  }
+  const request = { run_id: goalID, operation_id: "v", source_snapshot: "source", candidate: "candidate",
+    command: ["node", "check"], environment: { platform: "linux", arch: "x64", runtime: "node-22" }, scope: "targeted" as const,
+    owner: "worker" as const, expected_evidence: ["command"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  for (let i = 0; i < 51; i++) {
+    const input = { ...request, operation_id: `v${i}`, candidate: `candidate-${i}` };
+    const admission = await ledger.reserveValidation(input, 51); assert.equal(admission.decision, "ALLOW");
+    await ledger.settleValidation(admission.reservation_id!, input, "passed", 0, 7);
+  }
+  const before = await ledger.readGoal();
+  const revised = await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: goalFingerprint(["revised proof"]), origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 50, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null });
+  assert.equal(revised.budget!.max_units, 50); assert.equal(revised.consumed_units, 48);
+  assert.equal(revised.validation_budget.limit, 51); assert.equal(revised.validation_budget.consumed, 51);
+  assert.deepEqual(revised.validation_budget, before.state.validation_budget);
+  const reopened = await RunFlightLedger.openGoal(path.join(root, "separate-budgets/.sortie-dogs/run-flight/root.json"));
+  assert.deepEqual((await reopened.readGoal()).state, revised);
+  assert.deepEqual((await reopened.readGoal()).records.slice(0, -1), before.records);
+  assert.equal((await reopened.reserveValidation({ ...request, candidate: "candidate-50" }, 51)).decision, "SKIP");
+  await assert.rejects(reopened.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 3, scope_epoch: 3,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-3", session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 47, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null }), RunFlightLedgerError);
+  const nullable = await accepted("nullable-validation", 1);
+  assert.equal((await nullable.ledger.appendGoal({ kind: "goal.revised", at, goal_id: "goal-nullable-validation", revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 2, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null })).validation_budget.limit, null);
+});
+
+test("legacy revision followed by a lower recorded validation limit replays without rewriting admissions", async () => {
+  const { ledger } = await accepted("legacy-validation-ceiling", 50), goalID = "goal-legacy-validation-ceiling";
+  const request = { run_id: goalID, operation_id: "first", source_snapshot: "source", candidate: "candidate-1", command: ["node", "check"],
+    environment: { platform: "linux", arch: "x64", runtime: "node-22" }, scope: "targeted" as const, owner: "worker" as const,
+    expected_evidence: ["command"], marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 50);
+  await ledger.settleValidation(first.reservation_id!, request, "passed", 0);
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator", delivery: "mvp-first",
+    budget: { max_units: 30, time_ms: null, cost_usd: null, source: "user-revision" }, acceptance_contract: null });
+  // This exact event sequence was legal under the old reducer, which lowered limit to 30.
+  const secondRequest = { ...request, operation_id: "second", candidate: "candidate-2" };
+  const second = await ledger.reserveValidation(secondRequest, 30);
+  assert.equal(second.decision, "ALLOW"); await ledger.settleValidation(second.reservation_id!, secondRequest, "passed", 0);
+  const before = await ledger.readGoal();
+  assert.equal(before.state.validation_budget.limit, 50); assert.equal(before.state.validation_budget.consumed, 2);
+  const reopened = await RunFlightLedger.openGoal(path.join(root, "legacy-validation-ceiling/.sortie-dogs/run-flight/root.json"));
+  assert.deepEqual(await reopened.readGoal(), before);
+  assert.deepEqual(before.records.filter(({ event }) => event.kind === "validation.admission").map(({ event }) =>
+    event.kind === "validation.admission" ? event.limit : null), [50, 30]);
+  await assert.rejects(reopened.reserveValidation({ ...request, operation_id: "third", candidate: "candidate-3" }, 25), /stale, duplicated, or exhausted/,
+    "compatibility does not permit arbitrary same-revision limit reductions");
 });
 
 test("validation admission permits monotonic limit growth for a changed candidate", async () => {

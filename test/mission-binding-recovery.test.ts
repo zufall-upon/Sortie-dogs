@@ -11,6 +11,81 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
+for (const stage of ["goal", "binding"]) test(`prepared Mission ${stage} failure resumes the same run without premature admission`, async t => {
+  const directory = await mkdtemp(resolve("_testenv/partial-registration-"));
+  try {
+    const agents: Record<string, object> = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" } };
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
+      messages: async () => ({ data: [] }), children: async () => ({ data: [] }),
+    } } } as never);
+    let hooks = await create();
+    const tool = async (name: string, args: object = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+      message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Write result and validate it" }],
+    });
+    await tool("start_mission", { requirements: ["Write result and validate it"] });
+    const ledgerPath = join(directory, ".sortie-dogs-v010/run-flight", `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    const ledger = await RunFlightLedger.openGoal(ledgerPath), goalID = (await ledger.readGoal()).state.goal_id!;
+    const at = new Date().toISOString();
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: "prior", reservation_id: "prior", session_id: "root", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, unit_id: "prior", reservation_id: "prior", receipt_id: "prior-receipt",
+      disposition: "failed", result_class: "process-defect", progress_fingerprint: null, evidence: [], elapsed_ms: 17, cost_usd: 0.25 });
+    let injected = 0;
+    const append = RunFlightLedger.prototype.appendGoal, update = OperatorMissionRuntime.prototype.update;
+    if (stage === "goal") t.mock.method(RunFlightLedger.prototype, "appendGoal", async function (this: RunFlightLedger, event: Parameters<typeof append>[0]) {
+      if (event.kind === "goal.revised" && injected++ < 2) throw new Error("injected-goal-failure");
+      return append.call(this, event);
+    });
+    else t.mock.method(OperatorMissionRuntime.prototype, "update", function (this: OperatorMissionRuntime, root: string, mutate: Parameters<typeof update>[1]) {
+      return update.call(this, root, state => {
+        const prior = state.runID; mutate(state);
+        if (state.runID !== prior && injected++ < 2) throw new Error("injected-binding-failure");
+      });
+    });
+    const plan = { executor: stage === "goal" ? "self" : "worker", units: [{ title: "Write result", objective: "Write result and validate it",
+      read: [], write: ["result.txt"], validation: ["node check.mjs"] }] };
+    await assert.rejects(tool("plan_units", plan), new RegExp(`injected-${stage}-failure`));
+    await assert.rejects(tool("plan_units", plan), new RegExp(`injected-${stage}-failure`));
+    t.mock.restoreAll();
+    const runtime = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await runtime().required("root");
+    const ledgerBefore = await RunFlightLedger.readGoalFile(ledgerPath);
+    assert.equal(before.phase, "prepared"); assert.equal(before.units[0]!.status, "pending");
+    await assert.rejects(tool("start_direct_unit"), /mission-run-registration-incomplete/);
+    await assert.rejects(hooks["tool.execute.before"]!({ sessionID: "root", callID: "premature", tool: "task" },
+      { args: structuredClone(runtime().nextWorkerTask(before)) }), /mission-run-registration-incomplete/);
+    assert.deepEqual(await runtime().required("root"), before, "neither admission mutated the prepared run");
+    // Reload the public plugin, not a private recovery helper. Same declaration completes the missing stage.
+    hooks = await create();
+    const resumed = await tool("plan_units", plan), after = await runtime().required("root");
+    assert.equal(after.runID, before.runID); assert.equal(after.planHash, before.planHash);
+    assert.deepEqual(after.units[0]!.hashes, before.units[0]!.hashes);
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, before.runID);
+    const registered = await RunFlightLedger.readGoalFile(ledgerPath);
+    assert.equal(registered.state.goal_id, ledgerBefore.state.goal_id);
+    assert.equal(registered.state.origin_user_message_id, "original");
+    assert.equal(registered.state.consumed_units, ledgerBefore.state.consumed_units);
+    assert.equal(registered.state.consumed_units, 1); assert.equal(registered.state.consumed_time_ms, 17);
+    assert.equal(registered.state.consumed_cost_usd, 0.25);
+    assert.deepEqual(registered.state.validation_budget, ledgerBefore.state.validation_budget);
+    assert.equal(registered.records.filter(({ event }) => event.kind === "goal.revised").length, 1);
+    if (stage === "binding") {
+      assert.ok(resumed.task);
+      await hooks["tool.execute.before"]!({ sessionID: "root", callID: "normal", tool: "task" }, { args: structuredClone(resumed.task) });
+    } else {
+      assert.equal(resumed.status, "direct-unit-running");
+      assert.equal((await tool("start_direct_unit")).run_id, before.runID);
+    }
+    const final = await runtime().required("root");
+    assert.equal(final.units[0]!.status, "running");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).plans, 1);
+    assert.equal((await RunFlightLedger.readGoalFile(ledgerPath)).records.filter(({ event }) => event.kind === "goal.revised").length, 1);
+    assert.equal((await RunFlightLedger.readGoalFile(ledgerPath)).state.outstanding_reservations.length, 1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const readOnly of [false, true]) test(`returned recoverable mission Worker releases overlap for serial ${readOnly ? "reader" : "writer"}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/serial-binding-"));
@@ -89,6 +164,10 @@ for (const readOnly of [false, true]) test(`returned recoverable mission Worker 
     const admitted = await ledger();
     assert.equal(admitted.state.consumed_units, 1); assert.equal(admitted.state.outstanding_reservations.length, 1);
     await inspect("next", old.handoffPath, "old-read");
+    const currentHost = await tool("operator_status", "coordinator");
+    assert.equal(currentHost.run_id, nextRun.runID, "historical handoff cannot hide the current host run");
+    assert.equal(currentHost.budget.consumed_units, 1); assert.equal(currentHost.budget.reserved_units, 1);
+    assert.equal(currentHost.task, undefined, "an existing Worker must not be dispatched again from stale context");
     assert.equal((await tool("bind_write_gate", "next", { project_root: directory, manifest_path: old.manifestPath })).reason,
       "binding-replay", "reading historical controls never replaces the new admission");
     await inspect("next", next.handoffPath, "next-read");

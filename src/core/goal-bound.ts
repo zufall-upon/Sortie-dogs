@@ -396,6 +396,9 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
   const validationAdmissions = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>>();
   const validationSettlements = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>>();
   const reopenedValidationEvidence = new Set<string>();
+  // Older revisions projected the unit ceiling onto validation capacity. Replay their
+  // subsequent, stricter recorded admissions without shrinking the retained capacity.
+  let validationAdmissionLimit: number | null = null;
   for (const [index, record] of records.entries()) {
     requireState(record.sequence === index + 1 && record.previous_hash === previous && HASH.test(record.event_hash), "invalid", "Goal ledger chain is malformed.");
     previous = record.event_hash;
@@ -422,6 +425,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       validationAdmissions.clear();
       validationSettlements.clear();
       reopenedValidationEvidence.clear();
+      validationAdmissionLimit = null;
       continue;
     }
     requireState(state.goal_id !== null && event.goal_id === state.goal_id, "transition", "Goal identity mismatch.");
@@ -433,7 +437,6 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     } else if (event.kind === "goal.revised") {
        requireState(state.phase !== "terminal" && event.revision === state.revision + 1 && event.scope_epoch === state.scope_epoch + 1 &&
          HASH.test(event.acceptance_fingerprint) && event.budget.max_units >= state.consumed_units &&
-         event.budget.max_units >= state.validation_budget.consumed &&
          validAcceptanceContract(event.acceptance_contract) &&
          (event.reset_no_progress === undefined || typeof event.reset_no_progress === "boolean"),
          "transition", "Scope revision is stale or resets consumed budget.");
@@ -441,7 +444,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         acceptance_fingerprint: event.acceptance_fingerprint, latest_user_message_id: event.origin_user_message_id,
         selected_agent: event.selected_agent, delivery: event.delivery, budget: event.budget,
         validation_budget: { ...state.validation_budget,
-          limit: state.validation_budget.limit === null ? null : event.budget.max_units },
+          limit: state.validation_budget.limit === null ? null : Math.max(
+            state.validation_budget.limit, state.validation_budget.consumed, event.budget.max_units) },
         acceptance_contract: event.acceptance_contract,
         session_ids: addUnique(state.session_ids, event.session_id), phase: "active", stop_reason: null,
         receipt: null, tickets: [], ...(event.reset_no_progress === true
@@ -449,6 +453,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
           : {}) };
       if (event.reset_no_progress === true) replanRevision = null;
       legacyResetRevision = event.reset_no_progress === undefined;
+      if (validationAdmissionLimit !== null) validationAdmissionLimit = Math.max(event.budget.max_units, state.validation_budget.consumed);
     } else if (event.kind === "ticket.issued") {
       requireState(state.phase === "active" && event.revision === state.revision && event.scope_epoch === state.scope_epoch &&
         event.origin_user_message_id === state.latest_user_message_id && event.sequence === state.tickets.length + 1 &&
@@ -565,14 +570,16 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         const latest = [...validationSettlements.values()].filter(entry => entry.evidence_key === event.evidence_key).at(-1);
         const blocked = latest !== undefined && latest.outcome !== "passed" && !retryableValidationFailure(latest.outcome, latest.exit_code);
         requireState(event.scope !== null && event.consumed === state.validation_budget.consumed + 1 &&
-          (state.validation_budget.limit === null || event.limit >= state.validation_budget.limit) &&
+          (validationAdmissionLimit === null || event.limit >= validationAdmissionLimit) &&
           ((!duplicate && !blocked && !inFlight && reopen === undefined) || (validReopen && !inFlight)) &&
           !state.validation_budget.reservations.some((entry) => entry.reservation_id === event.reservation_id),
           "budget", "Validation admission is stale, duplicated, or exhausted.");
-        state = { ...state, validation_budget: { ...state.validation_budget, consumed: event.consumed, limit: event.limit,
+        state = { ...state, validation_budget: { ...state.validation_budget, consumed: event.consumed,
+          limit: Math.max(state.validation_budget.limit ?? event.limit, event.limit),
           reservations: [...state.validation_budget.reservations,
             { reservation_id: event.reservation_id, operation_id: event.operation_id, evidence_key: event.evidence_key }] } };
         validationAdmissions.set(event.reservation_id, event);
+        validationAdmissionLimit = event.limit;
         if (reopen !== undefined) reopenedValidationEvidence.add(event.evidence_key);
       } else {
         requireState(event.reopen === undefined && event.consumed === state.validation_budget.consumed,

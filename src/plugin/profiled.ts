@@ -2099,6 +2099,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return direct;
     }
     async function startDirect(root: string, actor: string) {
+      await assertMissionRunBound(root);
       let direct = await directExecution(actor);
       if (!direct) {
         const run = await operators.admitDirect(root, actor, `direct-${randomUUID()}`);
@@ -2110,10 +2111,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         });
         direct = await directExecution(actor);
       }
+      if (!direct) throw new Error("mission-direct-binding-unavailable: retain the admitted unit and restore its Mission binding");
       await activateDirect(actor);
       return JSON.stringify({ status: "direct-unit-running", run_id: direct!.run.runID, unit_id: direct!.unit.unit.id,
         executor_session_id: actor, validation: direct!.unit.unit.validation,
         next_action: `Implement/correct and run the declared checks here, in this same session. Call ${finishDirectUnit} after the requested delivery boundary. No Worker or handoff read is needed. Retain the original requirements; independent Review and Operator acceptance still follow.` });
+    }
+    async function assertMissionRunBound(root: string) {
+      const mission = await missions.required(root), run = await operators.required(root);
+      if (mission.runID !== run.runID) throw new Error(
+        "mission-run-registration-incomplete: retry plan_units with the same plan to finish goal registration and Mission binding; no unit admitted");
+      await operators.verifyContinuityControls(run);
     }
     async function handoffDirect(root: string, actor: string, callID?: string, notes?: string) {
       const direct = await directExecution(actor);
@@ -2835,8 +2843,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           prior_run_id: previous.runID } : {}) };
       const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
+      // prepareMission retains an identical prepared run after either registration stage
+      // fails. Verify its pinned controls, then idempotently register the same declaration;
+      // only the durable Mission binding below makes it eligible for admission.
+      await operators.verifyContinuityControls(state);
       await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
-      control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       await missions.update(root, item => {
         item.continuity = mission.continuity;
         item.reviewScope = missionReviewScope(item.reviewScope,
@@ -2847,6 +2858,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (operation) { item.kind = "operation"; item.execution = operation; }
         item.workQuantity = planWorkQuantity(item, raw as Parameters<typeof planWorkQuantity>[1], state, item.workQuantity, workQuantities, input.directory);
       });
+      control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       const next = await operators.next(root, actor);
       if (!record(next) || !record(next.task)) return JSON.stringify(next);
       const setup = await prepareValidationScratch(input.directory, plan.units.flatMap(unit => unit.validation));
@@ -3873,6 +3885,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (who.role === "dog-operator" && request.tool === "task" && !delegated) throw new Error("operator-worker-task-required");
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {
+          if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionRunBound(root);
           const pendingUnit = state!.units.find(unit => unit.status !== "succeeded");
           if (pendingUnit?.terminalRescue) {
             const requiredModel = pendingUnit.terminalRescue.selected_model;

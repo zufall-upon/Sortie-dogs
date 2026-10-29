@@ -77,6 +77,8 @@ interface Extraction {
   applies: boolean;
   ambiguous: boolean;
   paths: string[];
+  /** Path indices whose operation replaces/removes the directory entry, never follows it. */
+  entryPaths?: number[];
   createdDirectories?: string[];
   requiredDirectories?: string[];
   gitCommit?: boolean;
@@ -506,6 +508,7 @@ function robocopyOutput(tokens: readonly string[]): string | undefined {
 
 function shellPaths(command: string, powershell: boolean, depth = 0): Extraction {
   const paths: string[] = [];
+  const entryPaths: number[] = [];
   let applies = false;
   let ambiguous = false;
   let gitCommit = false;
@@ -567,6 +570,9 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       issue ??= commandIssue(source, "active-scriptblock", "use strict ForEach-Object { $_.Property } or a direct command");
     } else if (ALL_OPERAND_COMMANDS.has(executable)) {
       applies = true;
+      if (!powershell && ["rm", "unlink", "rmdir"].includes(executable)) {
+        entryPaths.push(...commandOperands.flatMap((path, i) => /[\\/]$/u.test(path) ? [] : [paths.length + i]));
+      }
       paths.push(...commandOperands);
       if (executable === "mkdir" && tokens.some((token) => token === "-p" || token === "--parents")) {
         createdDirectories.push(...commandOperands);
@@ -579,6 +585,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     } else if (executable === "mv") {
       applies = true;
       if (commandOperands.length < 2) ambiguous = true;
+      // Multiple operands and directory targets have different destination semantics.
+      const endOptions = tokens.indexOf("--");
+      const options = tokens.slice(1, endOptions < 0 ? tokens.length : endOptions).filter(token => token.startsWith("-"));
+      const entryMove = options.every(option => ["-f", "-i", "-n", "-v", "-T", "--force", "--interactive", "--no-clobber", "--verbose", "--no-target-directory"].includes(option)) &&
+        (endOptions < 0 || tokens.slice(endOptions + 1).every(token => !token.startsWith("-")));
+      if (!powershell && commandOperands.length === 2 && entryMove) {
+        if (!/[\\/]$/u.test(commandOperands[0]!)) entryPaths.push(paths.length);
+        if ((options.includes("-T") || options.includes("--no-target-directory")) && !/[\\/]$/u.test(commandOperands[1]!)) entryPaths.push(paths.length + 1);
+      }
       paths.push(...commandOperands);
     } else if (executable === "tee") {
       applies = true;
@@ -761,6 +776,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     applies,
     ambiguous,
     paths,
+    ...(entryPaths.length ? { entryPaths } : {}),
     ...(createdDirectories.length > 0 ? { createdDirectories } : {}),
     ...(requiredDirectories.length > 0 ? { requiredDirectories } : {}),
     ...(gitCommit ? { gitCommit: true } : {}),
@@ -832,6 +848,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       applies: extracted.applies || paths.length > 0,
       ambiguous: extracted.ambiguous,
       paths: destinations.map(rebase),
+      ...(extracted.entryPaths ? { entryPaths: extracted.entryPaths.map(index => paths.length + index) } : {}),
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
@@ -1247,11 +1264,19 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   };
   const externalDirectories: { path: string; realPath: string }[] = [];
   const externalFiles: { path: string; realPath?: string; anchorRealPath: string }[] = [];
+  const linkEntries = new Map<string, string>();
+  for (const path of [...exactWritable].map(path => project.absolute(path))) {
+    if (await isSymbolicLink(path)) linkEntries.set(path, await realpath(dirname(path)));
+  }
   for (const path of externalEntries) {
     try {
       const metadata = await lstat(path);
       if (metadata.isSymbolicLink()) {
-        throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        // An exact link grants its entry, not its target or descendants.
+        const anchorRealPath = await realpath(dirname(path));
+        linkEntries.set(path, anchorRealPath);
+        externalFiles.push({ path, anchorRealPath });
+        continue;
       }
       if (metadata.isDirectory()) {
         externalDirectories.push({ path, realPath: await realpath(path) });
@@ -1306,6 +1331,18 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         throw new WriteDeniedError("project-boundary", path, { cause: error });
       }
       throw error;
+    }
+    const absolutePath = resolve(project.root, manifestPath.path);
+    const entryAnchor = linkEntries.get(absolutePath);
+    if (entryAnchor !== undefined && await realpath(dirname(absolutePath)) !== entryAnchor) {
+      throw new WriteDeniedError("manifest-scope", path);
+    }
+    if (await isSymbolicLink(absolutePath)) {
+      // Following a link needs independent permission for its current target. Entry
+      // permission alone never grants target writes, including after a link swap.
+      try { await checkPath(await realpath(absolutePath)); }
+      catch (error) { throw new WriteDeniedError("manifest-scope", path, { cause: error }); }
+      return;
     }
     if (manifestPath.kind === "absolute") {
       if (!isAbsolute(manifestPath.path)) throw new WriteDeniedError("project-boundary", path);
@@ -1393,12 +1430,17 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       // OpenCode resolves native file-tool paths against its instance directory, not the
       // manifest root. Check the same destination without rewriting the tool arguments.
       const nativeFileTool = /^(?:write|edit)(?:$|[_-])/iu.test(_input.tool) || /patch/iu.test(_input.tool);
-      for (const path of extracted.paths) {
-        if (nativeFileTool) {
-          try { normalizeManifestPath(path); }
-          catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+      for (const [index, path] of extracted.paths.entries()) {
+        try { normalizeManifestPath(path); }
+        catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
+        try {
+          const absolute = resolve(nativeFileTool ? toolDirectory : project.root, path);
+          const anchor = linkEntries.get(absolute);
+          const entryOnly = !nativeFileTool && extracted.entryPaths?.includes(index) &&
+            !/[\\/]$/u.test(path) && !extracted.ambiguous;
+          if (entryOnly && anchor !== undefined && await realpath(dirname(absolute)) === anchor) continue;
+          await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path);
         }
-        try { await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path); }
         catch (error) {
           if (options?.investigativeShell && error instanceof WriteDeniedError && error.reason === "manifest-scope") {
             error.message += " Use expand_unit with the missing output path (dir/** for a directory), then retry this command in the SAME active Task. Preserve user prohibitions, native permissions, settled units and cumulative spend; no approval or redispatch is needed for an in-request scope repair.";
