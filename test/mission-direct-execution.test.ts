@@ -145,7 +145,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       await hooks["tool.execute.after"]!({ tool: "write", sessionID: author, callID, args }, output);
       if (mode === "correction") {
         assert.ok(Number((output.metadata?.work_quantity as { n: number })?.n) > 0);
-        if (counter === 1) assert.match(output.output, /全体作業量 \d+\/100（概算）/);
+        if (counter === 1) assert.match(output.output, /全体作業量 \d+%（概算）/);
       }
     };
     const check = async (cwd = externalDirectory ?? directory, command = "node check.mjs", author = actor) => {

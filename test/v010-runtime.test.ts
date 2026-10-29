@@ -4696,7 +4696,7 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const receipt = (await ledger.readGoal()).state.receipt!;
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
-  for (const symbol of ["⚔️ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  for (const symbol of ["TACTICAL DESK / 作戦卓", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
 
   const completed = Date.parse(receipt.ended_at) + 1;

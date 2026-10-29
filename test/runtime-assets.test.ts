@@ -3,8 +3,20 @@ import test from "node:test";
 
 import { RUNTIME_ASSET_VERSION } from "../src/asset-version.ts";
 import { runtimeAssets } from "../src/runtime-assets.ts";
-import { missionOperatorContent } from "../src/runtime-mission-assets.ts";
+import { missionOperatorContent, missionCoordinatorContent } from "../src/runtime-mission-assets.ts";
 import { V010_RUNTIME_PROFILE } from "../src/core/runtime-profile.ts";
+
+test("normal updates reuse observed whole-request progress without a display-only model turn", () => {
+  for (const policy of [missionOperatorContent(V010_RUNTIME_PROFILE, "test"), missionCoordinatorContent(V010_RUNTIME_PROFILE, "test")]) {
+    assert.match(policy, /work_quantity_display[\s\S]*next useful user-facing progress update/u);
+    assert.match(policy, /No separate progress-only status call or model turn/u);
+    assert.match(policy, /NOT elapsed time, cost, budget or completed-unit share/u);
+    assert.match(policy, /only formal request completion means 100%/u);
+    assert.match(policy, /Task metadata may be saved without being displayed[\s\S]*Direct may/u);
+    assert.match(policy, /append it verbatim exactly once outside any code fence/u);
+    assert.match(policy, /↩ recovered only after recovery is observed/u);
+  }
+});
 
 test("Mission supervision distinguishes required visual work from optional caveats without restricting ordinary work", () => {
   const policy = missionOperatorContent(V010_RUNTIME_PROFILE, "test");

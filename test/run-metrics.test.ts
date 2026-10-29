@@ -261,13 +261,23 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
   assert.ok(inserted.startsWith("status: DONE — complete\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了</strong></summary>"));
-  assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\ngoal-result\n\n🟢 COMPLETED — complete/u);
-  assert.match(inserted, /⚔️ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
-  assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未取得[\s\S]*➡️ NEXT\n未取得/u);
+  assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\nTACTICAL DESK \/ 作戦卓\n─+\ngoal-result\n\n🟢 COMPLETED — complete/u);
+  assert.match(inserted, /⚑ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
+  assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未確認（未実施なしを確認した意味ではありません）[\s\S]*➡️ NEXT\n未取得/u);
+  assert.match(inserted, /🏅 今回の作戦特性\n判定保留/u);
+  assert.match(inserted, /host計上費用\s+\$0\.2500/u);
   assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*予測費用\s+計測不可 ※予測概算/u);
-  assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
+  assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*➡️ NEXT\n未取得[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
+  assert.ok(inserted.indexOf("🪙 COST / PACK") < inserted.indexOf("➡️ NEXT"));
+  assert.match(inserted, /作戦称号\s+判定保留/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
+  const explicitNone = insertSortieResult("status: DONE\n\n**未実施:** なし", result);
+  assert.match(explicitNone, /⏳ 未実施\nなし/u);
+  const unknownCost = formatSortieResult({ ...result, cost: { ...result.cost,
+    cost_usd: { availability: "unavailable", value: null, reason: "incomplete-host-coverage" } } });
+  assert.match(unknownCost, /host計上費用\s+unknown（全体の計上額未取得）/u);
+  assert.doesNotMatch(unknownCost, /host計上費用\s+\$0/u);
   const gaps = insertSortieResult("status: DONE — checks passed\n\n**未実施:** 未解決の返却行\n\n**次:** なし", result,
     "evidence-gaps", "EVIDENCE_GAPS\n未解決の返却行");
   assert.match(gaps, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);

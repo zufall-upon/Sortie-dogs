@@ -429,5 +429,5 @@ export function projectWorkQuantity(state: WorkQuantityState, completed = false,
     remaining_kinds: accepted ? [] : state.remainingKinds };
 }
 export function formatWorkQuantity(progress: WorkQuantityProgress): string {
-  return `全体作業量 ${progress.n}/100（概算）${progress.estimate_revision > 1 ? " · 見積更新" : ""}`;
+  return `全体作業量 ${progress.n}%（概算）${progress.estimate_revision > 1 ? " · 見積更新" : ""}`;
 }

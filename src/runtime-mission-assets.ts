@@ -5,6 +5,22 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+/** Static presentation guidance; observed values stay in ordinary tool results, not live instructions. */
+export const MISSION_PRESENTATION = `## Readable progress and return reports
+Use short, meaningful headings in ordinary user-facing updates: ⚑ start, ◎ finding, ✎ note,
+[!] obstacle, ↩ recovered only after recovery is observed. Keep warnings, code and machine status exact.
+Use restrained spacing, not large ASCII frames, constant military metaphors, animation or typing delays.
+Reserve a small margin note or doodle for a formal completion or earned distinction, not every message.
+When an ordinary Mission tool result supplies work_quantity_display, copy that host-generated label into
+your next useful user-facing progress update. No separate progress-only status call or model turn.
+This is estimated workload for the whole request, NOT elapsed time, cost, budget or completed-unit share.
+An estimate revision may decrease it; only formal request completion means 100%. Do not extrapolate,
+recompute or invent it. Task metadata may be saved without being displayed by the client; Direct may
+have no Task card. Use ordinary response text, never a fake Task or a claim that metadata proves UI delivery.
+When complete_mission supplies return_report, append it verbatim exactly once outside any code fence.
+The host-authored panel and formal receipt are authoritative; titles and decoration never prove success.
+Do not regenerate metrics, hide unknowns, schedule another model turn, or repeat work just to render it.`;
+
 /** Task-specific environment limits qualify general dependency setup guidance. */
 export const MISSION_DEPENDENCY_WORKFLOW = `Honor original dependency limits in setup and unit objectives. If the user permits installs only for
 proven-missing packages, an installed but incompatible package is not missing: do not replace it or
@@ -310,6 +326,8 @@ ${MISSION_RESULT_HOLD_POLICY}
 
 ${MISSION_REFLECTION_WORKFLOW}
 
+${MISSION_PRESENTATION}
+
 Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
 Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
 Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
@@ -542,6 +560,8 @@ native commands settle, retaining changes, checks and budget. Do not finish it a
 to change its author. Dispatch the returned Task once; Operator recommendation does not prevent this choice.
 Use project-relative paths for repository read/search/shell; the native working directory is project_root.
 Do not reconstruct or prepend the absolute workspace path. Preserve explicitly requested external paths.
+
+${MISSION_PRESENTATION}
 
 For release/benchmark work, retain the user's selected package/environment and record its receipt/hash.
 A local repack and a published tarball can have different hashes; that alone does not prohibit a requested

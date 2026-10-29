@@ -1,5 +1,5 @@
 import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
-import { buildDebrief, renderDebrief, renderDebriefProof, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
+import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
 import { goalFingerprint } from "../core/goal-bound.ts";
 import type { GoalReport } from "../core/goal-report.ts";
 import { renderCareer, type SortieCareer } from "./sortie-career.ts";
@@ -547,11 +547,15 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     : metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`);
   const body = [
     "🐾 SORTIE DOGS — 帰還報告",
+    "TACTICAL DESK / 作戦卓",
+    "────────────────────",
     result.result_id[0],
     "",
     `${color} ${achievement} — ${displayText(presentation.statusSummary)}`,
     "",
-    "⚔️ MISSION",
+    ...renderDebriefTraits(result.debrief, result.mission.status === "COMPLETED"),
+    "",
+    "⚑ MISSION",
     `経過          ⏱ ${metricText(result.speed.goal_wall_ms, duration)} ※待機含む`,
     `最終達成条件  ◔ ${criteria}`,
     `対象検証      ${proof.validation}`,
@@ -563,14 +567,13 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     displayText(presentation.implementation),
     "",
     "⏳ 未実施",
-    displayText(presentation.pending),
-    "",
-    "➡️ NEXT",
-    displayText(presentation.next),
+    presentation.pending?.trim() ? displayText(presentation.pending) : "未確認（未実施なしを確認した意味ではありません）",
     "",
     "🪙 COST / PACK",
     `使用量        ${tokenText}`,
     `予測費用      ${estimatedCost} ※予測概算`,
+    `host計上費用  ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : "unknown（全体の計上額未取得）"}`,
+    "※換算済み予測費用・host計上費用は請求総額ではありません。未換算・未取得を$0扱いしません",
     "",
     ...renderDebrief(result.debrief),
     "",
@@ -578,6 +581,10 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     "",
     "🛑 STOP REASON",
     displayText(presentation.stopReason ?? result.mission.stop_reason),
+    "",
+    "➡️ NEXT",
+    displayText(presentation.next),
+    ...(result.mission.status === "COMPLETED" ? ["", "└─ 記録を閉じる。次の作戦へ。"] : []),
     "",
     "※使用量は最終応答生成前の計測",
   ].join("\n");

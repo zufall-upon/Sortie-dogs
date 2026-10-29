@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDebrief, observeDebriefSession, renderDebrief } from "../dist/plugin/sortie-debrief.js";
+import { buildDebrief, observeDebriefSession, renderDebrief, renderDebriefTraits } from "../dist/plugin/sortie-debrief.js";
 import { collectRunMetrics, createSortieResult, insertSortieResult, terminalRunOutcome } from "../dist/plugin/run-metrics.js";
 import type { GoalAcceptanceContract, GoalFlightEventRecord, GoalTerminalReceipt } from "../src/core/goal-bound.ts";
 
@@ -158,6 +158,10 @@ test("Recovery requires fail, intervening host edit, pass in same child, and com
   const make = (parts: object[], status = receipt.status) => buildDebrief({ ...receipt, status }, contract,
     { complete: true, sessions: [observe("a", [message("a", 10, 20, parts)])], window: undefined });
   assert.deepEqual(make([failed, edit, passed]).traits, ["修正から復帰"]);
+  assert.match(renderDebriefTraits(make([failed, edit, passed]), true).join("\n"),
+    /↩️ 修正から復帰 — 同じ子セッションで対象検証失敗→変更→同じ検証成功、任務完了/u);
+  assert.doesNotMatch(renderDebriefTraits(make([failed, edit, passed]), false).join("\n"), /↩️ 修正から復帰/u);
+  assert.match(renderDebriefTraits(make([failed, passed]), true).join("\n"), /判定保留/u);
   assert.deepEqual(make([failed, passed]).traits, []);
   assert.deepEqual(make([failed, edit, passed], "stopped").traits, []);
   const split = buildDebrief(receipt, contract, { complete: true, sessions: [
@@ -174,6 +178,18 @@ test("Clean Sweep requires complete terminal-matched attempt history and no resu
     { kind: "unit.settled", goal_id: "g", reservation_id: "r", disposition: "succeeded", result_class: "acceptance" },
     { kind: "goal.terminal", goal_id: "g", receipt }];
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, ["一発完遂"]);
+  const earned = buildDebrief(receipt, contract, observation, records(events));
+  assert.match(renderDebriefTraits(earned, true).join("\n"), /🎯 一発完遂 — 完全な対象履歴/u);
+  assert.match(renderDebriefTraits(earned, true).join("\n"), /作戦称号\s+一発完遂[\s\S]*特別記章\s+静かな一撃 — 一発完遂の別名/u);
+  assert.doesNotMatch(renderDebriefTraits(earned, false).join("\n"), /静かな一撃|作戦称号\s+一発完遂/u);
+  const combined = { ...earned, traits: ["連携作戦", "修正から復帰"] as const };
+  const rendered = renderDebriefTraits(combined, true).join("\n");
+  assert.equal((rendered.match(/作戦称号/gu) ?? []).length, 1);
+  assert.match(rendered, /作戦称号\s+立て直し屋[\s\S]*不屈の連携/u);
+  assert.doesNotMatch(renderDebriefTraits(combined, false).join("\n"), /立て直し屋|不屈の連携/u);
+  assert.match(renderDebriefTraits(combined, false).join("\n"), /作戦称号\s+連携上手/u);
+  assert.deepEqual(earned.traits, ["一発完遂"], "rendering must not alter the host observation");
+  assert.doesNotMatch(renderDebriefTraits(undefined, true).join("\n"), /🎯 一発完遂|↩️ 修正から復帰|🐾 連携作戦/u);
   assert.deepEqual(buildDebrief(receipt, contract, observation).traits, []);
   assert.deepEqual(buildDebrief(receipt, contract, { ...observation, complete: false }, records(events)).traits, []);
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events.slice(1))).traits, []);

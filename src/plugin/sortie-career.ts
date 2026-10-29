@@ -126,6 +126,18 @@ export function renderCareer(career: SortieCareer | undefined): string[] {
     `❓ 指示待ち ${career.decision}`,
     `🔄 進行中 ${career.active}`,
     `↩️ 復帰 ${career.recoveries}`,
+    "※今回ではなく保存履歴の戦績。進行中は終端記録なし（現在の稼働確認ではありません）",
+    `※復帰は成功任務の同一子セッション内の検証失敗→変更→同じ検証成功のみ。報告取得 ${career.telemetryCovered}/${terminal}任務`,
+    `🎯 一発完遂 ${career.firstPass.count}/${career.firstPass.eligible}判定対象任務`,
+    "",
+    "🎖 PACK獲得称号（保存履歴）",
+    ...([
+      ["任務完遂の隊", "保存された正式receiptに任務完了あり"],
+      ["連携の隊", "報告に異なる子セッションの稼働区間重複あり（成功称号ではありません）"],
+      ["復帰の隊", "成功任務に上記の限定された復帰記録あり"],
+      ["一発完遂の隊", "判定対象の成功任務に再試行・再計画・検証失敗なし"],
+    ] as const).filter(([title]) => career.titles.includes(title)).map(([title, reason]) => `${title} — ${reason}`),
+    ...(career.titles.length === 0 ? ["判定保留 — 保存範囲で確認できた称号なし"] : []),
     "",
     `🪙 累積使用量 ${career.tokens.covered === 0 ? "計測不可" : `${career.tokens.sum.toLocaleString("ja-JP")} tokens`} ※${career.tokens.covered}/${terminal}任務`,
     `⏱ 累積worker ${minutes(career.workerTime)}`,
@@ -135,5 +147,6 @@ export function renderCareer(career: SortieCareer | undefined): string[] {
     "📦 保存範囲",
     `${career.since?.slice(0, 10) ?? "開始日不明"}以降 / ${career.coverage.included} of ${career.coverage.files} files${career.coverage.unavailable || career.coverage.truncated ? " ※部分集計" : ""}`,
     "※生涯戦績ではありません",
+    "※称号も上記保存範囲のみ。未取得・削除済み履歴は判定しません",
   ];
 }

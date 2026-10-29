@@ -107,5 +107,11 @@ test("renders PACK RECORD in ordered icon rows with measured coverage and retent
   assert.match(text, /^📜 PACK RECORD\n🏁 完了 1\n🟡 中断 1\n⏳ 外部待機 0\n❓ 指示待ち 0\n🔄 進行中 0\n↩️ 復帰 0/u);
   assert.match(text, /🪙 累積使用量 25 tokens ※1\/2任務/u);
   assert.match(text, /🕰 累積goal 0\.3分 ※2\/2任務 ※待機・重複含む/u);
-  assert.match(text, /📦 保存範囲\n1970-01-01以降 \/ 1 of 1 files\n※生涯戦績ではありません$/u);
+  assert.match(text, /📦 保存範囲\n1970-01-01以降 \/ 1 of 1 files\n※生涯戦績ではありません\n※称号も上記保存範囲のみ。未取得・削除済み履歴は判定しません$/u);
+  assert.match(text, /🎖 PACK獲得称号（保存履歴）\n任務完遂の隊 — 保存された正式receiptに任務完了あり/u);
+  assert.match(text, /🎯 一発完遂 1\/1判定対象任務/u);
+  assert.match(text, /進行中は終端記録なし（現在の稼働確認ではありません）/u);
+  assert.match(text, /復帰は成功任務の同一子セッション内[\s\S]*報告取得 1\/2任務/u);
+  assert.doesNotMatch(renderCareer(summarizeCareer([history(receipt("unfinished", "stopped"))], coverage)).join("\n"),
+    /任務完遂の隊|一発完遂の隊|復帰の隊/u);
 });
