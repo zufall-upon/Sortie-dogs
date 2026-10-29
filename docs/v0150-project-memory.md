@@ -50,3 +50,7 @@ V2 は既存の tool-result transport を使う。通常の最終要求には正
 正式履歴のowning-service fallbackが必要なMissionでは `SORTIE_QUALIFICATION_MANAGED=1` を使う。専用 `base/state` のXDG_STATE_HOMEでmanaged serviceを分離し、共有hostのregistration・global候補を変更しない。stdio standaloneは公開履歴APIがないhostでこのfallbackを利用できない。背景Taskは起動ackと完了を区別し、native final/receiptを別途回収する。終了後は同じ専用XDG_STATE_HOMEでそのserviceだけ停止し、観測・DB・成果・設定は保持する。
 
 OpenCode 2.2.0/SOLで、自然訂正・新session想起・off、独立Advisorの実応答と採否理由/効果未検証の想起、未完成報告のOperator受入拒否を確認。通常の限定inventory実装Missionは正式check→独立Review→receipt→最終ユーザーMarkdownへ同一hostパネル一度、まで確認。小成果の成功は製品全体の受入ではない。元添付画像は相談の誘導性と旧Gemma表示の診断材料であり、pixel一致のUI目標ではない。desktopの実レンダリングと画像生成能力は、このCLI確認で実証したとは扱わない。
+
+保存観測は `_testenv/v0150-qualification/`（Git対象外）。`native-mission.json` の成功完了toolから取得した `return_report` と、同じsessionの最終assistant本文（`normal-mission-final.md`）を完全一致で照合し、一度だけ含まれることを確認した。対象goalは `sha256:38e3e624e7d3ca652df059fa1ea92d0df1dae5efc4e55567da434a357c594b64`。実装・Advisor・独立Reviewerのnative assistant modelは全て `openai/gpt-6.1-sol`。報告パネルの費用予測は累計実費と同一視せず、今回の費用はunknownのまま保持する。
+
+再起動時のunit process-defectと、製品のsource検証失敗は別である。完了済みの実モデル推論を再実行せず、残存native記録を照合する。`ca0590e` の一般PM相談応答capture補正後は統合候補の正式検証が必要。開発中ChatGPTの結果相談、独立source Review、PRレビュー回収・main統合・固定成果物によるreleaseは別途完了が必要で、CLI小成果やunitの成功だけでは満たさない。
