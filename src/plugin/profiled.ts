@@ -4309,7 +4309,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       "experimental.chat.system.transform": async (request, output) => {
         const root = await rootFor(request.sessionID) ?? await proposalPromptRoot(request.sessionID);
         const memoryWho = await identity(request.sessionID);
-        if (["dog-coordinator", "dog-operator"].includes(memoryWho.role ?? "")) {
+        if (root && ["dog-coordinator", "dog-operator"].includes(memoryWho.role ?? "")) {
           (output.system ??= []).push("SORTIE_PM_JUDGMENT: At existing acceptance/strategy decisions, compare original user requirements and vision with the actual artifact, formal checks, Review, delivery and concrete unmet work; Coordinator prose is not completion proof. Inspect required visual artifacts directly, not only path/SHA. Remedy concrete gaps with existing owners; do not add a role, approval gate or repeat unchanged checks. For required consultation, repeated failure or report/artifact mismatch, use the existing native Advisor Task: Goal → Constraints → Observed facts → Question. Obtain independent evaluation before revealing your preferred solution; then record adoption/rejection, reason, change and observed effect (or unverified). Preserve the existing consultation cap and configurable Advisor model. A skipped consultation needs a concrete reason; a failed dispatch is not consultation. Advice and memory never authorize execution, Review PASS or validation.");
           if (memoryStartup) {
             const packet = await projectMemory.recall(input.directory, root ? (await missions.read(root))?.id : undefined)
