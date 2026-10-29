@@ -28,7 +28,52 @@ async function command(label, exe, args, cwd=root, env={}) {
   assert.equal(exit,0,stderr);return stdout;
 }
 const envFile=path.join(base,'environment.json');
-if(phase==='setup') {
+if(phase==='review-setup') {
+  await assert.rejects(fs.stat(envFile),{code:'ENOENT'});
+  const candidate=await json(path.join(base,'candidate.json'));
+  assert.equal(sha(await fs.readFile(candidate.tgz)),candidate.sha256);
+  const fixture=await installedFixture(candidate.tgz,path.join(base,'review'),'v014',{nested:false});
+  const {project,env,installed,credentialSource}=fixture;
+  const retained=await json(path.join(root,'_testenv/v0150-qualification/environment.json'));
+  const settings=await json(path.join(retained.config,'opencode.json'));
+  settings.plugins=[path.join(project,'.opencode/plugins/sortie-dogs')];
+  await save(path.join(project,'.opencode/opencode.json'),settings);
+  const bin=path.join(fixture.run,'bin');await fs.mkdir(bin);
+  await fs.symlink('missing-python',path.join(bin,'python'));
+  await fs.writeFile(path.join(project,'proof.txt'),'retained\n');
+  await fs.writeFile(path.join(project,'check.mjs'),'import assert from "node:assert/strict";import fs from "node:fs";assert.equal(fs.readFileSync("proof.txt","utf8"),"retained\\n");console.log("RETAINED_PROOF_PASS");\n');
+  await command('review-git-init','git',['init'],project);
+  await command('review-git-add','git',['add','proof.txt','check.mjs'],project);
+  await command('review-git-commit','git',['-c','user.name=Qualification','-c','user.email=qualification@example.invalid','commit','-m','test: retained required proof'],project);
+  const prompt=`日本語。これは隔離された実運用回帰。SOL openai/gpt-6.1-solだけをCoordinator/Reviewerに明示指定。共有hostへ触らない。既存proof.txtの検証だけ、再実装・新成果作成なし。元要求は「proof.txtがretained\\nであることを一度検証し、外部binの切れリンクを変更せず、履歴scopeを保持してReview/独立Review/Acceptance/receiptまで完了」。通常start_mission→Coordinatorで進める。Coordinatorはまずexecutor=workerでpending unitをplan_unitsする（dispatchしない）。この最初のunitのreadはcheck.mjs, proof.txt, ${bin}/**、writeは${bin}/**、validationはnode check.mjs。次に同じ要求をnarrow read-only proof unitへplan_units(executor=self)で正式replan（read=check.mjs,proof.txt、write=[]、validation=node check.mjs）。これは広い履歴scopeを保持したままの正規復帰。narrow unitでnode check.mjsを一回だけ実行、finish_direct_unit、その後review_mission(risk_tags=[public-logic])を呼ぶ。review_missionを飛ばしたりscope削除したりledger編集しない。独立ReviewerをSOLで派遣しPASS後submit_mission、rootがcomplete_missionでreceiptを取得し正式帰還報告を一度だけ表示。元要求と実リンクとproofと検証履歴を保持。上限はこの回帰で実行unit1つ、再実行なし。費用はunknownを報告。最初と最後にoperator_statusでruntime実ロードとbudgetを観測。`;
+  await fs.writeFile(path.join(base,'review-prompt.txt'),prompt+'\n');
+  await save(envFile,{root,base,project,installed,env,credentialSource,bin,proof_sha256:sha(await fs.readFile(path.join(project,'proof.txt'))),candidate_sha256:candidate.sha256});
+  console.log(envFile);
+} else if(phase==='review-summary') {
+  const setup=await json(envFile),candidate=await json(path.join(base,'candidate.json'));
+  const native=await json(path.join(base,'native-messages.json')),turn=await json(path.join(base,'review.json'));
+  const captures=Object.values(native.captures).flat();
+  const parts=captures.flatMap(m=>m.content??[]);
+  const packets=name=>parts.filter(p=>p.type==='tool'&&p.name===name&&p.state?.status==='completed').map(p=>JSON.parse(p.state.content[0].text));
+  const statuses=packets('sortie_v010_operator_status'),completed=packets('sortie_v010_complete_mission');
+  const key=sha(turn.session),state=path.join(setup.project,'.sortie-dogs-v010');
+  const mission=await json(path.join(state,'missions',key+'.json')),operator=await json(path.join(state,'operators',key+'.json'));
+  const models=[...new Set(captures.filter(m=>m.type==='assistant'&&m.model).map(m=>`${m.model.providerID}/${m.model.id}`))];
+  const errors=parts.filter(p=>p.type==='tool'&&p.state?.status==='error').map(p=>({tool:p.name,error:p.state.error}));
+  const checks={candidate_loaded:statuses.some(s=>s.runtime?.runtime_asset_version===candidate.runtimeMarker)&&sha(await fs.readFile(candidate.tgz))===candidate.sha256,
+    public_review:packets('sortie_v010_review_mission').some(p=>p.status==='review-required'),
+    history_scope_retained:mission.reviewScope?.write?.includes(setup.bin+'/**'),
+    proof_preserved:sha(await fs.readFile(path.join(setup.project,'proof.txt')))===setup.proof_sha256,
+    link_preserved:await fs.readlink(path.join(setup.bin,'python'))==='missing-python',
+    independent_review:mission.review?.verdict==='PASS'&&mission.review.child!==turn.session,
+    receipt:operator.receipt?.status==='succeeded'&&completed.length===1,
+    no_duplicate_execution:operator.units.length===1&&operator.units[0].evidence.length===1&&mission.attempts.filter(a=>a.kind==='direct_execution').length===1,
+    sol_only:models.length===1&&models[0]==='openai/gpt-6.1-sol',native_settled:!native.pending};
+  const summary={checks,models,errors,cost_usd:null,elapsed_ms:turn.elapsed_ms,candidate,receipt:operator.receipt,mission_id:mission.id,root_session:turn.session,
+    limitations:['Isolated new Mission public-path reproduction, not continuation or acceptance of the original shared-host Mission.','Known old-version ENOENT oracle retained in handoff; not replayed.','Actual total cost remains unknown; no budget reset.']};
+  await save(path.join(base,'review-summary.json'),summary);console.log(JSON.stringify(summary,null,2));
+  assert.ok(Object.values(checks).every(Boolean),'review recovery checks failed');
+} else if(phase==='setup') {
   await assert.rejects(fs.stat(envFile),{code:'ENOENT'});
   const stable=JSON.parse(await command('stable-pack','npm',['pack','sortie-dogs@0.14.9','--json','--pack-destination',base]));
   const stableTgz=path.join(base,stable[0].filename);

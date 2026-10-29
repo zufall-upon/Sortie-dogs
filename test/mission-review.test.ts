@@ -1,20 +1,114 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile, symlink } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
   observedMissionValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
-import { MISSION_REVIEW_REFERENCE, type OperatorMission } from "../dist/core/operator-mission.js";
+import { MISSION_REVIEW_REFERENCE, OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
+import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
 import { protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const git = promisify(execFile);
+
+test("dangling external symlink retains identity, bounded missing preview and repair fingerprint", async () => {
+  const root = await mkdtemp(resolve("_testenv/dangling-review-"));
+  try {
+    const link = join(root, "python"), target = join(root, "target");
+    await symlink("target", link);
+    const first = await declaredArtifacts([root], 4096);
+    assert.ok(first.entries.some(e => e[0] === link && e[1] === "symlink:target" && e[2] === "target-missing:ENOENT"));
+    assert.match(first.excerpt, /target missing: ENOENT/);
+    await assert.rejects(git(process.execPath, ["-e", "require('node:fs').readFileSync(process.argv[1])", link]), /ENOENT/,
+      "fingerprinting a missing target never makes required-output validation pass");
+    const bounded = await declaredArtifacts([root], 20);
+    assert.ok(Buffer.byteLength(bounded.excerpt) <= 20); assert.equal(bounded.truncated, true);
+    await rm(link); await symlink("other-missing", link);
+    assert.notDeepEqual((await declaredArtifacts([root])).entries, first.entries);
+    await rm(link); await symlink("target", link); await writeFile(target, "repaired\n");
+    assert.notDeepEqual((await declaredArtifacts([root])).entries, first.entries);
+    await rm(link); await symlink(resolve("package.json"), link);
+    await assert.rejects(declaredArtifacts([root]), /declared-artifact-link-outside-scope/);
+    await rm(link); await symlink("python", link);
+    await assert.rejects(declaredArtifacts([root]), { code: "ELOOP" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("symlink resolution errors and post-lstat removal or replacement are not target-missing", async t => {
+  const root = await mkdtemp(resolve("_testenv/dangling-errors-"));
+  const original = fs.realpath;
+  try {
+    for (const mode of ["EACCES", "EPERM", "EIO", "removed", "replaced"]) {
+      const link = join(root, mode); await symlink("missing", link);
+      let calls = 0;
+      const injected = t.mock.method(fs, "realpath", async (p: Parameters<typeof fs.realpath>[0]) => {
+        if (p === link && ++calls === 2) {
+          if (mode === "removed" || mode === "replaced") {
+            await rm(link); if (mode === "replaced") await symlink("different", link);
+          }
+          throw Object.assign(new Error(mode), { code: mode.startsWith("E") ? mode : "ENOENT" });
+        }
+        return original(p);
+      });
+      syncBuiltinESMExports();
+      try { await assert.rejects(declaredArtifacts([link]), { code: mode.startsWith("E") ? mode : "ENOENT" }); }
+      finally { injected.mock.restore(); syncBuiltinESMExports(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("public broad external scope then narrow proof unit reviews retained dangling link without replanning history away", async () => {
+  const area = await mkdtemp(resolve("_testenv/dangling-public-")), root = join(area, "project"), bin = join(area, "bin");
+  try {
+    await mkdir(root); await mkdir(bin); await symlink("missing-python", join(bin, "python"));
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "proof.txt"), "retained\n");
+    await writeFile(join(root, "check.mjs"), 'import assert from "node:assert/strict";import fs from "node:fs";assert.equal(fs.readFileSync("proof.txt","utf8"),"retained\\n");\n');
+    const history: unknown[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+    } } } as never);
+    const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+      message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Verify retained proof without changing external links" }],
+    });
+    await tool("start_mission", { requirements: ["Verify retained proof without changing external links"] });
+    const unit = { title: "Proof", objective: "Verify retained proof", read: ["check.mjs", "proof.txt"], write: [], validation: ["node check.mjs"] };
+    await tool("plan_units", { executor: "worker", units: [{ ...unit, read: [...unit.read, bin + "/**"], write: [bin + "/**"] }] });
+    await tool("plan_units", { executor: "self", units: [unit], reason: "Read-only proof preserves historical external scope" });
+    const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
+    const started = Date.now();
+    await hooks["tool.execute.before"]!(input, { args });
+    const checked = await git(process.execPath, ["check.mjs"], { cwd: root });
+    await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: "proof",
+      state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+    const finished = await tool("finish_direct_unit");
+    assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
+    const review = await tool("review_mission", { risk_tags: ["public-logic"] });
+    assert.ok(review.task, JSON.stringify(review));
+    assert.equal(review.status, "review-required");
+    const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.ok(mission.reviewScope?.write.includes(bin + "/**"), "the earlier broad scope is still retained");
+    const source = await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope);
+    assert.match(source.excerpt, /target missing: ENOENT/);
+    assert.equal(await fs.readlink(join(bin, "python")), "missing-python");
+    const status = await tool("operator_status");
+    assert.equal(status.budget.consumed_units, 1);
+    assert.equal(await fs.readFile(join(root, "proof.txt"), "utf8"), "retained\n");
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
 
 test("required validation matches ordered native occurrences, not a latest-per-command map or display excerpt", () => {
   const A = "node a.mjs", B = "node b.mjs", declared = [A, B, A, B];

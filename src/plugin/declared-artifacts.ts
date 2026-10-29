@@ -32,14 +32,31 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
       throw error;
     });
     if (!metadata) { entries.push([label, "missing"]); return; }
-    const canonical = await realpath(path);
     if (metadata.isSymbolicLink()) {
-      entries.push([label, `symlink:${await readlink(path)}`, canonical]);
+      const target = await readlink(path);
+      let canonical: string;
+      try { canonical = await realpath(path); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        // ENOENT may be the link disappearing or being replaced, not a missing target.
+        const current = await lstat(path);
+        if (!current.isSymbolicLink() || current.dev !== metadata.dev || current.ino !== metadata.ino
+          || current.ctimeMs !== metadata.ctimeMs || current.mtimeMs !== metadata.mtimeMs
+          || await readlink(path) !== target) throw error;
+        entries.push([label, `symlink:${target}`, "target-missing:ENOENT"]);
+        const notice = Buffer.from(`\n--- external symlink: ${label} ---\n${target}\n[target missing: ENOENT]\n`);
+        const bounded = notice.subarray(0, remaining);
+        if (bounded.length) { excerpts.push(bounded.toString("utf8")); remaining -= bounded.length; }
+        if (bounded.length < notice.length) truncated = true;
+        return;
+      }
+      entries.push([label, `symlink:${target}`, canonical]);
       if (!physical.some(root => within(root, canonical))) throw new Error("declared-artifact-link-outside-scope");
       if (ancestors.has(canonical)) return; // The link identity is recorded; do not traverse cycles.
       await visit(canonical, ancestors);
       return;
     }
+    const canonical = await realpath(path);
     if (metadata.isDirectory()) {
       entries.push([label, "directory", canonical]);
       const next = new Set([...ancestors, canonical]);
