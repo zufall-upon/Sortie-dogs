@@ -358,9 +358,10 @@ const gauge = (percent: number): string => {
 
 /** Display existing observations only; titles never select an execution policy. */
 export function debriefOperationTitle(debrief: Debrief | undefined, completed: boolean): string | undefined {
+  if (!completed) return undefined;
   const traits = debrief?.traits ?? [];
-  if (completed && traits.includes("修正から復帰")) return "立て直し屋";
-  if (completed && traits.includes("一発完遂")) return "一発完遂";
+  if (traits.includes("修正から復帰")) return "立て直し屋";
+  if (traits.includes("一発完遂")) return "静かな一撃";
   if (traits.includes("連携作戦")) return "連携上手";
   return undefined;
 }
@@ -369,17 +370,23 @@ export function renderDebriefTraits(debrief: Debrief | undefined, completed: boo
   const traits = debrief?.traits ?? [];
   const title = debriefOperationTitle(debrief, completed);
   return [
-    `作戦称号      ${title ?? "判定保留（確認できた既存特性なし）"}`,
-    ...(completed && traits.includes("一発完遂") ? ["特別記章      静かな一撃 — 一発完遂の別名（別実績として加算しません）"] : []),
+    `作戦称号      ${title === "静かな一撃" ? "静かな一撃 — 一発完遂" : title ?? (completed ? "判定保留（根拠未確認）" : "未授与（未完了）")}`,
     ...(completed && traits.includes("修正から復帰") && traits.includes("連携作戦")
-      ? ["特別記章      不屈の連携 — 同じ任務で修正復帰と稼働区間の重複を観測（追加の実績加算なし）"] : []),
-    "🏅 今回の作戦特性",
+      ? ["特別記章      不屈の連携 — 修正復帰 × 並行稼働"] : []),
+  ];
+}
+
+/** Evidence belongs after the main result, without awarding the same fact twice. */
+export function renderDebriefTraitEvidence(debrief: Debrief | undefined, completed: boolean): string[] {
+  const traits = debrief?.traits ?? [];
+  return [
+    "✎ 称号・観測の根拠",
     ...(traits.includes("連携作戦") ? ["🐾 連携作戦 — 異なる子セッションの稼働区間が重複（成果成功の判定ではありません）"] : []),
     ...(completed && traits.includes("修正から復帰") ? ["↩️ 修正から復帰 — 同じ子セッションで対象検証失敗→変更→同じ検証成功、任務完了"] : []),
-    ...(completed && traits.includes("一発完遂") ? ["🎯 一発完遂 — 完全な対象履歴で再試行・再計画・検証失敗なし、対象検証PASS・任務完了"] : []),
+    ...(completed && traits.includes("一発完遂") ? ["一発完遂の条件 — 完全な対象履歴で再試行・再計画・検証失敗なし、対象検証PASS・任務完了"] : []),
     ...(!traits.includes("連携作戦") && !(completed && traits.some(trait => trait === "修正から復帰" || trait === "一発完遂"))
-      ? ["判定保留 — 確認できた既存特性なし（未観測と該当なしは区別できません）"] : []),
-    "※今回の観測記録。称号は実行方針・検証・Review・Acceptanceを変更しません",
+      ? ["特性の根拠未確認（未観測と該当なしは区別できません）"] : []),
+    "※今回の観測のみ。別名・組合せの二重加算なし。称号は実行方針・検証・Review・Acceptanceを変更しません",
   ];
 }
 export function renderDebrief(debrief: Debrief | undefined): string[] {

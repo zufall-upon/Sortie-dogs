@@ -1,5 +1,5 @@
 import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
-import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
+import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, renderDebriefTraitEvidence, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
 import { goalFingerprint } from "../core/goal-bound.ts";
 import type { GoalReport } from "../core/goal-report.ts";
 import { renderCareer, type SortieCareer } from "./sortie-career.ts";
@@ -578,6 +578,8 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     ...renderDebrief(result.debrief),
     "",
     ...renderCareer(result.career),
+    "",
+    ...renderDebriefTraitEvidence(result.debrief, result.mission.status === "COMPLETED"),
     "",
     "🛑 STOP REASON",
     displayText(presentation.stopReason ?? result.mission.stop_reason),

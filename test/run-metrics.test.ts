@@ -264,7 +264,8 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\nTACTICAL DESK \/ 作戦卓\n─+\ngoal-result\n\n🟢 COMPLETED — complete/u);
   assert.match(inserted, /⚑ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
   assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未確認（未実施なしを確認した意味ではありません）[\s\S]*➡️ NEXT\n未取得/u);
-  assert.match(inserted, /🏅 今回の作戦特性\n判定保留/u);
+  assert.match(inserted, /✎ 称号・観測の根拠\n特性の根拠未確認/u);
+  assert.ok(inserted.indexOf("⚑ MISSION") < inserted.indexOf("✎ 称号・観測の根拠"));
   assert.match(inserted, /host計上費用\s+\$0\.2500/u);
   assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*予測費用\s+計測不可 ※予測概算/u);
   assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*➡️ NEXT\n未取得[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
