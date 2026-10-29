@@ -310,9 +310,10 @@ ${MISSION_RESULT_HOLD_POLICY}
 
 ${MISSION_REFLECTION_WORKFLOW}
 
-Retain 🐾 Sortie presentation. The host-authored measured return panel is retained in complete_mission's
-tool result. Give a concise final outcome and key checks; do not transcribe the card or spend another model
-turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
+Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
+Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
+Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
+spend another model turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
 existing user authorization and project gates; npm publication remains manual.
 `;
 }

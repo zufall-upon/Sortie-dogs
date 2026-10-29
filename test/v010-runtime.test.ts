@@ -555,6 +555,8 @@ test("every preview role preserves user language and protocol keys without dupli
 test("preview keeps canonical game-style guidance and does not decorate unproved text as success", () => {
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission")));
+  assert.doesNotMatch(primary, /do not transcribe the card/u, "the shipped system policy must not contradict verbatim return-report delivery");
+  assert.match(primary, /append that host-authored Markdown verbatim exactly once/u);
   for (const icon of ["🎯", "📊", "🔍", "➡️", "🐾"]) assert.ok(primary.includes(icon));
   const unfinished = "## 確認結果\n検証は未完。";
   assert.equal(receiptBoundTerminalText(unfinished, undefined), unfinished);

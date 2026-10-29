@@ -61,6 +61,60 @@ test("V2 exposes opted-in Project Memory to existing controllers only and preser
   }
 });
 
+test("V2 Project Memory keeps inline image bytes out of recall and retrieves the original on demand", async () => {
+  const root = await mkdtemp(join(process.cwd(), "_testenv", "v2-memory-inline-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(root, "config");
+  let cleanup: (() => void) | undefined;
+  try {
+    const fixture = contextFixture();
+    fixture.context.location.directory = root;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    const memory = new ProjectMemory(await projectMemoryFile(root));
+    await memory.configure(true);
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup(fixture.context) as () => void;
+    const bytes = Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/wAAAABJRU5ErkJggg==", "base64"), Buffer.alloc(3 * 1024 * 1024, 0xa5)]);
+    const data = bytes.toString("base64"), source = "root:inline-reference";
+    const originalText = "Use this original reference, not a generated replacement.\n" + "original detail ".repeat(200);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "inline-reference",
+      prompt: { text: originalText, files: [{ data, mime: "image/png", name: "reference.png" }] } });
+    const pending = await memory.recall(root);
+    assert.ok(JSON.stringify(pending).length < 16000, "automatic pending recall must not contain base64 image bytes");
+    assert.equal(pending.pending[0].attachments[0].url, undefined);
+    assert.equal(pending.pending[0].attachments[0].source, source);
+    assert.equal(pending.pending[0].attachments[0].index, 0);
+    const definition = fixture.tools.find(tool => tool.name === "sortie_v010_project_memory") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    const executeMemory = async (request: object) => JSON.parse((await definition.execute(
+      { request_json: JSON.stringify(request) }, { sessionID: "root" })).content);
+    const original = await executeMemory({ action: "source", source });
+    assert.equal(original.source.text, originalText, "full original text remains available without fetching base64 image payloads");
+    assert.ok(JSON.stringify(original).length < 16000);
+    assert.equal((await memory.source(source))!.attachments[0].url, `data:image/png;base64,${data}`, "projection must not rewrite the retained original");
+    const image = await executeMemory({ action: "attachment", source, index: 0 });
+    assert.equal(image.attachment.mime, "image/png");
+    assert.deepEqual(await readFile(image.attachment.path), bytes, "native read gets the exact original bytes through an on-demand file reference");
+    assert.equal((await executeMemory({ action: "attachment", source, index: 0 })).attachment.path, image.attachment.path);
+    await executeMemory({ action: "apply", source, operation: "retain-reference", changes: [{ key: "original-reference", scope: "project", context: "project",
+      kind: "constraint", status: "adopted", text: "Use the original reference", reason: "User requirement" }] });
+    const processed = await new ProjectMemory(memory.file).recall(root);
+    assert.ok(JSON.stringify(processed).length < 16000, "processed source projection must also omit base64");
+    assert.equal(processed.sources![0].attachments[0].source, source);
+    const event = { sessionID: "root", agent: "dog-operator", system: [] as any[], messages: [], tools: {} };
+    await fixture.sessionHooks.get("context")!(event);
+    const injection = event.system.find(part => part.text?.startsWith("SORTIE_PROJECT_MEMORY ("));
+    assert.ok(injection && injection.text.length < 16000, "the real model system injection remains bounded for this image-bearing source");
+    assert.ok(!injection.text.includes(data));
+    await memory.configure(false);
+    assert.deepEqual(await executeMemory({ action: "attachment", source, index: 0 }), { attachment: null }, "off must not expose retained image bytes");
+  } finally {
+    cleanup?.();
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function contextFixture() {
   const history: Record<string, unknown>[] = [{
     id: "assistant-final",

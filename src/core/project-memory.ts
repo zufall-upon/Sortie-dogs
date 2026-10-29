@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { durableScopeRoot } from "./durable-scope-root.ts";
 import { configRoot } from "../reflection/config.ts";
@@ -24,6 +24,12 @@ interface MemoryState {
 const empty = (): MemoryState => ({ v: 1, enabled: false, sources: [], events: [], processed: {} });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const text = (value: unknown, max = 8000): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
+const sourceView = (source: MemorySource, fullText = false) => ({ ...source,
+  text: fullText ? source.text : source.text.slice(0, 2000), text_truncated: !fullText && source.text.length > 2000,
+  attachments: source.attachments.map((file, index) => ({ source: source.id, index,
+    ...(file.mime ? { mime: file.mime.slice(0, 256) } : {}), ...(file.filename ? { filename: file.filename.slice(0, 256) } : {}),
+    url: !file.url.startsWith("data:") && file.url.length <= 2048 ? file.url : undefined,
+    url_omitted: file.url.startsWith("data:") || file.url.length > 2048 })) });
 
 /** Stable repository identity uses local Git common-dir, never remote URL or a worktree path. */
 export async function projectMemoryFile(root: string): Promise<string> {
@@ -83,6 +89,31 @@ export class ProjectMemory {
     const state = await this.load();
     return state.enabled ? state.sources.find(source => source.id === id) : undefined;
   }
+  async sourceForModel(id: string) {
+    const source = await this.source(id);
+    return source ? sourceView(source, true) : undefined;
+  }
+  /** Materialize inline bytes only on demand; recall must never inject them as model text. */
+  async attachment(id: string, index: number) {
+    if (!Number.isSafeInteger(index) || index < 0) return undefined;
+    const source = await this.source(id), file = source?.attachments[index];
+    if (!file) return undefined;
+    if (!file.url.startsWith("data:")) return { ...file, source: id, index };
+    const response = await fetch(file.url);
+    if (!response.ok) throw new Error("project-memory-attachment-unavailable");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const mime = file.mime ?? response.headers.get("content-type") ?? "application/octet-stream";
+    const extension = ({ "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+      "application/pdf": ".pdf", "text/plain": ".txt" } as Record<string, string>)[mime] ?? ".bin";
+    const directory = `${this.file}.attachments`, path = join(directory, `${hash(file.url)}${extension}`);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
+      await rename(temporary, path);
+    } finally { await unlink(temporary).catch(() => undefined); }
+    return { source: id, index, path, mime, ...(file.filename ? { filename: file.filename } : {}) };
+  }
   async configure(enabled: boolean): Promise<void> { await this.transaction(state => { state.enabled = enabled; }); }
   async capture(source: Omit<MemorySource, "observedAt" | "availability">): Promise<void> {
     if (!await this.enabled()) return;
@@ -137,7 +168,7 @@ export class ProjectMemory {
     snapshot.sort((a, b) => terms.filter(term => b.text.toLocaleLowerCase().includes(term)).length -
       terms.filter(term => a.text.toLocaleLowerCase().includes(term)).length || b.at.localeCompare(a.at));
     const pending = state.sources.filter(source => !Object.hasOwn(state.processed, source.id));
-    const excerpt = (source: MemorySource) => ({ ...source, text: source.text.slice(0, 2000), text_truncated: source.text.length > 2000 });
+    const excerpt = (source: MemorySource) => sourceView(source);
     return { enabled: true as const, snapshot: snapshot.slice(0, 24), pending: pending.slice(0, 8).map(excerpt),
       pending_count: pending.length, oldest_pending: pending[0]?.observedAt ?? null,
       last_success: Object.values(state.processed).map(item => item.at).sort().at(-1) ?? null,

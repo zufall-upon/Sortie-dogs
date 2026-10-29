@@ -20,7 +20,7 @@ v010の公開ユーザーturn（画像only含む）を安定session/message ID�
 
 Mission外の通常PM相談も、既存Advisorの応答・質問・callID・child/modelをSourceへ保持する。背景起動のackだけを相談完了と扱わない。通常Operatorが採否をEventへ関連付けるまで、応答は観測・未処理のままであり、採用や効果をhostが推測しない。
 
-toolの `request_json` は `action: recall|source|apply`。recallはqueryに関連する現在像と未処理原文を返す。原文excerptが切られた場合はsourceで全文取得。applyはsource/operation/changesを受け、`changes: []` は明示no-change。訂正は新Sourceと現Eventのsupersedesを指定。Snapshot競合なら再想起して訂正し、同じ処理の再送は同一operationで冪等。SourceとEventを混同せず、processedとEventは同一atomic renameでcommitする。排他競合はbounded retry、失敗時はpendingを残す。中断でlockが残った場合はエラーに出たlockのowner停止を確認してそのlockだけ除去し同じ処理を再送。壊れた/将来schemaのデータを空で上書きしない。
+toolの `request_json` は `action: recall|source|attachment|apply`。recallはqueryに関連する現在像と未処理原文を返す。原文excerptが切られた場合はsourceで全文取得。recall/sourceの添付はsource/index付き参照で、inline画像bytesと2048文字超のURLをモデル用文字列へ再注入しない。`{action: "attachment", source, index}` は元添付を返し、inlineデータは記憶file隣の `.attachments/` 内へatomicに展開したnative read用pathを返す。元Sourceのbytes/URLと保存schemaは変更せず、原文・添付への追跡を保持。offはこの取得も停止し、展開済みファイルは保持する。applyはsource/operation/changesを受け、`changes: []` は明示no-change。訂正は新Sourceと現Eventのsupersedesを指定。Snapshot競合なら再想起して訂正し、同じ処理の再送は同一operationで冪等。SourceとEventを混同せず、processedとEventは同一atomic renameでcommitする。排他競合はbounded retry、失敗時はpendingを残す。中断でlockが残った場合はエラーに出たlockのowner停止を確認してそのlockだけ除去し同じ処理を再送。壊れた/将来schemaのデータを空で上書きしない。
 
 次の通常判断/新sessionでpendingとSnapshotを提示して漏れを回復する。意味抽出の完全性・追加費用ゼロは保証しない。モデルの採否/効果記録は実測証拠の代わりではない。PM判断とAdvisor独立評価の改善はopt-inに従属しない。元要求→実物→正式check→Review→delivery→未達を照合し、必要画像は実際に取得評価する。既存native AdvisorへGoal→Constraints→Observed facts→Questionを送り、自己推奨案は初回独立評価後。既存相談上限・モデル差替えを維持し、助言/記憶を権限・Review PASS・正式検証にしない。製品にブラウザ自動操作を必須化しない。
 
