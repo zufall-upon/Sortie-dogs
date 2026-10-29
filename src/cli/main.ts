@@ -366,7 +366,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       if (initialized.preservedLegacyPaths.length > 0) {
         process.stdout.write(`Preserved legacy runtime files: ${initialized.preservedLegacyPaths.join(", ")}.\n`);
       }
-      process.stdout.write("Optional Project Memory: sortie-dogs memory on [project-root]. Off stops capture/recall and retains data. Reload the project plugin after first opt-in.\n");
+      if (profile === "v010") process.stdout.write("Optional Project Memory: sortie-dogs memory on [project-root]. Off stops capture/recall and retains data. Reload the project plugin after first opt-in.\n");
       const override = profile === "v010"
         ? await initializer.coordinatorModelOverride(global ? target! : resolve(initArgs[0] ?? process.cwd()), global).catch(() => undefined)
         : undefined;
