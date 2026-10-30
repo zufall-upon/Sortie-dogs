@@ -25,9 +25,9 @@ test("report locale redisplay regenerates host defaults without consuming cards 
     "<details><summary>Example</summary>\nPending: disclosure example\n</details>\n\n" +
     "**Implementation:** 利用者の説明\n\n**Pending:** 利用者の保留\n\n**Next:** 利用者の次操作";
   const displayed = insert(insert(prose, "ja"), "en");
-  assert.match(displayed, /🔧 Implementation\n利用者の説明/u);
-  assert.match(displayed, /⏳ Pending\n利用者の保留/u);
-  assert.match(displayed, /➡️ NEXT\n利用者の次操作/u);
+  assert.match(displayed, /🔧 Implementation\n\n利用者の説明/u);
+  assert.match(displayed, /⏳ Pending\n\n利用者の保留/u);
+  assert.match(displayed, /➡️ NEXT\n\n利用者の次操作/u);
   assert.ok(displayed.endsWith(prose.slice("status: DONE\n\n".length)), "original explanatory content stays verbatim");
   assert.equal(insert(displayed, "en"), displayed);
 });
@@ -92,9 +92,11 @@ test("rare saved receipt snapshots and bilingual renderer preserve counts, state
     for (const [index, locale] of ["ja", "en"].entries()) {
       const text = outputs[index]!;
       await writeFile(`${folder}/${name}.${locale}.md`, `<!-- SYNTHETIC fixture; actual formatSortieResult output; no real award -->\n${text}\n`);
-      const body = text.slice(text.indexOf("~~~text\n") + 8, text.lastIndexOf("\n~~~"));
+      assert.doesNotMatch(text, /~~~|<pre>/u, "long prose must use wrapping Markdown, not a fence");
+      const body = text.slice(text.indexOf("</summary>\n\n") + "</summary>\n\n".length, text.lastIndexOf("\n\n</details>"));
       const escape = (s: string) => s.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
-      await writeFile(`${folder}/${name}.${locale}.html`, `<!doctype html><html lang="${locale}"><meta charset="utf-8"><title>Synthetic ${name} ${locale}</title><style>body{background:#171c1b;color:#ddd;font:14px monospace}pre{white-space:pre-wrap}summary{cursor:pointer}</style><p>SYNTHETIC fixture — actual text renderer, HTML pre wrapper; not native WebUI evidence.</p><details open><summary>${escape(name)} / ${locale}</summary><pre>${escape(body)}</pre></details></html>`);
+      const paragraphs = body.split("\n\n").map(line => `<p>${line.startsWith("`TACTICAL DESK / ") ? `<code>${escape(line.slice(1, -1))}</code>` : line}</p>`).join("\n");
+      await writeFile(`${folder}/${name}.${locale}.html`, `<!doctype html><html lang="${locale}"><meta charset="utf-8"><title>Synthetic ${name} ${locale}</title><style>body{background:#171c1b;color:#ddd;font:14px sans-serif;max-width:598px}summary{cursor:pointer}</style><p>SYNTHETIC fixture — literal paragraph preview of emitted Markdown; not native WebUI evidence.</p><details open><summary>${escape(name)} / ${locale}</summary>${paragraphs}</details></html>`);
     }
     const source = "status: DONE — synthetic\n\n**Implementation:** fixture/model\n\n**Pending:** unverified\n\n**Next:** none";
     const en = insertSortieResult(source, result, "evidence-gaps", undefined, "en");
@@ -377,20 +379,20 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
   assert.ok(inserted.startsWith("status: DONE — complete\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了</strong></summary>"));
-  assert.match(inserted, /~~~text\n🐾 SORTIE DOGS — 帰還報告\nTACTICAL DESK \/ 作戦卓\n─+\ngoal-result\n\n🟢 COMPLETED — complete/u);
+  assert.match(inserted, /🐾 SORTIE DOGS — 帰還報告\n\n`TACTICAL DESK \/ 作戦卓`\n\n─+\n\ngoal-result\n\n🟢 COMPLETED — complete/u);
   assert.match(inserted, /⚑ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
-  assert.match(inserted, /🔧 実装\n未取得[\s\S]*⏳ 未実施\n未確認（未実施なしを確認した意味ではありません）[\s\S]*➡️ NEXT\n未取得/u);
-  assert.match(inserted, /✎ 称号・観測の根拠\n特別記章 — 保存判定未取得（授与未確認）\n特性の根拠未確認/u);
+  assert.match(inserted, /🔧 実装\n\n未取得[\s\S]*⏳ 未実施\n\n未確認（未実施なしを確認した意味ではありません）[\s\S]*➡️ NEXT\n\n未取得/u);
+  assert.match(inserted, /✎ 称号・観測の根拠\n\n特別記章 — 保存判定未取得（授与未確認）\n\n特性の根拠未確認/u);
   assert.ok(inserted.indexOf("⚑ MISSION") < inserted.indexOf("✎ 称号・観測の根拠"));
   assert.match(inserted, /host計上費用\s+\$0\.2500/u);
   assert.match(inserted, /🪙 COST \/ PACK[\s\S]*19 tokens[\s\S]*予測費用\s+計測不可 ※予測概算/u);
-  assert.match(inserted, /🛑 STOP REASON\ncompleted[\s\S]*➡️ NEXT\n未取得[\s\S]*※使用量は最終応答生成前の計測\n~~~/u);
+  assert.match(inserted, /🛑 STOP REASON\n\ncompleted[\s\S]*➡️ NEXT\n\n未取得[\s\S]*※使用量は最終応答生成前の計測\n\n<\/details>/u);
   assert.ok(inserted.indexOf("🪙 COST / PACK") < inserted.indexOf("➡️ NEXT"));
   assert.match(inserted, /作戦称号\s+判定保留/u);
   assert.doesNotMatch(inserted, /evidence-1|evidence ref|completed\)|sha256:/u);
   assert.equal(insertSortieResult(inserted, result), inserted);
   const explicitNone = insertSortieResult("status: DONE\n\n**未実施:** なし", result);
-  assert.match(explicitNone, /⏳ 未実施\nなし/u);
+  assert.match(explicitNone, /⏳ 未実施\n\nなし/u);
   const unknownCost = formatSortieResult({ ...result, cost: { ...result.cost,
     cost_usd: { availability: "unavailable", value: null, reason: "incomplete-host-coverage" } } });
   assert.match(unknownCost, /host計上費用\s+unknown（全体の計上額未取得）/u);
@@ -399,15 +401,15 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
     "evidence-gaps", "EVIDENCE_GAPS\n未解決の返却行");
   assert.match(gaps, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
   assert.match(gaps, /レビュー補足\s+未解決の返却行/u);
-  assert.match(gaps, /⏳ 未実施\n未解決の返却行[\s\S]*➡️ NEXT\nなし/u);
+  assert.match(gaps, /⏳ 未実施\n\n未解決の返却行[\s\S]*➡️ NEXT\n\nなし/u);
   assert.match(gaps, /\*\*次:\*\* なし/u);
   assert.equal(insertSortieResult(gaps, result, "evidence-gaps", "EVIDENCE_GAPS\n未解決の返却行"), gaps,
     "the native final renderer retains the host review verdict and next action");
   const specific = insertSortieResult("status: DONE\n\n**未実施:** Windows 検証未実施\n\n**次:** 返却行299を確認", result,
     "evidence-gaps", "EVIDENCE_GAPS\n自動省略の証拠不足");
-  assert.match(specific, /⏳ 未実施\nWindows 検証未実施/u);
+  assert.match(specific, /⏳ 未実施\n\nWindows 検証未実施/u);
   assert.match(specific, /レビュー補足\s+自動省略の証拠不足/u);
-  assert.match(specific, /➡️ NEXT\n返却行299を確認/u);
+  assert.match(specific, /➡️ NEXT\n\n返却行299を確認/u);
   const multiline = insertSortieResult("status: DONE\n\n**次:**\nなし\n\n```md\n**次:** なし\n```\n> **次:** なし", result,
     "evidence-gaps", "EVIDENCE_GAPS\n未解決の返却行");
   assert.match(multiline, /\*\*次:\*\*\nなし/u);
@@ -442,9 +444,9 @@ test("renders completed, interrupted, external-blocker, and user-decision as dis
   assert.equal((screenshotText.match(/<details>/gu) ?? []).length, 1);
   assert.doesNotMatch(screenshotText, /Evidence|manifest:|raw_status/u);
   const decisionText = insertSortieResult("❓ **NEED_DECISION** choose", decision);
-  assert.match(externalText, /🔴 EXTERNAL_BLOCKER/u);
+  assert.match(externalText, /🔴 EXTERNAL&#95;BLOCKER/u);
   assert.match(interruptedText, /🟡 INTERRUPTED/u);
-  assert.match(decisionText, /🟡 USER_DECISION/u);
+  assert.match(decisionText, /🟡 USER&#95;DECISION/u);
   assert.doesNotMatch(externalText, /TRUE_BLOCKER|external_dependency|Evidence|evidence_refs/u);
 });
 
@@ -478,8 +480,31 @@ test("uses real terminal presentation fields without letting fenced status text 
     "**実装:** renderer `literal` and ``` input\n**未実施:** release\n**NEXT:** verify CLI\n**Commit:** abc123";
   const output = insertSortieResult(source, result);
   assert.match(output, /candidate-real[\s\S]*🟡 INTERRUPTED — budget reached/u);
-  assert.match(output, /🔧 実装\nrenderer `literal` and ``` input[\s\S]*⏳ 未実施\nrelease[\s\S]*➡️ NEXT\nverify CLI/u);
-  assert.match(output, /Commit\s+abc123[\s\S]*🛑 STOP REASON\nbudget: exhausted/u);
+  assert.match(output, /🔧 実装\n\nrenderer &#96;literal&#96; and &#96;&#96;&#96; input[\s\S]*⏳ 未実施\n\nrelease[\s\S]*➡️ NEXT\n\nverify CLI/u);
+  assert.match(output, /Commit\s+abc123[\s\S]*🛑 STOP REASON\n\nbudget: exhausted/u);
   assert.equal(terminalRunOutcome(output), "INTERRUPTED");
   assert.equal(insertSortieResult(output, result), output);
+});
+
+test("narrow report keeps long identifiers and hostile Markdown literal without a pre or fence", () => {
+  const id = `provider/model_${"x".repeat(160)}[v1]`;
+  const receipt: GoalTerminalReceipt = { goal_id: id, terminal_revision: 1,
+    acceptance_fingerprint: goalFingerprint(id), started_at: new Date(0).toISOString(),
+    ended_at: new Date(1000).toISOString(), status: "succeeded", stop_reason: "completed",
+    unit_ids: [], session_ids: [], evidence_refs: [], milestone_at: null };
+  const base = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  const hostile = '</details><script>alert(1)</script> ![image](https://example.invalid) [link](javascript:alert(1)) ``` ~~~ &lt; **bold**';
+  const result = { ...base, debrief: { ...base.debrief!, mix: [{ model: id, tokens: 1, percent: 100 }] } };
+  const decode = (text: string) => text.replace(/<wbr>/gu, "").replace(/&#(\d+);/gu, (_, value: string) => String.fromCodePoint(Number(value)));
+  for (const locale of ["ja", "en"]) {
+    const output = formatSortieResult(result, { locale, implementation: hostile, pending: "1) not a list", next: "# not a heading", commit: id });
+    assert.doesNotMatch(output, /<script>|!\[|\[link\]|```|~~~|<pre>/u);
+    assert.equal((output.match(/<\/details>/gu) ?? []).length, 1);
+    assert.ok(output.includes("<wbr>"), "long IDs have layout-only break opportunities");
+    assert.ok(decode(output).includes(hostile), "literal user text is not deleted or translated");
+    assert.equal(decode(output).split(id).length - 1, 3, "goal, model and commit IDs retain every character");
+    assert.ok(output.includes("1&#41; not a list"));
+    assert.ok(output.includes("&#35; not a heading"));
+    assert.ok(output.includes(locale === "en" ? "1 token ↺" : "1 tokens ↺"));
+  }
 });

@@ -373,7 +373,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
       wallMilliseconds: unionDuration(spans) } } : {}) };
 }
 
-const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ").replace(/[\\`*_{}\[\]()<>!|]/gu, "").slice(0, 120);
+const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ");
 const milliseconds = (value: number | null, locale: ReportLocale = "ja"): string => value === null ? reportText(locale)("未記録", "Unrecorded")
   : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(2)}s`;
 const dollars = (usd: number): string => `$${usd.toFixed(usd > 0 && usd < 0.00005 ? 6 : 4)}`;
@@ -484,7 +484,7 @@ export function renderDebrief(debrief: Debrief | undefined, locale = resolveRepo
           ? `${gauge(cost.usd / pricedUsd * 100)} ${(cost.usd / pricedUsd * 100).toFixed(1)}% · ${dollars(cost.usd)}${cost.complete ? "" : t("（一部未換算）", " (partly unpriced)")}`
           : `${t("比率算出不可", "share unavailable")} · ${dollars(cost.usd)}`
         : t("費用未換算", "unpriced");
-      return `🐕 ${entry.model === "その他" ? t("その他", "Other") : entry.model === "未分類" ? t("未分類", "Unclassified") : label(entry.model)} ${share} · ${entry.tokens.toLocaleString(locale)} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
+      return `🐕 ${entry.model === "その他" ? t("その他", "Other") : entry.model === "未分類" ? t("未分類", "Unclassified") : label(entry.model)} ${share} · ${entry.tokens.toLocaleString(locale)} ${locale === "en" && entry.tokens === 1 ? "token" : "tokens"}${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
     }),
     ...(visible.some((entry) => entry.hostCostZero) ? [t("   †host費用0計上あり（無料・全体価格の評価ではありません）", "   †Some host costs recorded as zero (not a claim of free use or total price)")] : []),
     `⚡ ${t("実行重複率", "Execution overlap")} ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0

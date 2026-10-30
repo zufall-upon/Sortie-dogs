@@ -238,3 +238,47 @@ V2の既存履歴投影テストも日英で共用し、通常requestと現在tu
 先行の実UI・実費用記録は元候補の観測として保持し、今回へ読み替えない。
 PR #311の再回収時点のbaseは `6a0a5764500884155e24ff06416e1aac86f51d8d`、review本文0。
 通常コメントのCodex failed/usage limitは外部review未完のまま、技術指摘やPASSには変換しない。
+
+### 狭幅表示の局所補正（2026-10-30）
+
+rootが候補 `f87af45` の合成earned日英出力を正規OpenCode WebUIへ通常本文として提示し、
+detailsを展開して実測した。viewport 634×843、pre幅598/client596、IBM Plex Mono、
+white-space: pre、scrollWidthは日本語1041・英語1639。表示到達は確認したが、狭幅の可読性は不合格。
+画像は折畳み状態の取得のみで、展開画像確認済みとはしない。
+
+既存Advisor `ses_e75acf76dffeQ8bkB0nM2fFqv0` は、この観測だけを材料にA案
+（details内を通常Markdownの縦並び＋短い等幅装飾）を推奨した。
+助言者はsource未読・SourceReview/正式検証未実施という留保付き。A案を採用し、
+B案（pre維持＋手動改行）は日本語幅・長IDで再溢れしやすく保守範囲が増えるため不採用。
+助言をReview PASSやAcceptanceには読み替えない。
+
+実装者 `openai/gpt-6.1-sol` がsourceで確認した共有点は `formatSortieResult`。
+公開V2/tool-resultのパネル抽出と履歴投影はdetails/summary識別であり、本文のfenceに依存しない。
+共通rendererだけを折返し可能な段落へ変更し、固定の短いTACTICAL DESK装飾のみinline codeとする。
+費用・モデル別ゲージ・PACK・unknown・範囲・根拠・未完了注記は省略しない。
+保存schema・判定・receipt・locale解決・数値・進捗配送の機構は変更しない。
+
+利用者由来本文はHTML/Markdown構文文字を文字参照へ変換し、表示時の文字を保持する。
+モデルIDの記号削除・120文字切捨てを廃止。長いASCIIトークンは24文字ごとの
+`<wbr>`でレイアウト上の改行候補を追加し、ID自体へ空白やゼロ幅文字を挿入しない。
+HTML/fence/画像/link/見出し/箇条書き注入と長IDの表示文字保持を局所回帰で確認する。
+英語のmission/file/tokenは1のみ単数、0と複数は複数形。集計値は変えない。
+
+同じ6状態×日英fixtureを同じパスへ再生成する。修正前の24ファイルは
+`_testenv/pr311-rare-i18n/pre-narrow-f87af45/`へ保存し、旧証拠を保持。
+新mdは実renderer出力、htmlは出力のliteral paragraph previewであって正規UIの証拠ではない。
+既存callerの最終配送・再表示・日英履歴投影とrendererの影響assertionを更新した。
+先行85 PASS・実Missionを無目的に再実行せず、今回登録の3表示モジュールと影響callerだけを確認する。
+正式command/exit/時間は今回Taskのnative結果とPRの候補別記録に残す。
+最初の今回正式実行は53 PASS/1 FAIL（build 9.326秒、test 0.282秒、exit 1）。
+状態名のunderscoreが安全な文字参照になったことへの既存bytes assertion追従漏れだった。
+EXTERNAL/USER_DECISIONの状態・表示文字・判定は変えず、該当assertionだけを補正して同じ3モジュールを再確認する。
+
+今回Workerのbrowserは接続不可既知のため、今回候補の正規UI成功・横溢れ解消・
+`wbr`の正規UI保持とcopy動作・展開画像はまだ未検証。
+rootが同じviewport・正規UIで新earned日英mdを比較する必要がある。
+本文全体のIBM Plex Mono維持は意図しない。合成fixtureは実任務の獲得・費用・Acceptanceではない。
+
+今回PR本文・通常コメント6件・review本文0・行コメント0を再回収し、追加の具体技術指摘なし。
+mainは `6a0a5764500884155e24ff06416e1aac86f51d8d` のまま。Codex failed/usage limitは保留を継承。
+追加モデル相談・Gemma・新release・global変更・npm publish・共有host再起動・停止評価再開なし。

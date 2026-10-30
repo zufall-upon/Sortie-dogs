@@ -134,7 +134,8 @@ export function renderCareer(career: SortieCareer | undefined, locale = resolveR
   const t = reportText(locale);
   if (career === undefined) return ["📜 PACK RECORD", t("保存履歴を取得できません", "Saved history unavailable")];
   const terminal = career.goals - career.active;
-  const minutes = (metric: { sum: number; covered: number }) => metric.covered === 0 ? t("計測不可", "Unavailable") : `${(metric.sum / 60000).toFixed(1)}${t("分", " min")} ※${metric.covered}/${terminal}${t("任務", " missions")}`;
+  const missions = (count: number) => count === 1 ? " mission" : " missions";
+  const minutes = (metric: { sum: number; covered: number }) => metric.covered === 0 ? t("計測不可", "Unavailable") : `${(metric.sum / 60000).toFixed(1)}${t("分", " min")} ※${metric.covered}/${terminal}${t("任務", missions(terminal))}`;
   return [
     "📜 PACK RECORD",
     `🏁 ${t("完了", "Completed")} ${career.completed}`,
@@ -144,8 +145,8 @@ export function renderCareer(career: SortieCareer | undefined, locale = resolveR
     `🔄 ${t("進行中", "Active")} ${career.active}`,
     `↩️ ${t("復帰", "Recoveries")} ${career.recoveries}`,
     t("※今回ではなく保存履歴の戦績。進行中は終端記録なし（現在の稼働確認ではありません）", "※Saved history, not this mission. Active means no terminal record, not confirmation of current activity."),
-    t(`※復帰は成功任務の同一子セッション内の検証失敗→変更→同じ検証成功のみ。報告取得 ${career.telemetryCovered}/${terminal}任務`, `※Recovery requires a successful mission and same-child check failure → edit → same check success. Reports ${career.telemetryCovered}/${terminal} missions`),
-    `🎯 ${t("一発完遂", "Clean Sweep")} ${career.firstPass.count}/${career.firstPass.eligible}${t("判定対象任務", " eligible missions")}`,
+    t(`※復帰は成功任務の同一子セッション内の検証失敗→変更→同じ検証成功のみ。報告取得 ${career.telemetryCovered}/${terminal}任務`, `※Recovery requires a successful mission and same-child check failure → edit → same check success. Reports ${career.telemetryCovered}/${terminal}${missions(terminal)}`),
+    `🎯 ${t("一発完遂", "Clean Sweep")} ${career.firstPass.count}/${career.firstPass.eligible}${t("判定対象任務", ` eligible${missions(career.firstPass.eligible)}`)}`,
     "",
     t("🎖 PACK獲得称号（保存履歴）", "🎖 PACK titles (saved history)"),
     ...([
@@ -158,18 +159,18 @@ export function renderCareer(career: SortieCareer | undefined, locale = resolveR
     "",
     t("特別記章（保存履歴・記章別／合算しません）", "Special insignia (saved history; separate, never summed)"),
     ...(career.rare.filter(item => item.earned > 0).map(item =>
-      `${rareDisplay(item.id, locale).title} — ${t(`${item.earned}任務に獲得記録あり`, `Award recorded in ${item.earned} missions`)}`)),
+      `${rareDisplay(item.id, locale).title} — ${t(`${item.earned}任務に獲得記録あり`, `Award recorded in ${item.earned}${missions(item.earned)}`)}`)),
     ...(career.rare.every(item => item.earned === 0) ? [t("確認できた獲得記録なし（未獲得の断定ではありません）", "No confirmed award records (not a claim of never earned)")] : []),
-    ...career.rare.map(item => `${rareDisplay(item.id, locale).title}${t(`の判定範囲 — 成功${career.completed}任務中 非該当${item.notEarned}・判定不能${item.unknown}・旧未判定${item.legacy}`, ` coverage — ${career.completed} successful missions: not applicable ${item.notEarned} · unknown ${item.unknown} · legacy unevaluated ${item.legacy}`)}`),
+    ...career.rare.map(item => `${rareDisplay(item.id, locale).title}${t(`の判定範囲 — 成功${career.completed}任務中 非該当${item.notEarned}・判定不能${item.unknown}・旧未判定${item.legacy}`, ` coverage — ${career.completed} successful${missions(career.completed)}: not applicable ${item.notEarned} · unknown ${item.unknown} · legacy unevaluated ${item.legacy}`)}`),
     t("※同じ任務・現在の正式receiptにつき各記章1件。再開中の旧獲得は除外。通常称号の別名を追加実績にしません", "※One record per insignia per mission's current formal receipt. Old awards excluded while reopened. Title aliases are not extra achievements."),
     "",
-    `🪙 ${t("累積使用量", "Cumulative usage")} ${career.tokens.covered === 0 ? t("計測不可", "Unavailable") : `${career.tokens.sum.toLocaleString(locale)} tokens`} ※${career.tokens.covered}/${terminal}${t("任務", " missions")}`,
+    `🪙 ${t("累積使用量", "Cumulative usage")} ${career.tokens.covered === 0 ? t("計測不可", "Unavailable") : `${career.tokens.sum.toLocaleString(locale)} ${locale === "en" && career.tokens.sum === 1 ? "token" : "tokens"}`} ※${career.tokens.covered}/${terminal}${t("任務", missions(terminal))}`,
     `⏱ ${t("累積worker", "Cumulative worker")} ${minutes(career.workerTime)}`,
     `🕰 ${t("累積goal", "Cumulative goal")} ${minutes(career.goalWall)} ${t("※待機・重複含む", "※Includes waiting and overlap")}`,
-    `⚡ ${t("累積重複率", "Cumulative overlap")} ${career.overlap.ratio === null ? t("計測不可", "Unavailable") : `${career.overlap.ratio.toFixed(2)}×`} ※${career.overlap.covered}/${terminal}${t("任務・速度倍率ではありません", " missions; not a speed multiplier")}`,
+    `⚡ ${t("累積重複率", "Cumulative overlap")} ${career.overlap.ratio === null ? t("計測不可", "Unavailable") : `${career.overlap.ratio.toFixed(2)}×`} ※${career.overlap.covered}/${terminal}${t("任務・速度倍率ではありません", `${missions(terminal)}; not a speed multiplier`)}`,
     "",
     t("📦 保存範囲", "📦 Retained scope"),
-    `${career.since?.slice(0, 10) ?? t("開始日不明", "Unknown start")}${t("以降", " onward")} / ${career.coverage.included} of ${career.coverage.files} files${career.coverage.unavailable || career.coverage.truncated ? t(" ※部分集計", " ※Partial aggregation") : ""}`,
+    `${career.since?.slice(0, 10) ?? t("開始日不明", "Unknown start")}${t("以降", " onward")} / ${career.coverage.included} of ${career.coverage.files}${career.coverage.files === 1 ? " file" : " files"}${career.coverage.unavailable || career.coverage.truncated ? t(" ※部分集計", " ※Partial aggregation") : ""}`,
     t("※生涯戦績ではありません", "※Not a lifetime record"),
     t("※称号も上記保存範囲のみ。未取得・削除済み履歴は判定しません", "※Titles cover only the retained scope above. Missing or deleted history is not evaluated."),
   ];

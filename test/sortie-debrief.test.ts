@@ -245,7 +245,7 @@ test("cards overwrite model-authored numbers, are idempotent, retain status and 
   assert.equal(insertSortieResult("```\nstatus: DONE\n```", result), "```\nstatus: DONE\n```");
 });
 
-test("adding a fenced collapsed report preserves detailed explanation headings and disclosure examples", () => {
+test("adding a wrapping collapsed report preserves detailed explanation headings and disclosure examples", () => {
   const result = createSortieResult(receipt, { acceptance_contract: contract, consumed_time_ms: 10, satisfied_criteria: ["c"] }, undefined);
   const explanation = "今の作業は起動前契約の重複をなくすこと。\n\n**確認:** 欠落項目を検出する場所と予算継承を揃える。\n\n" +
     "<details><summary>設計の詳細</summary>\n**Sortie Result** は表示名の例。\n```yaml\nmanifest: example.json\n```\n</details>";
@@ -304,7 +304,7 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
   assert.match(text, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
   assert.match(text, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
   assert.match(text, /↺未取得/u);
-  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
+  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n\n※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
 
   const partial = { ...populated.debrief, mix: populated.debrief.mix.map(entry => entry.model === "fixture/5"

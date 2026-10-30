@@ -2463,7 +2463,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
       acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
     assert.equal(english.status, "succeeded");
     assert.match(english.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
-    assert.match(english.return_report, /➡️ NEXT\nNone/u);
+    assert.match(english.return_report, /➡️ NEXT\n\nNone/u);
     assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.match(english.return_report_instruction, /Append return_report verbatim once/);
     assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore);

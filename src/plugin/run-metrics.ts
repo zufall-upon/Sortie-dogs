@@ -515,10 +515,18 @@ export interface SortieResultPresentation {
   readonly reviewNote?: string;
 }
 
-const reportFence = (body: string): string => {
-  const longest = Math.max(0, ...[...body.matchAll(/^~+/gmu)].map((match) => match[0].length));
-  const fence = "~".repeat(Math.max(3, longest + 1));
-  return `${fence}text\n${body}\n${fence}`;
+/** Literal display text, not Markdown supplied by the model/user. Entities are
+ * decoded by the renderer after Markdown tokenization. wbr supplies layout-only
+ * breaks for long IDs without adding characters to their text/copy value.
+ */
+const reportLiteral = (text: string): string => {
+  const escape = (value: string) => value.replace(/[&<>\\`*_~\[\]#!|]/gu,
+    character => `&#${character.codePointAt(0)};`);
+  return text.replace(/[^\s]+/gu, token => {
+    const chunks = /^[\x21-\x7e]{33,}$/u.test(token) ? token.match(/.{1,24}/gu)! : [token];
+    return chunks.map(escape).join("<wbr>");
+  }).replace(/^([ ]*)([-+])/u, (_match, space: string, bullet: string) => `${space}&#${bullet.codePointAt(0)};`)
+    .replace(/^(\d+)([.)])(?=\s)/u, (_match, count: string, delimiter: string) => `${count}&#${delimiter.codePointAt(0)};`);
 };
 
 export function formatSortieResult(result: SortieResult, presentation: SortieResultPresentation = {}): string {
@@ -548,8 +556,8 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
       : `$${estimate.usd.toFixed(4)}${estimate.unpricedRequests > 0 ? t("（一部未換算）", " (partly unpriced)") : ""}`;
   const measuredTokens = result.debrief?.mixCoverage?.observedTokens;
   const tokenText = result.cost.total_tokens.availability === "unavailable" && measuredTokens !== undefined && measuredTokens > 0
-    ? `${measuredTokens.toLocaleString(locale)} tokens${t("（観測分）", " (observed)")}`
-    : metric(result.cost.total_tokens, (value) => `${value.toLocaleString(locale)} tokens`);
+    ? `${measuredTokens.toLocaleString(locale)} ${locale === "en" && measuredTokens === 1 ? "token" : "tokens"}${t("（観測分）", " (observed)")}`
+    : metric(result.cost.total_tokens, (value) => `${value.toLocaleString(locale)} ${locale === "en" && value === 1 ? "token" : "tokens"}`);
   const body = [
     t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report"),
     t("TACTICAL DESK / 作戦卓", "TACTICAL DESK / Operations"),
@@ -594,8 +602,9 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     ...(result.mission.status === "COMPLETED" ? ["", t("└─ 記録を閉じる。次の作戦へ。", "└─ Record closed. On to the next operation.")] : []),
     "",
     t("※使用量は最終応答生成前の計測", "※Usage measured before final response generation"),
-  ].join("\n");
-  return `<details>\n<summary><strong>${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}</strong></summary>\n\n${reportFence(body)}\n\n</details>`;
+  ].filter(line => line !== "").map((line, index) => index === 1
+    ? `\`${line}\`` : reportLiteral(line.trim())).join("\n\n");
+  return `<details>\n<summary><strong>${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}</strong></summary>\n\n${body}\n\n</details>`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
