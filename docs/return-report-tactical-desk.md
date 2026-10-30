@@ -282,3 +282,35 @@ rootが同じviewport・正規UIで新earned日英mdを比較する必要があ�
 今回PR本文・通常コメント6件・review本文0・行コメント0を再回収し、追加の具体技術指摘なし。
 mainは `6a0a5764500884155e24ff06416e1aac86f51d8d` のまま。Codex failed/usage limitは保留を継承。
 追加モデル相談・Gemma・新release・global変更・npm publish・共有host再起動・停止評価再開なし。
+
+### rootによる狭幅補正後の正規UI比較
+
+上記の「未検証」はWorker返却時点の記録。後続でrootがruntime候補
+`33a06f4969905cc53e0fd4fb83c579823cacd0e7` の実renderer出力を正規OpenCode WebUIで比較した。
+この節はroot提供の直接観測を記録するもので、Coordinatorによる別の撮影・実行を意味しない。
+
+- 同じ既存比較turnの通常本文へ、日英earnedの保存bytesを合成fixtureと明示して提示。
+  実任務の獲得・費用ではない。新しいMission、表示専用モデル実行、DB履歴変更、DOM/CSS注入は行っていない。
+- 正規UIのviewportは634×843。新しい日英detailsは各68段落、本文幅598・scrollWidth598で横溢れなし。
+  通常summaryクリックで開閉し、長い費用・復帰・記章条件・計測範囲の注記を直接読んだ。
+  行高22.40625pxから44.8125pxへの自然折返しを確認。前候補のpre幅JP1041・EN1639から改善した。
+  本文はInter、短いTACTICAL DESKのinline codeを保持。本文全体の等幅書体維持は保証しない。
+- 費用、`fixture/model ██████████ 100.0% · $0.0200 · 1,500 tokens`、PACK、unknown、保存範囲、
+  称号根拠、二重加算防止注記を実renderで比較した。Advisor A案採用の効果は、この狭幅の横溢れ解消として観測済み。
+- 既存回帰と同じ179文字IDを使った実rendererの3段落も正規UIへ提示。
+  各7個のwbr、幅598・scrollWidth598、段落高67.21875px。
+  Range選択の`getSelection().toString()`で元179文字IDの完全一致を各1回確認した。
+  空白・ゼロ幅文字の追加や文字欠落はなかった。OSクリップボードのread/write試験ではない。
+- rootは画像 `/tmp/opencode-browser-iZlgOU/0/screenshot.png`
+  （`file_b530867d-cf0a-48d2-b42e-7b64d1c3ebac`）をその場で直接確認。
+  長ID3段落の折返しと折畳みの日英summaryを視認した。
+  tool進行時の再描画でdetailsが閉じたため、展開パネルの画像取得成功とはしない。
+  展開本文・全注記・幅・折返しは正規DOMで直接確認した代替検証である。
+
+今回の正規UI未確認という残件は上記範囲で解消。合成表示の確認を実称号獲得、OS clipboard試験、
+全状態の画像確認、独立Review PASS、要求全体のAcceptanceへ拡張しない。
+source/testは非変更なので、既存の保存系85 PASS、表示54 PASS、影響caller6 PASSを再実行しない。
+現候補のSELF_RECHECKED（未解決指摘なし・residual_major:null）は独立PASSではない。
+文書確定後は既存12fixture比較とdiff checkだけで最終bindingを取得する。
+最終PR回収は通常6件・review本文0・行コメント0。追加の具体技術指摘なし、Codex利用上限は保留。
+費用累計unknownを維持し、公開v0.15.1/tag/global/npm/restart/停止評価・main mergeは行わない。
