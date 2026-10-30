@@ -687,6 +687,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   const omitted: string[] = [];
   const unreadable: string[] = [];
+  const outsideLinks: string[] = [];
   let diff = scopedDiff;
   if (repository && local.length && displayBaseline) {
     // HEAD-only diffs are empty once the author commits. Display the original mission delta
@@ -789,12 +790,18 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     excerpt += artifacts.excerpt;
     if (artifacts.truncated) omitted.push("external artifacts");
     unreadable.push(...artifacts.unreadable);
+    outsideLinks.push(...artifacts.entries.filter(([, kind]) => kind === "target-not-inspected:outside-scope").map(([path]) => path));
   }
   const bytes = Buffer.from(excerpt);
   const truncatedSource = [...new Set(omitted)];
   if (bytes.length > 24_000 && truncatedSource.length === 0) truncatedSource.push("(source diff exceeds excerpt budget)");
+  // Missing coverage is not a clipped source preview: disclose it even after that
+  // budget is exhausted. Full link identities remain in the fingerprint above.
+  const outsideNotice = outsideLinks.length ? `\n[UNINSPECTED EXTERNAL LINK TARGETS: ${outsideLinks.length} link(s); outside declared artifact roots; ` +
+    `target contents not inspected or fingerprinted through these links. Link entries (first 20, clipped preview): ` +
+    `${Buffer.from(JSON.stringify(outsideLinks.slice(0, 20))).subarray(0, 2_000).toString("utf8")}]` : "";
   return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
     (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
-    (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : ""),
+    (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") + outsideNotice,
     truncatedEvidence, truncatedSource };
 }

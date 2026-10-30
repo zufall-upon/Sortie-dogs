@@ -13,6 +13,8 @@ main `159b79c` 基点、別branch `fix/review-external-link-metadata`。PR #311�
 
 Reviewの外部artifact走査だけ `reportOutsideLinks` を選択する。範囲外リンクはリンク文字列・解決先・未検査理由をfingerprintに記録し、リンク先を読まず再帰しない。抜粋にも `target not inspected: outside declared scope` を表示する。リンク先の内容を検査済みとは扱わない。リンク変更はReview fingerprintを変えるが、未追跡先の内容変更を検査したとは主張しない。対象実体が別途明示scope内なら従来どおり内容も検査する。
 
+独立調査で、通常抜粋の24,000-byte枠を先行成果物が使い切ると未検査表示も失われるMediumを再現。同じReview Taskで補正し、既存の収集entriesから範囲外リンクの件数と代表pathを抽出する。`UNINSPECTED EXTERNAL LINK TARGETS` 要約を抜粋枠の外へ付加し、リンク経由では参照先内容を検査・fingerprintしていないことを明記する。代表path表示は先頭20件・2,000-byte previewへ制限する。collectorの既定挙動・共有API・validation/write境界は補正でも変更しない。
+
 既定の `declaredArtifacts`、検証snapshot、manifest/write gateは変更しない。壊れたリンクの記録、内部リンクの追跡、ELOOP・権限・消失競合等の既存異常処理も維持。外部参照の書込み権限を付与する変更ではない。
 
 ## 限定検証
@@ -22,6 +24,12 @@ Reviewの外部artifact走査だけ `reportOutsideLinks` を選択する。範�
 - 既定収集で同じ範囲外リンクを拒否するassertionを保持。Reviewだけmetadata記録で進む差を確認。
 - 追加checkの正式登録修正はhostが `mission-validation-registration-contract-mismatch` で拒否したため、既存の正式recipeを変更せず実行。manifestの2件は補助native検証として区別する。
 - 大規模suite、ゲーム実行、GPU推論、global更新、release、npm publishは未実施。
+
+### Review中の補正検証
+
+- 既存の公開入口fixtureを通常抜粋／30,000-byte成果物で満杯の抜粋にparameterize。旧外部scopeを保持した正式 `sortie_v010_review_mission` の保存Task本文へ未検査要約が届くことを検査する。
+- 修正前に `node --experimental-strip-types --import ./test/setup.ts --test --test-name-pattern='public broad external scope then narrow proof unit.*full source preview' test/mission-review.test.ts` を実行。exit 1、追加した公開Taskの未検査通知assertionで失敗し、欠落を再現。fixtureはfinallyで削除済み。
+- 補正candidateの正式検証は継承した `npm run test:targeted -- test/mission-review.test.ts` を使用。結果は同candidateへ束縛したMissionのnative検証記録と最終報告に残す。修正後の自己再点検は独立PASSとは区別する。
 
 ## 未確認・未反映
 
