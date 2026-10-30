@@ -784,7 +784,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     // Do not make review depend on listing it; record the missing coverage instead. Protected
     // validation still requires readable outputs and does not use this review-only option.
     const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)),
-      { reportUnreadableDirectories: true });
+      { reportUnreadableDirectories: true, reportOutsideLinks: true });
     sourceUpdate(JSON.stringify(artifacts.entries));
     excerpt += artifacts.excerpt;
     if (artifacts.truncated) omitted.push("external artifacts");

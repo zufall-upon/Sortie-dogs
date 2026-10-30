@@ -12,7 +12,7 @@ const within = (root: string, path: string) => {
  * previews are bounded independently. Follow package links only inside a declared physical root.
  */
 export async function declaredArtifacts(paths: readonly string[], previewLimit = 0,
-  options: { reportUnreadableDirectories?: boolean } = {}) {
+  options: { reportUnreadableDirectories?: boolean; reportOutsideLinks?: boolean } = {}) {
   const roots = [...new Set(paths.map(path => resolve(path)))].sort();
   const physical = await Promise.all(roots.map(path => realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return path;
@@ -51,7 +51,17 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
         return;
       }
       entries.push([label, `symlink:${target}`, canonical]);
-      if (!physical.some(root => within(root, canonical))) throw new Error("declared-artifact-link-outside-scope");
+      if (!physical.some(root => within(root, canonical))) {
+        if (!options.reportOutsideLinks) throw new Error("declared-artifact-link-outside-scope");
+        // Review records the link entry, not authority to inspect its target. Keep the
+        // strict default for validation snapshots and never recurse beyond declared roots.
+        entries.push([label, "target-not-inspected:outside-scope", canonical]);
+        const notice = Buffer.from(`\n--- external symlink: ${label} ---\n${target}\n[target not inspected: outside declared scope]\n`);
+        const bounded = notice.subarray(0, remaining);
+        if (bounded.length) { excerpts.push(bounded.toString("utf8")); remaining -= bounded.length; }
+        if (bounded.length < notice.length) truncated = true;
+        return;
+      }
       if (ancestors.has(canonical)) return; // The link identity is recorded; do not traverse cycles.
       await visit(canonical, ancestors);
       return;
