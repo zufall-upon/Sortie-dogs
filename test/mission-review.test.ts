@@ -19,6 +19,25 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const git = promisify(execFile);
 
+test("review-only outward link reporting is bounded, does not follow targets and respects explicit target scopes", async () => {
+  const area = await mkdtemp(resolve("_testenv/review-link-boundary-"));
+  try {
+    const root = join(area, "scope"), target = join(area, "target.txt"), link = join(root, "link");
+    await mkdir(root); await writeFile(target, "EXPLICIT_TARGET_CONTENT"); await symlink(target, link);
+    await assert.rejects(declaredArtifacts([root]), /declared-artifact-link-outside-scope/);
+    const report = await declaredArtifacts([root], 4096, { reportOutsideLinks: true });
+    assert.ok(report.entries.some(e => e[0] === link && e[1] === `symlink:${target}` && e[2] === target));
+    assert.ok(report.entries.some(e => e[1] === "target-not-inspected:outside-scope"));
+    assert.ok(!report.entries.some(e => e[0] === target));
+    assert.doesNotMatch(report.excerpt, /EXPLICIT_TARGET_CONTENT/);
+    const bounded = await declaredArtifacts([root], 20, { reportOutsideLinks: true });
+    assert.ok(Buffer.byteLength(bounded.excerpt) <= 20); assert.equal(bounded.truncated, true);
+    const explicit = await declaredArtifacts([root, target], 4096, { reportOutsideLinks: true });
+    assert.match(explicit.excerpt, /EXPLICIT_TARGET_CONTENT/);
+    assert.ok(!explicit.entries.some(e => e[1] === "target-not-inspected:outside-scope"));
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("dangling external symlink retains identity, bounded missing preview and repair fingerprint", async () => {
   const root = await mkdtemp(resolve("_testenv/dangling-review-"));
   try {
@@ -65,12 +84,21 @@ test("symlink resolution errors and post-lstat removal or replacement are not ta
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("public broad external scope then narrow proof unit reviews retained dangling link without replanning history away", async () => {
+for (const crowded of [false, true]) test(`public broad external scope then narrow proof unit reviews retained dangling and outward links without replanning history away${crowded ? " with a full source preview" : ""}`, async () => {
   const area = await mkdtemp(resolve("_testenv/dangling-public-")), root = join(area, "project"), bin = join(area, "bin");
   try {
     await mkdir(root); await mkdir(bin); await symlink("missing-python", join(bin, "python"));
+    const outside = join(area, "outside");
+    await mkdir(outside); await writeFile(join(outside, "secret"), "OUTSIDE_TARGET_BYTES_MUST_NOT_BE_READ");
+    await symlink(outside, join(bin, "external"));
+    await symlink(resolve("/"), join(bin, "z:"), "dir");
+    await writeFile(join(bin, "inside"), "IN_SCOPE_TARGET_BYTES");
+    await symlink("inside", join(bin, "internal"));
+    await assert.rejects(declaredArtifacts([bin]), /declared-artifact-link-outside-scope/,
+      "validation collection remains strict even though review can describe the link");
     await git("git", ["init", "--quiet"], { cwd: root });
     await writeFile(join(root, "proof.txt"), "retained\n");
+    if (crowded) await writeFile(join(root, "large-review.txt"), "x".repeat(30_000));
     await writeFile(join(root, "check.mjs"), 'import assert from "node:assert/strict";import fs from "node:fs";assert.equal(fs.readFileSync("proof.txt","utf8"),"retained\\n");\n');
     const history: unknown[] = [];
     const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
@@ -84,7 +112,8 @@ test("public broad external scope then narrow proof unit reviews retained dangli
     });
     await tool("start_mission", { requirements: ["Verify retained proof without changing external links"] });
     const unit = { title: "Proof", objective: "Verify retained proof", read: ["check.mjs", "proof.txt"], write: [], validation: ["node check.mjs"] };
-    await tool("plan_units", { executor: "worker", units: [{ ...unit, read: [...unit.read, bin + "/**"], write: [bin + "/**"] }] });
+    await tool("plan_units", { executor: "worker", units: [{ ...unit, read: [...unit.read, bin + "/**"],
+      write: [bin + "/**", ...(crowded ? ["large-review.txt"] : [])] }] });
     await tool("plan_units", { executor: "self", units: [unit], reason: "Read-only proof preserves historical external scope" });
     const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
     const started = Date.now();
@@ -101,8 +130,28 @@ test("public broad external scope then narrow proof unit reviews retained dangli
     const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
     const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
     assert.ok(mission.reviewScope?.write.includes(bin + "/**"), "the earlier broad scope is still retained");
+    assert.ok(mission.review!.task!.prompt.includes("UNINSPECTED EXTERNAL LINK TARGETS: 2"),
+      "the public Reviewer Task must disclose uninspected targets even if its source preview is full");
     const source = await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope);
-    assert.match(source.excerpt, /target missing: ENOENT/);
+    assert.match(source.excerpt, /target contents not inspected or fingerprinted through these links/u);
+    assert.match(source.excerpt, /bin\/external/u);
+    assert.match(source.excerpt, /bin\/z:/u);
+    if (crowded) {
+      assert.ok(source.excerpt.indexOf("[UNINSPECTED EXTERNAL LINK TARGETS:") >= 24_000);
+      assert.ok(source.truncatedSource.includes("large-review.txt"));
+    } else {
+      assert.match(source.excerpt, /target missing: ENOENT/);
+      assert.match(source.excerpt, /target not inspected: outside declared scope/);
+      assert.match(source.excerpt, /IN_SCOPE_TARGET_BYTES/);
+    }
+    assert.doesNotMatch(source.excerpt, /OUTSIDE_TARGET_BYTES_MUST_NOT_BE_READ/);
+    const first = source.fingerprint;
+    await writeFile(join(outside, "secret"), "CHANGED_OUTSIDE_BYTES");
+    assert.equal((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).fingerprint, first,
+      "uninspected target bytes are not claimed as reviewed input");
+    await rm(join(bin, "external")); await symlink(join(outside, "secret"), join(bin, "external"));
+    assert.notEqual((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).fingerprint, first,
+      "changing the link itself invalidates the review fingerprint");
     assert.equal(await fs.readlink(join(bin, "python")), "missing-python");
     const status = await tool("operator_status");
     assert.equal(status.budget.consumed_units, 1);
