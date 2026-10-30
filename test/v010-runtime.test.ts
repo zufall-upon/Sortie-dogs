@@ -2455,6 +2455,19 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
   assert.match(complete.return_report_instruction, /No host-side card will be appended/);
   assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
+  const previousLocale = process.env.SORTIE_REPORT_LOCALE;
+  const reportsBefore = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported");
+  try {
+    process.env.SORTIE_REPORT_LOCALE = "en";
+    const english = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
+      acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
+    assert.equal(english.status, "succeeded");
+    assert.match(english.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
+    assert.match(english.return_report, /➡️ NEXT\n\nNone/u);
+    assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
+    assert.match(english.return_report_instruction, /Append return_report verbatim once/);
+    assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore);
+  } finally { if (previousLocale === undefined) delete process.env.SORTIE_REPORT_LOCALE; else process.env.SORTIE_REPORT_LOCALE = previousLocale; }
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 
@@ -4696,8 +4709,19 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const receipt = (await ledger.readGoal()).state.receipt!;
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
-  for (const symbol of ["⚔️ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  for (const symbol of ["TACTICAL DESK / 作戦卓", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
+  const priorLocale = process.env.SORTIE_REPORT_LOCALE;
+  const reportsBefore = (await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported");
+  try {
+    process.env.SORTIE_REPORT_LOCALE = "en";
+    const english = await control!.renderReturnReport("root", "## Implementation\naccepted change\n\n## Next\nnone", goalFingerprint(receipt));
+    assert.ok(english?.includes("Return Report"));
+    assert.match(english!, /Special insignia/u);
+    assert.doesNotMatch(english!, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
+    assert.deepEqual((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore,
+      "public bridge redisplay in another locale must not write another report");
+  } finally { if (priorLocale === undefined) delete process.env.SORTIE_REPORT_LOCALE; else process.env.SORTIE_REPORT_LOCALE = priorLocale; }
 
   const completed = Date.parse(receipt.ended_at) + 1;
   const info = { id: "final-message", sessionID: "root", role: "assistant", agent: "dog-operator", finish: "stop", time: { created: completed, completed } };

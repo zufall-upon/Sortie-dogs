@@ -41,7 +41,7 @@ test("ordinary single unit exposes weighted whole-request intermediate values, n
   observeWorkQuantity(state, { kind: "command-end", command: "npm test", exit: 0, callID: "check" }); const checked = n();
   assert.ok(0 < read && read < a && a < b && b < checked && checked < 100);
   assert.deepEqual(projectWorkQuantity(state).remaining_kinds, ["artifact", "validation", "review", "delivery", "acceptance"]);
-  assert.match(formatWorkQuantity(projectWorkQuantity(state)), /全体作業量 \d+\/100（概算）/);
+  assert.match(formatWorkQuantity(projectWorkQuantity(state)), /全体作業量 \d+%（概算）/);
 });
 
 test("broad permission scopes are not scanned; distinct native targets move the same estimate", () => {
@@ -445,7 +445,7 @@ test("real durable Mission resumes without resetting quantity or altering execut
     assert.deepEqual((await operators.required("root")).units[0]!.hashes, hashes);
     assert.equal(await readFile(r.units[0]!.handoffPath, "utf8"), handoff);
     const progress = await missionProgressReader(directory, "root", "call")();
-    assert.match(String(progress?.description), /全体作業量 \d+\/100/);
+    assert.match(String(progress?.description), /全体作業量 \d+%/);
     await missions.update("root", state => { state.phase = "cancelled"; });
     await missions.capture("root", { id: "u2", text: "Continue same request" });
     const continued = await missions.start("root", ["Implement result"]);

@@ -159,7 +159,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validation", args: { command: "node check.mjs" } }, liveCheck);
     assert.ok(Number((liveCheck.metadata.work_quantity as { n: number }).n) > 0);
     assert.equal(liveCheck.output, "PASS", "progress must not alter actual command stdout");
-    assert.match(String(liveCheck.metadata.work_quantity_display), /全体作業量 \d+\/100（概算）/);
+    assert.match(String(liveCheck.metadata.work_quantity_display), /全体作業量 \d+%（概算）/);
     if (verdict === "PASS") history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
       state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } },
       time: { ran: 1200, completed: 1300 } }] });

@@ -257,18 +257,25 @@ test("coordinator-owned requested-full evidence satisfies an exact settled-pass 
 });
 
 test("terminal report snapshots are idempotent, receipt-bound, and cannot alter goal execution state", async () => {
+  const { evaluateRareAwards } = await import("../dist/core/rare-awards.js");
   const { ledger } = await accepted("report");
   const receipt = { goal_id: "goal-report", terminal_revision: 1, acceptance_fingerprint: acceptance,
     started_at: at, ended_at: "2026-09-08T00:00:01.000Z", status: "stopped" as const, stop_reason: "stopped" as const,
     unit_ids: [], session_ids: ["root-session"], evidence_refs: [], milestone_at: null };
   const before = await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: receipt.goal_id, receipt });
   const report = { definition: "pre-terminal-host-tokens/v1" as const, terminal_key: goalFingerprint(receipt),
-    tokens: 10, models: [{ model: "fixture/model", tokens: 10 }], first_pass_eligible: false, traits: [] };
+    tokens: 10, models: [{ model: "fixture/model", tokens: 10 }], first_pass_eligible: false, traits: [],
+    rare: evaluateRareAwards(false, "unknown", "unknown", "unknown") };
   await assert.rejects(ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id,
     report: { ...report, terminal_key: goalFingerprint("wrong receipt") } }), RunFlightLedgerError);
   const after = await ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id, report });
   assert.deepEqual(after, before);
   await ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id, report });
+  assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported").length, 1);
+  const saved = (await ledger.readGoal()).records.find(({ event }) => event.kind === "goal.reported")!.event;
+  assert.deepEqual(saved.kind === "goal.reported" && saved.report.rare, report.rare);
+  await ledger.appendGoal({ kind: "goal.reported", at: receipt.ended_at, goal_id: receipt.goal_id,
+    report: { ...report, rare: evaluateRareAwards(true, "true", "true", "true") } });
   assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported").length, 1);
   await ledger.appendGoal({ kind: "goal.user-continued", at: "2026-09-08T00:00:02.000Z", goal_id: receipt.goal_id,
     origin_user_message_id: "user-2", session_id: "root-session", selected_agent: "dog-coordinator" });

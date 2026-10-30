@@ -13,6 +13,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
+import { reportText, resolveReportLocale } from "./report-locale.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
@@ -1760,16 +1761,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         let panel: string | undefined;
         if (input.returnReportTransport === "tool-result" && result.receipt?.status === "succeeded") {
+          const t = reportText(resolveReportLocale());
           const reviewGaps = missionReportReview(mission, state.runID) === "evidence-gaps"
-            ? mission!.review!.result?.trim() || "独立Reviewの未解決証拠あり" : undefined;
+            ? mission!.review!.result?.trim() || t("独立Reviewの未解決証拠あり", "Independent Review has unconfirmed evidence") : undefined;
           const gapSummary = reviewGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").slice(0, 500);
           const text = withMissionOperationOutcome(`✅ **DONE** \`${state.runID}\` — declared checks passed; Operator accepted the result.`, mission) + `\n\n` +
-            `**変更点:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
-            `**確認結果:** 宣言検証合格 — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
-            (mission?.review ? `\nレビュー: ${mission.review.verdict === "self-rechecked" ? "修正著者の自己再確認（独立PASSではない）" : mission.review.verdict === "evidence-gaps" ? "証拠不足を残して受入れ（レビューPASSではない）" : mission.review.verdict}.` : "") +
+            `**${t("変更点", "Changes")}:** ${state.units.map(unit => unit.unit.title).join("; ")}\n\n` +
+            `**${t("確認結果", "Validation")}:** ${t("宣言検証合格", "Declared checks passed")} — ${[...new Set(state.units.flatMap(unit => unit.unit.validation))].join("; ")}` +
+            (mission?.review ? `\n${t("レビュー", "Review")}: ${mission.review.verdict === "self-rechecked" ? t("修正著者の自己再確認（独立PASSではない）", "Author self-rechecked (not independent PASS)") : mission.review.verdict === "evidence-gaps" ? t("証拠不足を残して受入れ（レビューPASSではない）", "Accepted with evidence gaps (not Review PASS)") : mission.review.verdict}.` : "") +
             (mission?.deliveryObservation?.head ? `\nCommit: ${mission.deliveryObservation.head} (${mission.deliveryObservation.branch ?? "detached"}; clean=${mission.deliveryObservation.clean})` : "") +
-            (reviewGaps ? `\n\n**レビュー補足:** ${gapSummary}\n\n**次:** なし（補足だけを理由に再レビュー不要）`
-              : "\n\n**次:** なし");
+            (reviewGaps ? `\n\n**${t("レビュー補足", "Review note")}:** ${gapSummary}\n\n**${t("次", "Next")}:** ${t("なし（補足だけを理由に再レビュー不要）", "None (no repeat review solely for the advisory)")}`
+              : `\n\n**${t("次", "Next")}:** ${t("なし", "None")}`);
           const rendered = await control!.renderReturnReport(context.sessionID, text, goalFingerprint(result.receipt),
             missionReportReview(mission, state.runID), missionReportReviewGaps(mission, state.runID)).catch(() => undefined);
           if (rendered) panel = returnReportPanel(rendered);
@@ -4447,7 +4449,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 run ? missionReportReview(mission, run.runID) : undefined,
                 run ? missionReportReviewGaps(mission, run.runID) : undefined) ?? output.text;
             }
-            if (output.text.includes("<summary><strong>🐾 SORTIE DOGS — 帰還報告")) rememberRendered(`${request.sessionID}:${request.messageID}:${request.partID}`, output.text);
+            if (returnReportPanel(output.text) !== undefined) rememberRendered(`${request.sessionID}:${request.messageID}:${request.partID}`, output.text);
           }
         }
       },

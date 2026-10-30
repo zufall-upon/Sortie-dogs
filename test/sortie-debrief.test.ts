@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDebrief, observeDebriefSession, renderDebrief } from "../dist/plugin/sortie-debrief.js";
+import { buildDebrief, observeDebriefSession, renderDebrief, renderDebriefTraits, renderDebriefTraitEvidence } from "../dist/plugin/sortie-debrief.js";
 import { collectRunMetrics, createSortieResult, insertSortieResult, terminalRunOutcome } from "../dist/plugin/run-metrics.js";
 import type { GoalAcceptanceContract, GoalFlightEventRecord, GoalTerminalReceipt } from "../src/core/goal-bound.ts";
+import { evaluateRareAwards, rareEvaluation } from "../src/core/rare-awards.ts";
 
 const receipt: GoalTerminalReceipt = { goal_id: "g", terminal_revision: 1, acceptance_fingerprint: "sha256:a",
   started_at: new Date(0).toISOString(), ended_at: new Date(1000).toISOString(), status: "succeeded", stop_reason: "completed",
@@ -158,6 +159,10 @@ test("Recovery requires fail, intervening host edit, pass in same child, and com
   const make = (parts: object[], status = receipt.status) => buildDebrief({ ...receipt, status }, contract,
     { complete: true, sessions: [observe("a", [message("a", 10, 20, parts)])], window: undefined });
   assert.deepEqual(make([failed, edit, passed]).traits, ["修正から復帰"]);
+  assert.match(renderDebriefTraitEvidence(make([failed, edit, passed]), true).join("\n"),
+    /↩️ 修正から復帰 — 同じ子セッションで対象検証失敗→変更→同じ検証成功、任務完了/u);
+  assert.doesNotMatch(renderDebriefTraitEvidence(make([failed, edit, passed]), false).join("\n"), /↩️ 修正から復帰/u);
+  assert.match(renderDebriefTraits(make([failed, passed]), true).join("\n"), /判定保留/u);
   assert.deepEqual(make([failed, passed]).traits, []);
   assert.deepEqual(make([failed, edit, passed], "stopped").traits, []);
   const split = buildDebrief(receipt, contract, { complete: true, sessions: [
@@ -174,11 +179,50 @@ test("Clean Sweep requires complete terminal-matched attempt history and no resu
     { kind: "unit.settled", goal_id: "g", reservation_id: "r", disposition: "succeeded", result_class: "acceptance" },
     { kind: "goal.terminal", goal_id: "g", receipt }];
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, ["一発完遂"]);
+  const earned = buildDebrief(receipt, contract, observation, records(events));
+  assert.match(renderDebriefTraitEvidence(earned, true).join("\n"), /一発完遂の条件 — 完全な対象履歴/u);
+  assert.doesNotMatch(renderDebriefTraits(earned, true).join("\n"), /獲得記録あり/u, "unsaved evaluation is not an awarded record");
+  const saved = { ...earned, rareRecord: "saved" as const };
+  assert.match(renderDebriefTraits(saved, true).join("\n"), /作戦称号\s+特別記章へ集約\n特別記章\s+静かな一撃 — 獲得記録あり/u);
+  assert.equal((renderDebriefTraits(saved, true).join("\n").match(/静かな一撃/gu) ?? []).length, 1);
+  assert.equal(rareEvaluation(earned.rare, "rare.clean-sweep")?.status, "earned");
+  assert.doesNotMatch(renderDebriefTraits(earned, false).join("\n"), /静かな一撃|作戦称号\s+一発完遂/u);
+  const combined = { ...saved, traits: ["連携作戦", "修正から復帰"] as const,
+    rare: evaluateRareAwards(true, "false", "true", "true") };
+  const rendered = renderDebriefTraits(combined, true).join("\n");
+  assert.equal((rendered.match(/作戦称号/gu) ?? []).length, 1);
+  assert.match(rendered, /作戦称号\s+立て直し屋[\s\S]*不屈の連携/u);
+  assert.doesNotMatch(renderDebriefTraits(combined, false).join("\n"), /立て直し屋|不屈の連携/u);
+  assert.match(renderDebriefTraits(combined, false).join("\n"), /作戦称号\s+未授与（未完了）/u);
+  assert.doesNotMatch(renderDebriefTraits(combined, false).join("\n"), /連携上手/u);
+  assert.match(renderDebriefTraitEvidence(combined, false).join("\n"), /🐾 連携作戦/u);
+  assert.deepEqual(earned.traits, ["一発完遂"], "rendering must not alter the host observation");
+  assert.doesNotMatch(renderDebriefTraits(undefined, true).join("\n"), /🎯 一発完遂|↩️ 修正から復帰|🐾 連携作戦/u);
   assert.deepEqual(buildDebrief(receipt, contract, observation).traits, []);
+  assert.equal(rareEvaluation(buildDebrief(receipt, contract, observation).rare, "rare.clean-sweep")?.status, "unknown");
   assert.deepEqual(buildDebrief(receipt, contract, { ...observation, complete: false }, records(events)).traits, []);
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events.slice(1))).traits, []);
   parent.tasks.push("a");
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, []);
+});
+
+test("rare condition negatives require observed coverage; incomplete evidence is not absence", () => {
+  const passed = tool("pass", "bash", 15, 16, { command: "npm test" }, { exit: 0 });
+  const child = observe("a", [message("a", 10, 20, [passed])]);
+  const make = (complete: boolean) => buildDebrief(receipt, contract, { complete, sessions: [child], window: undefined });
+  const known = rareEvaluation(make(true).rare, "rare.recovery-coordination")!;
+  assert.equal(known.status, "not-earned");
+  assert.ok(known.evidence.includes("recovery.false"));
+  assert.equal(rareEvaluation(make(false).rare, "rare.recovery-coordination")?.status, "unknown");
+  const adjacent = observe("b", [message("b", 21, 30)]);
+  child.complete = false; // Timing is complete, recovery metadata is not.
+  const negativeAndUnknown = buildDebrief(receipt, contract, { complete: true, sessions: [child, adjacent], window: undefined });
+  assert.deepEqual(rareEvaluation(negativeAndUnknown.rare, "rare.recovery-coordination")?.evidence,
+    ["receipt.succeeded", "recovery.unknown", "coordination.false"]);
+  assert.equal(rareEvaluation(negativeAndUnknown.rare, "rare.recovery-coordination")?.status, "not-earned");
+  const stopped = buildDebrief({ ...receipt, status: "stopped" }, contract, { complete: true, sessions: [child], window: undefined });
+  assert.ok(stopped.rare?.evaluations.every(e => e.status !== "earned"));
+  assert.doesNotMatch(renderDebriefTraits(stopped, false).join("\n"), /獲得記録あり/u);
 });
 
 test("review prose is not proof and controller skip remains waived", () => {
@@ -201,7 +245,7 @@ test("cards overwrite model-authored numbers, are idempotent, retain status and 
   assert.equal(insertSortieResult("```\nstatus: DONE\n```", result), "```\nstatus: DONE\n```");
 });
 
-test("adding a fenced collapsed report preserves detailed explanation headings and disclosure examples", () => {
+test("adding a wrapping collapsed report preserves detailed explanation headings and disclosure examples", () => {
   const result = createSortieResult(receipt, { acceptance_contract: contract, consumed_time_ms: 10, satisfied_criteria: ["c"] }, undefined);
   const explanation = "今の作業は起動前契約の重複をなくすこと。\n\n**確認:** 欠落項目を検出する場所と予算継承を揃える。\n\n" +
     "<details><summary>設計の詳細</summary>\n**Sortie Result** は表示名の例。\n```yaml\nmanifest: example.json\n```\n</details>";
@@ -260,7 +304,7 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
   assert.match(text, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
   assert.match(text, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
   assert.match(text, /↺未取得/u);
-  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n   ※worker区間・速度倍率ではありません/u);
+  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n\n※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
 
   const partial = { ...populated.debrief, mix: populated.debrief.mix.map(entry => entry.model === "fixture/5"

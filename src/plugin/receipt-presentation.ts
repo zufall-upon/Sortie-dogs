@@ -3,8 +3,8 @@ import { terminalRunOutcome } from "./run-metrics.js";
 
 /** Extract only the host card, excluding the terminal prose that follows it. */
 export function returnReportPanel(rendered: string): string | undefined {
-  const summary = rendered.indexOf("<summary><strong>🐾 SORTIE DOGS — 帰還報告");
-  if (summary < 0) return undefined;
+  const summary = /<summary><strong>🐾 SORTIE DOGS — (?:帰還報告|Return Report)(?=｜|<\/strong>)/u.exec(rendered)?.index;
+  if (summary === undefined) return undefined;
   const start = rendered.lastIndexOf("<details", summary);
   const end = rendered.indexOf("\n</details>", summary);
   return start < 0 || end < 0 ? undefined : rendered.slice(start, end + "\n</details>".length).trim();

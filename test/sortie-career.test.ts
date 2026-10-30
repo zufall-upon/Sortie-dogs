@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { summarizeCareer, collectCareer, renderCareer } from "../dist/plugin/sortie-career.js";
 import { goalFingerprint, type GoalFlightEventRecord, type GoalTerminalReceipt } from "../dist/core/goal-bound.js";
 import { validGoalReport } from "../src/core/goal-report.ts";
+import { evaluateRareAwards, rareEvaluation, validRareAwards, type ConditionState } from "../src/core/rare-awards.ts";
 
 const coverage = { files: 1, included: 1, unavailable: 0, truncated: false };
 const root = fileURLToPath(new URL(`../_testenv/career-${process.pid}/`, import.meta.url));
@@ -41,6 +42,61 @@ test("replays deduplicate goals and reopened completion replaces the previous co
   assert.equal(result.workerTime.sum, 1000);
   assert.equal(result.goalWall.sum, 20000);
   assert.deepEqual(result.firstPass, { count: 1, eligible: 1 });
+});
+
+test("rare AND evaluations preserve false versus unknown and never reward an unsuccessful receipt", () => {
+  for (const recovery of ["true", "false", "unknown"] as ConditionState[]) {
+    for (const coordination of ["true", "false", "unknown"] as ConditionState[]) {
+      const rare = evaluateRareAwards(true, "unknown", recovery, coordination);
+      const expected = [recovery, coordination].includes("false") ? "not-earned"
+        : [recovery, coordination].includes("unknown") ? "unknown" : "earned";
+      assert.equal(rareEvaluation(rare, "rare.recovery-coordination")?.status, expected);
+      assert.equal(validRareAwards(rare), true);
+      assert.equal(rareEvaluation(rare, "rare.clean-sweep")?.status, "unknown");
+    }
+  }
+  assert.ok(evaluateRareAwards(false, "true", "true", "true").evaluations.every(e => e.status === "not-earned"));
+});
+
+const withRare = (entries: ReturnType<typeof history>, rare = evaluateRareAwards(true, "true", "false", "false")) => {
+  const event = entries.at(-1)!.event as Extract<GoalFlightEventRecord["event"], { kind: "goal.reported" }>;
+  (event.report as { rare: typeof rare }).rare = rare;
+  return entries;
+};
+
+test("rare history counts each current successful goal once and excludes reopened or obsolete receipts", () => {
+  const first = withRare(history(receipt("g"), 10));
+  const opened = [...first, record({ kind: "goal.user-continued", goal_id: "g", at: at(11) }, 5)];
+  assert.equal(summarizeCareer([opened], coverage).rare[0]!.earned, 0);
+  const final = { ...receipt("g", "succeeded", 20), terminal_revision: 2 };
+  const closed = [...opened, ...withRare(history(final, 30), evaluateRareAwards(true, "false", "true", "true")).slice(2)];
+  const result = summarizeCareer([closed, closed, first], coverage);
+  assert.equal(result.goals, 1);
+  assert.equal(result.rare[0]!.earned, 0);
+  assert.equal(result.rare[1]!.earned, 1);
+  assert.match(renderCareer(result).join("\n"), /不屈の連携 — 1任務に獲得記録あり/u);
+  const failed = withRare(history(receipt("failed", "stopped")));
+  assert.ok(summarizeCareer([failed], coverage).rare.every(e => e.earned === 0));
+});
+
+test("legacy and future rare rules preserve existing telemetry without pretending to be non-earned", () => {
+  const future = withRare(history(receipt("future"), 12), { definition: "rare-awards/v2", evaluations: [] });
+  const unknownVersion = withRare(history(receipt("version"), 13), { definition: "rare-awards/v1", evaluations: [
+    { id: "rare.clean-sweep", rule_version: 2, status: "earned", evidence: ["future.proof"] },
+    { id: "rare.future", rule_version: 1, status: "earned", evidence: [] },
+  ] });
+  const legacy = history(receipt("legacy"), 10);
+  const result = summarizeCareer([future, unknownVersion, legacy], { ...coverage, truncated: true });
+  assert.equal(result.tokens.sum, 35);
+  assert.deepEqual(result.rare.map(e => [e.earned, e.unknown, e.legacy]), [[0, 2, 1], [0, 2, 1]]);
+  assert.match(renderCareer(result).join("\n"), /旧未判定1/u);
+  assert.match(renderCareer(result).join("\n"), /部分集計/u);
+  const report = (future.at(-1)!.event as Extract<GoalFlightEventRecord["event"], { kind: "goal.reported" }>).report;
+  assert.equal(validGoalReport(report), true);
+  assert.equal(validGoalReport({ ...report, rare: { definition: "rare-awards/v1", evaluations: [null] } }), false);
+  const rare = evaluateRareAwards(true, "true", "false", "false");
+  assert.equal(validRareAwards({ ...rare, evaluations: [...rare.evaluations, rare.evaluations[0]] }), false);
+  assert.equal(rareEvaluation({ ...rare, evaluations: [{ ...rare.evaluations[0]!, evidence: [] }] }, "rare.clean-sweep"), undefined);
 });
 
 test("unknown telemetry, clock gaps, and active goals never become zero-cost successful missions", () => {
@@ -107,5 +163,27 @@ test("renders PACK RECORD in ordered icon rows with measured coverage and retent
   assert.match(text, /^📜 PACK RECORD\n🏁 完了 1\n🟡 中断 1\n⏳ 外部待機 0\n❓ 指示待ち 0\n🔄 進行中 0\n↩️ 復帰 0/u);
   assert.match(text, /🪙 累積使用量 25 tokens ※1\/2任務/u);
   assert.match(text, /🕰 累積goal 0\.3分 ※2\/2任務 ※待機・重複含む/u);
-  assert.match(text, /📦 保存範囲\n1970-01-01以降 \/ 1 of 1 files\n※生涯戦績ではありません$/u);
+  assert.match(text, /📦 保存範囲\n1970-01-01以降 \/ 1 of 1 file\n※生涯戦績ではありません\n※称号も上記保存範囲のみ。未取得・削除済み履歴は判定しません$/u);
+  assert.match(text, /🎖 PACK獲得称号（保存履歴）\n任務完遂の隊 — 保存された正式receiptに任務完了あり/u);
+  assert.match(text, /🎯 一発完遂 1\/1判定対象任務/u);
+  assert.match(text, /進行中は終端記録なし（現在の稼働確認ではありません）/u);
+  assert.match(text, /復帰は成功任務の同一子セッション内[\s\S]*報告取得 1\/2任務/u);
+  assert.doesNotMatch(renderCareer(summarizeCareer([history(receipt("unfinished", "stopped"))], coverage)).join("\n"),
+    /任務完遂の隊|一発完遂の隊|復帰の隊/u);
+});
+
+test("English PACK counts use singular only for one without changing saved numeric state", () => {
+  for (const count of [0, 1, 2]) {
+    const histories = Array.from({ length: count }, (_, index) => withRare(history(receipt(`plural-${index}`), 10)));
+    const career = summarizeCareer(histories, { ...coverage, files: count, included: count });
+    const before = JSON.stringify(career);
+    const text = renderCareer(career, "en").join("\n");
+    const noun = count === 1 ? "mission" : "missions";
+    assert.ok(text.includes(`${count} successful ${noun}:`));
+    assert.ok(text.includes(`Reports ${count}/${count} ${noun}`));
+    assert.ok(text.includes(`Clean Sweep ${count}/${count} eligible ${noun}`));
+    assert.ok(text.includes(`${count} of ${count} ${count === 1 ? "file" : "files"}`));
+    if (count > 0) assert.ok(text.includes(`Award recorded in ${count} ${noun}`));
+    assert.equal(JSON.stringify(career), before);
+  }
 });

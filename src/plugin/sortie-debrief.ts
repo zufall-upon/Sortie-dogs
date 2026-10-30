@@ -3,6 +3,19 @@ import type { GoalAcceptanceContract, GoalTerminalReceipt, GoalFlightEventRecord
 import { validationDurationGuidance } from "../core/validation-budget.js";
 import { DEDICATED_WORKER_ROLES, LUNA_FABRIC_WORKER_ROLE } from "./model-routing.ts";
 import { normalizeCommand } from "./gate.ts";
+import { evaluateRareAwards, rareEvaluation, RARE_RULES, type RareAwards, type ConditionState } from "../core/rare-awards.ts";
+import { reportText, resolveReportLocale, type ReportLocale } from "./report-locale.ts";
+
+export function rareDisplay(id: string, locale: ReportLocale): { title: string; reason: string } {
+  const t = reportText(locale);
+  return id === "rare.clean-sweep" ? {
+    title: t("静かな一撃", "Quiet Strike"),
+    reason: t("厳密な一発完遂（既存実績の特別区分・別加算なし）", "Strict Clean Sweep (reclassified existing achievement; no extra count)"),
+  } : {
+    title: t("不屈の連携", "Unbroken Formation"),
+    reason: t("修正復帰 × 異なる子の並行稼働（因果的協働成果の証明ではありません）", "Recovery × overlapping child activity (not proof of causally successful collaboration)"),
+  };
+}
 
 type Span = { start: number; end: number };
 type Check = Span & { command: string; passed: boolean };
@@ -69,6 +82,9 @@ export interface Debrief {
   readonly notes?: readonly string[];
   readonly traits: readonly ("連携作戦" | "修正から復帰" | "一発完遂")[];
   readonly firstPassEligible?: boolean;
+  readonly rare?: RareAwards;
+  /** Only persisted, receipt-matched evaluations are displayed as awarded records. */
+  readonly rareRecord?: "saved" | "legacy" | "unavailable";
   readonly overlap?: { readonly workerMilliseconds: number; readonly wallMilliseconds: number };
   readonly validationEfficiency: {
     readonly completed: number;
@@ -318,7 +334,18 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     settled.every((event) => event.disposition === "succeeded" && event.result_class === "acceptance") &&
     !events?.some((event) => event.kind === "goal.replanned" || event.kind === "goal.user-continued" || event.kind === "goal.revised" ||
       (event.kind === "validation.admission" && event.decision !== "ALLOW") || (event.kind === "validation.settled" && event.outcome !== "passed")) &&
-    sessions.every((session) => !session.failed && new Set(session.checks.map((check) => check.command)).size === session.checks.length)) traits.push("一発完遂");
+     sessions.every((session) => !session.failed && new Set(session.checks.map((check) => check.command)).size === session.checks.length)) traits.push("一発完遂");
+  const cleanDisqualified = validation === "FAIL" || recovered || sessions.some(session => session.failed ||
+    new Set(session.checks.map(check => check.command)).size !== session.checks.length) ||
+    new Set(tasks).size !== tasks.length || settled.some(event => event.disposition !== "succeeded" || event.result_class !== "acceptance") ||
+    events?.some(event => event.kind === "goal.replanned" || event.kind === "goal.user-continued" || event.kind === "goal.revised" ||
+      event.kind === "validation.admission" && event.decision !== "ALLOW" ||
+      event.kind === "validation.settled" && event.outcome !== "passed");
+  const clean: ConditionState = traits.includes("一発完遂") ? "true" : cleanDisqualified ? "false" : "unknown";
+  const recovery: ConditionState = traits.includes("修正から復帰") ? "true"
+    : complete && commands.size > 0 && validation === "PASS" ? "false" : "unknown";
+  const coordination: ConditionState = traits.includes("連携作戦") ? "true" : timingComplete ? "false" : "unknown";
+  const rare = evaluateRareAwards(receipt.status === "succeeded", clean, recovery, coordination);
   const review = reviews.filter((entry) => !sessions.some((session) => (session.lastPossibleMutation ?? 0) > entry.at ||
     session.mutations.some((edit) => edit.end > entry.at))).at(-1);
   const packComplete = observation.complete && sessions.every(session => session.root || session.timingComplete || Object.keys(session.models).length > 0);
@@ -337,6 +364,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
     ...(pricing.complete && pricing.pricedRequests + pricing.unpricedRequests > 0 ? { estimatedCost: {
       usd: pricing.usd, pricedRequests: pricing.pricedRequests, unpricedRequests: pricing.unpricedRequests } } : {}),
     validation, review: review?.status ?? "未確認", reviewSource: review?.source ?? "controller", traits, firstPassEligible,
+    rare, rareRecord: "unavailable",
     validationEfficiency,
     notes: [...(!observation.complete ? ["host履歴の取得が一部不足"] : []),
       ...(!usageComplete ? ["モデルIDまたはusageの記録が不足"] : []),
@@ -345,8 +373,8 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
       wallMilliseconds: unionDuration(spans) } } : {}) };
 }
 
-const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ").replace(/[\\`*_{}\[\]()<>!|]/gu, "").slice(0, 120);
-const milliseconds = (value: number | null): string => value === null ? "未記録"
+const label = (text: string): string => text.replace(/[\r\n\t]/gu, " ");
+const milliseconds = (value: number | null, locale: ReportLocale = "ja"): string => value === null ? reportText(locale)("未記録", "Unrecorded")
   : value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(2)}s`;
 const dollars = (usd: number): string => `$${usd.toFixed(usd > 0 && usd < 0.00005 ? 6 : 4)}`;
 const gauge = (percent: number): string => {
@@ -355,7 +383,61 @@ const gauge = (percent: number): string => {
   const partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][remainder]!;
   return `${"█".repeat(whole)}${partial}${" ".repeat(10 - whole - (remainder === 0 ? 0 : 1))}`;
 };
-export function renderDebrief(debrief: Debrief | undefined): string[] {
+
+/** Display existing observations only; titles never select an execution policy. */
+export function debriefOperationTitle(debrief: Debrief | undefined, completed: boolean): string | undefined {
+  if (!completed) return undefined;
+  const traits = debrief?.traits ?? [];
+  if (traits.includes("修正から復帰")) return "立て直し屋";
+  if (traits.includes("一発完遂")) return undefined; // Reclassified, never a second achievement under an alias.
+  if (traits.includes("連携作戦")) return "連携上手";
+  return undefined;
+}
+
+export function renderDebriefTraits(debrief: Debrief | undefined, completed: boolean, locale = resolveReportLocale()): string[] {
+  const t = reportText(locale);
+  const traits = debrief?.traits ?? [];
+  const title = debriefOperationTitle(debrief, completed);
+  const earned = completed && debrief?.rareRecord === "saved" ? RARE_RULES.filter(rule =>
+    rareEvaluation(debrief.rare, rule.id)?.status === "earned") : [];
+  return [
+    `${t("作戦称号", "Operation title")}      ${title === "立て直し屋" ? t(title, "Recovery Specialist") : title === "連携上手" ? t(title, "Formation Specialist") : earned.some(rule => rule.id === "rare.clean-sweep") ? t("特別記章へ集約", "Listed under special insignia") : completed ? t("判定保留（根拠未確認）", "Pending (evidence unconfirmed)") : t("未授与（未完了）", "Not awarded (unfinished)")}`,
+    ...earned.map(rule => `${t("特別記章", "Special insignia")}      ${rareDisplay(rule.id, locale).title} — ${t("獲得記録あり", "Award recorded")}`),
+  ];
+}
+
+/** Evidence belongs after the main result, without awarding the same fact twice. */
+export function renderDebriefTraitEvidence(debrief: Debrief | undefined, completed: boolean, locale = resolveReportLocale()): string[] {
+  const t = reportText(locale);
+  const traits = debrief?.traits ?? [];
+  return [
+    t("✎ 称号・観測の根拠", "✎ Title and observation evidence"),
+    ...(!completed ? [t("特別記章 — 未授与（正式成功なし）", "Special insignia — not awarded (no formal success)")] : debrief?.rareRecord !== "saved"
+      ? [debrief?.rareRecord === "legacy" ? t("特別記章 — 旧記録のため未判定", "Special insignia — legacy record, not evaluated") : t("特別記章 — 保存判定未取得（授与未確認）", "Special insignia — saved evaluation unavailable (award unconfirmed)")]
+      : RARE_RULES.map(rule => {
+        const evaluation = rareEvaluation(debrief.rare, rule.id);
+        const display = rareDisplay(rule.id, locale);
+        const evidence = evaluation?.evidence.map(code => {
+          if (code === "receipt.succeeded") return t("正式成功", "Formal success");
+          if (code === "receipt.not-succeeded") return t("正式成功なし", "No formal success");
+          const [condition, state] = code.split(".");
+          const name = condition === "clean-sweep" ? t("一発完遂", "Clean Sweep") : condition === "recovery" ? t("修正復帰", "Recovery") : t("並行稼働", "Overlap");
+          return `${name}: ${state === "true" ? t("確認", "confirmed") : state === "false" ? t("不成立確認", "confirmed false") : t("根拠不足", "insufficient evidence")}`;
+        }).join(" · ");
+        return `${display.title}${t("の条件", " conditions")} — ${display.reason} / ${evaluation?.status === "earned" ? t("成立", "Confirmed") : evaluation?.status === "not-earned" ? t("非該当", "Not applicable") : t("判定不能（根拠不足・未対応ルール含む）", "Unknown (insufficient evidence or unsupported rule)")}${evidence ? ` / ${evidence}` : ""}`;
+      })),
+    ...(traits.includes("連携作戦") ? [t("🐾 連携作戦 — 異なる子セッションの稼働区間が重複（成果成功の判定ではありません）", "🐾 Pack Tactics — activity spans of different child sessions overlap (not a success judgment)")] : []),
+    ...(completed && traits.includes("修正から復帰") ? [t("↩️ 修正から復帰 — 同じ子セッションで対象検証失敗→変更→同じ検証成功、任務完了", "↩️ Recovery — same child session: target check failed → edit → same check passed; mission completed")] : []),
+    ...(completed && traits.includes("一発完遂") ? [t("一発完遂の条件 — 完全な対象履歴で再試行・再計画・検証失敗なし、対象検証PASS・任務完了", "Clean Sweep conditions — complete target history, no retries, replans or failed checks; target checks PASS and mission completed")] : []),
+    ...(!traits.includes("連携作戦") && !(completed && traits.some(trait => trait === "修正から復帰" || trait === "一発完遂"))
+      ? [t("特性の根拠未確認（未観測と該当なしは区別できません）", "Trait evidence unconfirmed (unobserved cannot be distinguished from absent)")] : []),
+    t("※今回の観測のみ。別名・組合せの二重加算なし。称号は実行方針・検証・Review・Acceptanceを変更しません", "※This observation only. No duplicate counts for aliases or combinations. Titles do not change execution policy, validation, Review or Acceptance."),
+    t("※レアは厳密条件・組合せの特別認定。出現率は未計測。再表示は再授与ではありません", "※Special recognition for strict conditions or combinations; frequency unmeasured. Redisplay is not a new award."),
+    t("※記章目的の失敗作り・追加派遣・検証省略・再実行・支出は行いません", "※Do not manufacture failures, dispatch extra tasks, skip checks, rerun work or spend money for insignia."),
+  ];
+}
+export function renderDebrief(debrief: Debrief | undefined, locale = resolveReportLocale()): string[] {
+  const t = reportText(locale);
   const validationEfficiency = debrief?.validationEfficiency ?? {
     completed: 0, skipped: 0, rejected: 0, redundantMilliseconds: 0, medianMilliseconds: null, p90Milliseconds: null,
   };
@@ -385,43 +467,46 @@ export function renderDebrief(debrief: Debrief | undefined): string[] {
       } } : {}),
       ...(tail.some((entry) => entry.hostCostZero) ? { hostCostZero: true } : {}) });
   }
-  const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
-    : value === "WAIVED" ? "免除" : "未記録";
   const counts = new Map(packVisible.map((entry) => [entry.model, entry.count]));
   return [
-    `モデル内訳    ${mix === null ? "usage未取得" : !hasPriced
-      ? "予測費用未換算（モデル別token数）" : pricedUsd === 0
-        ? "予測費用比率（合計$0・算出不可）" : partiallyPriced
-          ? "換算済み予測費用の比率（一部未換算）" : "予測費用比率"}`,
+    `${t("モデル内訳", "Model breakdown")}    ${mix === null ? t("usage未取得", "usage unavailable") : !hasPriced
+      ? t("予測費用未換算（モデル別token数）", "Estimate unpriced (tokens by model)") : pricedUsd === 0
+        ? t("予測費用比率（合計$0・算出不可）", "Estimated cost shares (total $0; unavailable)") : partiallyPriced
+          ? t("換算済み予測費用の比率（一部未換算）", "Priced estimate shares (partly unpriced)") : t("予測費用比率", "Estimated cost shares")}`,
     ...visible.map((entry) => {
       const count = counts.get(entry.model);
       const input = entry.inputCache === undefined ? 0 : entry.inputCache.uncachedInputTokens +
         entry.inputCache.cacheReadTokens + entry.inputCache.cacheWriteTokens;
-      const cache = entry.inputCache === undefined || input === 0 ? "未取得" : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
+      const cache = entry.inputCache === undefined || input === 0 ? t("未取得", "unavailable") : `${(entry.inputCache.cacheReadTokens / input * 100).toFixed(0)}%`;
       const cost = entry.estimatedCost;
       const share = cost?.pricedRequests
         ? pricedUsd > 0
-          ? `${gauge(cost.usd / pricedUsd * 100)} ${(cost.usd / pricedUsd * 100).toFixed(1)}% · ${dollars(cost.usd)}${cost.complete ? "" : "（一部未換算）"}`
-          : `比率算出不可 · ${dollars(cost.usd)}`
-        : "費用未換算";
-      return `🐕 ${label(entry.model)} ${share} · ${entry.tokens.toLocaleString("ja-JP")} tokens${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
+          ? `${gauge(cost.usd / pricedUsd * 100)} ${(cost.usd / pricedUsd * 100).toFixed(1)}% · ${dollars(cost.usd)}${cost.complete ? "" : t("（一部未換算）", " (partly unpriced)")}`
+          : `${t("比率算出不可", "share unavailable")} · ${dollars(cost.usd)}`
+        : t("費用未換算", "unpriced");
+      return `🐕 ${entry.model === "その他" ? t("その他", "Other") : entry.model === "未分類" ? t("未分類", "Unclassified") : label(entry.model)} ${share} · ${entry.tokens.toLocaleString(locale)} ${locale === "en" && entry.tokens === 1 ? "token" : "tokens"}${count === undefined ? "" : ` ×${count}`} ↺${cache}${entry.hostCostZero ? "†" : ""}`;
     }),
-    ...(visible.some((entry) => entry.hostCostZero) ? ["   †host費用0計上あり（無料・全体価格の評価ではありません）"] : []),
-    `⚡ 実行重複率 ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
+    ...(visible.some((entry) => entry.hostCostZero) ? [t("   †host費用0計上あり（無料・全体価格の評価ではありません）", "   †Some host costs recorded as zero (not a claim of free use or total price)")] : []),
+    `⚡ ${t("実行重複率", "Execution overlap")} ${debrief?.overlap !== undefined && debrief.overlap.wallMilliseconds > 0
       ? `${(debrief.overlap.workerMilliseconds / debrief.overlap.wallMilliseconds).toFixed(2)}×`
-      : pack?.length === 0 ? "対象なし（出撃なし）" : "稼働区間の記録不足"}`,
-    "   ※worker区間・速度倍率ではありません",
-    `検証効率      完了${validationEfficiency.completed} · skip${validationEfficiency.skipped} · reject${validationEfficiency.rejected} · 重複回避${milliseconds(validationEfficiency.redundantMilliseconds)}`,
-    `検証時間      median ${milliseconds(validationEfficiency.medianMilliseconds)} · p90 ${milliseconds(validationEfficiency.p90Milliseconds)}`,
-    ...(debrief?.notes?.length ? [`計測範囲      ${debrief.notes.join(" · ")}`] : []),
+      : pack?.length === 0 ? t("対象なし（出撃なし）", "Not applicable (no dispatches)") : t("稼働区間の記録不足", "Activity spans incomplete")}`,
+    t("   ※worker区間・速度倍率ではありません", "   ※Worker spans, not a speed multiplier"),
+    `${t("検証効率", "Validation efficiency")}      ${t("完了", "completed ")}${validationEfficiency.completed} · skip${validationEfficiency.skipped} · reject${validationEfficiency.rejected} · ${t("重複回避", "redundancy avoided ")}${milliseconds(validationEfficiency.redundantMilliseconds, locale)}`,
+    `${t("検証時間", "Validation time")}      median ${milliseconds(validationEfficiency.medianMilliseconds, locale)} · p90 ${milliseconds(validationEfficiency.p90Milliseconds, locale)}`,
+    ...(debrief?.notes?.length ? [`${t("計測範囲", "Measurement scope")}      ${debrief.notes.map(note => locale === "ja" ? note : ({
+      "host履歴の取得が一部不足": "Partial host history",
+      "モデルIDまたはusageの記録が不足": "Model ID or usage records incomplete",
+      "稼働区間の時刻が不足（token集計とは独立）": "Activity timestamps incomplete (independent of token aggregation)",
+    }[note] ?? "Additional measurement limitation")).join(" · ")}`] : []),
   ];
 }
 
-export function renderDebriefProof(debrief: Debrief | undefined): { validation: string; review: string } {
+export function renderDebriefProof(debrief: Debrief | undefined, locale = resolveReportLocale()): { validation: string; review: string } {
+  const t = reportText(locale);
   const status = (value: string): string => value === "PASS" ? "🟢 PASS" : value === "FAIL" ? "🔴 FAIL"
-    : value === "WAIVED" ? "免除" : "未記録";
+    : value === "WAIVED" ? t("免除", "Waived") : t("未記録", "Unrecorded");
   const efficiency = debrief?.validationEfficiency;
   return { validation: `${status(debrief?.validation ?? "未確認")}${efficiency === undefined || efficiency.skipped === 0
-    ? "" : `（再実行skip ${efficiency.skipped} / ${milliseconds(efficiency.redundantMilliseconds)}）`}`,
-    review: `${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? "（reviewer報告）" : ""}` };
+    ? "" : t(`（再実行skip ${efficiency.skipped} / ${milliseconds(efficiency.redundantMilliseconds)}）`, ` (rerun skipped ${efficiency.skipped} / ${milliseconds(efficiency.redundantMilliseconds)})`)}`,
+    review: `${status(debrief?.review ?? "未確認")}${debrief?.reviewSource === "reviewer" ? t("（reviewer報告）", " (reviewer report)") : ""}` };
 }

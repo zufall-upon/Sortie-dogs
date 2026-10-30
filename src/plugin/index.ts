@@ -132,7 +132,7 @@ import { AdaptiveRemediationRuntime, AdaptiveRunFlightLineage, type AdaptiveReme
 import { DEFAULT_ADAPTIVE_REMEDIATION_MODEL, GitAdaptiveRemediationHost, OpenCodeAdaptiveRemediationProvider,
   type AdaptiveRemediationSessionClient } from "./adaptive-remediation-host.js";
 import type { ChildTerminalEvidence, ChildTerminalObservation } from "../core/child-terminal-reconciliation.js";
-import { collectRunMetrics, createSortieResult, createGoalReport, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
+import { collectRunMetrics, createSortieResult, createGoalReport, withSavedGoalReport, insertRunMetrics, insertSortieResult, replaceDoneTerminalStatus,
   replaceTerminalStatus, sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
 import type { RunMetricsClient } from "./run-metrics.js";
 import { profileAgent, STABLE_RUNTIME_PROFILE } from "../core/runtime-profile.js";
@@ -6857,8 +6857,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             let records = terminal.records;
             if (!records.some(({ event }) => event.kind === "goal.reported" && event.report?.terminal_key === report.terminal_key)) {
               await ledger.appendGoal({ kind: "goal.reported", at: new Date().toISOString(), goal_id: terminal.receipt.goal_id, report });
-              records = (await ledger.readGoal()).records;
             }
+            // appendGoal serializes competing deliveries and retains the first report for this receipt.
+            records = (await ledger.readGoal()).records;
+            sortieResult = withSavedGoalReport(sortieResult, terminal.receipt, records);
             const currentPath = goalLedgerFiles.get(goalRoot(textInput.sessionID));
             if (currentPath !== undefined) {
               const { collectCareer } = await import("./sortie-career.js");
@@ -8274,8 +8276,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const report = createGoalReport(result, receipt);
         if (!records.some(({ event }) => event.kind === "goal.reported" && event.report.terminal_key === report.terminal_key)) {
           await ledger.appendGoal({ kind: "goal.reported", at: new Date().toISOString(), goal_id: receipt.goal_id, report });
-          records = (await ledger.readGoal()).records;
         }
+        records = (await ledger.readGoal()).records;
+        result = withSavedGoalReport(result, receipt, records);
         const currentPath = goalLedgerFiles.get(goalRoot(root));
         if (currentPath) {
           const { collectCareer } = await import("./sortie-career.js");
