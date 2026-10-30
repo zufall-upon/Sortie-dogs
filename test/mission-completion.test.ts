@@ -405,7 +405,7 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
       assert.match(completed.return_report, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
       assert.match(completed.return_report, /レビュー補足\s+The decisive return line is not visible/u);
-      assert.match(completed.return_report, /➡️ NEXT\nなし/u);
+      assert.match(completed.return_report, /➡️ NEXT\n\nなし/u);
       const visible = { text: `✅ **DONE** — validated result\n\n**次:** なし\n\n${completed.return_report}` };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final", partID: "final-text" }, visible);
       assert.match(visible.text, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u,
