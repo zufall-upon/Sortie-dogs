@@ -2455,6 +2455,19 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
   assert.match(complete.return_report_instruction, /No host-side card will be appended/);
   assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
+  const previousLocale = process.env.SORTIE_REPORT_LOCALE;
+  const reportsBefore = (await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported");
+  try {
+    process.env.SORTIE_REPORT_LOCALE = "en";
+    const english = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
+      acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
+    assert.equal(english.status, "succeeded");
+    assert.match(english.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
+    assert.match(english.return_report, /➡️ NEXT\nNone/u);
+    assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
+    assert.match(english.return_report_instruction, /Append return_report verbatim once/);
+    assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore);
+  } finally { if (previousLocale === undefined) delete process.env.SORTIE_REPORT_LOCALE; else process.env.SORTIE_REPORT_LOCALE = previousLocale; }
   assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
 }));
 

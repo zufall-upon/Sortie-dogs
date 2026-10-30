@@ -212,3 +212,29 @@ ID・判定・rule_version・receipt・保存schema・獲得件数は言語共�
 mdは実際のtext renderer出力、htmlはその本文をpreに包む比較用fixture。実Missionの獲得や正規WebUIの実表示証拠ではない。
 今回Workerのbrowserはdisconnectedで、スクリーンショット・DOM観測は未実施。過去候補の実UI結果を今回の記章/多言語表示へ流用しない。
 独立Reviewは親の後続工程。作者テストや自己確認を独立PASSに読み替えない。
+
+### 独立調査で見つかった多言語配送の補正
+
+`98be72c` の独立read-only調査で、次の有効指摘を記録してから同じReviewerが修正した。
+調査・修正モデルは `openai/gpt-6.1-sol`。修正後の確認は著者のSELF_RECHECKEDであり、独立PASSではない。
+
+- Major：パネル抽出が日本語見出し限定。英語rendererの出力が通常V2完了tool resultの
+  `return_report` に載らない。日英共通のパネル識別を完了caller・履歴投影・表示済み判定で使用する。
+- Medium：再表示の説明抽出が旧hostカードを読み、以前のlocaleの「未取得」等を本文として保持していた。
+  最上位の元本文のみを参照する。code/disclosure内の例は説明に流用せず、利用者由来の文章は言語を変えず保持する。
+- Medium：tool-result完了callerのhost生成NEXT・補足既定文が日本語固定。
+  各配送時のreport localeで生成する。単位titleや実レビュー本文は翻訳しない。
+
+既存の公開tool-result完了テストを拡張し、同じ正式receiptを日本語→英語で再表示しても
+パネル・配送指示が存在し、英語のNEXTになり、`goal.reported` を追加しないことを確認する。
+V2の既存履歴投影テストも日英で共用し、通常requestと現在turnのcard保持、過去turnのcompaction投影、
+保存履歴非変更を同じoracleで検証する。判定条件・保存schema・実績ID・費用計測・進捗％は変更しない。
+
+- 修正前の限定回帰：4件中日本語V2投影1 PASS、再表示・公開英語完了・英語V2投影の3件FAIL、exit 1。
+- 修正後の同じ限定回帰：4 PASS、exit 0。build 9.170秒、test 1.124秒。
+  command：`PATH=/home/user/.local/bin:$PATH npm run test:targeted -- --test-name-pattern='report locale redisplay|V2 final request retains|root discards one exact diagnosed transient' test/run-metrics.test.ts test/v2-plugin.test.ts test/v010-runtime.test.ts`。
+
+上記は既存test harnessの合成公開caller回帰。新しい実Mission・正規UI表示・獲得実績ではない。
+先行の実UI・実費用記録は元候補の観測として保持し、今回へ読み替えない。
+PR #311の再回収時点のbaseは `6a0a5764500884155e24ff06416e1aac86f51d8d`、review本文0。
+通常コメントのCodex failed/usage limitは外部review未完のまま、技術指摘やPASSには変換しない。

@@ -9,6 +9,29 @@ import { summarizeCareer } from "../dist/plugin/sortie-career.js";
 import { resolveReportLocale } from "../dist/plugin/report-locale.js";
 import { mkdir, writeFile } from "node:fs/promises";
 
+test("report locale redisplay regenerates host defaults without consuming cards or quoted examples as prose", () => {
+  const receipt: GoalTerminalReceipt = { goal_id: "locale-redisplay", terminal_revision: 1,
+    acceptance_fingerprint: goalFingerprint("locale-redisplay"), started_at: new Date(0).toISOString(),
+    ended_at: new Date(1000).toISOString(), status: "succeeded", stop_reason: "completed",
+    unit_ids: [], session_ids: [], evidence_refs: [], milestone_at: null };
+  const result = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  const insert = (text: string, locale: string) => insertSortieResult(text, result, undefined, undefined, locale);
+  const japanese = insert("status: DONE", "ja");
+  const english = insert(japanese, "en");
+  assert.doesNotMatch(english, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
+  assert.equal(insert(english, "en"), english);
+  assert.equal(insert(english, "ja"), japanese);
+  const prose = "status: DONE\n\n```text\nImplementation: quoted example\n```\n\n" +
+    "<details><summary>Example</summary>\nPending: disclosure example\n</details>\n\n" +
+    "**Implementation:** 利用者の説明\n\n**Pending:** 利用者の保留\n\n**Next:** 利用者の次操作";
+  const displayed = insert(insert(prose, "ja"), "en");
+  assert.match(displayed, /🔧 Implementation\n利用者の説明/u);
+  assert.match(displayed, /⏳ Pending\n利用者の保留/u);
+  assert.match(displayed, /➡️ NEXT\n利用者の次操作/u);
+  assert.ok(displayed.endsWith(prose.slice("status: DONE\n\n".length)), "original explanatory content stays verbatim");
+  assert.equal(insert(displayed, "en"), displayed);
+});
+
 test("rare saved receipt snapshots and bilingual renderer preserve counts, states, prose and redisplay", async () => {
   const receipt: GoalTerminalReceipt = { goal_id: "synthetic-i18n", terminal_revision: 1,
     acceptance_fingerprint: goalFingerprint("synthetic"), started_at: new Date(0).toISOString(),

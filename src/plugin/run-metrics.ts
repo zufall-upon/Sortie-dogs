@@ -752,7 +752,10 @@ export function insertSortieResult(text: string, result: SortieResult,
 }
 
 function extractSortiePresentation(text: string): SortieResultPresentation {
-  const first = topLevelLines(text).find(({ line }) => line.trim().length > 0)?.line ?? "";
+  // Old host cards and quoted examples are not caller prose. In particular, a
+  // previous locale's generated unknown values must not become retained text.
+  text = topLevelLines(text).map(({ line }) => line).join("\n");
+  const first = text.split("\n").find(line => line.trim().length > 0) ?? "";
   const statusSummary = first.split(/\s+[—-]\s+/u).slice(1).join(" — ").trim() || undefined;
   const section = (names: string): string | undefined => {
     const expression = new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\p{Extended_Pictographic}\\uFE0F?[ \\t]+)?(?:\\*\\*)?(?:${names})(?:\\*\\*)?[ \\t]*:?[ \\t]*(?:\\*\\*)?[ \\t]*(.*)$`, "imu");
