@@ -3,6 +3,7 @@ import test from "node:test";
 import { buildDebrief, observeDebriefSession, renderDebrief, renderDebriefTraits, renderDebriefTraitEvidence } from "../dist/plugin/sortie-debrief.js";
 import { collectRunMetrics, createSortieResult, insertSortieResult, terminalRunOutcome } from "../dist/plugin/run-metrics.js";
 import type { GoalAcceptanceContract, GoalFlightEventRecord, GoalTerminalReceipt } from "../src/core/goal-bound.ts";
+import { evaluateRareAwards, rareEvaluation } from "../src/core/rare-awards.ts";
 
 const receipt: GoalTerminalReceipt = { goal_id: "g", terminal_revision: 1, acceptance_fingerprint: "sha256:a",
   started_at: new Date(0).toISOString(), ended_at: new Date(1000).toISOString(), status: "succeeded", stop_reason: "completed",
@@ -180,11 +181,14 @@ test("Clean Sweep requires complete terminal-matched attempt history and no resu
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, ["一発完遂"]);
   const earned = buildDebrief(receipt, contract, observation, records(events));
   assert.match(renderDebriefTraitEvidence(earned, true).join("\n"), /一発完遂の条件 — 完全な対象履歴/u);
-  assert.match(renderDebriefTraits(earned, true).join("\n"), /作戦称号\s+静かな一撃 — 一発完遂/u);
-  assert.equal((renderDebriefTraits(earned, true).join("\n").match(/静かな一撃/gu) ?? []).length, 1);
-  assert.doesNotMatch(renderDebriefTraits(earned, true).join("\n"), /特別記章/u);
+  assert.doesNotMatch(renderDebriefTraits(earned, true).join("\n"), /獲得記録あり/u, "unsaved evaluation is not an awarded record");
+  const saved = { ...earned, rareRecord: "saved" as const };
+  assert.match(renderDebriefTraits(saved, true).join("\n"), /作戦称号\s+特別記章へ集約\n特別記章\s+静かな一撃 — 獲得記録あり/u);
+  assert.equal((renderDebriefTraits(saved, true).join("\n").match(/静かな一撃/gu) ?? []).length, 1);
+  assert.equal(rareEvaluation(earned.rare, "rare.clean-sweep")?.status, "earned");
   assert.doesNotMatch(renderDebriefTraits(earned, false).join("\n"), /静かな一撃|作戦称号\s+一発完遂/u);
-  const combined = { ...earned, traits: ["連携作戦", "修正から復帰"] as const };
+  const combined = { ...saved, traits: ["連携作戦", "修正から復帰"] as const,
+    rare: evaluateRareAwards(true, "false", "true", "true") };
   const rendered = renderDebriefTraits(combined, true).join("\n");
   assert.equal((rendered.match(/作戦称号/gu) ?? []).length, 1);
   assert.match(rendered, /作戦称号\s+立て直し屋[\s\S]*不屈の連携/u);
@@ -195,10 +199,30 @@ test("Clean Sweep requires complete terminal-matched attempt history and no resu
   assert.deepEqual(earned.traits, ["一発完遂"], "rendering must not alter the host observation");
   assert.doesNotMatch(renderDebriefTraits(undefined, true).join("\n"), /🎯 一発完遂|↩️ 修正から復帰|🐾 連携作戦/u);
   assert.deepEqual(buildDebrief(receipt, contract, observation).traits, []);
+  assert.equal(rareEvaluation(buildDebrief(receipt, contract, observation).rare, "rare.clean-sweep")?.status, "unknown");
   assert.deepEqual(buildDebrief(receipt, contract, { ...observation, complete: false }, records(events)).traits, []);
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events.slice(1))).traits, []);
   parent.tasks.push("a");
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, []);
+});
+
+test("rare condition negatives require observed coverage; incomplete evidence is not absence", () => {
+  const passed = tool("pass", "bash", 15, 16, { command: "npm test" }, { exit: 0 });
+  const child = observe("a", [message("a", 10, 20, [passed])]);
+  const make = (complete: boolean) => buildDebrief(receipt, contract, { complete, sessions: [child], window: undefined });
+  const known = rareEvaluation(make(true).rare, "rare.recovery-coordination")!;
+  assert.equal(known.status, "not-earned");
+  assert.ok(known.evidence.includes("recovery.false"));
+  assert.equal(rareEvaluation(make(false).rare, "rare.recovery-coordination")?.status, "unknown");
+  const adjacent = observe("b", [message("b", 21, 30)]);
+  child.complete = false; // Timing is complete, recovery metadata is not.
+  const negativeAndUnknown = buildDebrief(receipt, contract, { complete: true, sessions: [child, adjacent], window: undefined });
+  assert.deepEqual(rareEvaluation(negativeAndUnknown.rare, "rare.recovery-coordination")?.evidence,
+    ["receipt.succeeded", "recovery.unknown", "coordination.false"]);
+  assert.equal(rareEvaluation(negativeAndUnknown.rare, "rare.recovery-coordination")?.status, "not-earned");
+  const stopped = buildDebrief({ ...receipt, status: "stopped" }, contract, { complete: true, sessions: [child], window: undefined });
+  assert.ok(stopped.rare?.evaluations.every(e => e.status !== "earned"));
+  assert.doesNotMatch(renderDebriefTraits(stopped, false).join("\n"), /獲得記録あり/u);
 });
 
 test("review prose is not proof and controller skip remains waived", () => {

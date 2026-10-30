@@ -4289,6 +4289,16 @@ test("a user-held INTERRUPTED report renders the debrief regardless of icon and 
     assert.match(report.text, /INTERRUPTED/u);
     assert.match(report.text, /<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
     assert.doesNotMatch(report.text, /Evidence|raw_status|manifest:/u);
+    const previousLocale = process.env.SORTIE_REPORT_LOCALE;
+    try {
+      // Settings change after plugin creation: the current delivery setting wins.
+      process.env.SORTIE_REPORT_LOCALE = "en-US";
+      const english = { text: "status: INTERRUPTED — user hold" };
+      await hooks["experimental.text.complete"]!({ sessionID: "report-root", messageID: "report-en", partID: "part-en" }, english);
+      assert.match(english.text, /Return Report/u);
+      assert.match(english.text, /Not awarded \(unfinished\)/u);
+      assert.doesNotMatch(english.text, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
+    } finally { if (previousLocale === undefined) delete process.env.SORTIE_REPORT_LOCALE; else process.env.SORTIE_REPORT_LOCALE = previousLocale; }
   });
 });
 

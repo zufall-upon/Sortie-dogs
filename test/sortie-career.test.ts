@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { summarizeCareer, collectCareer, renderCareer } from "../dist/plugin/sortie-career.js";
 import { goalFingerprint, type GoalFlightEventRecord, type GoalTerminalReceipt } from "../dist/core/goal-bound.js";
 import { validGoalReport } from "../src/core/goal-report.ts";
+import { evaluateRareAwards, rareEvaluation, validRareAwards, type ConditionState } from "../src/core/rare-awards.ts";
 
 const coverage = { files: 1, included: 1, unavailable: 0, truncated: false };
 const root = fileURLToPath(new URL(`../_testenv/career-${process.pid}/`, import.meta.url));
@@ -41,6 +42,61 @@ test("replays deduplicate goals and reopened completion replaces the previous co
   assert.equal(result.workerTime.sum, 1000);
   assert.equal(result.goalWall.sum, 20000);
   assert.deepEqual(result.firstPass, { count: 1, eligible: 1 });
+});
+
+test("rare AND evaluations preserve false versus unknown and never reward an unsuccessful receipt", () => {
+  for (const recovery of ["true", "false", "unknown"] as ConditionState[]) {
+    for (const coordination of ["true", "false", "unknown"] as ConditionState[]) {
+      const rare = evaluateRareAwards(true, "unknown", recovery, coordination);
+      const expected = [recovery, coordination].includes("false") ? "not-earned"
+        : [recovery, coordination].includes("unknown") ? "unknown" : "earned";
+      assert.equal(rareEvaluation(rare, "rare.recovery-coordination")?.status, expected);
+      assert.equal(validRareAwards(rare), true);
+      assert.equal(rareEvaluation(rare, "rare.clean-sweep")?.status, "unknown");
+    }
+  }
+  assert.ok(evaluateRareAwards(false, "true", "true", "true").evaluations.every(e => e.status === "not-earned"));
+});
+
+const withRare = (entries: ReturnType<typeof history>, rare = evaluateRareAwards(true, "true", "false", "false")) => {
+  const event = entries.at(-1)!.event as Extract<GoalFlightEventRecord["event"], { kind: "goal.reported" }>;
+  (event.report as { rare: typeof rare }).rare = rare;
+  return entries;
+};
+
+test("rare history counts each current successful goal once and excludes reopened or obsolete receipts", () => {
+  const first = withRare(history(receipt("g"), 10));
+  const opened = [...first, record({ kind: "goal.user-continued", goal_id: "g", at: at(11) }, 5)];
+  assert.equal(summarizeCareer([opened], coverage).rare[0]!.earned, 0);
+  const final = { ...receipt("g", "succeeded", 20), terminal_revision: 2 };
+  const closed = [...opened, ...withRare(history(final, 30), evaluateRareAwards(true, "false", "true", "true")).slice(2)];
+  const result = summarizeCareer([closed, closed, first], coverage);
+  assert.equal(result.goals, 1);
+  assert.equal(result.rare[0]!.earned, 0);
+  assert.equal(result.rare[1]!.earned, 1);
+  assert.match(renderCareer(result).join("\n"), /不屈の連携 — 1任務に獲得記録あり/u);
+  const failed = withRare(history(receipt("failed", "stopped")));
+  assert.ok(summarizeCareer([failed], coverage).rare.every(e => e.earned === 0));
+});
+
+test("legacy and future rare rules preserve existing telemetry without pretending to be non-earned", () => {
+  const future = withRare(history(receipt("future"), 12), { definition: "rare-awards/v2", evaluations: [] });
+  const unknownVersion = withRare(history(receipt("version"), 13), { definition: "rare-awards/v1", evaluations: [
+    { id: "rare.clean-sweep", rule_version: 2, status: "earned", evidence: ["future.proof"] },
+    { id: "rare.future", rule_version: 1, status: "earned", evidence: [] },
+  ] });
+  const legacy = history(receipt("legacy"), 10);
+  const result = summarizeCareer([future, unknownVersion, legacy], { ...coverage, truncated: true });
+  assert.equal(result.tokens.sum, 35);
+  assert.deepEqual(result.rare.map(e => [e.earned, e.unknown, e.legacy]), [[0, 2, 1], [0, 2, 1]]);
+  assert.match(renderCareer(result).join("\n"), /旧未判定1/u);
+  assert.match(renderCareer(result).join("\n"), /部分集計/u);
+  const report = (future.at(-1)!.event as Extract<GoalFlightEventRecord["event"], { kind: "goal.reported" }>).report;
+  assert.equal(validGoalReport(report), true);
+  assert.equal(validGoalReport({ ...report, rare: { definition: "rare-awards/v1", evaluations: [null] } }), false);
+  const rare = evaluateRareAwards(true, "true", "false", "false");
+  assert.equal(validRareAwards({ ...rare, evaluations: [...rare.evaluations, rare.evaluations[0]] }), false);
+  assert.equal(rareEvaluation({ ...rare, evaluations: [{ ...rare.evaluations[0]!, evidence: [] }] }, "rare.clean-sweep"), undefined);
 });
 
 test("unknown telemetry, clock gaps, and active goals never become zero-cost successful missions", () => {

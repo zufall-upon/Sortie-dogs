@@ -1,9 +1,10 @@
 import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
 import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, renderDebriefTraitEvidence, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
 import { goalFingerprint } from "../core/goal-bound.ts";
-import type { GoalReport } from "../core/goal-report.ts";
+import { validGoalReport, type GoalReport } from "../core/goal-report.ts";
 import { renderCareer, type SortieCareer } from "./sortie-career.ts";
 import { estimateModelUsageCost } from "./model-cost.ts";
+import { reportText, resolveReportLocale } from "./report-locale.ts";
 
 export interface RunMetricsClient {
   readonly session?: {
@@ -497,11 +498,12 @@ function duration(milliseconds: number): string {
   return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-function metricText<T>(metric: SortieResultMetric<T>, render: (value: T) => string): string {
-  return metric.availability === "available" ? render(metric.value) : "計測不可";
+function metricText<T>(metric: SortieResultMetric<T>, render: (value: T) => string, unavailable = "計測不可"): string {
+  return metric.availability === "available" ? render(metric.value) : unavailable;
 }
 
 export interface SortieResultPresentation {
+  readonly locale?: string;
   readonly implementation?: string;
   readonly pending?: string;
   readonly next?: string;
@@ -513,7 +515,6 @@ export interface SortieResultPresentation {
   readonly reviewNote?: string;
 }
 
-const displayText = (value: string | undefined): string => value?.replace(/[\r\n\t]+/gu, " ").trim() || "未取得";
 const reportFence = (body: string): string => {
   const longest = Math.max(0, ...[...body.matchAll(/^~+/gmu)].map((match) => match[0].length));
   const fence = "~".repeat(Math.max(3, longest + 1));
@@ -521,76 +522,80 @@ const reportFence = (body: string): string => {
 };
 
 export function formatSortieResult(result: SortieResult, presentation: SortieResultPresentation = {}): string {
-  const criteria = metricText(result.proof.criteria, (entries) => {
+  const locale = resolveReportLocale(presentation.locale);
+  const t = reportText(locale);
+  const metric = <T>(value: SortieResultMetric<T>, render: (value: T) => string) => metricText(value, render, t("計測不可", "Unavailable"));
+  const display = (value: string | undefined) => value?.replace(/[\r\n\t]+/gu, " ").trim() || t("未取得", "Unavailable");
+  const criteria = metric(result.proof.criteria, (entries) => {
     const passing = entries.filter(({ status }) => status === "PASS").length;
     return `${passing}/${entries.length}`;
   });
   const achievement = result.mission.status === "COMPLETED" ? "COMPLETED"
     : result.mission.status === "INTERRUPTED" ? "INTERRUPTED"
       : result.mission.status === "EXTERNAL_BLOCKER" ? "EXTERNAL_BLOCKER" : "USER_DECISION";
-  const summaryLabel = result.mission.status === "COMPLETED" ? "完了"
-    : result.mission.status === "INTERRUPTED" ? "中断（未完了）"
-      : result.mission.status === "EXTERNAL_BLOCKER" ? "外部要因で未完了" : "ユーザー判断待ち（未完了）";
+  const summaryLabel = result.mission.status === "COMPLETED" ? t("完了", "Complete")
+    : result.mission.status === "INTERRUPTED" ? t("中断（未完了）", "Interrupted (unfinished)")
+      : result.mission.status === "EXTERNAL_BLOCKER" ? t("外部要因で未完了", "External blocker (unfinished)") : t("ユーザー判断待ち（未完了）", "Awaiting user decision (unfinished)");
   const color = result.mission.status === "COMPLETED" ? "🟢" : result.mission.status === "EXTERNAL_BLOCKER" ? "🔴" : "🟡";
-  const proof = renderDebriefProof(result.debrief);
-  const review = presentation.missionReview === "PASS" ? "🟢 PASS（独立Reviewer）"
-    : presentation.missionReview === "self-rechecked" ? "🟢 自己再確認済み（修正著者・独立PASSではない）"
-    : presentation.missionReview === "evidence-gaps" ? "🟡 補足あり（非ブロッキング・PASSではない）"
-      : presentation.missionReview === "skipped-low-risk" ? "免除（低リスク）" : proof.review;
+  const proof = renderDebriefProof(result.debrief, locale);
+  const review = presentation.missionReview === "PASS" ? t("🟢 PASS（独立Reviewer）", "🟢 PASS (independent Reviewer)")
+    : presentation.missionReview === "self-rechecked" ? t("🟢 自己再確認済み（修正著者・独立PASSではない）", "🟢 Author self-rechecked (not independent PASS)")
+    : presentation.missionReview === "evidence-gaps" ? t("🟡 補足あり（非ブロッキング・PASSではない）", "🟡 Evidence gaps (non-blocking; not PASS)")
+      : presentation.missionReview === "skipped-low-risk" ? t("免除（低リスク）", "Waived (low risk)") : proof.review;
   const estimate = result.debrief?.estimatedCost;
-  const estimatedCost = estimate === undefined ? "計測不可"
-    : estimate.pricedRequests === 0 ? "未換算"
-      : `$${estimate.usd.toFixed(4)}${estimate.unpricedRequests > 0 ? "（一部未換算）" : ""}`;
+  const estimatedCost = estimate === undefined ? t("計測不可", "Unavailable")
+    : estimate.pricedRequests === 0 ? t("未換算", "Unpriced")
+      : `$${estimate.usd.toFixed(4)}${estimate.unpricedRequests > 0 ? t("（一部未換算）", " (partly unpriced)") : ""}`;
   const measuredTokens = result.debrief?.mixCoverage?.observedTokens;
   const tokenText = result.cost.total_tokens.availability === "unavailable" && measuredTokens !== undefined && measuredTokens > 0
-    ? `${measuredTokens.toLocaleString("ja-JP")} tokens（観測分）`
-    : metricText(result.cost.total_tokens, (value) => `${value.toLocaleString("ja-JP")} tokens`);
+    ? `${measuredTokens.toLocaleString(locale)} tokens${t("（観測分）", " (observed)")}`
+    : metric(result.cost.total_tokens, (value) => `${value.toLocaleString(locale)} tokens`);
   const body = [
-    "🐾 SORTIE DOGS — 帰還報告",
-    "TACTICAL DESK / 作戦卓",
+    t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report"),
+    t("TACTICAL DESK / 作戦卓", "TACTICAL DESK / Operations"),
     "────────────────────",
     result.result_id[0],
     "",
-    `${color} ${achievement} — ${displayText(presentation.statusSummary)}`,
+    `${color} ${achievement} — ${display(presentation.statusSummary)}`,
     "",
-    ...renderDebriefTraits(result.debrief, result.mission.status === "COMPLETED"),
+    ...renderDebriefTraits(result.debrief, result.mission.status === "COMPLETED", locale),
     "",
     "⚑ MISSION",
-    `経過          ⏱ ${metricText(result.speed.goal_wall_ms, duration)} ※待機含む`,
-    `最終達成条件  ◔ ${criteria}`,
-    `対象検証      ${proof.validation}`,
+    `${t("経過", "Elapsed")}          ⏱ ${metric(result.speed.goal_wall_ms, duration)} ${t("※待機含む", "※Includes waiting")}`,
+    `${t("最終達成条件", "Final criteria")}  ◔ ${criteria}`,
+    `${t("対象検証", "Target validation")}      ${proof.validation}`,
     `SourceReview  ${review}`,
-    ...(presentation.reviewNote ? [`レビュー補足  ${displayText(presentation.reviewNote)}`] : []),
-    `Commit        ${displayText(presentation.commit)}`,
+    ...(presentation.reviewNote ? [`${t("レビュー補足", "Review note")}  ${display(presentation.reviewNote)}`] : []),
+    `Commit        ${display(presentation.commit)}`,
     "",
-    "🔧 実装",
-    displayText(presentation.implementation),
+    t("🔧 実装", "🔧 Implementation"),
+    display(presentation.implementation),
     "",
-    "⏳ 未実施",
-    presentation.pending?.trim() ? displayText(presentation.pending) : "未確認（未実施なしを確認した意味ではありません）",
+    t("⏳ 未実施", "⏳ Pending"),
+    presentation.pending?.trim() ? display(presentation.pending) : t("未確認（未実施なしを確認した意味ではありません）", "Unconfirmed (does not mean nothing remains)"),
     "",
     "🪙 COST / PACK",
-    `使用量        ${tokenText}`,
-    `予測費用      ${estimatedCost} ※予測概算`,
-    `host計上費用  ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : "unknown（全体の計上額未取得）"}`,
-    "※換算済み予測費用・host計上費用は請求総額ではありません。未換算・未取得を$0扱いしません",
+    `${t("使用量", "Usage")}        ${tokenText}`,
+    `${t("予測費用", "Estimated cost")}      ${estimatedCost} ${t("※予測概算", "※Estimate only")}`,
+    `${t("host計上費用", "Host-recorded cost")}  ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : t("unknown（全体の計上額未取得）", "unknown (total host cost unavailable)")}`,
+    t("※換算済み予測費用・host計上費用は請求総額ではありません。未換算・未取得を$0扱いしません", "※Priced estimates and host-recorded costs are not the total bill. Unpriced or missing amounts are not $0."),
     "",
-    ...renderDebrief(result.debrief),
+    ...renderDebrief(result.debrief, locale),
     "",
-    ...renderCareer(result.career),
+    ...renderCareer(result.career, locale),
     "",
-    ...renderDebriefTraitEvidence(result.debrief, result.mission.status === "COMPLETED"),
+    ...renderDebriefTraitEvidence(result.debrief, result.mission.status === "COMPLETED", locale),
     "",
     "🛑 STOP REASON",
-    displayText(presentation.stopReason ?? result.mission.stop_reason),
+    display(presentation.stopReason ?? result.mission.stop_reason),
     "",
     "➡️ NEXT",
-    displayText(presentation.next),
-    ...(result.mission.status === "COMPLETED" ? ["", "└─ 記録を閉じる。次の作戦へ。"] : []),
+    display(presentation.next),
+    ...(result.mission.status === "COMPLETED" ? ["", t("└─ 記録を閉じる。次の作戦へ。", "└─ Record closed. On to the next operation.")] : []),
     "",
-    "※使用量は最終応答生成前の計測",
+    t("※使用量は最終応答生成前の計測", "※Usage measured before final response generation"),
   ].join("\n");
-  return `<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜${color} ${summaryLabel}</strong></summary>\n\n${reportFence(body)}\n\n</details>`;
+  return `<details>\n<summary><strong>${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}</strong></summary>\n\n${reportFence(body)}\n\n</details>`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -683,7 +688,7 @@ export function sanitizeTerminalReport(text: string): string {
   const keep = (block: string): string => `\0SORTIE_PROSE_${preserved.push(block) - 1}\0`;
   return text.replace(/<details\b[^>]*>[\s\S]*?<\/details>/giu, block => {
       const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/iu.exec(block)?.[1]?.replace(/<[^>]*>/gu, "").trim() ?? "";
-      return /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*帰還報告)/iu.test(summary) ? "" : keep(block);
+      return /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*(?:帰還報告|Return Report))/iu.test(summary) ? "" : keep(block);
     })
     .replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$/gimu,
       (block: string, _fence: string, offset: number, source: string) => {
@@ -709,14 +714,16 @@ export function insertRunMetrics(text: string, metrics: RunMetrics): string {
 }
 
 export function insertSortieResult(text: string, result: SortieResult,
-  missionReview?: SortieResultPresentation["missionReview"], reviewEvidenceGaps?: string): string {
+  missionReview?: SortieResultPresentation["missionReview"], reviewEvidenceGaps?: string, localeSetting?: string): string {
+  const locale = resolveReportLocale(localeSetting);
+  const t = reportText(locale);
   const visible = sanitizeTerminalReport(text);
   const gapSummary = missionReview === "evidence-gaps"
-    ? reviewEvidenceGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").trim().slice(0, 500) || "独立Reviewに未確認事項あり"
+    ? reviewEvidenceGaps?.replace(/^EVIDENCE_GAPS\s*/u, "").replace(/\s+/gu, " ").trim().slice(0, 500) || t("独立Reviewに未確認事項あり", "Independent Review has unconfirmed items")
     : undefined;
   const reported = extractSortiePresentation(text);
   // Preserve uncertainty visibly without manufacturing unfinished work or a required next action.
-  const presentation = { ...reported, missionReview, ...(gapSummary ? { reviewNote: gapSummary } : {}) };
+  const presentation = { ...reported, locale, missionReview, ...(gapSummary ? { reviewNote: gapSummary } : {}) };
   const checkpoint = terminalCheckpoint(visible);
   if (checkpoint === undefined) return visible;
   // A title in model text is not trusted evidence. Replace existing cards, including legacy cards.
@@ -739,7 +746,7 @@ export function insertSortieResult(text: string, result: SortieResult,
   while (cleaned[checkpoint.index + 1] === "") cleaned.splice(checkpoint.index + 1, 1);
   let card: string;
   try { card = formatSortieResult(result, presentation); }
-  catch { card = "<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。\n\n</details>"; }
+  catch { card = t("<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。\n\n</details>", "<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report</strong></summary>\n\n**Note:** Display totals unavailable. See the leading status for the mission result.\n\n</details>"); }
   cleaned.splice(checkpoint.index + 1, 0, "", card, "");
   return cleaned.join(newline).trimEnd();
 }
@@ -756,7 +763,7 @@ function extractSortiePresentation(text: string): SortieResultPresentation {
     return tail.find((line) => line.trim().length > 0 && !/^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\*\\*)?(?:変更点|実装|未実施|次|NEXT|Commit|コミット)/iu.test(line))?.trim();
   };
   const explicitStop = /^(?:TRUE_INTERRUPTION|TRUE_BLOCKER)[ \\t]*:[ \\t]*(.+)$/imu.exec(text)?.[1]?.trim();
-  return { statusSummary, implementation: section("変更点|実装"), pending: section("未実施"), next: section("次|NEXT"),
+  return { statusSummary, implementation: section("変更点|実装|Implementation|Changes"), pending: section("未実施|Pending"), next: section("次|NEXT"),
     commit: section("Commit|コミット"), stopReason: explicitStop };
 }
 
@@ -772,6 +779,20 @@ export function createGoalReport(result: SortieResult, receipt: GoalTerminalRece
     models: mix != null && mix.length <= 128 && mix.every((entry) => entry.model.length <= 512) &&
       mix.reduce((sum, entry) => sum + entry.tokens, 0) === tokens ? mix.map(({ model, tokens }) => ({ model, tokens })) : null,
     first_pass_eligible: result.debrief?.firstPassEligible === true, traits,
+    ...(result.debrief?.rare === undefined ? {} : { rare: result.debrief.rare }),
     ...(result.debrief?.overlap === undefined ? {} : { overlap: { definition: "worker-span-union/v1" as const,
       worker_ms: result.debrief.overlap.workerMilliseconds, wall_ms: result.debrief.overlap.wallMilliseconds } }) };
+}
+
+/** Both terminal delivery callers use the first persisted snapshot, not a later remeasurement. */
+export function withSavedGoalReport(result: SortieResult, receipt: GoalTerminalReceipt,
+  records: readonly GoalFlightEventRecord[]): SortieResult {
+  const report = records.map(({ event }) => event).find(event => event.kind === "goal.reported" &&
+    event.goal_id === receipt.goal_id && validGoalReport(event.report) && event.report.terminal_key === goalFingerprint(receipt));
+  if (result.debrief === undefined) return result;
+  const saved = report?.kind === "goal.reported" ? report.report : undefined;
+  return { ...result, debrief: { ...result.debrief, rare: saved?.rare,
+    ...(saved === undefined ? {} : { traits: saved.traits.map(trait => trait === "pack-tactics" ? "連携作戦" as const
+      : trait === "recovery" ? "修正から復帰" as const : "一発完遂" as const), firstPassEligible: saved.first_pass_eligible }),
+    rareRecord: saved === undefined ? "unavailable" : saved.rare === undefined ? "legacy" : "saved" } };
 }

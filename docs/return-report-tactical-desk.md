@@ -170,3 +170,45 @@ PR #311の現本文・通常コメント2件・review本文0件・行コメン�
 これらのテストは実Desktop表示・ChatGPT相談・正式最終配送の成功を意味しない。
 実装者はCoordinator `openai/gpt-6.1-sol`。実装Workerの新規派遣なし、Gemma使用なし。
 既存区間のhost実装計上は$0.2847668を継承。今回区間・Reviewer・外部相談を含む総額はこの時点でunknown。
+
+## 追加仕様：条件型の特別記章と言語
+
+既存ChatGPT相談「Sortie-dogs PR #311 — レア称号機構の独立設計評価」の採否を継承する。
+条件型Aを採用。B（節目）とC（品質）は、今回の観測から再現可能な根拠を確立できず保留。
+新規相談・獲得実験・常時モデル判定は追加しない。
+
+- `rare.clean-sweep` / rule_version 1：静かな一撃 / Quiet Strike。
+  既存の厳密な一発完遂を特別区分へ再分類。別名の追加実績ではなく、通常作戦称号と二重表示しない。
+  完全な正式終端一致履歴・対象検証PASS・再試行/再計画/検証失敗なしが必要。
+- `rare.recovery-coordination` / rule_version 1：不屈の連携 / Unbroken Formation。
+  同じ子で対象検証失敗→変更→同じ検証成功、任務成功、異なる子の正の稼働重複。
+  重複は観測事実であり、因果的な協働成果の証明ではない。
+- 各条件は true / false / unknown。ANDでは確認済みfalseがunknownに優先する。
+  不足情報を非該当としない。未完了・正式成功なしは授与しない。出現率は未計測。
+- 既存GoalReportのoptional `rare` に安定ID・rule_version・状態・根拠コードを保存。
+  `terminal_key` は正式receiptのfingerprint。初回保存を両公開配送経路が再利用し、表示言語や再計測で再授与しない。
+  保存済み作戦特性も再表示時に復元する。費用は従来どおり表示時の観測範囲を明示する。
+- PACKは保持された同goalの現在の正式成功終端だけ、記章別に各1件。記章間を合算しない。
+  再開中の旧獲得は除外。旧未判定・報告なし・未知definition/ruleは別扱いし、現在の獲得に変換しない。
+  旧履歴を翻訳名から再解釈したり、履歴を追加書換えしたりしない。
+
+### 製品の表示言語
+
+既存sourceには製品locale設定・翻訳辞書がなく、モデル向けの「利用者の言語で応答」指示だけだった。
+今回の帰還パネルに限定して `SORTIE_REPORT_LOCALE` を追加する。
+`ja` / `ja-JP` / `ja_JP` は日本語、`en`等は英語。未指定・空は既存互換の日本語、未対応の明示指定は英語fallback。
+プロセス環境を**各配送時**に読む。plugin生成時の値に固定しない。
+直接renderer APIでは `formatSortieResult(result, { locale: "en" })`、
+`insertSortieResult(text, result, review, gaps, "en")` で環境値より優先できる。
+
+対象は帰還報告・作戦称号・記章・条件/根拠/状態・PACK注記・費用/計測範囲。
+ID・判定・rule_version・receipt・保存schema・獲得件数は言語共通。
+利用者/モデルが書いた実装説明・レビュー注記・次操作・モデルIDは翻訳せず保持する。
+従って日本語で書かれた説明を英語パネルへ渡せば、その説明自体は日本語のまま。
+開発相談の日本語と製品localeを混同せず、未対応の製品全体・他言語まで翻訳済みとはしない。
+
+`test/run-metrics.test.ts` の `rare saved receipt snapshots and bilingual renderer…` は同じ合成根拠で日英を切り替え、
+`_testenv/pr311-rare-i18n/{earned,combination,not-applicable,unknown,future,legacy}.{ja,en}.{md,html}` を保存する。
+mdは実際のtext renderer出力、htmlはその本文をpreに包む比較用fixture。実Missionの獲得や正規WebUIの実表示証拠ではない。
+今回Workerのbrowserはdisconnectedで、スクリーンショット・DOM観測は未実施。過去候補の実UI結果を今回の記章/多言語表示へ流用しない。
+独立Reviewは親の後続工程。作者テストや自己確認を独立PASSに読み替えない。

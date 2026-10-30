@@ -1,3 +1,5 @@
+import { validRareAwards, type RareAwards } from "./rare-awards.ts";
+
 /** Optional, bounded telemetry retained with the existing terminal goal ledger, never an authority input. */
 export interface GoalReport {
   readonly definition: "pre-terminal-host-tokens/v1";
@@ -7,6 +9,7 @@ export interface GoalReport {
   readonly first_pass_eligible: boolean;
   readonly traits: readonly ("pack-tactics" | "recovery" | "clean-sweep")[];
   readonly overlap?: { readonly definition: "worker-span-union/v1"; readonly worker_ms: number; readonly wall_ms: number };
+  readonly rare?: RareAwards;
 }
 
 export function validGoalReport(value: unknown): value is GoalReport {
@@ -15,11 +18,12 @@ export function validGoalReport(value: unknown): value is GoalReport {
   const amount = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
   const duration = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
   const overlap = item.overlap;
-  return Object.keys(item).every((key) => ["definition", "terminal_key", "tokens", "models", "first_pass_eligible", "traits", "overlap"].includes(key)) &&
+  return Object.keys(item).every((key) => ["definition", "terminal_key", "tokens", "models", "first_pass_eligible", "traits", "overlap", "rare"].includes(key)) &&
     item.definition === "pre-terminal-host-tokens/v1" && /^sha256:[a-f0-9]{64}$/u.test(item.terminal_key) &&
     (item.tokens === null || amount(item.tokens)) && typeof item.first_pass_eligible === "boolean" &&
     Array.isArray(item.traits) && item.traits.length <= 3 && new Set(item.traits).size === item.traits.length &&
     item.traits.every((trait) => ["pack-tactics", "recovery", "clean-sweep"].includes(trait)) &&
+    (item.rare === undefined || validRareAwards(item.rare)) &&
     (overlap === undefined || overlap !== null && typeof overlap === "object" &&
       Object.keys(overlap).every((key) => ["definition", "worker_ms", "wall_ms"].includes(key)) && overlap.definition === "worker-span-union/v1" &&
       duration(overlap.worker_ms) && duration(overlap.wall_ms) && overlap.worker_ms >= overlap.wall_ms) &&
