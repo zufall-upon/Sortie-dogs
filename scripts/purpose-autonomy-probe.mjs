@@ -10,6 +10,7 @@ import { nativeRunPending } from './native-run-settlement.mjs';
 
 const model = 'openai/gpt-6.1-sol#xhigh';
 const hash = value => createHash('sha256').update(value).digest('hex');
+export const nativeTraceFingerprint = tools => hash(JSON.stringify(tools));
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
 const save = (path, value) => writeFile(path, JSON.stringify(value, null, 2) + '\n');
 export const fixtureFiles = {
@@ -337,7 +338,10 @@ export async function verifyContinuation(result) {
   const old = JSON.parse(priorBytes), existing = old.turns[0];
   assert.equal(hash(await readFile(result.prior.package_path)), old.candidate_sha256);
   const nativeTools = traceTools(existing.database_path, existing.models.map(item => item.sessionID));
-  assert.deepEqual(nativeTools, result.prior.native_tools, 'individual recovery references remain bound to the native source');
+  // The retained record is JSON: absent optional native fields serialize without
+  // undefined properties. Compare that same transport representation on reload.
+  assert.equal(nativeTraceFingerprint(nativeTools), nativeTraceFingerprint(result.prior.native_tools),
+    'individual recovery references remain bound to the native source');
   assert.deepEqual(assessExisting(existing, nativeTools, old.initial_hashes), result.prior.assessment);
   assert.equal(result.prior.assessment.usable_for_continuation, true);
   verifyRuntime(existing, await packageIdentity(result.prior.package_path));

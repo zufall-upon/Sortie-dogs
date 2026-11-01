@@ -7,9 +7,12 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { DatabaseSync } from "node:sqlite";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
-import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting, phaseTools, stageRecovery } from "../scripts/purpose-autonomy-probe.mjs";
+import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting, phaseTools, stageRecovery, nativeTraceFingerprint } from "../scripts/purpose-autonomy-probe.mjs";
 
 test("purpose phase accounting does not mislabel a registered refresh before checkpoint as replay after resume", () => {
+  const trace = [{ call_id: "native-call", error: undefined, content: [{ type: "text", text: "actual native output" }] }];
+  assert.equal(nativeTraceFingerprint(trace), nativeTraceFingerprint(JSON.parse(JSON.stringify(trace))), "JSON reload preserves native trace identity");
+  assert.notEqual(nativeTraceFingerprint(trace), nativeTraceFingerprint([{ ...trace[0], call_id: "different-call" }]), "different native provenance is not equivalent");
   const tool = (sequence: number, name: string, input: any = {}, extra: any = {}) =>
     ({ sequence, name, input, call_id: `c${sequence}`, session_id: "root", status: "completed", ...extra });
   const before = [tool(1, "sortie_v010_plan_units", { units: [{ read: ["validation-events.jsonl"], write: ["validation-events.jsonl"] }] }),
