@@ -5,9 +5,36 @@ import { resolve, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { tmpdir } from "node:os";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
+import { fixtureFiles, loadedRuntime, authorRoute, prompts } from "../scripts/purpose-autonomy-probe.mjs";
+
+// Keep sqlite fixtures and their evidence paths on the project filesystem.
+const fixtureTemp = resolve("_testenv", "mission-cli-probe-tmp");
+await mkdir(fixtureTemp, { recursive: true });
+const tmpdir = () => fixtureTemp;
+
+test("purpose behavior fixture has an actual rollback oracle and distinguishes route/runtime from configuration", async () => {
+  const project = await mkdtemp(join(tmpdir(), "purpose-oracle-"));
+  try {
+    for (const [path, value] of Object.entries(fixtureFiles)) await writeFile(join(project, path), value);
+    const run = (script: string) => execFileSync(process.execPath, [script], { cwd: project, stdio: "pipe" });
+    run("verify-existing.mjs");
+    assert.throws(() => run("verify-stage.mjs"));
+    run("generate.mjs"); run("verify-stage.mjs");
+    assert.equal(await readFile(join(project, "probe-state.txt"), "utf8"), "temporary\n");
+    assert.throws(() => run("verify-recovery.mjs"), "echo PASS cannot substitute for actual restoration");
+    run("rollback.mjs"); run("verify-recovery.mjs");
+    assert.equal(await readFile(join(project, "probe-state.txt"), "utf8"), "original\n");
+    assert.match(prompts.checkpoint, /同Mission/);
+    assert.equal(loadedRuntime([{ name: "config", output: "0.16.0-purpose-aligned-v1" }]), null);
+    const runtime = { runtime_asset_version: "0.16.0-purpose-aligned-v1", adapter_sha256: "actual-host-observation" };
+    assert.deepEqual(loadedRuntime([{ name: "sortie_v010_operator_status", content: [{ type: "text", text: JSON.stringify({ runtime }) }] }]), runtime);
+    assert.equal(authorRoute({ operator: { units: [{ directExecution: { actor: "root" } }] }, models: [] }), "direct");
+    assert.equal(authorRoute({ models: [{ agent: "dog-worker-v010" }] }), "worker");
+    assert.equal(authorRoute({ models: [] }), "unknown");
+  } finally { await rm(project, { recursive: true, force: true }); }
+});
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };

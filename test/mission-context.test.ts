@@ -132,6 +132,15 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
   const purpose = { decision: "REUSE", requirement_ids: ["R1"], observed_outcome: "Helper is ready; requested result still absent",
     unmet_work: ["Write result and run required validation"], reason: "Reuse installed helper rather than reinstalling",
     evidence_refs: ["call:ready"], next_action: "Write result and validate" };
+  const before = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [], purpose_decision: purpose }, { sessionID: actor }), /mission-units/);
+  const denied = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(denied.id, before.id);
+  assert.equal(denied.runID, before.runID);
+  assert.equal(denied.plans, before.plans);
+  const deniedContext = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).handoffContext(denied) as any;
+  assert.equal(deniedContext.continuity.purpose_decisions.application_status, "not-established-by-this-record");
+  assert.equal(denied.purposeDecisions!.length, 1, "a selected strategy can survive refusal, not an executed method or admitted plan");
   const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ handoff_context: "Remaining: write result, run check. Prior failure: wrong helper path.",
     purpose_decision: purpose,
     units: [{ title: "Create result", objective: "Finish result", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] }, { sessionID: actor }));

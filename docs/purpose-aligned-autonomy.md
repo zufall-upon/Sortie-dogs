@@ -53,6 +53,22 @@ Missionをまたぐ旧判断はcurrentにしない。元Missionの保存履歴�
 - C「新規強制停止・同コマンド一律拒否」不採用。理由：正当な再実行や必須工程を妨げる。
 - この段階での行動改善効果は未検証。相談は設計入力であり実行権限・正式検証・Reviewではない。
 
+### 相談その2（2026-11-01）
+
+同じ原会話へ初期候補`d352e12`、限定44件PASSと初期独立Review PASS、実モデル行動未実証を提示。
+rootが回答「初期実装評価と実CLI実証方針」9994文字を全文確認。
+既存probeのWorker必須成功契約を緩める案より、監視・DB・費用・settlement・teardownを再利用する
+薄い行動runner案を採用。理由：Coordinator直実行と同Mission複数turnを独立して評価できる。
+実装は`scripts/purpose-autonomy-probe.mjs`。既存成果再利用/非拡張と、代替/rollback/同Mission復帰を扱う。
+安全checkpointではnative writers・inbox・idleを既存helperで全確認し、Mission openだけ許容する。
+共有service停止・live tool途中のkill・DB直書きは行わない。実証前の効果は未検証。
+
+plan失敗後に判断だけ保存される経路も公開toolで確認する。選択した助言の保持は正常だが実施証拠ではない。
+表示へ`application_status: not-established-by-this-record`と、成果/参照はモデル申告でありhost観測ではない旨を追加。
+新状態機械は作らない。currentは要求との関連であり証拠freshnessではない点を明示する。
+大きな配列の可能性だけを理由にUI全体を改修せず、必要な実測時に範囲を絞る。
+CLI結果とrelease判断は次の同会話への相談対象であり、初期PASSだけでrelease済みとはしない。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。

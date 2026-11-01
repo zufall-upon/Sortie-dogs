@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 /** CLI close ends one root turn, not its background descendants or Mission.
  * Read native state only; never dispatch another prompt or manufacture acceptance. */
-export function nativeRunPending(project, databasePath, { since = 0, root } = {}) {
+export function nativeRunPending(project, databasePath, { since = 0, root, allowOpenMission = false } = {}) {
   if (!databasePath) return false;
   const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -62,7 +62,9 @@ export function nativeRunPending(project, databasePath, { since = 0, root } = {}
       // A delivered blocker/decision is a stopped attempt, not acceptance. Native
       // writers, queued continuations and fresh idle epochs were checked above.
       const incompleteDelivery = mission.phase === 'submitted' && ['blocked', 'needs-decision'].includes(mission.submission?.status);
-      if (!['completed', 'cancelled'].includes(mission.phase) && !incompleteDelivery) return true;
+      // An explicit safe-checkpoint observer may end a turn while the Mission
+      // remains open. All native writers/queues/idle checks above still apply.
+      if (!allowOpenMission && !['completed', 'cancelled'].includes(mission.phase) && !incompleteDelivery) return true;
     }
     return false;
   } finally { db.close(); }

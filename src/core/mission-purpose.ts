@@ -61,7 +61,8 @@ export function purposeDecisionView(mission: OperatorMission) {
   const current = entries.filter(item => item.mission_id === mission.id && item.requirements_fingerprint === fingerprint &&
     item.requirement_ids.every(id => mission.requirements.some(requirement => requirement.id === id)));
   return { current, historical: entries.filter(item => !current.includes(item)),
-    interpretation: "Strategy observations only; original requirements and actual outcomes govern. REUSE does not establish evidence freshness or PASS. STOP_METHOD ends only the named method: it neither stops a live process nor completes/cancels the Mission. Required validation, explicit rollback, permissions, budget, Review and root acceptance remain unchanged. next_action here is advisory, not the host next_action." };
+    application_status: "not-established-by-this-record",
+    interpretation: "Selected strategy observations, not proof that a plan was admitted or a method executed. observed_outcome and evidence_refs are model reports, not host observations. current means related to current requirements, not current evidence freshness. Original requirements and actual outcomes govern. REUSE does not establish evidence freshness or PASS. STOP_METHOD ends only the named method: it neither stops a live process nor completes/cancels the Mission. Required validation, explicit rollback, permissions, budget, Review and root acceptance remain unchanged. next_action here is advisory, not the host next_action." };
 }
 
 export const purposeDecisionSchema = { type: "object", "x-sortie-optional": true, additionalProperties: false,

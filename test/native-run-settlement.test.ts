@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { nativeRunPending, waitForNativeSettlement } from '../scripts/native-run-settlement.mjs';
+
+const fixtureTemp = resolve('_testenv', 'native-settlement-tmp');
+await mkdir(fixtureTemp, { recursive: true });
+const tmpdir = () => fixtureTemp;
 
 test('root turn exit does not settle a native background Worker, inbox or unfinished Mission', async () => {
   const project = await mkdtemp(join(tmpdir(), 'native-settlement-'));
@@ -39,6 +42,13 @@ test('root turn exit does not settle a native background Worker, inbox or unfini
     const mission = join(missions, `${createHash('sha256').update('root').digest('hex')}.json`);
     await writeFile(mission, JSON.stringify({ phase: 'submitted' }));
     assert.equal(nativeRunPending(project, path, { since: 100 }), true, 'Worker success is not root acceptance');
+    assert.equal(nativeRunPending(project, path, { since: 100, allowOpenMission: true }), false, 'safe checkpoint does not require Mission completion');
+    db.exec("INSERT INTO session_inbox VALUES ('worker')");
+    assert.equal(nativeRunPending(project, path, { since: 100, allowOpenMission: true }), true, 'checkpoint still awaits queued descendants');
+    db.exec('DELETE FROM session_inbox');
+    db.exec("UPDATE session_v2 SET time_idle = NULL WHERE id = 'worker'");
+    assert.equal(nativeRunPending(project, path, { since: 100, allowOpenMission: true }), true, 'checkpoint still awaits native idle');
+    db.exec("UPDATE session_v2 SET time_idle = 130 WHERE id = 'worker'");
     await writeFile(mission, JSON.stringify({ phase: 'completed' }));
     assert.equal(nativeRunPending(project, path, { since: 100 }), false);
     await writeFile(mission, JSON.stringify({ phase: 'cancelled' }));
