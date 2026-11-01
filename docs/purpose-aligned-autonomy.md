@@ -158,6 +158,22 @@ native exit 0でも正式binding未成立。モデルは元成果を再生成せ
 この補正は既存の「失敗後、変更根拠のある再検証を許容し、未変更成果は再利用する」という契約の適用であり、
 実行履歴の失敗削除やrelease完了認定ではない。次のChatGPT相談で実結果と効率留保を提示する。
 
+### 相談その4：出荷準備への移行（2026-11-01）
+
+rootが同じ原会話へS2の成果・登録修復・外側exit1・14PASS・独立Review・費用とrelease未達を提示し、
+回答「Sortie-dogs v0.16.x — S2実証後の独立評価」3799文字を全文確認した。
+A（範囲と限界を明記し既存出荷gateへ進む）を採用。提示事実から新たな確定Major/Mediumはなく、
+同Mission復帰と必須rollbackまでの実利用者成果が成立したため。B（追加修正）は具体的な到達可能な
+原要求未達が判明した場合だけ採用する。未公開候補の直接コードReviewやrelease許可の代用ではない。
+登録不備時に正式bindingを拒否し、変更根拠のあるcheckだけ更新した動作を維持し、freshnessを緩めない。
+cleanや改善率は主張せず、S1/S2をきれいな履歴に作り直すモデル再実行も行わない。
+
+変更はv016 release profile・startup version guard・固定commit手順の接続へ限定。
+既存Worker実起動/実モデル確認を維持し、v0.14.6以後の既定WorkerはTerra/max、OperatorはSOL/xhigh。
+過去版のLuna Fast契約・branch/channel/tag保護は変更しない。
+出荷準備の効果（PR統合、固定artifact preflight、最終full）はこの採用時点では未検証。
+それらの実結果を最終の既存ChatGPT相談へ返した後にglobal/tag/GitHub Releaseへ進み、npm publishは手動境界を守る。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。

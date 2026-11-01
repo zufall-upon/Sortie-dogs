@@ -126,7 +126,7 @@ export async function runPurposeProbe(tgz, output, capUSD = 3, timeoutSeconds = 
     await mkdir(join(output, 'tmp'), { recursive: true });
     process.env.TMPDIR = join(output, 'tmp');
     process.env.npm_config_cache = join(output, 'npm-cache');
-    fixture = await installedFixture(tgz, output, 'v015', { nested: false });
+    fixture = await installedFixture(tgz, output, 'v016', { nested: false });
     const { project, env } = fixture;
     for (const [path, value] of Object.entries(files)) await writeFile(join(project, path), value);
     await writeFile(join(project, '.gitignore'), `.opencode/\n${fixture.runtime.stateDirectory}/\nvalidation-events.jsonl\n`);

@@ -83,8 +83,8 @@ export const v2PluginWrapperSource = runtime => `import { createSortieDogsV2Plug
 export const releaseSmokeWorkerStarted = (events, records, unitID) =>
   events.some(event => event.type === 'tool_use' && event.part?.tool === 'task' && event.part.state?.status === 'completed') ||
   records.some(({ event }) => event.kind === 'unit.settled' && event.unit_id === unitID && event.disposition === 'succeeded');
-/** v0.13 only needs native Worker start and actual model identity at the CLI gate. */
-export const missionReleaseSmokeMode = profileId => ['v013', 'v014', 'v015'].includes(profileId) ? 'start' : profileId === 'v012' ? 'complete' : null;
+/** v0.13+ needs native Worker start and actual model identity at the CLI gate. */
+export const missionReleaseSmokeMode = profileId => ['v013', 'v014', 'v015', 'v016'].includes(profileId) ? 'start' : profileId === 'v012' ? 'complete' : null;
 // Keep retained/pre-versioned observations on their historical ordinary Worker route.
 export const missionWorkerModelID = version => typeof version === 'string' && compareReleaseVersions(version, '0.14.6') >= 0
   ? 'gpt-6.1-terra' : 'gpt-6-luna-fast';
@@ -99,7 +99,7 @@ export function v013StartupReceipt(result) {
   assert(worker?.model?.providerID === 'openai' && worker.model.id === workerID && worker.model.variant === 'max' &&
     Number.isFinite(worker.started_ms) && worker.started_ms >= 0,
     `Mission Worker must actually start on ${workerID === 'gpt-6.1-terra' ? 'Terra Standard' : 'Luna Fast'}/max`);
-  assert(/^0\.(?:13|14|15)\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
+  assert(/^0\.(?:13|14|15|16)\.\d+$/.test(result.package_version) && result.runtime_marker?.startsWith(`${result.package_version}-`),
     'v013 candidate version and installed Mission marker do not match');
   return { schema: 1, version: result.package_version, profile: 'v010', sha256: result.candidate_sha256,
     sessionID: result.root, workerStarted: true, workerStartedMs: worker.started_ms, workerModel: worker.model,
