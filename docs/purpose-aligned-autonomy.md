@@ -121,6 +121,43 @@ Review経路の一般gate改修には拡張せず、今回の自然なAPI接続�
 新candidateのtgz/marker/関連実装bytehashを固定。停止済みfixtureの旧package byteを別名保存した上で
 新packageへ更新し、依存契約が同一の場合だけ既存依存を再利用する。DB直書きやlive差替えはしない。
 
+### S2実証と収集済み結果の評価補正（2026-11-01）
+
+補正runtime候補は`b06213a16f48ba930a976af33f7d144e5591a07e`、markerは
+`0.16.0-purpose-aligned-v2`、tgz SHA-256は
+`721984065f68ca450ea686a0b401dbe6a8c2dda467a3b4d9d669ab8417167fe4`。
+旧tgzは変更せず、停止済みfixtureの旧installed byteを別名保存、既存依存を再利用した。
+`continue`実operationは1回、既存S1の再実行なし。
+
+- root `ses_e695615d7ffenZmmoHTFYVbEgy`、Mission `mission-a4280230-8bfa-468d-a0b1-61f9810d3730`。
+- checkpointは211806ms、resumeは121925ms。両CLI exit 0/stopped=false。
+  実モデルは同じrootのSOL/xhigh、Worker追加なし。速度差をS1のWorker経路との改善比較には使わない。
+- 既知失敗helperを実行せず正規代替生成。checkpointはtemporaryの実状態、writer解放済み。
+  私有serverを正常終了して再起動し、同root/Mission/要求fingerprintで復帰。
+- 判断ID `11dba902-9b60-437b-9f58-4fa316c9ab4d`、要求fingerprint
+  `a9cbe00de0c245cf4c3b62bcc403f884eac88a65547f22dd5ad39d574fc99120`を継承。
+- resumeでは生成もstage checkも再実行せず、既存rollbackを実行しoriginalへのhash一致、result=readyを確認。
+  正式recovery check exit 0、既存の低リスクReview skip、正式receipt succeededまで到達。
+- 実`review_mission`にpurpose_decisionを同伴し、保存ID `29d9bbf8-70ee-4945-947e-86da0df45d35`を確認。
+  この保存のためだけのreplan/追加Reviewなし。低リスクskipを独立PASSと呼ばない。
+- 両serverのloaded marker/adapter/関連実装bytehashを固定tgzと照合。
+  loaded `profiled.js`は`4aa5130ac206c9e0ca33c2a3f7e4637fbe159d08785b9663f1a671d55ce9bf25`。
+- S2既知換算費用は同root累計$0.4010688。checkpoint $0.2562896を重複加算せず、旧S1込み累計$0.792704。
+  unpriced_requests 0。総請求額ではない。元$3台帳を継承、新allowanceのresetなし。
+
+checkpoint前には登録修復が1回あった。モデルが追記ログをread入力にも含めたため、最初のstage checkは
+native exit 0でも正式binding未成立。モデルは元成果を再生成せず、ログをwrite-onlyにする登録補正後に
+必要なstage checkだけを再実行し、正式PASSで解放した。履歴はprocess-defect→変更→正式成功として保持。
+これはclean実行ではなく、補正による追加check 1回と実装source調査が残ったという効率上の留保。
+
+外側continueはこの2回を「復帰後stage再実行」と誤判定しexit 1になった。
+2回はどちらもcheckpoint前、復帰後は0回であることをnative call ID/順序で確認したため、
+評価器だけをphase差分へ最小補正。無変更のモデル作業を繰り返さず、元外側failed receipt/resultsを保存し、
+別`continuation-assessment.json`へ元結果hash・評価器revision・登録修復のcall参照・成果/効率を記録する。
+既知の登録修復以外の追加checkや、実際の復帰後replayは許容しない。
+この補正は既存の「失敗後、変更根拠のある再検証を許容し、未変更成果は再利用する」という契約の適用であり、
+実行履歴の失敗削除やrelease完了認定ではない。次のChatGPT相談で実結果と効率留保を提示する。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。

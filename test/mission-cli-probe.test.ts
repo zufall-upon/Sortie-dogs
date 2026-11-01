@@ -7,7 +7,27 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { DatabaseSync } from "node:sqlite";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
-import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting } from "../scripts/purpose-autonomy-probe.mjs";
+import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting, phaseTools, stageRecovery } from "../scripts/purpose-autonomy-probe.mjs";
+
+test("purpose phase accounting does not mislabel a registered refresh before checkpoint as replay after resume", () => {
+  const tool = (sequence: number, name: string, input: any = {}, extra: any = {}) =>
+    ({ sequence, name, input, call_id: `c${sequence}`, session_id: "root", status: "completed", ...extra });
+  const before = [tool(1, "sortie_v010_plan_units", { units: [{ read: ["validation-events.jsonl"], write: ["validation-events.jsonl"] }] }),
+    tool(2, "shell", { command: "node verify-stage.mjs" }),
+    tool(3, "sortie_v010_finish_direct_unit", {}, { content: [{ type: "text", text: JSON.stringify({ ready: false,
+      reason: "mission-review-correction-validation-binding-unavailable:node verify-stage.mjs" }) }] }),
+    tool(4, "sortie_v010_plan_units", { units: [{ read: ["verify-stage.mjs"], write: ["validation-events.jsonl"] }] }),
+    tool(5, "shell", { command: "node verify-stage.mjs" })];
+  const checkpoint = { tools: before, operator: { units: [{ status: "succeeded", evidence: [{ execution: { command: ["node verify-stage.mjs"], exit_code: 0 } }] }] } };
+  const resumed = { tools: [...before, tool(6, "shell", { command: "node rollback.mjs" })] };
+  assert.deepEqual(phaseTools(checkpoint, resumed).map((item: any) => item.sequence), [6]);
+  assert.equal(stageRecovery(checkpoint).additional_check_count, 1);
+  assert.equal(stageRecovery(checkpoint).clean_execution, false);
+  assert.throws(() => stageRecovery({ ...checkpoint, tools: before.filter(item => item.sequence !== 4) }), /concrete changed/,
+    "two identical checks without a source-backed registration change are not silently accepted");
+  assert.equal(phaseTools(checkpoint, { tools: [...before, tool(6, "shell", { command: "node verify-stage.mjs" })] })[0].input.command,
+    "node verify-stage.mjs", "a real replay after resume remains visible to the verifier");
+});
 
 test("purpose recovery assessment separates abandonment, resolved Review and unknown blockers", () => {
   const native = (sequence: number, name: string, status: string, extra: any = {}) =>

@@ -300,6 +300,35 @@ const successTurn = turn => {
   assert.equal(turn.cleanup_errors?.length ?? 0, 0);
   assert.equal(turn.unpriced_requests, 0); assert.notEqual(turn.usage_complete, false);
 };
+const toolIdentity = tool => `${tool.session_id}\0${tool.call_id ?? `${tool.message_id}\0${tool.name}`}`;
+export function phaseTools(checkpoint, resumed) {
+  const before = new Set(checkpoint.tools.map(toolIdentity));
+  return resumed.tools.filter(tool => !before.has(toolIdentity(tool)));
+}
+export function stageRecovery(checkpoint) {
+  const stage = checkpoint.tools.filter(tool => ['shell', 'bash'].includes(tool.name) && tool.input?.command === 'node verify-stage.mjs');
+  const notReady = checkpoint.tools.filter(tool => tool.name === 'sortie_v010_finish_direct_unit').flatMap(tool => {
+    try { const packet = JSON.parse(contentText(tool.content ?? tool.output)); return packet.ready === false ? [{ tool, packet }] : []; }
+    catch { return []; }
+  });
+  if (stage.length === 1 && notReady.length === 0) return null;
+  // A same-command refresh after correcting a mutating log's input declaration
+  // is not a replay on resume. Require the actual refused binding and new recipe.
+  assert.equal(stage.length, 2, 'unexpected checkpoint stage repetition');
+  assert.equal(notReady.length, 1, 'unknown not-ready result needs diagnosis');
+  const refused = notReady[0];
+  assert.equal(refused.packet.reason, 'mission-review-correction-validation-binding-unavailable:node verify-stage.mjs');
+  const plans = checkpoint.tools.filter(tool => tool.name === 'sortie_v010_plan_units' && tool.status === 'completed');
+  const initial = plans.find(tool => tool.sequence < stage[0].sequence && tool.input?.units?.[0]?.read?.includes('validation-events.jsonl'));
+  const correction = plans.find(tool => tool.sequence > refused.tool.sequence && tool.sequence < stage[1].sequence &&
+    tool.input?.units?.[0]?.write?.includes('validation-events.jsonl') && !tool.input.units[0].read.includes('validation-events.jsonl'));
+  assert(initial && correction, 'checkpoint refresh must follow a concrete changed input/output registration');
+  assert(checkpoint.operator.units.some(unit => unit.status === 'succeeded' && unit.evidence.some(proof =>
+    proof.execution.command.join(' ') === 'node verify-stage.mjs' && proof.execution.exit_code === 0)));
+  return { disposition: 'registration-corrected-before-checkpoint', first_check: toolIdentity(stage[0]),
+    refused_binding: toolIdentity(refused.tool), corrective_plan: toolIdentity(correction), refreshed_check: toolIdentity(stage[1]),
+    additional_check_count: 1, clean_execution: false };
+}
 export async function verifyContinuation(result) {
   assert.equal(result.schema, 2);
   const priorBytes = await readFile(result.prior.results_path), executionBytes = await readFile(result.prior.execution_path);
@@ -328,6 +357,8 @@ export async function verifyContinuation(result) {
   }
   assert.equal(checkpoint.mission.phase, 'running');
   assert.equal(checkpoint.operator.units.some(unit => unit.status === 'running'), false);
+  assert(checkpoint.operator.units.some(unit => unit.status === 'succeeded' && unit.evidence?.some(proof =>
+    proof.execution.command.join(' ') === 'node verify-stage.mjs' && proof.execution.exit_code === 0)), 'checkpoint owns a formal stage PASS');
   assert.equal(checkpoint.hashes['probe-state.txt'], hash('temporary\n'));
   assert.equal(resumed.hashes['probe-state.txt'], hash('original\n'));
   assert.equal(resumed.hashes['result.txt'], hash('ready\n'));
@@ -345,14 +376,27 @@ export async function verifyContinuation(result) {
   assert(resumed.tools.filter(tool => ['shell', 'bash', 'powershell'].includes(tool.name))
     .every(tool => !/(?:node\s+|\.\/)known-failing\.mjs/u.test(tool.input?.command ?? '')));
   assert.equal(result.validation_events.filter(item => item.check === 'existing').length, 1, 'S1 not rerun');
-  assert.equal(result.validation_events.filter(item => item.check === 'stage').length, 1, 'stage not rerun on resume');
+  const resumedTools = phaseTools(checkpoint, resumed);
+  assert.equal(resumedTools.filter(tool => ['shell', 'bash'].includes(tool.name) && /(?:node\s+|\.\/)verify-stage\.mjs/u.test(tool.input?.command ?? '')).length, 0,
+    'a settled stage must not rerun after the checkpoint');
+  assert.equal(resumedTools.filter(tool => ['shell', 'bash'].includes(tool.name) && /(?:node\s+|\.\/)generate\.mjs/u.test(tool.input?.command ?? '')).length, 0,
+    'the generated outcome must not be recreated on resume');
+  const recovery = stageRecovery(checkpoint);
+  const checkpointChecks = checkpoint.tools.filter(tool => ['shell', 'bash'].includes(tool.name) && tool.input?.command === 'node verify-stage.mjs').length;
+  assert.equal(result.validation_events.filter(item => item.check === 'stage').length, checkpointChecks, 'all stage log entries belong to checkpoint calls');
   assert.equal(result.validation_events.filter(item => item.check === 'recovery').length, 1);
   assert.equal(result.budget.limit_usd, JSON.parse(executionBytes).limit_usd);
   assert.equal(result.budget.carried_usd, existing.priced_usd);
   assert.equal(result.budget.priced_usd, existing.priced_usd + resumed.priced_usd, 'same-root checkpoint/resume costs counted once');
   assert.equal(result.budget.usage_complete, true); assert(result.budget.priced_usd < result.budget.limit_usd);
+  await assertStopped(checkpoint.runtime.pid); await assertStopped(resumed.runtime.pid);
+  assert.equal(nativeRunPending(old.project, resumed.database_path, { root: resumed.root }), false, 'no live writer/inbox/unfinished native Mission remains');
   return { status: 'pass', original_outer_exit: 1, prior_clean: result.prior.assessment.clean_execution,
     prior_avoidable_attempts: result.prior.assessment.avoidable_attempts, s2_mission: resumed.mission.id,
+    checkpoint_stage_checks: checkpointChecks, stage_checks_after_resume: 0, checkpoint_registration_recovery: recovery,
+    assessed_budget: { limit_usd: result.budget.limit_usd, cumulative_priced_usd: result.budget.priced_usd,
+      unpriced_requests: 0, active_local_reserve_usd: 0, previous_failed_reservations_are_historical: true,
+      scope: 'Complete native usage for these observed roots, not total billing or an external payment reservation.' },
     author_routes: result.turns.map(authorRoute), cumulative_priced_usd: result.budget.priced_usd,
     note: 'S1 is retained evidence for the old candidate; S2 exercises the corrected candidate. No clean-run or improvement-rate claim.' };
 }
@@ -453,6 +497,15 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
     Number(process.argv[5] ?? 3), Number(process.argv[6] ?? 600))));
   else if (process.argv[2] === 'continue') console.log(JSON.stringify(await continuePurposeProbe(resolve(process.argv[3]), resolve(process.argv[4]),
     resolve(process.argv[5]), Number(process.argv[6] ?? 600))));
-  else if (process.argv[2] === 'verify-continuation') console.log(JSON.stringify(await verifyContinuation(await json(resolve(process.argv[3])))));
+  else if (process.argv[2] === 'verify-continuation') {
+    const path = resolve(process.argv[3]), bytes = await readFile(path), result = await verifyContinuation(JSON.parse(bytes));
+    const assessment = { ...result, source_results_sha256: hash(bytes),
+      source_execution_sha256: hash(await readFile(join(dirname(path), 'execution.json'))),
+      evaluator_sha256: hash(await readFile(import.meta.filename)),
+      evaluator_revision: (await command('git', ['rev-parse', 'HEAD'], process.cwd(), {})).trim(),
+      interpretation: 'Collected native CLI outcomes assessed without rerunning model work. Both historical outer exit 1 records remain unchanged.' };
+    await save(join(dirname(path), 'continuation-assessment.json'), assessment);
+    console.log(JSON.stringify(assessment));
+  }
   else throw Error('Usage: purpose-autonomy-probe.mjs run <tgz> <output> [total-cap-usd] [turn-timeout-seconds] | continue <new-tgz> <prior-output> <output> [turn-timeout-seconds] | verify[-continuation] <results.json>');
 }
