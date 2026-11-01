@@ -838,6 +838,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     const output = { system: [] as string[] };
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
+    const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
+    if (reconciliation) (output.system ??= []).push(reconciliation);
     await reconcileCorrectionPermissions(String(event.sessionID));
     if (record(event.tools)) {
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
@@ -891,6 +893,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
     const output = { context: [] as string[] };
     await hooks["experimental.session.compacting"]!({ sessionID: String(event.sessionID ?? "") }, output);
+    const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
+    if (reconciliation) (output.context ??= []).push(reconciliation);
     if (Array.isArray(event.system)) event.system.push(...output.context.map(text => ({ type: "text", text })));
   });
   await context.permission.hook("evaluate", async event => {

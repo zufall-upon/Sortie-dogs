@@ -514,6 +514,65 @@ test("background adapter retains rewritten host output for the real completion r
   } finally { cleanup?.(); }
 });
 
+test("background settlement inspection failure leaves prompt, context and compaction usable without accepting or relaunching", async () => {
+  const fixture = contextFixture(), histories: Record<string, any[]> = { root: [], child: [] };
+  fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID,
+    agent: sessionID === "child" ? "dog-worker-v010" : "dog-operator",
+    ...(sessionID === "child" ? { parentID: "root" } : {}) });
+  fixture.context.session.context = async ({ sessionID }) => histories[sessionID] ?? [];
+  let broken = true, settlements = 0, admissions = 0;
+  const factory: OpenCodePlugin = async () => ({
+    "tool.execute.before": async () => { admissions++; }, "chat.message": async () => {},
+    "experimental.chat.system.transform": async (_input, output) => { output.system = ["CURRENT_MISSION"]; },
+    "experimental.session.compacting": async (_input, output) => { output.context = ["ORIGINAL_REQUIREMENTS_AND_SPEND"]; },
+    "tool.execute.after": async (_input, output) => {
+      if ((output.metadata as any)?.status === "running") return;
+      if (broken) throw new Error("git ls-files: internal error - directory entry not superset of prefix");
+      settlements++;
+      output.output = "Saved native result; formal acceptance still pending";
+    },
+  });
+  let cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  try {
+    const dispatch = { sessionID: "root", tool: "subagent", id: "call_inspection_failure",
+      input: { agent: "dog-worker-v010", prompt: "publish once", background: true } };
+    await fixture.toolHooks.get("execute.before")!(dispatch);
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "child", messageID: "prompt", prompt: { text: "publish once" } });
+    histories.child!.push({ id: "prompt", type: "user" });
+    await fixture.toolHooks.get("execute.after")!({ ...dispatch, status: "completed",
+      result: { content: "Job running", metadata: { status: "running", sessionID: "child" } } });
+    histories.child!.push({ id: "terminal", type: "assistant", finish: "stop", content: [{ type: "text", text: "Published once" }] });
+    for (const reload of [false, true]) {
+      if (reload) { cleanup?.(); cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context); }
+      const prompt = { text: "Report the saved result without republishing" };
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "followup", prompt });
+      assert.equal(prompt.text, "Report the saved result without republishing");
+      for (const hook of ["context", "compaction"]) {
+        const event = { sessionID: "root", agent: "dog-operator", system: [], messages: [], tools: {} };
+        await fixture.sessionHooks.get(hook)!(event);
+        assert.match(JSON.stringify(event.system), /SORTIE_BACKGROUND_RECONCILIATION_UNAVAILABLE/);
+        assert.match(JSON.stringify(event.system), /directory entry not superset of prefix/);
+        assert.match(JSON.stringify(event.system), /acceptance.*not.*proven/i);
+        assert.match(JSON.stringify(event.system), hook === "context" ? /CURRENT_MISSION/ : /ORIGINAL_REQUIREMENTS_AND_SPEND/);
+      }
+      const saved = await fixture.context.storage!.get("v2-background-dispatches:root") as any[];
+      assert.equal(saved[0].terminal, "succeeded", "native completion survives inspection failure");
+      assert.notEqual(saved[0].settled, true, "inspection failure must remain recoverable, never a fabricated PASS");
+      assert.equal(saved[0].result, undefined);
+    }
+    broken = false;
+    for (let i = 0; i < 2; i++) {
+      const event = { sessionID: "root", agent: "dog-operator", system: [], messages: [], tools: {} };
+      await fixture.sessionHooks.get("context")!(event);
+      assert.doesNotMatch(JSON.stringify(event.system), /SORTIE_BACKGROUND_RECONCILIATION_UNAVAILABLE/);
+    }
+    const saved = await fixture.context.storage!.get("v2-background-dispatches:root") as any[];
+    assert.equal(saved[0].settled, true);
+    assert.equal(saved[0].result, "Saved native result; formal acceptance still pending");
+    assert.equal(settlements, 1); assert.equal(admissions, 1); assert.equal(fixture.synthetic.length, 0);
+  } finally { cleanup?.(); }
+});
+
 test("Reviewer model tool order never changes other agents' native tool set or insertion order", async () => {
   const fixture = contextFixture();
   const cleanup = await createSortieDogsV2Plugin(async () => ({
