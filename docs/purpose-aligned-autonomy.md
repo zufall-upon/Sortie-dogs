@@ -174,6 +174,28 @@ cleanや改善率は主張せず、S1/S2をきれいな履歴に作り直すモ�
 出荷準備の効果（PR統合、固定artifact preflight、最終full）はこの採用時点では未検証。
 それらの実結果を最終の既存ChatGPT相談へ返した後にglobal/tag/GitHub Releaseへ進み、npm publishは手動境界を守る。
 
+### 出荷準備の実測とCI補正（2026-11-01）
+
+PR #316をmainへ統合（`45094c9b2b4acc1052c74ceeea345a7ea8ce9baa`）。PR本文/通常コメント/Review/行コメントを回収。
+Codexは実行失敗通知のみ、具体指摘0件のため保留（PASSでも欠陥確定でもない）。再依頼はしない。
+release tooling関連33件PASS。統合commitから生成したtgzはS2の固定候補と全配布file/byteが同一で、
+SHA-256も`721984065f68ca450ea686a0b401dbe6a8c2dda467a3b4d9d669ab8417167fe4`のまま。
+
+最初のpreflightはtmpfs cacheへのwrite errno -122でnpm exit134、外側exit1、モデル起動前に停止。
+df上の空きでは判定せず小さなwriteでも同じ失敗を確認し、repositoryの自作cache/tmpへ移して補正。
+失敗fixture/receiptを保持し、同tgzで未起動のWorker startup gateを実施してexit0。
+Operator SOL/xhigh、Worker Terra/maxを13024msで観測、観測全体15348ms。
+startup receiptのcanonicalExitはnull、意図的なCLI終了130、terminalはworker-started。
+換算済み費用$0.0654424に未換算request2件があり、総費用は未確定。
+S1/S2の実証費用$0.792704へ未換算分を0として合算しない。
+startup観測にはloaded実装hashのstatus packetがなく、同byteのS2 loaded証拠とtar比較を併用する。
+startup自体のloaded hash実測と偽らない。共有serviceは停止せず、私有CLI/serverのみ正常に片付いた。
+
+main CIのWindows testはPASS、quick testはV2 schemaのcapturedHandoff fixtureで失敗。
+V2は既存契約どおりoptionalをrequired+空文字sentinelへlowerするため、purpose_decision省略の旧fixtureを補正。
+同既存testへReviewの空文字/有効判断/不完全判断拒否のassertionも追加、公開schema限定check PASS。
+runtime/schema実装を緩めず、配布物変更なし。CI成功をレビュー指摘解消とは扱わない。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。
