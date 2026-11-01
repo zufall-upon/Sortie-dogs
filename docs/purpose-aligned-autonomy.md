@@ -69,6 +69,38 @@ plan失敗後に判断だけ保存される経路も公開toolで確認する。
 大きな配列の可能性だけを理由にUI全体を改修せず、必要な実測時に範囲を絞る。
 CLI結果とrelease判断は次の同会話への相談対象であり、初期PASSだけでrelease済みとはしない。
 
+### 最初の実CLI結果（2026-11-01、未完了）
+
+- 候補commit：`2c9911e50cc9c7d36160f2eb2c2372f41009f51e`。
+- package：`0.16.0`、marker：`0.16.0-purpose-aligned-v1`。
+- SHA-256：`2a847d323801c27ae0256eee84a8f4bbddf41ef6802b8efbb8401b880faae9a5`。
+- runner SHA-256：`180b6dd6308700427b807492445e145cd64c3d016ebb9c87030bececa7cf2bf5`。
+- 外側command：`node scripts/purpose-autonomy-probe.mjs run _testenv/purpose-v016/package/sortie-dogs-0.16.0.tgz _testenv/purpose-v016 3 600`。
+  exit 1。S1のterminal収集後、履歴tool error 2件をrunnerが拒否。S2/checkpoint/resumeは起動していない。
+- S1 root：`ses_e697423b8ffeEZTsUGEGL4D3ll`、Mission：`mission-543988b7-de96-4f44-8d38-82923b5712d8`。
+  CLI exit 0、stop false、経過265607ms、正式Mission/receiptはcompleted/succeeded、独立Review PASS。
+- Operator SOL/xhigh、Worker SOL/default、Reviewer SOL/xhighをnative messageで観測。
+  3session、assistant message 30件。これは課題の実行経路であり改善率ではない。
+- loaded markerと候補内adapterのbyte hashが一致。`profiled.js`実測SHA-256は
+  `f2ef2e84bad42e6071326e444c7548b4a4e7a4cc7ad4094e8585cf0cf0351eda`。
+- `product.json`、`unrelated.js`、全immutable入力はhash不変。必須`node verify-existing.mjs`は1回、exit 0、
+  正式evidence `sha256:15d366db9e83173018d6e5ba0e776dbdaf84fd971445854c23b467fbfa569604`。
+  成果再利用の実証であり、以前の正式PASSを再利用したという意味ではない。
+- 手段記録のための同一plan再呼出しが`SORTIE_FAST_LANE_DENIED: BACKLOG_DRAIN_INVALID`。
+  その後も元Mission/正式証拠を維持し再実装・再検証なし。Review初回dispatchも
+  `SORTIE_FAST_LANE_DENIED: REVIEW_EVIDENCE_REQUIRED`で開始前拒否。
+  モデルが`canonical_validation_exit: 0`、`review_phase: final`、実リスク`process-io`を補い、Review/受入まで復帰。
+- REUSE判断は選択済み助言として保存されたが、記録だけの余計なplanと実装source調査が発生。
+  正式成果は得られたものの「不要往復のない運用」は未達。履歴error 0だけで評価するrunner契約も見直し対象。
+- 換算済み既知費用$0.3916352、unpriced_requests 0。全体請求総額ではない。
+  外側$3留保はrunner失敗時のまま保持し、新allowanceで再開しない。
+- 保存証拠：`_testenv/purpose-v016/execution.json`、`results.json`、`smoke-1/existing.json`、同stdout/stderr、隔離DB。
+  固定package/全証拠を保持。private server PIDの消滅確認後、自作npm cache/tmpだけ約272MiB除去。
+  共有service停止・他所有者退避への操作・同条件再実行なし。
+
+次節目はこの実結果を同じChatGPTへ戻し、late判断の記録経路と回復した拒否の評価を比較する。
+相談結果・採否の反映前に、別fixtureでS1を自動再実行したりrelease完了としない。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。
