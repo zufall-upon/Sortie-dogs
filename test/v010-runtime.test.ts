@@ -506,13 +506,19 @@ test("language follow-up marker upgrades the installed language1 preview", async
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
-test("v0.13 restore does not accept a v0.11 runtime marker", async () => fixture(async root => {
+for (const installed of ["0.11.4", "0.17.0-future-v1"])
+test(`Mission refresh rejects incompatible marker ${installed} before mutation`, async () => fixture(async root => {
   await initializeProject(root, "v010");
-  await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), "0.11.4\n");
+  const marker = join(root, ".opencode/sortie-dogs-v010.version");
+  await writeFile(marker, `${installed}\n`);
+  const asset = join(root, ".opencode", previewAssets[0]!.installPath);
+  const before = await readFile(asset, "utf8");
   await assert.rejects(initializeProject(root, "v010"), /cannot be updated/u);
+  assert.equal(await readFile(marker, "utf8"), `${installed}\n`);
+  assert.equal(await readFile(asset, "utf8"), before);
 }));
 
-for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1"])
+for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1", "0.15.3-external-review-links-v1"])
 test(`Mission refresh accepts the retained marker ${installed}`, async () => fixture(async root => {
   await initializeProject(root, "v010");
   await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), `${installed}\n`);
