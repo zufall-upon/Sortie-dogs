@@ -196,6 +196,21 @@ V2は既存契約どおりoptionalをrequired+空文字sentinelへlowerするた
 同既存testへReviewの空文字/有効判断/不完全判断拒否のassertionも追加、公開schema限定check PASS。
 runtime/schema実装を緩めず、配布物変更なし。CI成功をレビュー指摘解消とは扱わない。
 
+### 相談その5：v016移行互換性の局所修復（2026-11-01）
+
+Git外TMPDIRによるfullでは環境由来の2失敗は解消したが、既存v010-runtimeの7移行checkが失敗。
+classifyVersionTransitionの明示targetがv015までで、既存0.10 preview/0.12–0.14からv016への正規更新を拒否していた。
+rootが同原会話へ実結果とsource/assertionを提示、回答「移行互換性障害の独立評価」3251文字を全文確認。
+A（既存v010 migration契約をv016へ最小接続）を採用。既存利用者の更新不能は出荷阻害Majorであり、
+fresh install/adjacent15のみへ保証を狭めて出荷するB案は原要求を縮小するため不採用。局所修復GO、出荷HOLD。
+
+restoredPreviewの移行先へ16を追加し、retainedMissionの12/13/14→16を明示接続する。
+same/order/adjacentや0.11別runtime拒否、downgrade/異系統/ownership/symlink保護は変更しない。
+既存7assertionを維持し、0.15adjacentと拒否時不変の関連assertionを補足する。
+既存Missionをコピーした隔離fixtureで正規CLI initとstate byte不変も確認し、モデル継続の証明とは区別する。
+この採用時点で効果は未検証。旧tgz/旧preflight/旧実証を新runtime候補のfresh PASSへ読み替えず、
+修復後の新固定commit/tgzへ関連check、preflight、最終full、必要Reviewを結び付けて判断する。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。
