@@ -2255,10 +2255,19 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.match(reflection.input.properties.scope!.description!, /empty string to omit/u);
     const plan = tools.find(tool => tool.name === "sortie_v010_plan_units")!;
     const validate = new Ajv({ strict: false }).compile(plan.input);
-    const capturedHandoff = { units: "", work_quantities: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker" };
+    const capturedHandoff = { units: "", work_quantities: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker", purpose_decision: "" };
     assert.equal(validate(capturedHandoff), true, JSON.stringify(validate.errors));
     assert.equal(validate({ ...capturedHandoff, units: "invented-plan" }), false);
     assert.equal(validate({ ...capturedHandoff, units: [] }), false, "empty units cannot masquerade as a new plan");
+    const review = tools.find(tool => tool.name === "sortie_v010_review_mission")!;
+    const validateReview = new Ajv({ strict: false }).compile(review.input);
+    const capturedReview = { risk_tags: [], mode: "", reviewer_session_id: "", evidence: "", traces: "", purpose_decision: "" };
+    assert.equal(validateReview(capturedReview), true, "optional purpose note uses the existing V2 omission sentinel");
+    const purpose = { decision: "REUSE", requirement_ids: ["R1"], observed_outcome: "Current checks passed",
+      unmet_work: ["Review"], reason: "Reuse existing evidence", evidence_refs: [], next_action: "Review the candidate" };
+    assert.equal(validateReview({ ...capturedReview, purpose_decision: purpose }), true, JSON.stringify(validateReview.errors));
+    assert.equal(validateReview({ ...capturedReview, purpose_decision: { decision: "REUSE" } }), false,
+      "provider schema still rejects incomplete decision records");
     const start = tools.find(tool => tool.name === "sortie_v010_start_mission")!;
     assert.equal(new Ajv({ strict: false }).compile(start.input.properties.preferred_executor)(""), true);
     for (const tool of tools) assert.deepEqual(tool.input.required, Object.keys(tool.input.properties), `${tool.name} cannot expose optional top-level properties`);
