@@ -14,6 +14,47 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
+import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
+
+test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "u1", text: "Deliver working result, verify it, and explicitly roll back the probe" });
+  const original = await missions.start("root", ["Working result", "Verify and roll back probe"]);
+  const decision = { decision: "STOP_METHOD", requirement_ids: ["R1"], observed_outcome: "The unchanged helper still fails",
+    unmet_work: ["Deliver result using another method", "Required verification and rollback"], reason: "Same input and failure; no new hypothesis",
+    evidence_refs: ["call:failed-helper"], affected_method: "retry unchanged helper", next_action: "Inspect alternative and finish verification/rollback" };
+  await missions.recordPurposeDecision("root", decision);
+  await missions.recordPurposeDecision("root", decision);
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const resumed = await cold.required("root");
+  assert.equal(resumed.purposeDecisions!.length, 1);
+  assert.deepEqual(resumed.requirements, original.requirements);
+  assert.equal(resumed.phase, "open");
+  assert.equal(resumed.plans, 0);
+  assert.deepEqual(resumed.attempts, original.attempts);
+  assert.deepEqual(resumed.review, original.review);
+  assert.deepEqual(resumed.submission, null);
+  const packet = missionPacket(resumed);
+  assert.equal(packet.next_action, missionPacket(original).next_action);
+  assert.match(JSON.stringify(await cold.handoffContext(resumed)), /retry unchanged helper/);
+  assert.match(cold.brief(resumed), /Required verification and rollback/);
+  assert.equal(purposeDecisionView(resumed).current.length, 1);
+  for (const bad of [{ ...decision, decision: "PASS" }, { ...decision, requirement_ids: ["R99"] },
+    { ...decision, affected_method: undefined }, { ...decision, authorization: "all" }]) {
+    await assert.rejects(cold.recordPurposeDecision("root", bad), /mission-purpose-decision-invalid/);
+  }
+  await cold.capture("root", { id: "u2", text: "Also preserve metadata" });
+  const changed = await cold.start("root", [...resumed.requirements.map(item => item.text), "Preserve metadata"]);
+  assert.equal(changed.id, original.id);
+  assert.notEqual(purposeRequirementsFingerprint(changed), purposeRequirementsFingerprint(original));
+  assert.equal(purposeDecisionView(changed).current.length, 0);
+  assert.equal(purposeDecisionView(changed).historical.length, 1);
+  for (let i = 0; i < 10; i++) await cold.recordPurposeDecision("root", { ...decision, reason: `Changed hypothesis ${i}` });
+  assert.equal((await cold.required("root")).purposeDecisions!.length, 8);
+  const broken = { ...changed, purposeDecisions: [null, { decision: "REUSE" }] } as never;
+  assert.deepEqual(purposeDecisionView(broken).current, []);
+  assert.equal(missionPacket(broken).next_action, missionPacket(original).next_action);
+}));
 
 async function fixture(run: (directory: string) => Promise<void>) {
   const area = resolve("_testenv");

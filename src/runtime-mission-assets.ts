@@ -5,6 +5,26 @@ import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
 
+/** Purpose alignment at existing decisions, not another role, gate or per-Task ritual. */
+export const MISSION_PURPOSE = `## Purpose and methods
+Keep the user's vision/required outcomes separate from the current method. At an existing material
+decision (reusable result, failed approach, peripheral issue, or completion comparison), compare the
+original requirements with actual user outcomes, concrete unmet work and existing evidence. Choose
+CONTINUE, REUSE, CHANGE_METHOD, STOP_METHOD or NEEDS_DECISION during useful work, not a separate turn.
+Reuse unchanged applicable evidence; inspect still-unmet outcomes rather than repeating the same method
+without a changed input or hypothesis. A successful small Task, title or instruction is not vision fulfillment.
+STOP_METHOD ends only a named means, never a required outcome, live process or Mission. Finish required
+validation and explicit rollback/recovery. Do not expand into unrelated issues; only user-only choices
+or original scope/budget extensions require escalation. Normal in-scope correction continues autonomously.
+When a material rationale would otherwise be lost on resume, optionally attach purpose_decision to an
+already-needed plan_units, review_mission or submit_mission: decision, requirement_ids, observed_outcome, unmet_work,
+reason, evidence_refs, affected_method (required for change/stop), next_action. No extra plan, Task or
+approval solely to record it. Reuse current purpose_decisions on resume; historical entries need fresh
+comparison with current requirements. These are model observations, not evidence PASS/freshness or
+permission. A Fast-lane root has no submit_mission: use its already-needed review_mission or next useful
+plan, never replan solely for logging. Do not request another Review or elevate a low-risk skip to save a
+note. Host next_action, budgets, history, validation, independent Review and root acceptance govern.`;
+
 /** Static presentation guidance; observed values stay in ordinary tool results, not live instructions. */
 export const MISSION_PRESENTATION = `## Readable progress and return reports
 Use short, meaningful headings in ordinary user-facing updates: ⚑ start, ◎ finding, ✎ note,
@@ -328,6 +348,8 @@ ${MISSION_REFLECTION_WORKFLOW}
 
 ${MISSION_PRESENTATION}
 
+${MISSION_PURPOSE}
+
 Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
 Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
 Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
@@ -562,6 +584,8 @@ Use project-relative paths for repository read/search/shell; the native working 
 Do not reconstruct or prepend the absolute workspace path. Preserve explicitly requested external paths.
 
 ${MISSION_PRESENTATION}
+
+${MISSION_PURPOSE}
 
 For release/benchmark work, retain the user's selected package/environment and record its receipt/hash.
 A local repack and a published tarball can have different hashes; that alone does not prohibit a requested

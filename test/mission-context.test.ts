@@ -129,7 +129,20 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
   }
   history.root!.push({ info: { id: "fresh-tool", role: "assistant" }, parts: [{ type: "tool", tool: "shell", callID: "ready",
     state: { status: "completed", input: { command: "node helper.mjs --status" }, output: "READY_EXISTING", metadata: { exit: 0 } } }] });
+  const purpose = { decision: "REUSE", requirement_ids: ["R1"], observed_outcome: "Helper is ready; requested result still absent",
+    unmet_work: ["Write result and run required validation"], reason: "Reuse installed helper rather than reinstalling",
+    evidence_refs: ["call:ready"], next_action: "Write result and validate" };
+  const before = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ units: [], purpose_decision: purpose }, { sessionID: actor }), /mission-units/);
+  const denied = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(denied.id, before.id);
+  assert.equal(denied.runID, before.runID);
+  assert.equal(denied.plans, before.plans);
+  const deniedContext = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).handoffContext(denied) as any;
+  assert.equal(deniedContext.continuity.purpose_decisions.application_status, "not-established-by-this-record");
+  assert.equal(denied.purposeDecisions!.length, 1, "a selected strategy can survive refusal, not an executed method or admitted plan");
   const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ handoff_context: "Remaining: write result, run check. Prior failure: wrong helper path.",
+    purpose_decision: purpose,
     units: [{ title: "Create result", objective: "Finish result", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] }, { sessionID: actor }));
   const task = { args: structuredClone(planned.task) };
   await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "worker-call" }, task);
@@ -138,6 +151,12 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
   const unit = run.units[0]!;
   const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
   const continuity = handoff.ext["sortie-dogs/mission-context"].continuity;
+  assert.equal(continuity.purpose_decisions.current[0].decision, "REUSE");
+  assert.deepEqual(continuity.purpose_decisions.current[0].unmet_work, purpose.unmet_work);
+  const cold = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  assert.equal((await cold.required("root")).purposeDecisions![0].decision, "REUSE");
+  await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Reuse is not completion",
+    purpose_decision: { ...purpose, unmet_work: [] } }, { sessionID: actor }), /mission-units-incomplete/);
   const native = await nativeContractReadView(directory, { path: unit.handoffPath });
   if (mode !== "unavailable-history") {
     assert.match(native!, /Use existing ready helper; do not reinstall/);
@@ -157,4 +176,29 @@ for (const mode of ["root", "coordinator", "unavailable-history"]) test(`${mode}
   assert.deepEqual(unit.unit.validation, ["node check.mjs"]);
   assert.equal(run.receipt, null);
   assert.deepEqual(unit.evidence, [], "inherited tool success is not current validation");
+}));
+
+test("public submission retains purpose observations but invalid optional input has no submission side effect", async () => fixture(async directory => {
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }), messages: async () => ({ data: [] }),
+    children: async () => ({ data: [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+    parts: [{ type: "text", text: "Fetch an external result and verify it" }],
+  });
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Deliver verified external result"] }, { sessionID: "root" });
+  const purpose = { decision: "CHANGE_METHOD", requirement_ids: ["R1"], observed_outcome: "External endpoint unavailable",
+    unmet_work: ["Fetch and verify result"], reason: "No result received", evidence_refs: [],
+    affected_method: "Unavailable transport", next_action: "Restore external transport, then resume same Mission" };
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  await assert.rejects(hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary: "External transport unavailable",
+    purpose_decision: { ...purpose, requirement_ids: ["R99"] } }, { sessionID: "root" }), /mission-purpose-decision-invalid/);
+  assert.equal((await missions.required("root")).submission, null);
+  await hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary: "External transport unavailable",
+    purpose_decision: purpose }, { sessionID: "root" });
+  const saved = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(saved.purposeDecisions![0].decision, "CHANGE_METHOD");
+  assert.equal(saved.submission!.status, "blocked");
+  assert.notEqual(saved.phase, "completed");
 }));

@@ -5,9 +5,82 @@ import { resolve, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { tmpdir } from "node:os";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
+import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting, phaseTools, stageRecovery, nativeTraceFingerprint } from "../scripts/purpose-autonomy-probe.mjs";
+
+test("purpose phase accounting does not mislabel a registered refresh before checkpoint as replay after resume", () => {
+  const trace = [{ call_id: "native-call", error: undefined, content: [{ type: "text", text: "actual native output" }] }];
+  assert.equal(nativeTraceFingerprint(trace), nativeTraceFingerprint(JSON.parse(JSON.stringify(trace))), "JSON reload preserves native trace identity");
+  assert.notEqual(nativeTraceFingerprint(trace), nativeTraceFingerprint([{ ...trace[0], call_id: "different-call" }]), "different native provenance is not equivalent");
+  const tool = (sequence: number, name: string, input: any = {}, extra: any = {}) =>
+    ({ sequence, name, input, call_id: `c${sequence}`, session_id: "root", status: "completed", ...extra });
+  const before = [tool(1, "sortie_v010_plan_units", { units: [{ read: ["validation-events.jsonl"], write: ["validation-events.jsonl"] }] }),
+    tool(2, "shell", { command: "node verify-stage.mjs" }),
+    tool(3, "sortie_v010_finish_direct_unit", {}, { content: [{ type: "text", text: JSON.stringify({ ready: false,
+      reason: "mission-review-correction-validation-binding-unavailable:node verify-stage.mjs" }) }] }),
+    tool(4, "sortie_v010_plan_units", { units: [{ read: ["verify-stage.mjs"], write: ["validation-events.jsonl"] }] }),
+    tool(5, "shell", { command: "node verify-stage.mjs" })];
+  const checkpoint = { tools: before, operator: { units: [{ status: "succeeded", evidence: [{ execution: { command: ["node verify-stage.mjs"], exit_code: 0 } }] }] } };
+  const resumed = { tools: [...before, tool(6, "shell", { command: "node rollback.mjs" })] };
+  assert.deepEqual(phaseTools(checkpoint, resumed).map((item: any) => item.sequence), [6]);
+  assert.equal(stageRecovery(checkpoint).additional_check_count, 1);
+  assert.equal(stageRecovery(checkpoint).clean_execution, false);
+  assert.throws(() => stageRecovery({ ...checkpoint, tools: before.filter(item => item.sequence !== 4) }), /concrete changed/,
+    "two identical checks without a source-backed registration change are not silently accepted");
+  assert.equal(phaseTools(checkpoint, { tools: [...before, tool(6, "shell", { command: "node verify-stage.mjs" })] })[0].input.command,
+    "node verify-stage.mjs", "a real replay after resume remains visible to the verifier");
+});
+
+test("purpose recovery assessment separates abandonment, resolved Review and unknown blockers", () => {
+  const native = (sequence: number, name: string, status: string, extra: any = {}) =>
+    ({ sequence, name, status, session_id: "root", message_id: `m${sequence}`, call_id: `c${sequence}`, ...extra });
+  const tools = [native(1, "sortie_v010_plan_units", "error", { error: "BACKLOG_DRAIN_INVALID" }),
+    native(2, "sortie_v010_review_mission", "completed"),
+    native(3, "subagent", "error", { error: "REVIEW_EVIDENCE_REQUIRED" }),
+    native(4, "sortie_v010_review_mission", "completed", { input: { risk_tags: ["process-io"], traces: ["canonical_validation_exit: 0", "review_phase: final"] } }),
+    native(5, "subagent", "completed", { input: { agent: "dog-reviewer-v010" }, metadata: { sessionID: "reviewer" } }),
+    native(6, "sortie_v010_complete_mission", "completed")];
+  const existing = { root: "root", code: 0, stopped: false, hashes: { "product.json": "same" }, unpriced_requests: 0, errors: [{}, {}],
+    mission: { phase: "completed", sourceAuthors: ["worker"], review: { verdict: "PASS", child: "reviewer" } },
+    operator: { receipt: { status: "succeeded" }, units: [{ evidence: [{ execution: { command: ["node verify-existing.mjs"], exit_code: 0, outcome: "pass" } }] }] } };
+  const assessed = assessExisting(existing, tools, { "product.json": "same" });
+  assert.equal(assessed.usable_for_continuation, true);
+  assert.equal(assessed.clean_execution, false);
+  assert.equal(assessed.avoidable_attempts, 2);
+  assert.deepEqual(assessed.refusals.map((item: any) => item.disposition), ["abandoned_nonessential", "resolved"]);
+  assert.equal(assessExisting({ ...existing, errors: [{}, {}, {}] }, [...tools, native(7, "shell", "error", { error: "unexplained I/O error" })],
+    { "product.json": "same" }).usable_for_continuation, false, "same-Mission success does not resolve an unknown error");
+  assert.equal(assessExisting(existing, tools.filter(tool => tool.sequence !== 5), { "product.json": "same" }).usable_for_continuation, false,
+    "a claimed PASS without the actual Reviewer dispatch cannot resolve its refusal");
+});
+
+// Keep sqlite fixtures and their evidence paths on the project filesystem.
+const fixtureTemp = resolve("_testenv", "mission-cli-probe-tmp");
+await mkdir(fixtureTemp, { recursive: true });
+const tmpdir = () => fixtureTemp;
+
+test("purpose behavior fixture has an actual rollback oracle and distinguishes route/runtime from configuration", async () => {
+  const project = await mkdtemp(join(tmpdir(), "purpose-oracle-"));
+  try {
+    for (const [path, value] of Object.entries(fixtureFiles)) await writeFile(join(project, path), value);
+    const run = (script: string) => execFileSync(process.execPath, [script], { cwd: project, stdio: "pipe" });
+    run("verify-existing.mjs");
+    assert.throws(() => run("verify-stage.mjs"));
+    run("generate.mjs"); run("verify-stage.mjs");
+    assert.equal(await readFile(join(project, "probe-state.txt"), "utf8"), "temporary\n");
+    assert.throws(() => run("verify-recovery.mjs"), "echo PASS cannot substitute for actual restoration");
+    run("rollback.mjs"); run("verify-recovery.mjs");
+    assert.equal(await readFile(join(project, "probe-state.txt"), "utf8"), "original\n");
+    assert.match(prompts.checkpoint, /同Mission/);
+    assert.equal(loadedRuntime([{ name: "config", output: "0.16.0-purpose-aligned-v1" }]), null);
+    const runtime = { runtime_asset_version: "0.16.0-purpose-aligned-v1", adapter_sha256: "actual-host-observation" };
+    assert.deepEqual(loadedRuntime([{ name: "sortie_v010_operator_status", content: [{ type: "text", text: JSON.stringify({ runtime }) }] }]), runtime);
+    assert.equal(authorRoute({ operator: { units: [{ directExecution: { actor: "root" } }] }, models: [] }), "direct");
+    assert.equal(authorRoute({ models: [{ agent: "dog-worker-v010" }] }), "worker");
+    assert.equal(authorRoute({ models: [] }), "unknown");
+  } finally { await rm(project, { recursive: true, force: true }); }
+});
 
 const expected = "openai/gpt-6.1-sol#xhigh";
 const root = { sessionID: "root", agent: "dog-operator", model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } };
