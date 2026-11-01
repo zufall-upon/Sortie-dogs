@@ -213,8 +213,25 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       return;
     }
     const validatedUnits = structuredClone((await runtime.required("root")).units);
+    const purpose = { decision: "REUSE", requirement_ids: ["R1"], observed_outcome: "Existing unit validation is complete",
+      unmet_work: ["Review and final acceptance"], reason: "Reuse the completed check, not a logging-only plan",
+      evidence_refs: [], next_action: "Review the current candidate" };
+    const missionRuntime = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+    const beforeReview = await missionRuntime.required("root");
+    await assert.rejects(hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["not-a-risk"], purpose_decision: purpose },
+      { sessionID: dispatcher }), /mission-review-input/);
+    assert.deepEqual((await missionRuntime.required("root")).purposeDecisions, beforeReview.purposeDecisions, "refused Review cannot save a decision");
+    if (fast) {
+      const lowRisk = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: [], purpose_decision: purpose }, { sessionID: dispatcher }));
+      assert.equal(lowRisk.status, "skipped-low-risk");
+      assert.equal(lowRisk.task, undefined, "recording a purpose note does not elevate a legitimate low-risk skip");
+      assert.deepEqual((await runtime.required("root")).units, validatedUnits);
+    }
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+      purpose_decision: purpose,
       traces: ["check.mjs observed ready result, exit 0"], evidence: [{ path: "reference.md", offset: 1, limit: 1 }] }, { sessionID: dispatcher }));
+    const recordedDecision = (await missionRuntime.required("root")).purposeDecisions!.at(-1)!;
+    assert.equal(recordedDecision.decision, "REUSE");
     const reviewer = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, reviewer);
     if (mode === "implementation") {
@@ -256,6 +273,10 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       "attaching undeclared project context does not replan, rerun validation, or dispatch another Worker");
     identities.reviewer!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: dispatcher, callID: "reviewer-call" }, { output: "PASS\nThe result is validated.", metadata: { sessionId: "reviewer" } });
+    const sameReview = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], purpose_decision: purpose }, { sessionID: dispatcher }));
+    assert.equal(sameReview.status, "review-recorded");
+    assert.equal((await missionRuntime.required("root")).purposeDecisions!.length, 1, "same decision does not replan, dispatch or duplicate");
+    assert.equal((await missionRuntime.required("root")).purposeDecisions![0].id, recordedDecision.id);
     if (mode === "implementation") {
       delete identities.coordinator!.outcome;
       const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);

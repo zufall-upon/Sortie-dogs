@@ -17,11 +17,13 @@ STOP_METHOD ends only a named means, never a required outcome, live process or M
 validation and explicit rollback/recovery. Do not expand into unrelated issues; only user-only choices
 or original scope/budget extensions require escalation. Normal in-scope correction continues autonomously.
 When a material rationale would otherwise be lost on resume, optionally attach purpose_decision to an
-already-needed plan_units or submit_mission: decision, requirement_ids, observed_outcome, unmet_work,
+already-needed plan_units, review_mission or submit_mission: decision, requirement_ids, observed_outcome, unmet_work,
 reason, evidence_refs, affected_method (required for change/stop), next_action. No extra plan, Task or
 approval solely to record it. Reuse current purpose_decisions on resume; historical entries need fresh
 comparison with current requirements. These are model observations, not evidence PASS/freshness or
-permission. Host next_action, budgets, history, validation, independent Review and root acceptance govern.`;
+permission. A Fast-lane root has no submit_mission: use its already-needed review_mission or next useful
+plan, never replan solely for logging. Do not request another Review or elevate a low-risk skip to save a
+note. Host next_action, budgets, history, validation, independent Review and root acceptance govern.`;
 
 /** Static presentation guidance; observed values stay in ordinary tool results, not live instructions. */
 export const MISSION_PRESENTATION = `## Readable progress and return reports

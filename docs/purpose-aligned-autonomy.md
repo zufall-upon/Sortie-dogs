@@ -101,6 +101,26 @@ CLI結果とrelease判断は次の同会話への相談対象であり、初期P
 次節目はこの実結果を同じChatGPTへ戻し、late判断の記録経路と回復した拒否の評価を比較する。
 相談結果・採否の反映前に、別fixtureでS1を自動再実行したりrelease完了としない。
 
+### 相談その3と追評価（2026-11-01）
+
+rootが同じ原会話へS1実結果を提示し、回答7913文字と追回答を全文確認。
+初回B案の前提「rootでもsubmitへ同伴可能」は実sourceのOperator controlsと異なると追加照会。
+Fast-lane rootはsubmit入口を持たず、検証後の自然な判断保存入口が不足していた。
+追評価でA案を限定採用：既に必要な`review_mission`にも同じoptional契約を接続する。
+既存Review前提確認後に保存し、判断のために追加Reviewや低リスクskipの格上げはしない。
+complete_missionへ万能入口は増やさず、既存plan/submit経路も維持する。
+採用時の効果は未検証。旧S1を補正後のfresh PASS/clean実行に読み替えない。
+
+S1の外側exit1/結果/raw記録/旧tgzは保持し、新assessmentへ個別の拒否call→正規次操作→正式状態を記録。
+late planは不要操作の放棄、Review拒否は実Reviewerの起動/PASS/受入で回復したという違いを保つ。
+未知error・未解決・cleanup失敗・usage不明を一括許容しない。成果成立と効率を分離する。
+Review経路の一般gate改修には拡張せず、今回の自然なAPI接続と観測へ限定する。
+
+`continue` commandは旧結果のhash/元$3ローカル台帳/既知費用を継承し、未起動S2だけ扱う。
+外部budget承認APIは存在せず要求しない。旧S1のnative idle/所有PID消滅/費用完全性を照合して続行する。
+新candidateのtgz/marker/関連実装bytehashを固定。停止済みfixtureの旧package byteを別名保存した上で
+新packageへ更新し、依存契約が同一の場合だけ既存依存を再利用する。DB直書きやlive差替えはしない。
+
 ## 受入条件と実証
 
 1. 保存/読込、旧互換、同Mission復帰、要求変更失効、壊れたoptional記録を限定testで確認。

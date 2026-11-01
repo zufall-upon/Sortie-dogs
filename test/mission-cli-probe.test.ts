@@ -7,7 +7,30 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { DatabaseSync } from "node:sqlite";
 import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
-import { fixtureFiles, loadedRuntime, authorRoute, prompts } from "../scripts/purpose-autonomy-probe.mjs";
+import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting } from "../scripts/purpose-autonomy-probe.mjs";
+
+test("purpose recovery assessment separates abandonment, resolved Review and unknown blockers", () => {
+  const native = (sequence: number, name: string, status: string, extra: any = {}) =>
+    ({ sequence, name, status, session_id: "root", message_id: `m${sequence}`, call_id: `c${sequence}`, ...extra });
+  const tools = [native(1, "sortie_v010_plan_units", "error", { error: "BACKLOG_DRAIN_INVALID" }),
+    native(2, "sortie_v010_review_mission", "completed"),
+    native(3, "subagent", "error", { error: "REVIEW_EVIDENCE_REQUIRED" }),
+    native(4, "sortie_v010_review_mission", "completed", { input: { risk_tags: ["process-io"], traces: ["canonical_validation_exit: 0", "review_phase: final"] } }),
+    native(5, "subagent", "completed", { input: { agent: "dog-reviewer-v010" }, metadata: { sessionID: "reviewer" } }),
+    native(6, "sortie_v010_complete_mission", "completed")];
+  const existing = { root: "root", code: 0, stopped: false, hashes: { "product.json": "same" }, unpriced_requests: 0, errors: [{}, {}],
+    mission: { phase: "completed", sourceAuthors: ["worker"], review: { verdict: "PASS", child: "reviewer" } },
+    operator: { receipt: { status: "succeeded" }, units: [{ evidence: [{ execution: { command: ["node verify-existing.mjs"], exit_code: 0, outcome: "pass" } }] }] } };
+  const assessed = assessExisting(existing, tools, { "product.json": "same" });
+  assert.equal(assessed.usable_for_continuation, true);
+  assert.equal(assessed.clean_execution, false);
+  assert.equal(assessed.avoidable_attempts, 2);
+  assert.deepEqual(assessed.refusals.map((item: any) => item.disposition), ["abandoned_nonessential", "resolved"]);
+  assert.equal(assessExisting({ ...existing, errors: [{}, {}, {}] }, [...tools, native(7, "shell", "error", { error: "unexplained I/O error" })],
+    { "product.json": "same" }).usable_for_continuation, false, "same-Mission success does not resolve an unknown error");
+  assert.equal(assessExisting(existing, tools.filter(tool => tool.sequence !== 5), { "product.json": "same" }).usable_for_continuation, false,
+    "a claimed PASS without the actual Reviewer dispatch cannot resolve its refusal");
+});
 
 // Keep sqlite fixtures and their evidence paths on the project filesystem.
 const fixtureTemp = resolve("_testenv", "mission-cli-probe-tmp");
