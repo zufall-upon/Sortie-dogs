@@ -9,6 +9,7 @@ import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
 import { applyPendingWork, rememberWorkMission, rememberedWorkRun } from "./work-quantity-observations.js";
+import { appendPurposeDecision, purposeDecisionView, type PurposeDecision } from "./mission-purpose.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -193,6 +194,8 @@ export interface OperatorMission {
   context?: MissionContext[];
   /** Shared public context/working notes; observations, never extra requirements or acceptance. */
   continuity?: MissionContinuity;
+  /** Optional bounded strategy observations; never requirements, proof or authority. */
+  purposeDecisions?: PurposeDecision[];
   /** Operator recommendation from already-known context; not a requirement or execution lock. */
   preferredExecutor?: "coordinator" | "worker";
   /** Known unit facts passed to the Coordinator without pre-starting a Worker. */
@@ -509,6 +512,7 @@ export class OperatorMissionRuntime {
       launch_conditions: state.launchConditions ?? [],
       conversation: sources.some(source => source.session_id === state.root && source.entries > 0 && !("snapshot_available" in source)) ? [] : state.context ?? [],
       continuity: { notes: state.continuity?.notes, sources, progress: state.progress,
+        purpose_decisions: purposeDecisionView(state),
         attempts: (state.attempts ?? []).map(({ runID, unitID, status, failure, resultClass, childSessionID }) =>
           ({ run_id: runID, unit_id: unitID, status, failure, result_class: resultClass, session_id: childSessionID })),
         execution: state.execution,
@@ -740,6 +744,9 @@ export class OperatorMissionRuntime {
         reason: reason.trim(), at: new Date().toISOString() }].slice(-MISSION_CONSULTATION_LIMIT);
     });
   }
+  recordPurposeDecision(root: string, raw: unknown): Promise<OperatorMission> {
+    return this.update(root, state => appendPurposeDecision(state, raw));
+  }
   recordConsultationDispatch(root: string, input: { role: MissionConsultation["role"]; callID: string; reason: string;
     trigger?: string; question?: string }): Promise<OperatorMission> {
     if ((input.role !== "advisor" && input.role !== "scout") || !input.callID || !input.reason.trim() ||
@@ -830,6 +837,7 @@ export class OperatorMissionRuntime {
       ...(state.suggestedUnit ? [`Known unit facts (reuse or adapt during actual work): ${JSON.stringify(state.suggestedUnit)}`] : []),
       "Escalate only a completion candidate, a user-only decision, or an extension of original requirements/budget. Unit progress is published without stopping you.",
       "Requirements:", ...state.requirements.map(item => `${item.id}: ${item.text}`),
+      `Purpose/method observations (advisory, not proof or authority): ${JSON.stringify(purposeDecisionView(state))}`,
       `Confirmed launch conditions (fixed limits, not consumption or remaining budget): ${JSON.stringify(state.launchConditions ?? [])}`,
       `Explicit user write prohibitions: ${JSON.stringify(state.prohibitedWrite ?? [])}`,
       `Work kind: ${state.kind ?? "implementation"}. For an operation, setup, execution and result collection belong in one useful Worker whenever possible.`,
@@ -981,6 +989,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
     original_attachments: (mission.continuity?.sources ?? []).flatMap(source =>
       (source.attachments ?? []).map(file => ({ session_id: source.session_id, ...file }))),
     operation: missionOperationSummary(mission),
+    purpose_decisions: purposeDecisionView(mission),
     history: { status: missingAnchors.length ? "unavailable" : history.status,
       ...(history.reason ? { reason: history.reason } : missingAnchors.length ? { reason: "accepted-handoff-anchor-unavailable" } : {}),
       ...(missingAnchors.length ? { unavailable_anchors: missingAnchors } : {}),
@@ -1025,6 +1034,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
      accounting_scope: "Implementation units (Worker, direct controller execution or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
      delivery_observation: mission.deliveryObservation?.run_id === (run?.runID ?? mission.runID) ? mission.deliveryObservation : null,
     submission: mission.submission, progress: mission.progress, consultations: mission.consultations ?? [],
+    purpose_decisions: purposeDecisionView(mission),
     attempts: mission.attempts ?? [], corrections: (mission.corrections ?? []).map(({ findings: _findings, initialPrompt: _prompt, ...item }) => item), ...(mission.rescue ? { rescue: mission.rescue } : {}),
     operation: missionOperationSummary(mission),
     execution_summary: { completed_units: run?.units.filter(unit => unit.status === "succeeded").length ?? 0,

@@ -31,6 +31,7 @@ import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash, randomUUID } from "node:crypto";
+import { appendPurposeDecision, purposeDecisionSchema, validatePurposeDecision } from "../core/mission-purpose.js";
 import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
 import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
@@ -2876,11 +2877,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
+        purpose_decision: purposeDecisionSchema as never,
         executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here. Use worker without units to yield the current direct unit, carrying remaining action in handoff_context; the same unit, edits, checks and budget continue. With units, worker/default retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
+            if (args.purpose_decision !== undefined) await missions.recordPurposeDecision(root, args.purpose_decision);
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, mission,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
@@ -3303,10 +3306,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           review.source !== (await missionReviewSource(input.directory, run, review.evidence, mission.reviewBaseline, mission.reviewScope)).fingerprint) throw new Error("mission-review-required-or-stale");
     }
     tools[submitMission] = { description: "Coordinator: return only a completion candidate, a user-only decision, or a proven external/scope/budget blocker. Continue ordinary investigation, scope extensions and corrections yourself. Unit progress is published automatically without waking Operator.",
-      args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema }, execute: async (args, context) => {
+      args: { status: { type: "string", enum: ["ready", "needs-decision", "blocked"] } as never, summary: stringSchema,
+        purpose_decision: purposeDecisionSchema as never }, execute: async (args, context) => {
         const { root } = await missionAuthority(context.sessionID);
         return serializeDispatchTransition(root, async () => {
           let mission = await missions.required(root);
+          if (args.purpose_decision !== undefined) validatePurposeDecision(mission, args.purpose_decision);
           mission = await reconcileMissionExecution(root, mission, await operators.read(root));
           if (args.status === "ready") {
             if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
@@ -3324,7 +3329,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const direct = await directExecution(context.sessionID);
             if (direct) await control!.failDirectUnit(root, context.sessionID);
           }
-          const updated = await missions.update(root, state => { state.phase = "submitted";
+          const updated = await missions.update(root, state => {
+            if (args.purpose_decision !== undefined) appendPurposeDecision(state, args.purpose_decision);
+            state.phase = "submitted";
             state.submission = { status: args.status as "ready" | "needs-decision" | "blocked", summary: args.summary }; });
           const submittedRun = await operators.read(root);
           return JSON.stringify({ acceptance_summary: await missionAcceptanceSummary(updated, submittedRun, operators, acceptanceValidationObservation),
