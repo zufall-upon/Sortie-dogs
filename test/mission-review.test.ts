@@ -595,6 +595,38 @@ test("a non-Git mission reviews scoped nested repositories without a new root or
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+for (const fileScope of [false, true]) test(`Review resolves an ignored nested worktree from an inherited repository without widening outputs: file=${fileScope}`, async () => {
+  const area = await mkdtemp(join(tmpdir(), "mission-review-inherited-"));
+  const directory = join(area, "_testenv", "mission"), repository = join(directory, "source");
+  try {
+    await git("git", ["init", "--quiet"], { cwd: area });
+    await writeFile(join(area, ".gitignore"), "_testenv/\n");
+    await writeFile(join(area, "outside.txt"), "unrelated committed source\n");
+    await git("git", ["add", "."], { cwd: area });
+    await git("git", ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: area });
+    await mkdir(directory, { recursive: true });
+    await git("git", ["worktree", "add", "--detach", repository], { cwd: area });
+    const output = "source/_testenv/publish";
+    await mkdir(join(directory, output), { recursive: true });
+    await writeFile(join(directory, output, "result.json"), '{"published":true,"attempts":1}\n');
+    await writeFile(join(directory, "local.txt"), "separate declared output\n");
+    await writeFile(join(repository, "outside.txt"), "changed unrelated inner source\n");
+    const run = { units: [{ unit: { write: ["local.txt", fileScope ? `${output}/result.json` : `${output}/**`] }, hashes: [] }] } as never;
+    const baseline = await missionReviewBaseline(directory);
+    const source = await missionReviewSource(directory, run, [], baseline);
+    assert.match(source.excerpt, /"published":true/);
+    assert.match(source.excerpt, /separate declared output/);
+    assert.doesNotMatch(source.excerpt, /unrelated.*source|gitdir:|refs\/heads/);
+    await writeFile(join(repository, "outside.txt"), "more unrelated inner activity\n");
+    assert.equal((await missionReviewSource(directory, run, [], baseline)).fingerprint, source.fingerprint);
+    await writeFile(join(directory, output, "result.json"), '{"published":true,"attempts":2}\n');
+    const changed = await missionReviewSource(directory, run, [], baseline);
+    assert.notEqual(changed.candidateFingerprint, source.candidateFingerprint);
+    await rm(join(directory, output, "result.json"));
+    assert.notEqual((await missionReviewSource(directory, run, [], baseline)).candidateFingerprint, changed.candidateFingerprint);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("non-Git outputs and worktrees remain reviewable with scoped byte freshness", async () => {
   const area = await mkdtemp(join(tmpdir(), "mission-review-worktree-"));
   const directory = join(area, "mission"), repository = join(area, "repository"), worktree = join(directory, "worktree");

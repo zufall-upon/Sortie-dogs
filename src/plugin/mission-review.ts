@@ -630,12 +630,53 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     else local.push(scoped || ".");
   }
   const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
-  const gitScopes = [...local, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
+  // A Location may inherit an ancestor repository while its actual outputs live in a
+  // nested repository/worktree. Resolve that boundary before asking the outer Git:
+  // ls-files can return the whole ignored repository (or fail internally) for a narrow output.
+  const rootLocal: string[] = [], nested = new Map<string, string[]>();
+  for (const path of local) {
+    let current = resolve(directory), repository: string | undefined;
+    for (const part of path.split("/")) {
+      current = resolve(current, part);
+      const info = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+        return undefined;
+      });
+      if (!info?.isDirectory()) break; // Missing files and symlink targets are not traversed.
+      if (current === resolve(directory)) continue;
+      const metadata = await lstat(join(current, ".git")).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      });
+      if (metadata) repository = current; // Includes .git files and broken worktrees: Git must diagnose them.
+    }
+    if (repository) nested.set(repository, [...(nested.get(repository) ?? []), relative(repository, resolve(directory, path)).replaceAll("\\", "/") || "."]);
+    else rootLocal.push(path);
+  }
+  const gitScopes = [...rootLocal, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   let names = "", ignored = "", repository = true, scopedDiff = "";
   const untracked = new Set<string>(), currentFiles = new Set<string>();
+  const collected = new Set<string>();
+  const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
+    const scopedGit = async (args: string[]) => (await exec("git", args, { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
+    const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
+    const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
+    for (const name of tracked.split("\0").filter(Boolean)) { collected.add(prefix(name)); currentFiles.add(prefix(name)); }
+    for (const name of (await scopedGit(["ls-files", "-z", "--others", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) untracked.add(prefix(name));
+    for (const name of (await scopedGit(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) {
+      collected.add(prefix(name)); untracked.add(prefix(name));
+    }
+    // The Mission baseline belongs to its root, not these different repositories.
+    // Without a baseline here, committed outputs still appear as current content.
+    const delta = await currentGitDiff(scopedGit, pathspec);
+    if (delta) scopedDiff += `\n--- repository output: ${path} ---\n${delta}`;
+  };
+  for (const [absolute, paths] of nested) {
+    await collectRepository(absolute, relative(directory, absolute).replaceAll("\\", "/"), paths);
+  }
   try {
-    if (local.length) {
+    if (rootLocal.length) {
       names = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...gitScopes]);
       for (const path of (await git(["ls-files", "-z", "--others", "--exclude-standard", "--", ...gitScopes])).split("\0").filter(Boolean)) untracked.add(path);
       ignored = await git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...gitScopes]);
@@ -645,7 +686,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     repository = false;
     // Mission storage can be outside Git while its declared outputs are repositories,
     // worktrees or plain files. Inventory those outputs in place, not the storage root.
-    const collected = new Set<string>(), walked = new Set<string>();
+    const walked = new Set<string>();
     const collect = async (path: string): Promise<void> => {
       if (walked.has(path) || excluded(path)) return;
       walked.add(path);
@@ -656,10 +697,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         return undefined;
       });
       if (!stat?.isDirectory()) { collected.add(path); untracked.add(path); return; }
-      const scopedGit = async (args: string[]) => (await exec("git", args, { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
-      const pathspec = ["."]; // Shared tooling is rooted at the Mission, not each output repository.
-      let tracked: string;
-      try { tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]); }
+      // Shared tooling is rooted at the Mission, not each output repository.
+      try { await collectRepository(absolute, path, ["."]); }
       catch (error) {
         if (!notRepository(error)) throw error;
         for (const child of (await readdir(absolute)).filter(name => name !== ".git").sort()) {
@@ -667,20 +706,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         }
         return;
       }
-      const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
-      for (const name of tracked.split("\0").filter(Boolean)) { collected.add(prefix(name)); currentFiles.add(prefix(name)); }
-      for (const name of (await scopedGit(["ls-files", "-z", "--others", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) untracked.add(prefix(name));
-      for (const name of (await scopedGit(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) {
-        collected.add(prefix(name)); untracked.add(prefix(name));
-      }
-      // The mission's baseline belongs to its root, not to these different repositories.
-      // With no baseline here, committed outputs still appear as current file content.
-      const delta = await currentGitDiff(scopedGit, pathspec);
-      if (delta) scopedDiff += `\n--- repository output: ${path} ---\n${delta}`;
     };
-    for (const path of local) await collect(path);
-    names = [...collected].sort().join("\0");
+    for (const path of rootLocal) await collect(path);
   }
+  names = [...new Set([...names.split("\0").filter(Boolean), ...collected])].sort().join("\0");
   // Go's ignored in-project caches may be writable during validation but are not candidate
   // output. Keep every other ignored declared output visible and fingerprinted, including
   // directories of generated artifacts; focused references can still pin a cache file.
@@ -689,7 +718,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const unreadable: string[] = [];
   const outsideLinks: string[] = [];
   let diff = scopedDiff;
-  if (repository && local.length && displayBaseline) {
+  if (repository && rootLocal.length && displayBaseline) {
     // HEAD-only diffs are empty once the author commits. Display the original mission delta
     // or the focused correction delta without changing the full fingerprint basis.
     const changed = (await git(["diff", "--name-only", "-z", "--no-ext-diff", displayBaseline, "--", ...gitScopes]))
@@ -700,7 +729,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     const available = Math.max(0, 24_000 - Buffer.byteLength(selected + heading) -
       headers.reduce((size, title) => size + Buffer.byteLength(title), 0) - 500);
     const allowance = shown.length ? Math.min(3_000, Math.floor(available / shown.length)) : 0;
-    diff = heading;
+    diff += heading;
     for (const [index, path] of shown.entries()) {
       const patch = await git(["diff", "--no-ext-diff", "--no-textconv", displayBaseline, "--", path]);
       const bytes = Buffer.from(patch);
@@ -709,8 +738,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       if (bytes.length > allowance) omitted.push(path);
     }
     omitted.push(...changed.slice(shown.length));
-  } else if (repository && local.length) {
-    diff = await currentGitDiff(git, gitScopes);
+  } else if (repository && rootLocal.length) {
+    diff += await currentGitDiff(git, gitScopes);
   }
   const unchanged = diff.length === 0;
   let excerpt = selected + diff;

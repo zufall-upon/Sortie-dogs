@@ -26,6 +26,7 @@ export interface NativeBackgroundDispatch {
 export class NativeBackgroundLifecycle {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly restored = new Set<string>();
+  private readonly reconciliationErrors = new Map<string, string>();
   constructor(private readonly context: OpenCodeV2Context,
     private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<string | void>,
     private readonly owner?: (callID: string, restore?: ObjectValue) => ObjectValue | undefined,
@@ -83,8 +84,22 @@ export class NativeBackgroundLifecycle {
     return object(info) && typeof info.parentID === "string" &&
       (await this.read(info.parentID)).some(item => !item.settled && item.child === sessionID);
   }
+  reconciliationNotice(parent: string): string | undefined { return this.reconciliationErrors.get(parent); }
   async reconcile(parent: string): Promise<void> {
-    await this.serial(parent, async () => this.reconcileInside(parent, await this.read(parent)));
+    try {
+      await this.serial(parent, async () => this.reconcileInside(parent, await this.read(parent)));
+      this.reconciliationErrors.delete(parent);
+    }
+    catch (error) {
+      // This is recovery of existing native work, not admission or acceptance. A failed
+      // inspection must retain its terminal/reservation for idempotent retry without
+      // making the next user prompt, model request or compaction fail before it starts.
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn("[sortie-dogs-v010] Background reconciliation unavailable; saved work retained", reason);
+      this.reconciliationErrors.set(parent, `SORTIE_BACKGROUND_RECONCILIATION_UNAVAILABLE\n${JSON.stringify(reason.slice(0, 2_000))}\n` +
+        "Native work/results and cumulative spend are retained; formal validation and acceptance are not proven by this recovery failure. " +
+        "Diagnose the failed inspection and reconcile this same invocation after repair. Do not relaunch or repeat an already completed external operation just to repair accounting.");
+    }
   }
   /** Add provenance beside its existing native notification, without editing history or waking the parent again. */
   async project(parent: string, messages: readonly unknown[]): Promise<unknown[]> {
