@@ -502,7 +502,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (unit.directExecution || !unit.validationRegistration || !unit.callID) return validation;
       const taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
       const inherited = taskID ? await runtimeBridge.missionHandoffChecks!(root, taskID, unit.callID) : [];
-      let prefix = inherited.reduce((count, check) => count + check.command.length, 0);
+      let prefix = inherited.reduce((count, check) => count + check.matchedOccurrences.length, 0);
       // A new author's actual retry supersedes that inherited occurrence, including
       // a later failure. Never let an earlier handed-off PASS hide this native result.
       for (const check of unit.validationRegistration.checks) for (const command of check.command) {
@@ -694,7 +694,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           Date.parse(admittedAt),
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? unit.validationRegistration?.checks ?? [], input.directory, directories,
           unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt);
-        const members = canonicalObservedValidationMembers(command, unitValidation(unit), progress.nextOccurrence ?? 0);
+        // Progress is relative to the remaining suffix; native matching uses the
+        // full declaration so a retry of an inherited occurrence is captured too.
+        const members = canonicalObservedValidationMembers(command, unitValidation(unit),
+          unitValidation(unit).length - validation.length + (progress.nextOccurrence ?? 0));
         return members && validationDirectoryMatches(members, directory, input.directory, directories) ? members : undefined;
       },
       recordReviewerCorrectionCheck: (root, taskID, check) => operators.recordReviewerCorrectionCheck(root, taskID, check),

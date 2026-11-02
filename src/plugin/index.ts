@@ -2886,7 +2886,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         Date.parse(execution.startedAt) >= Date.parse(check.startedAt));
       return laterFailure ? [] : observedHostGoalEvidence({ ...check, owner: "coordinator", outcome: "pass",
         immutableRef: goalFingerprint({ direct_check: check }),
-        correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID, commands: check.command } }, state, reservation.unitID);
+        correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID,
+          commands: check.matchedOccurrences.map(item => check.command[item.member]!) } }, state, reservation.unitID);
     });
     const hostEvidence = [...new Map((directEvidence ?? [...observedEvidence, ...inherited]).map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only

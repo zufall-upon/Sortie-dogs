@@ -47,6 +47,11 @@ export interface ReviewerCorrectionCheck {
   readonly generatedInputs?: string;
 }
 
+/** Live projection of reusable occurrences; never rewrites the saved native check. */
+export interface DirectHandoffValidationCheck extends ReviewerCorrectionCheck {
+  readonly matchedOccurrences: readonly { readonly member: number; readonly occurrence: number }[];
+}
+
 /** Exact durable Mission Task claim, not authority supplied by a tool argument or Read. */
 export interface MissionImplementationAdmission {
   readonly runID: string;
@@ -91,7 +96,7 @@ export interface RuntimeBridge {
   missionDispatchOrigin?(rootSessionID: string, taskID: string, callID: string): Promise<{
     callID: string; startedAt: string; segments: readonly { sessionID: string; startedAt: string; endedAt: string }[];
   } | undefined>;
-  missionHandoffChecks?(rootSessionID: string, taskID: string, callID: string): Promise<readonly ReviewerCorrectionCheck[]>;
+  missionHandoffChecks?(rootSessionID: string, taskID: string, callID: string): Promise<readonly DirectHandoffValidationCheck[]>;
   reviewerCorrectionValidationMembers?(childSessionID: string, command: string, directory?: string): Promise<string[] | undefined>;
   missionValidationDirectoryMatches?(rootSessionID: string, taskID: string, childSessionID: string,
     commands: readonly string[], directory: string): Promise<boolean>;

@@ -22,11 +22,14 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
-const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "blocked", "needs-decision", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const incomplete = mode === "blocked" || mode === "needs-decision";
+  const registeredSuffix = mode.startsWith("handoff-registration-chain") || mode.startsWith("handoff-registration-suffix");
+  const oldChain = mode.startsWith("handoff-registration-chain");
+  const missingMiddle = mode === "handoff-registration-chain-missing";
   const external = ["external-cwd", "registration"].includes(mode);
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
@@ -105,7 +108,8 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
       read: ["check.mjs", ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
-      validation: [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
+      validation: registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
+        : [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
       ...(mode === "external-cwd" ? { validation_cwd: { "node check.mjs": externalDirectory! } } : {}) };
     const multi = mode.includes("pending") || mode === "recovery-normal-succeeded";
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration,
@@ -153,7 +157,10 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       const callID = `check-${++counter}`, args = { command, workdir: cwd }, start = Date.now();
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: author, callID }, { args });
       let exit = 0;
-      try { await exec(process.execPath, command.split(" ").slice(1), { cwd }); } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
+      try {
+        if (command.includes(" && ")) await exec(command, { cwd, shell: true });
+        else await exec(process.execPath, command.split(" ").slice(1), { cwd });
+      } catch (error) { exit = Number((error as { code?: unknown }).code) || 1; }
       (history[author] ??= []).push({ info: { id: callID, role: "assistant", sessionID: author }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: args, metadata: { exit }, time: { start, end: Date.now() } } }] });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: author, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
@@ -161,21 +168,26 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     };
     if (mode.startsWith("handoff-")) {
       const registeredHandoff = mode.startsWith("handoff-registration");
+      let effectiveValidation = declaration.validation;
       if (registeredHandoff) {
-        await write("broken\n");
-        assert.equal(await check(), 1);
+        await write(registeredSuffix ? "fixed\n" : "broken\n");
+        assert.equal(await check(directory, oldChain ? declaration.validation.join(" && ") : checkCommand), registeredSuffix ? 0 : 1);
+        effectiveValidation = registeredSuffix ? ["node check.mjs", `node check.mjs --${missingMiddle ? "expected-eight" : "middle"}`, "node check.mjs --last"]
+          : ["node check.mjs --second"];
         const registered = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct delivery check recipe",
-          units: [{ ...declaration, validation: ["node check.mjs --second"] }] }, { sessionID: actor, callID: "register" }));
+          units: [{ ...declaration, validation: effectiveValidation }] }, { sessionID: actor, callID: "register" }));
         assert.equal(registered.status, "direct-unit-registration-corrected");
-        checkCommand = "node check.mjs --second";
+        checkCommand = effectiveValidation[registeredSuffix ? 1 : 0]!;
       }
-      await write("fixed\n");
-      if (mode !== "handoff-registration") assert.equal(await check(), 0);
+      if (!registeredSuffix) await write("fixed\n");
+      if (mode !== "handoff-registration" && !registeredSuffix) assert.equal(await check(), 0);
       const direct = (await readRun()).units[0]!.directExecution!;
-      const prefix = await directHandoffValidationChecks([checkCommand, "node check.mjs --tail"], actor, history[actor]!,
-        Date.parse(direct.startedAt), direct.checks, directory);
+      const prefix = await directHandoffValidationChecks(registeredSuffix ? effectiveValidation : [checkCommand, "node check.mjs --tail"], actor, history[actor]!,
+        Date.parse(direct.startedAt), direct.checks, directory, undefined, direct.validationRegisteredAt);
       assert.equal(prefix.length, mode === "handoff-registration" ? 0 : 1, "unexecuted tail must not discard the passing bound prefix");
       if (prefix.length) assert.equal(prefix[0]!.callID, direct.checks.at(-1)!.callID);
+      if (registeredSuffix) assert.deepEqual(prefix[0]!.matchedOccurrences, [{ member: 0, occurrence: 0 }],
+        "only the reusable occurrence counts, even when its native call also ran the old middle and final check");
       const handoff = () => hooks.tool!.sortie_v010_plan_units.execute({ executor: "worker",
         handoff_context: "Continue existing result; node check.mjs already passed. Keep that evidence if source remains current." },
         { sessionID: actor, callID: "handoff-call" });
@@ -232,9 +244,14 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff-read", args: { filePath: current.handoffPath } },
         { output: await readFile(current.handoffPath, "utf8") });
       if (registeredHandoff) {
-        assert.deepEqual(yielded.units[0]!.validationRegistration!.validation, [checkCommand]);
-        assert.equal(await check(directory, checkCommand, "worker"), 0, "handoff captures the corrected recipe, not the frozen declaration");
-        assert.equal((await readRun()).units[0]!.validationRegistration!.checks.length, 1);
+        assert.deepEqual(yielded.units[0]!.validationRegistration!.validation, effectiveValidation);
+        if (!missingMiddle) {
+          assert.equal(await check(directory, registeredSuffix ? effectiveValidation.slice(1).join(" && ") : checkCommand, "worker"), 0,
+            "handoff captures the corrected suffix without replaying its checked prefix");
+          assert.equal((await readRun()).units[0]!.validationRegistration!.checks.length, 1);
+        }
+        assert.deepEqual((await readRun()).units[0]!.directHandoffs![0]!.checks, direct.checks,
+          "projecting reusable occurrences never rewrites the original native record");
       }
       if (mode === "handoff-stale" || mode.endsWith("latest-failure")) await write("broken\n", resultPath, "worker");
       if (mode.endsWith("latest-failure")) {
@@ -253,7 +270,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       assert.equal(status.budget.reserved_units, 0);
       assert.equal(status.budget.consumed_units, 1);
       assert(Math.abs(status.budget.settled_cost_usd - 0.0126) < 1e-10, JSON.stringify(status.budget));
-      assert.equal((await readRun()).units[0]!.status, mode === "handoff-stale" || mode.endsWith("latest-failure") ? "failed" : "succeeded");
+      assert.equal((await readRun()).units[0]!.status, mode === "handoff-stale" || mode.endsWith("latest-failure") || missingMiddle ? "failed" : "succeeded");
       const records = (await ledger.readGoal()).records;
       assert.equal(records.filter(item => item.event.kind === "dispatch.reserved").length, 1);
       assert.equal(records.filter(item => item.event.kind === "unit.settled").length, 1);

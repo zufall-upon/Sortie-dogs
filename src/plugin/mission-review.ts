@@ -15,7 +15,7 @@ import { declaredArtifacts } from "./declared-artifacts.js";
 import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers, normalizeCommand } from "./gate.js";
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
-import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
+import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -354,11 +354,15 @@ export async function reviewerCorrectionValidationFresh(validation: readonly str
 }
 
 /** Preserve a current ordered prefix while the next author executes the remaining recipe. */
-export async function directHandoffValidationChecks(...args: Parameters<typeof reviewerCorrectionValidationFresh>): Promise<readonly ReviewerCorrectionCheck[]> {
+export async function directHandoffValidationChecks(...args: Parameters<typeof reviewerCorrectionValidationFresh>): Promise<readonly DirectHandoffValidationCheck[]> {
   const [validation, child, history, started, checks, root, directories, registeredAt] = args;
   for (let count = validation.length; count > 0; count--) {
     const result = await reviewerCorrectionValidationFresh(validation.slice(0, count), child, history, started, checks, root, directories, registeredAt);
-    if (result.ready) return checks.filter(check => result.matched?.some(item => item.callID === check.callID));
+    if (result.ready) return checks.flatMap(check => {
+      const matchedOccurrences = result.matched?.filter(item => item.callID === check.callID)
+        .map(({ member, occurrence }) => ({ member, occurrence })) ?? [];
+      return matchedOccurrences.length ? [{ ...check, matchedOccurrences }] : [];
+    });
   }
   return [];
 }
