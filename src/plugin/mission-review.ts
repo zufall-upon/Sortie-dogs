@@ -5,7 +5,7 @@ import { lstat, readlink, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
-import type { OperatorState } from "../core/operator-runtime.js";
+import { unitValidation, unitValidationCwd, type OperatorState } from "../core/operator-runtime.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
 import { MISSION_REVIEW_REFERENCE, missionReviewScope, type MissionEvidenceExcerpt, type MissionReviewScope, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
@@ -40,9 +40,9 @@ export const validationDirectoryMatches = (commands: readonly string[], actual: 
 export function missionReviewValidation(run: OperatorState, statePath: string) {
   return run.units.map(unit => ({
     unit_id: unit.unit.id,
-    command: unit.unit.validation,
-    ...(unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ? {
-      validation_cwd: unit.directExecution?.validationCwd ?? unit.unit.validation_cwd,
+    command: unitValidation(unit),
+    ...(unitValidationCwd(unit) ? {
+      validation_cwd: unitValidationCwd(unit),
     } : {}),
     evidence: unit.evidence.map(({ protected_binding, ...evidence }) => ({
       ...evidence,

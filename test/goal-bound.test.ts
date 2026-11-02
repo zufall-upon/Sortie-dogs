@@ -41,6 +41,38 @@ test("delivery selection follows explicit current-turn facts without a classifie
     irreversible_or_major_scope: false, explicit_mode: "mvp-first" }), "mvp-first");
 });
 
+test("native validation registration preserves goal authority and spend while rejecting pre-registration observations", async () => {
+  const { ledger } = await accepted("validation-registration"), goalID = "goal-validation-registration";
+  const criterion = { criterion_id: "result", target: "result", entrypoint: "check", workload: "fixture", oracle_coverage: ["result"],
+    build_boundary: "included" as const, source: "source", candidate: "candidate", fixture: "fixture",
+    proof_scope: "requested-full" as const, expected_outcome: "pass" as const, validation_command: "node old.mjs" };
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: acceptance, origin_user_message_id: "user-1", session_id: "root-session", selected_agent: "dog-coordinator",
+    delivery: "mvp-first", budget: { max_units: 4, time_ms: null, cost_usd: null, source: "accepted-plan" }, acceptance_contract: { criteria: [criterion] } });
+  const before = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: "same-task",
+    reservation_id: "same-reservation", session_id: "root-session", ticket_id: null });
+  const registeredAt = "2026-09-08T00:00:01.000Z";
+  const registration = { kind: "goal.validation-registered" as const, at: registeredAt, goal_id: goalID,
+    reservation_id: "same-reservation", unit_id: "same-task", criterion_id: "result", command: "node corrected.mjs", registered_at: registeredAt };
+  await assert.rejects(ledger.appendGoal({ ...registration, unit_id: "other-task" }), /same active reserved unit/);
+  const state = await ledger.appendGoal(registration);
+  for (const key of ["goal_id", "revision", "scope_epoch", "acceptance_fingerprint", "acceptance_contract", "budget", "consumed_units", "outstanding_reservations"] as const) {
+    assert.deepEqual(state[key], before[key], key);
+  }
+  const observations = (command: string, startedAt: string) => evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint(command + startedAt),
+    command: [command], startedAt, endedAt: startedAt, exitCode: 0, outcome: "pass", fresh: true, source: "source", candidate: "candidate",
+    binding: { manifest_hash: goalFingerprint("manifest"), project_root: root, manifest_path: "manifest.json", source_paths: ["input"], candidate_paths: ["output"] } }, state, "same-task");
+  assert.deepEqual(observations("node old.mjs", registeredAt), []);
+  assert.equal(validGoalEvidence(observations(registration.command, at)[0]!, state), false, "old native diagnostic is never promoted");
+  const evidence = observations(registration.command, registeredAt);
+  assert.equal(validGoalEvidence(evidence[0]!, state), true);
+  const settled = await ledger.appendGoal({ kind: "unit.settled", at: registeredAt, goal_id: goalID, unit_id: "same-task", reservation_id: "same-reservation",
+    receipt_id: "receipt", disposition: "succeeded", progress_fingerprint: goalFingerprint(evidence), evidence, elapsed_ms: 1, cost_usd: 0 });
+  assert.equal(settled.consumed_units, 1);
+  assert.equal(settled.outstanding_reservations.length, 0);
+  assert.equal((await ledger.readGoal()).records.filter(record => record.event.kind === "dispatch.reserved").length, 1);
+});
+
 test("large protected path recipes retain direct-unit settlements and reopen without losing history", async () => {
   const name = "large-direct-evidence", goalID = `goal-${name}`;
   const { ledger } = await accepted(name);

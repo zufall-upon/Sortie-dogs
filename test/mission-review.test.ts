@@ -291,6 +291,60 @@ test("external cwd requires its original native binding; registration keeps unaf
   assert.equal(observedMissionValidation([B], child, history([retry]), 100, root).attempts.length, 0);
 });
 
+test("unchanged checked inputs survive added delivery records, whose new native check remains mandatory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-delivery-registration-")), child = "author";
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "body.txt"), "verified body\n");
+    await writeFile(join(root, "body-check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("body.txt","utf8"),"verified body\\n");');
+    await writeFile(join(root, "delivery-check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("delivery/receipt.json","utf8"),"{\\"members\\":9}\\n");');
+    const A = "node body-check.mjs", B = "node delivery-check.mjs", manifestPath = join(root, "manifest.json");
+    const unit = { id: "unit", read: ["body.txt", "body-check.mjs", "delivery-check.mjs"], write: ["body.txt"], validation: [A], acceptance_indices: [0] };
+    const manifest = JSON.stringify({ version: "0.1.0", task_id: "unit", ...unit });
+    await writeFile(manifestPath, manifest);
+    const authorization = { projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(manifest).digest("hex") };
+    const checks: any[] = [], parts: any[] = [];
+    const capture = async (command: string) => {
+      let current = authorization;
+      if (command === B) {
+        const path = join(root, "delivery-manifest.json"), outputManifest = JSON.stringify({ version: "0.1.0", task_id: "delivery",
+          read: ["delivery/receipt.json", "delivery-check.mjs"], write: ["delivery/receipt.json"], validation: [B] });
+        await writeFile(path, outputManifest);
+        current = { ...authorization, manifestPath: path, manifestHash: createHash("sha256").update(outputManifest).digest("hex") };
+      }
+      const snapshot = await protectedSnapshot(current, { command });
+      assert.ok(snapshot);
+      const binding = { ...snapshot.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+      const source = await validatedSourceSnapshot(root, binding), start = Date.now();
+      const native = await git(process.execPath, [command.split(" ")[1]!], { cwd: root });
+      assert.equal(native.stderr, "");
+      const end = Date.now(), callID = `check-${parts.length}`;
+      checks.push({ childSessionID: child, callID, command: [command], directory: root, binding,
+        source, candidate: source, fresh: true, exitCode: 0, startedAt: new Date(start).toISOString(), endedAt: new Date(end).toISOString() });
+      parts.push({ type: "tool", tool: "shell", callID, state: { status: "completed", input: { command, workdir: root }, metadata: { exit: 0 }, time: { start, end } } });
+    };
+    const history = () => [{ info: { role: "assistant", sessionID: child }, parts }];
+    await capture(A);
+    const original = JSON.stringify(checks[0]), run = { units: [{ unit, hashes: [], evidence: [{ protected_binding: checks[0].binding }] },
+      { unit: { ...unit, id: "delivery", write: ["delivery/**"] }, hashes: [], evidence: [] }] } as never;
+    const before = await missionReviewSource(root, run);
+    await mkdir(join(root, "delivery"));
+    await writeFile(join(root, "delivery/receipt.json"), '{"members":9}\n');
+    assert.equal((await reviewerCorrectionValidationFresh([A], child, history(), 0, checks, root)).ready, true,
+      "unmodified checked body retains its own input binding");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, before.fingerprint,
+      "new final output still changes the review candidate");
+    const registered = { [B]: new Date().toISOString() };
+    assert.equal((await reviewerCorrectionValidationFresh([A, B], child, history(), 0, checks, root, {}, registered)).ready, false);
+    await capture(B);
+    assert.equal((await reviewerCorrectionValidationFresh([A, B], child, history(), 0, checks, root, {}, registered)).ready, true);
+    assert.equal(JSON.stringify(checks[0]), original, "no reimplementation, rerun or rebinding of the body proof");
+    await writeFile(join(root, "delivery/receipt.json"), '{"members":8}\n');
+    assert.equal((await reviewerCorrectionValidationFresh([A, B], child, history(), 0, checks, root, {}, registered)).ready, false,
+      "changed delivery bytes invalidate their check");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a bound ordered retry recovers after an earlier overlap without a new admission", () => {
   const A = "node a.mjs", B = "node b.mjs", child = "author";
   const part = (command: string, callID: string, start: number, end: number) => ({ type: "tool", tool: "shell", callID,

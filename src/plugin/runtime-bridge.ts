@@ -83,6 +83,8 @@ export interface RuntimeBridge {
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  /** Native check capture only; does not grant Reviewer correction or artifact authority. */
+  ownsValidationRegistration?(childSessionID: string): Promise<boolean>;
   /** Existing controller executing a declared unit itself; never a fictitious native Task. */
   directMissionExecution?(sessionID: string): Promise<{ root: string; taskID: string; callID: string; startedAt: string } | undefined>;
   /** The same unit's original reservation and completed direct-author usage segments. */
@@ -127,6 +129,7 @@ export interface RuntimeBridge {
     restoreAcceptanceRemediationBaseline(rootSessionID: string, request: { failedTaskID: string;
       criteria: readonly string[]; fingerprint: string; currentTaskIDs: readonly string[] }): Promise<void>;
     registerGoalDeclaration(rootSessionID: string, prompt: string, missionRevision?: boolean): Promise<void>;
+    registerDirectValidation(rootSessionID: string, actor: string, criterionID: string, command: string, registeredAt: string): Promise<void>;
     relinkRegisteredGoal(rootSessionID: string, request: { prompt: string; expectedFingerprint: string;
       registeredAt: string }): Promise<void>;
     proposalGoalBinding(rootSessionID: string): Promise<OperatorProposalGoalBinding>;

@@ -210,7 +210,8 @@ ${MISSION_DEPENDENCY_WORKFLOW}
     an ordinary affirmative reply or a request to self-recover is enough. No hidden command or ID is
     needed from the user, and ordinary autonomous recovery does not require a new approval.
     Inspect operator_status to reconcile only native-proven ended work. If this session owns a quiescent
-    direct admission that cannot bind, plan_units with executor: "worker" and no units yields that same
+    direct admission that cannot bind, plan_units with executor: "worker" and units: "" in V2
+    (omit units on the legacy API; never units: []) yields that same
     unit and reservation without acquiring the contested writer. Explain the result and continue the
     returned Task when its write scope is available. A genuinely live or unproven other owner is not
     released: wait or separate work, and do not dispatch repeated conflicting attempts. Do not invent
@@ -569,14 +570,16 @@ Use the Operator's preferred_executor as a starting recommendation. Start useful
 do not investigate merely to confirm the recommendation. Adapt through actual work, honoring explicit user choices.
 Use plan_units with executor: "self" for direct work, or start_direct_unit for an already prepared unit.
 If a direct admission cannot bind because of manifest-overlap, operator_status and plan_units with
-executor: "worker" and no units remain management operations: yield only this quiescent owner, retain
+executor: "worker" and units: "" in V2 (omit units on the legacy API; never units: []) remain
+management operations: yield only this quiescent owner, retain
 its checks and reservation, and wait for a real conflicting writer rather than evicting it. Continue
 the same Mission and actual remaining work; do not create another Mission to clear the conflict.
 The host binds your native check results to the candidate; finish_direct_unit closes that work without
 a Worker handoff. Independent Review and Operator final acceptance still follow. This is not limited to
 micro-edits. Delegate to the configured Worker when that reduces work/cost or provides useful separation.
 There is no proposal/approval/contract-repair round trip in this route.
-To hand unfinished direct work to a Worker, call plan_units with executor: "worker", omit units, and put
+To hand unfinished direct work to a Worker, call plan_units with executor: "worker", units: "" in V2
+(omit units on the legacy API; never units: []), and put
 the remaining action/useful observations in handoff_context. The host transfers this same unit after current
 native commands settle, retaining changes, checks and budget. Do not finish it as successful or replan just
 to change its author. Dispatch the returned Task once; Operator recommendation does not prevent this choice.
