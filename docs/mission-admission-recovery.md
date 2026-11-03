@@ -103,3 +103,27 @@ npm run test:targeted -- test/mission-operation-lifecycle.test.ts test/mission-b
 到達対象はこの局所誤拒否の修正とPR作成まで。Windows画像との同一因果、工程肥大化全般、要求縮小の高速受入、戦略判断能力全般の改善は確認していない。
 #320・#322の成果と本件を合算して当初問題全体の解決とは扱わない。
 merge、global apply、公開は対象外。
+
+## 独立Reviewで確認した残留拒否と補正
+
+配送候補`44ec60f`を独立に調べ、同じpublic plugin入口で次を確認した。Windows事例への原因帰属ではない。
+
+- 同じ利用者発言・同じ要求の`intent=continue`では、旧unitに非null childがないと取消後照合を呼ばず、coreのexact Task終端guardに拒否される。未紐付けcancelled Worker callも既存取消後分岐へ含め、root直接実行とCoordinator計画の双方で照合する。
+- root配下の無関係なnative `general`子もprofile role不明として拒否していた。既知の非対象agentは当該Workerの所有物と扱わない。agent自体が不明、関連Workerがlive/終端不明の場合は拒否を維持する。
+- planning内の正規停止確認を保存した直後、古い`stoppedChildren`を参照して最初のplanningだけ拒否していた。既存停止照合後に同じrunの最新状態を読み直す。live子の停止や未確認acknowledgementの許可には使わない。
+- 同一要求continuationが到達可能になると、旧取消runをarchiveしないまま置換する分岐にも到達した。今回exact Task終端で復旧する未紐付け取消も既存archive手順へ含め、元のnull child・cancelled状態・証拠を保持する。新acceptanceへの成功証拠化はしない。
+
+既存`mission-operation-lifecycle.test.ts`を拡張し、新しい利用者発言なしのroot/Coordinator復旧、無関係な非profile子、同じplanning内の停止照合、旧取消記録のarchiveを検査する。live/未知/停止拒否、予約・累計費用保持の既存assertは削除しない。
+
+最小回帰command:
+
+```sh
+node --experimental-strip-types --import ./test/setup.ts --test --test-timeout=100000 --test-reporter=spec --test-name-pattern="unclaimed (root|Coordinator) Worker" test/mission-operation-lifecycle.test.ts
+```
+
+- 修正前: exit **1**、1成功/4失敗、test runner **0.766秒**。上記3種の誤拒否をpublic回帰として確認。
+- 途中: buildで`previous`の再読込に伴うTypeScript narrowingエラー（exit **1**）を修正。続くbuildはexit **0**。
+- 途中の最小回帰: exit **1**、4成功/1失敗、test runner **0.770秒**。同一要求の旧archiveが`ENOENT`となる履歴保持欠落を確認し、追加指摘として保持してから補正。
+- 最終検査は上記の宣言済み3ファイルcommandをそのまま使用し、実exit・時間・件数をnative正式記録とPRへ残す。前候補の成功結果を補正候補の成功扱いにはしない。
+
+相談済みAの「正規Task終端・所有権解消を既存情報で確認できた場合だけ復旧」を変えず、局所的な呼出し漏れ・対象除外・snapshot再利用・既存archive接続を補正した。追加gate・監視役・台帳field・runnerは導入していない。

@@ -354,7 +354,7 @@ for (const mode of ["cancel", "cancel-before-child", "cancel-before-child-direct
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
-test("unclaimed root Worker cancellation requires its exact terminal and quiescent native child tree before direct restart", async () => {
+for (const restart of ["replace", "continue", "unrelated-child"] as const) test(`unclaimed root Worker ${restart} requires its exact terminal and quiescent native child tree before direct restart`, async () => {
   const root = await mkdtemp(resolve("_testenv/unclaimed-root-task-"));
   try {
     await exec("git", ["init", "--quiet"], { cwd: root });
@@ -363,6 +363,7 @@ test("unclaimed root Worker cancellation requires its exact terminal and quiesce
     const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
       root: { agent: "dog-operator" }, loose: { agent: "dog-worker-v010", parentID: "root" },
     };
+    if (restart === "unrelated-child") identities.general = { agent: "general", parentID: "root", outcome: "succeeded" };
     let activity: Record<string, { type: string }> | undefined = { loose: { type: "running" } };
     const history: unknown[] = [], aborted: string[] = [];
     const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
@@ -387,8 +388,9 @@ test("unclaimed root Worker cancellation requires its exact terminal and quiesce
     await tool("cancel_operator", { reason: "plain" });
     const before = (await tool("operator_status")).budget;
     assert.equal(before.consumed_units, 1); assert.equal(before.reserved_units, 0);
+    const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE), cancelled = await runtime.required("root");
     hooks = await create();
-    await tool("start_mission", { intent: "replace", requirements: ["Write result and validate it"] });
+    await tool("start_mission", { intent: restart === "continue" ? "continue" : "replace", requirements: ["Write result and validate it"] });
     const declaration = { executor: "self", units: [unit] };
     const reject = async () => {
       await assert.rejects(tool("plan_units", declaration), /mission-cancelled-run-task-not-terminal/);
@@ -402,10 +404,98 @@ test("unclaimed root Worker cancellation requires its exact terminal and quiesce
     activity = undefined;
     await reject(); // Even a saved terminal cannot replace an unavailable active snapshot.
     activity = {};
+    identities.loose!.agent = "";
+    await reject(); // Missing identity is not an unrelated native agent.
+    identities.loose!.agent = "dog-worker-v010";
     const continued = await tool("plan_units", declaration);
     assert.equal(continued.status, "direct-unit-running");
+    const archived = JSON.parse(await readFile(`${runtime.statePath("root")}.${cancelled.runID}.archive`, "utf8"));
+    assert.deepEqual(archived.units, cancelled.units);
+    assert.equal(archived.phase, "cancelled");
     const after = (await tool("operator_status")).budget;
     assert.equal(after.consumed_units, before.consumed_units); assert.equal(after.reserved_units, 1);
     assert.deepEqual(aborted, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const restart of ["continue", "late-child"] as const) test(`unclaimed Coordinator Worker ${restart} restarts in one planning call after native reconciliation`, async () => {
+  const root = await mkdtemp(resolve("_testenv/unclaimed-coordinator-task-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await initializeProject(root, "v010");
+    await writeFile(join(root, "check.mjs"), 'console.log("checked");\n');
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      root: { agent: "dog-operator" }, old: { agent: "dogs-coordinator", parentID: "root" },
+      current: { agent: "dogs-coordinator", parentID: "root" },
+    };
+    const history: Record<string, unknown[]> = {}, activity: Record<string, { type: string }> = {};
+    const aborted: string[] = [];
+    let stopConfirmed = true;
+    const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      active: async () => ({ data: activity }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }),
+      abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); return { data: stopConfirmed }; },
+    } } } as never);
+    let hooks = await create();
+    const chat = (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `request-${id}`, agent: identities[id]!.agent }, {
+      message: { id: `request-${id}`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text }],
+    });
+    const tool = async (name: string, id: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+    const before = (id: string, callID: string, task: object) => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: id, callID }, { args: structuredClone(task) });
+    const units = ["first", "later"].map(name => ({ title: `Write ${name}`, objective: `Write and validate ${name}`,
+      read: ["check.mjs"], write: [`${name}.txt`], validation: ["node check.mjs"] }));
+    await chat("root", "Write both results and validate them");
+    const started = await tool("start_mission", "root", { requirements: ["Write both results and validate them"] });
+    await before("root", "old-call", started.task);
+    await chat("old", started.task.prompt);
+    const planned = await tool("plan_units", "old", { units });
+    await before("old", "worker-call", planned.task);
+    const terminal = { status: "error", input: planned.task, error: { type: "aborted" }, time: { end: Date.now() } };
+    history.old = [{ info: { role: "assistant", sessionID: "old" }, parts: [
+      { type: "tool", tool: "task", callID: "worker-call", state: terminal },
+    ] }];
+    await tool("cancel_operator", "root", { reason: "plain" });
+    const budget = (await tool("operator_status", "root")).budget;
+    const runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE), cancelled = await runtime.required("root");
+    hooks = await create();
+    const current = await tool("start_mission", "root", { intent: restart === "continue" ? "continue" : "replace",
+      requirements: ["Write both results and validate them"] });
+    await before("root", "current-call", current.task);
+    await chat("current", current.task.prompt);
+    const reject = async (pattern: RegExp) => {
+      await assert.rejects(tool("plan_units", "current", { units }), pattern);
+      assert.equal((await runtime.required("root")).runID, cancelled.runID);
+      assert.deepEqual((await tool("operator_status", "root")).budget, budget);
+    };
+    if (restart === "continue") {
+      terminal.status = "running";
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      terminal.status = "error";
+    } else {
+      identities.late = { agent: "dog-worker-v010", parentID: "old" };
+      activity.late = { type: "running" };
+      await reject(/active-or-unproven/);
+      assert.ok(!aborted.includes("late"), "planning must not interrupt a live discovered child");
+      delete activity.late;
+      stopConfirmed = false;
+      await reject(/stop-unconfirmed/);
+      assert.ok(!(await runtime.required("root")).stoppedChildren?.includes("late"));
+      stopConfirmed = true;
+    }
+    const next = await tool("plan_units", "current", { units });
+    assert.ok(next.task, "the first fully proven planning call returns its next Worker");
+    const archived = JSON.parse(await readFile(`${runtime.statePath("root")}.${cancelled.runID}.archive`, "utf8"));
+    assert.deepEqual(archived.units, cancelled.units, "reconciliation never rewrites old null-child work or evidence");
+    assert.deepEqual((await tool("operator_status", "root")).budget, budget);
+    if (restart === "late-child") {
+      assert.ok(archived.stoppedChildren.includes("late"));
+      assert.equal(identities.late!.outcome, undefined, "acknowledged cancellation is not a fabricated native outcome");
+      assert.equal(aborted.filter(id => id === "late").length, 2, "retry only the unconfirmed stop, not successful planning");
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

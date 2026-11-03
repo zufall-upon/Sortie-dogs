@@ -1362,9 +1362,11 @@ export class OperatorRuntime {
         created.push(control.path);
         try { await handle.writeFile(control.content); } finally { await handle.close(); }
       }
-      if ((superseding || replanning || previous?.phase === "completed") && previous) {
+      if ((superseding || replanning || previous?.phase === "completed" ||
+          previous?.phase === "cancelled" && unclaimedCalls.length > 0 && mission?.terminalTaskCalls !== undefined) && previous) {
         // A crash before the state switch may leave a checkpoint while the old run later advances.
         // Sequence-qualified replan snapshots keep that history without blocking a subsequent correction.
+        // Same-request recovery also retains the original unclaimed cancellation, not just its costs.
         const archive = replanning || previous.phase === "completed" ? this.replanArchivePath(previous)
           : `${this.file(root)}.${previous.runID}.archive`;
         try {

@@ -1483,11 +1483,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           new Set(children.map(child => child.id)).size !== children.length) throw deny();
       for (const child of children) {
         const info = payload(await session("get", { path: { id: child.id }, query: { directory: input.directory } }));
-        if (!record(info) || info.id !== child.id || info.parentID !== owner) throw deny();
+        if (!record(info) || info.id !== child.id || info.parentID !== owner ||
+            typeof info.agent !== "string" || !info.agent.trim()) throw deny();
         const role = canonicalAgent(profile, info.agent as string);
+        // Root Fast-lane Tasks must not claim unrelated profile or native agents.
+        if (owner === root && role !== "dog-worker" && role !== "dog-luna-worker") continue;
         if (!role) throw deny();
-        // Root Fast-lane Tasks must not claim an unrelated Coordinator/consultation.
-        if (owner === root && !["dog-worker", "dog-luna-worker"].includes(role)) continue;
         const descendants = payload(await session("children", { path: { id: child.id }, query: { directory: input.directory } }));
         if (Object.hasOwn(active, child.id) || !Array.isArray(descendants) || descendants.length ||
             !["succeeded", "failed", "interrupted"].includes(String(info.outcome)) &&
@@ -2887,7 +2888,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const cancelledPredecessor = previous?.phase === "cancelled" &&
         (mission.supersededRunID === previous.runID ||
           (mission.supersededRunID === undefined && ["explicit-cancellation", "agent-changed"].includes(previous.decision ?? "") &&
-            previous.units.some(unit => (previous.decision === "agent-changed" || unit.status === "cancelled") && unit.childSessionID !== null)));
+            previous.units.some(unit => (previous?.decision === "agent-changed" || unit.status === "cancelled") &&
+              (unit.childSessionID !== null || !unit.directExecution && unit.callID !== null))));
       let budget = await control!.currentBudget(root);
       if (cancelledPredecessor && budget?.reserved_units) {
         await control!.reconcileAbortedOperatorOrphan(root);
@@ -2898,6 +2900,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // Reconcile it even when reservation recovery has nothing to do. Never resume it,
         // interrupt live work here, or manufacture its native terminal/validation records.
         await stopCancelledChildren(root, previous, true);
+        previous = await operators.required(root);
       }
       if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
         `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
