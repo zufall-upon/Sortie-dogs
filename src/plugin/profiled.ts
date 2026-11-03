@@ -1158,6 +1158,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return packet;
     }
     function missionDispatchPacket(mission: OperatorMission, run?: import("../core/operator-runtime.js").OperatorState) {
+      const strategyRecovery = " If a method stalled or proposed avoidable extra work, Operator: compare the original goal, actual result and concrete unmet work before choosing to continue, change or stop that method. " +
+        `For a concrete adjustment, use ${profile.toolPrefix}plan_units with proposed units, reason and handoff_context, then dispatch its returned same-Coordinator continuation. ` +
+        "Preserve required checks through lawful registration/replanning and reuse current evidence. Otherwise continue normally; no extra approval or logging-only step.";
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
@@ -1189,7 +1192,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       if (mission.runID === run?.runID && run?.units.some(unit => unit.status === "running")) {
         if (mission.coordinator && !mission.dispatchOpen && !["completed", "cancelled"].includes(mission.phase)) return { ...packet, task: missions.task(mission),
-          next_action: "Resume this existing Coordinator Task with its task_id to continue the retained unit. Do not dispatch a replacement or wait for background work that has already ended." };
+          next_action: "Resume this existing Coordinator Task with its task_id to continue the retained unit. Do not dispatch a replacement or wait for background work that has already ended." + strategyRecovery };
         return { ...packet, next_action: "The current unit is active. Continue its owning session; do not dispatch a replacement Worker or Coordinator. Native background completion will return to the parent." };
       }
       if (mission.coordinator === null && mission.runID === run?.runID && !mission.dispatchOpen &&
@@ -1235,7 +1238,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           next_action: (run?.units.some(unit => unit.dispatchDenial) ? `${packet.next_action}\n` : "") +
             (mission.coordinator === null
               ? "Fast-lane needs correction or coordination: dispatch this exact Coordinator Task with the existing Worker changes, checks and concrete remaining work. Keep the same mission, requirements and cumulative budget; do not replace an active Worker."
-              : "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget.") };
+              : "The previous Coordinator Task is finished. Dispatch this exact Task to continue the same mission and Coordinator session; keep the original requirements and cumulative budget." + strategyRecovery) };
       }
       return packet;
     }
@@ -2770,8 +2773,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // packet can already contain one even while its Reviewer is still pending.
         const { task: _dispatchTask, ...packet } = missionDispatchPacket(mission, previous);
         const reviewPending = mission.runID === previous?.runID && mission.review?.verdict === "pending";
-        const active = mission.dispatchOpen || reviewPending || mission.runID === previous?.runID &&
-          previous?.units.some(unit => unit.status === "running");
+        const running = mission.runID === previous?.runID ? previous!.units.filter(unit => unit.status === "running") : [];
+        let retainedDirectOwnerEnded = false;
+        if (!mission.dispatchOpen && !reviewPending && mission.coordinator && running.length &&
+            running.every(unit => unit.directExecution?.actor === mission.coordinator && !unit.reviewerCorrection)) {
+          // This only forwards a proposal to the SAME owner. Native session termination
+          // does not settle its retained unit or authorize a new writer/contract.
+          const native = payload(await session("get", { path: { id: mission.coordinator } }).catch(() => undefined));
+          if (record(native) && native.id === mission.coordinator && native.parentID === root &&
+              canonicalAgent(profile, native.agent as string) === "dog-operator" &&
+              ["succeeded", "failed", "interrupted"].includes(String(native.outcome))) {
+            try { await assertDirectPlanningQuiescent(mission.coordinator); retainedDirectOwnerEnded = true; }
+            catch { /* A live/unproven native tool still owns this work; do not offer another Task. */ }
+          }
+        }
+        const active = mission.dispatchOpen || reviewPending || running.length > 0 && !retainedDirectOwnerEnded;
         const continuation = !active ? missions.task(mission) : undefined;
         // Existing Coordinator resumes accept a concrete prompt. Do not use the opaque
         // initial reference here: claim() would expand it from unchanged Mission state
