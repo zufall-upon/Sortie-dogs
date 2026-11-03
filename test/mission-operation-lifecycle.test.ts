@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { initializeProject } from "../dist/core/initialize.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settled-orphan"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
+for (const mode of ["cancel", "cancel-before-child", "cancel-before-child-direct", "replace", "missed-after", "orphan-abort", "settled-orphan"]) test(`cold ${mode} after accepted work -> external outputs -> reload -> acceptance`, async () => {
   const replaceActive = mode === "replace";
+  const unclaimed = mode.startsWith("cancel-before-child"), directReplacement = mode.endsWith("-direct");
   await mkdir(resolve("_testenv"), { recursive: true });
   const area = await mkdtemp(resolve("_testenv/mission-operations-"));
   const root = join(area, "project"), external = join(area, "global install");
@@ -38,10 +41,12 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     let stopConfirmed = true;
     const nativeActive: Record<string, { type: string }> = {};
     const history: Record<string, unknown[]> = {};
+    let childrenUnavailable = false, activeUnavailable = false;
     const create = () => SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
-      active: async () => ({ data: nativeActive }),
+      active: async () => ({ data: activeUnavailable ? undefined : nativeActive }),
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
       children: async ({ path }: { path: { id: string } }) => {
+        if (childrenUnavailable && path.id === "old") throw new Error("native-child-history-unavailable");
         if (replaceActive && ["root", "old", "oldWorker", "priorWorker"].includes(path.id)) throw new Error("v2-history-owning-service-unavailable");
         return { data: Object.entries(identities).filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) };
       },
@@ -84,11 +89,18 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     const checkedPrior = await exec(process.execPath, ["check.mjs", "old"], { cwd: root });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "priorWorker", callID: "prior-check" }, { output: checkedPrior.stdout, metadata: { exit: 0, status: "completed" } });
     identities.priorWorker!.outcome = "succeeded";
+    if (unclaimed) history.priorWorker = [{ info: { id: "prior-usage", role: "assistant", sessionID: "priorWorker",
+      providerID: "openai", modelID: "gpt-6.1-sol", time: { created: Date.now(), completed: Date.now() },
+      tokens: { input: 1000, output: 1000, reasoning: 0, cache: { read: 0, write: 0 } } }, parts: [] }];
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "old", callID: "prior-worker-call" }, { output: "prepared", metadata: { sessionId: "priorWorker" } });
     assert.equal((await tool("operator_status", "root")).units[0].status, "succeeded");
     const planned = await tool("operator_next", "old");
     await before("old", "old-worker-call", planned.task);
-    await chat("oldWorker", planned.task.prompt);
+    if (!unclaimed) await chat("oldWorker", planned.task.prompt);
+    else history.old = [{ info: { role: "assistant", sessionID: "old" }, parts: [
+      { type: "tool", tool: "task", callID: "old-worker-call", state: { status: "error", input: planned.task,
+        error: { type: "aborted" }, time: { end: Date.now() } } },
+    ] }];
     hooks = await create(); // Reload with a durable reservation and no process-local ownership Map.
     if (mode === "missed-after") {
       assert.equal((await tool("operator_status", "root")).budget.reserved_units, 1);
@@ -143,6 +155,16 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     // Native interruption may acknowledge closure before idle_outcome is written.
     const beforeBudget = (await tool("operator_status", "root")).budget;
     assert.equal(beforeBudget.reserved_units, replaceActive ? 1 : 0);
+    const cancelled = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    const ledgerPath = join(root, ".git/sortie-dogs/run-flight-v010", `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    const settlements = async () => (await RunFlightLedger.readGoalFile(ledgerPath)).records.flatMap(({ event }) => event.kind === "unit.settled" ? [event] : []);
+    const priorSettlements = unclaimed ? await settlements() : [];
+    if (unclaimed) {
+      assert.equal(cancelled.units[1]!.status, "cancelled");
+      assert.equal(cancelled.units[1]!.childSessionID, null);
+      assert.ok(priorSettlements.some(event => event.cost_usd !== null && event.cost_usd > 0), "retained prior native usage has a nonzero price");
+      assert.equal(beforeBudget.settled_cost_usd, null, "the unclaimed Task's unknown usage is not fabricated as zero");
+    }
     hooks = await create();
     assert.equal((await tool("operator_status", "root")).budget.consumed_units, beforeBudget.consumed_units);
 
@@ -150,8 +172,58 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     const current = await tool("start_mission", "root", { intent: replaceActive ? "replace" : "new", requirements: ["Install newer release at both destinations"] });
     assert.notEqual(current.mission_id, old.mission_id);
     assert.deepEqual(current.requirements.map((item: { text: string }) => item.text), ["Install newer release at both destinations"]);
-    await before("root", "current-call", current.task);
-    await chat("current", current.task.prompt);
+    if (!directReplacement) {
+      await before("root", "current-call", current.task);
+      await chat("current", current.task.prompt);
+    }
+    const declaration = { units: ["one", ...(directReplacement ? [] : ["two"])].map(name => ({
+      title: `Install ${name}`, objective: `Write and verify destination ${name}`, read: ["check.mjs"],
+      write: [join(external, name)], validation: [`node check.mjs ${name}`],
+    })), ...(directReplacement ? { executor: "self" } : {}) };
+    const planner = directReplacement ? "root" : "current";
+    if (unclaimed) {
+      const terminal = (history.old![0] as { parts: { callID: string; state: Record<string, unknown> }[] }).parts[0]!;
+      const original = structuredClone(terminal), info = (history.old![0] as { info: { sessionID: string } }).info;
+      const reject = async (pattern: RegExp) => {
+        await assert.rejects(tool("plan_units", planner, declaration), pattern);
+        const retained = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+        assert.equal(retained.runID, cancelled.runID, "rejected proof retains the old run");
+        assert.deepEqual(retained.units.map(unit => unit.evidence), cancelled.units.map(unit => unit.evidence));
+        assert.deepEqual((await tool("operator_status", "root")).budget, beforeBudget, "no double settlement or budget reset");
+        assert.deepEqual(await settlements(), priorSettlements);
+      };
+      terminal.state.status = "running";
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      terminal.state = structuredClone(original.state);
+      terminal.callID = "another-call";
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      terminal.callID = original.callID;
+      terminal.state.input = { ...planned.task, prompt: "another Task" };
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      terminal.state = structuredClone(original.state);
+      const prefix = "SORTIE_OPERATOR_TASK_REF ", reference = JSON.parse(planned.task.prompt.slice(prefix.length));
+      for (const changed of [{ ...reference, r: "foreign" }, { ...reference, n: "other-run" }, { ...reference, g: cancelled.generation }]) {
+        terminal.state.input = { ...planned.task, prompt: prefix + JSON.stringify(changed) };
+        await reject(/mission-cancelled-run-task-not-terminal/);
+      }
+      terminal.state = structuredClone(original.state);
+      info.sessionID = "foreign";
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      info.sessionID = "old";
+      terminal.state.metadata = { sessionId: "foreign-child" };
+      await reject(/mission-cancelled-run-task-not-terminal/);
+      terminal.state = structuredClone(original.state);
+      nativeActive.oldWorker = { type: "running" };
+      await reject(/mission-superseded-worker-not-terminal/);
+      delete nativeActive.oldWorker;
+      childrenUnavailable = true;
+      await reject(/native-child-history-unavailable/);
+      childrenUnavailable = false;
+      activeUnavailable = true;
+      await reject(/mission-superseded-(?:coordinator|worker)-not-terminal/);
+      activeUnavailable = false;
+      hooks = await create();
+    }
     if (mode === "settled-orphan") {
       // An earlier child is no longer in the current units and has no native idle outcome.
       // Cancellation already released the predecessor's reservations before this cold plan.
@@ -175,10 +247,24 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     await tool("operator_status", "root");
     await tool("operator_status", "root");
     assert.equal(aborted.length, stopsBefore, "persisted native acknowledgements prevent repeated cancellation");
-    let next = await tool("plan_units", "current", { units: ["one", "two"].map(name => ({
-      title: `Install ${name}`, objective: `Write and verify destination ${name}`, read: ["check.mjs"],
-      write: [join(external, name)], validation: [`node check.mjs ${name}`],
-    })) });
+    let next = await tool("plan_units", planner, declaration);
+    if (unclaimed) {
+      const archived = JSON.parse(await readFile(`${runtime.statePath("root")}.${cancelled.runID}.archive`, "utf8"));
+      assert.deepEqual(archived, cancelled, "native proof is transient: archive retains original cancellation and success evidence");
+      assert.equal(await readFile(join(external, "old"), "utf8"), "installed");
+      const budget = (await tool("operator_status", "root")).budget;
+      assert.equal(budget.consumed_units, beforeBudget.consumed_units);
+      assert.equal(budget.settled_cost_usd, beforeBudget.settled_cost_usd);
+      assert.deepEqual(await settlements(), priorSettlements, "new planning preserves both known costs and unknown usage without re-settlement");
+      if (directReplacement) {
+        assert.equal(next.status, "direct-unit-running");
+        assert.equal(next.executor_session_id, "root");
+        assert.equal(budget.reserved_units, 1, "only the new direct unit owns a reservation");
+        assert.equal((await tool("start_direct_unit", "root")).run_id, next.run_id, "repeated activation does not dispatch again");
+        assert.deepEqual((await tool("operator_status", "root")).budget, budget);
+        return;
+      }
+    }
     if (mode === "settled-orphan") {
       assert.equal(identities.stranded!.outcome, undefined, "cancellation reconciliation does not forge a native outcome");
       assert.equal(aborted.filter(id => id === "stranded").length, 2, "retry only the previously unconfirmed acknowledgement");
@@ -266,4 +352,60 @@ for (const mode of ["cancel", "replace", "missed-after", "orphan-abort", "settle
     assert.equal((await tool("complete_mission", "root")).status, "succeeded");
     assert.equal(await readFile(join(external, "one"), "utf8"), "installed");
   } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("unclaimed root Worker cancellation requires its exact terminal and quiescent native child tree before direct restart", async () => {
+  const root = await mkdtemp(resolve("_testenv/unclaimed-root-task-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await initializeProject(root, "v010");
+    await writeFile(join(root, "check.mjs"), 'console.log("checked");\n');
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      root: { agent: "dog-operator" }, loose: { agent: "dog-worker-v010", parentID: "root" },
+    };
+    let activity: Record<string, { type: string }> | undefined = { loose: { type: "running" } };
+    const history: unknown[] = [], aborted: string[] = [];
+    const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      active: async () => ({ data: activity }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root" ? history : [] }),
+      abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); return { data: true }; },
+    } } } as never);
+    let hooks = await create();
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+      message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Write result and validate it" }],
+    });
+    const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    const unit = { title: "Write result", objective: "Write result and validate it", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] };
+    const started = await tool("start_mission", { requirements: ["Write result and validate it"], unit, preferred_executor: "worker" });
+    await hooks["tool.execute.before"]!({ sessionID: "root", callID: "fast-call", tool: "task" }, { args: structuredClone(started.task) });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "fast-call",
+      state: { status: "error", input: started.task, error: { type: "aborted" }, time: { end: Date.now() } } }] });
+    await tool("cancel_operator", { reason: "plain" });
+    const before = (await tool("operator_status")).budget;
+    assert.equal(before.consumed_units, 1); assert.equal(before.reserved_units, 0);
+    hooks = await create();
+    await tool("start_mission", { intent: "replace", requirements: ["Write result and validate it"] });
+    const declaration = { executor: "self", units: [unit] };
+    const reject = async () => {
+      await assert.rejects(tool("plan_units", declaration), /mission-cancelled-run-task-not-terminal/);
+      assert.deepEqual((await tool("operator_status")).budget, before);
+      assert.deepEqual(aborted, [], "planning never interrupts a live or unproven root child");
+    };
+    await reject();
+    activity = {};
+    await reject(); // Inactive alone does not establish a child's terminal.
+    identities.loose!.outcome = "interrupted";
+    activity = undefined;
+    await reject(); // Even a saved terminal cannot replace an unavailable active snapshot.
+    activity = {};
+    const continued = await tool("plan_units", declaration);
+    assert.equal(continued.status, "direct-unit-running");
+    const after = (await tool("operator_status")).budget;
+    assert.equal(after.consumed_units, before.consumed_units); assert.equal(after.reserved_units, 1);
+    assert.deepEqual(aborted, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

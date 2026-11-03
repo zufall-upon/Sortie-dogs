@@ -1451,6 +1451,50 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await operators.recordStoppedChild(root, run.runID, child);
       }
     }
+    async function cancelledUnclaimedTaskCalls(root: string, run: OperatorState) {
+      const units = run.units.filter(unit => !unit.directExecution && unit.status === "cancelled" &&
+        unit.childSessionID === null && unit.callID !== null);
+      if (!units.length) return undefined;
+      const owner = run.operatorSessionID ?? root;
+      const deny = () => new Error("mission-cancelled-run-task-not-terminal");
+      // The bounded chat context may omit the old Task. Use the existing native
+      // history reader, and never substitute a model's stop report for a tool terminal.
+      const history = await reviewMessages(owner, undefined, true);
+      for (const unit of units) {
+        const parts = history.flatMap(message => record(message.info) && message.info.role === "assistant" &&
+          message.info.sessionID === owner && Array.isArray(message.parts) ? message.parts : []).filter(part =>
+          record(part) && part.type === "tool" && part.tool === "task" && part.callID === unit.callID);
+        const part = parts.length === 1 && record(parts[0]) ? parts[0] : undefined;
+        const state = part && record(part.state) ? part.state : undefined;
+        if (!part || part.sessionID !== undefined && part.sessionID !== owner || !state ||
+            !["completed", "error"].includes(String(state.status)) ||
+            record(state.metadata) && ["running", "pending", "unknown"].includes(String(state.metadata.status)) ||
+            !record(state.time) || typeof state.time.end !== "number" || !Number.isFinite(state.time.end) ||
+            !operators.matchesCancelledWorkerTask(run, unit.unit.id, state.input) || taskChildSessionID(state) !== undefined) throw deny();
+      }
+      // A parent Task terminal does not prove that an unclaimed child never started.
+      // Reuse the owning service's active snapshot and child lineage before allowing
+      // this formerly unrepresentable cancellation into prepareMission.
+      const active = payload(await session("active", {}));
+      if (!record(active) || !Object.values(active).every(value => record(value) &&
+          ["running", "retry"].includes(String(value.type))) || owner !== root && Object.hasOwn(active, owner)) throw deny();
+      const children = payload(await session("children", { path: { id: owner }, query: { directory: input.directory } }));
+      if (!Array.isArray(children) || children.some(child => !record(child) || typeof child.id !== "string") ||
+          new Set(children.map(child => child.id)).size !== children.length) throw deny();
+      for (const child of children) {
+        const info = payload(await session("get", { path: { id: child.id }, query: { directory: input.directory } }));
+        if (!record(info) || info.id !== child.id || info.parentID !== owner) throw deny();
+        const role = canonicalAgent(profile, info.agent as string);
+        if (!role) throw deny();
+        // Root Fast-lane Tasks must not claim an unrelated Coordinator/consultation.
+        if (owner === root && !["dog-worker", "dog-luna-worker"].includes(role)) continue;
+        const descendants = payload(await session("children", { path: { id: child.id }, query: { directory: input.directory } }));
+        if (Object.hasOwn(active, child.id) || !Array.isArray(descendants) || descendants.length ||
+            !["succeeded", "failed", "interrupted"].includes(String(info.outcome)) &&
+              !(info.outcome === undefined && run.stoppedChildren?.includes(child.id))) throw deny();
+      }
+      return { runID: run.runID, callIDs: units.map(unit => unit.callID!) };
+    }
     async function stop(root: string, reason: string, retireRoot = true): Promise<void> {
       const directActor = (await operators.read(root))?.units.find(unit => unit.status === "running" && unit.directExecution)?.directExecution?.actor;
       // Stopping owned execution does not write its artifacts. Its existing reservation
@@ -2888,8 +2932,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
           ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
           prior_run_id: previous.runID } : {}) };
+      const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
       const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
-        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context);
+        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
       // prepareMission retains an identical prepared run after either registration stage
       // fails. Verify its pinned controls, then idempotently register the same declaration;
       // only the durable Mission binding below makes it eligible for admission.

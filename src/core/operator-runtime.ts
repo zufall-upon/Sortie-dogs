@@ -937,8 +937,9 @@ export class OperatorRuntime {
   }
   /** Mission authority is supplied only by the owning profile, never by a model-authored plan. */
   prepareMission(root: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, supersededRunID?: string,
-    terminalChildren: readonly string[] = [], replaceRequirements = false, context?: Record<string, unknown>): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements, context }));
+    terminalChildren: readonly string[] = [], replaceRequirements = false, context?: Record<string, unknown>,
+    terminalTaskCalls?: { runID: string; callIDs: readonly string[] }): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements, context, terminalTaskCalls }));
   }
   /** Stage a settled mission's replacement; rejected preparation never cancels the usable run. */
   replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
@@ -1040,6 +1041,7 @@ export class OperatorRuntime {
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
       terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean; context?: Record<string, unknown>;
+      terminalTaskCalls?: { runID: string; callIDs: readonly string[] };
       reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[] } }): Promise<OperatorState> {
     const previous = await this.read(root);
     const superseding = mission?.supersededRunID !== undefined && previous?.runID === mission.supersededRunID &&
@@ -1108,6 +1110,17 @@ export class OperatorRuntime {
         previous.planHash === validatedPlanHash && previous.phase !== "cancelled") return previous;
     if (mission?.supersededRunID !== undefined && !superseding) throw new Error("mission-superseded-run-mismatch");
     const terminalChildren = mission?.terminalChildren ?? [];
+    const unclaimedCalls = previous?.units.flatMap(unit => !unit.directExecution && unit.status === "cancelled" &&
+      unit.childSessionID === null && unit.callID !== null ? [unit.callID] : []) ?? [];
+    // A cancelled admission can precede its child's first prompt. Only the owning
+    // profile's exact native Task proof, not null or cancellation alone, closes it.
+    if (mission && previous?.phase === "cancelled" && unclaimedCalls.length &&
+        (mission?.terminalTaskCalls?.runID !== previous.runID ||
+          new Set(mission.terminalTaskCalls.callIDs).size !== unclaimedCalls.length ||
+          mission.terminalTaskCalls.callIDs.length !== unclaimedCalls.length ||
+          unclaimedCalls.some(call => !mission.terminalTaskCalls!.callIDs.includes(call)))) {
+      throw new Error("mission-cancelled-run-task-not-terminal");
+    }
     const retainAcceptance = previous !== undefined && cancelledMissionRetainsAcceptance(previous);
     const predecessorChildren = previous?.units.flatMap(unit => !unit.directExecution && unit.childSessionID !== null
       ? [unit.childSessionID] : []) ?? [];
@@ -1120,7 +1133,7 @@ export class OperatorRuntime {
           unit.repairValidation !== null || (unit.status === "pending" && (unit.callID !== null || unit.childSessionID !== null ||
             unit.evidence.length > 0 || unit.resultClass !== null)) ||
           (unit.status === "succeeded" && (unit.childSessionID === null || unit.callID === null || unit.evidence.length === 0 || unit.resultClass !== "acceptance")) ||
-          (unit.status === "cancelled" && (unit.childSessionID === null || unit.callID === null))))) {
+          (unit.status === "cancelled" && unit.callID === null)))) {
       throw new Error("mission-superseded-run-has-work: reconcile prior workers and evidence before changing acceptance");
     }
     if (plan.git_lifecycle !== undefined) {
@@ -1493,6 +1506,20 @@ export class OperatorRuntime {
       ? { ...args, subagent_type: args.agent }
       : args;
     return unit !== undefined && this.matchesWorkerTask(state, unit, normalized);
+  }
+  /** Historical comparison only: cancellation revoked the admission generation. */
+  matchesCancelledWorkerTask(state: OperatorState, unitID: string, args: unknown): boolean {
+    const unit = state.units.find(item => item.unit.id === unitID);
+    if (state.phase !== "cancelled" || !unit || unit.status !== "cancelled" || unit.childSessionID !== null ||
+        !record(args) || typeof args.prompt !== "string") return false;
+    if (args.prompt === unit.task.prompt) return this.matchesRecordedWorkerTask(state, unitID, args);
+    if (!args.prompt.startsWith(`${OPERATOR_TASK_REFERENCE} `)) return false;
+    let reference: unknown;
+    try { reference = JSON.parse(args.prompt.slice(OPERATOR_TASK_REFERENCE.length + 1)); }
+    catch { return false; }
+    if (!record(reference) || !Number.isSafeInteger(reference.g) || (reference.g as number) < 1 ||
+        (reference.g as number) >= state.generation) return false;
+    return this.matchesRecordedWorkerTask({ ...state, generation: reference.g as number }, unitID, args);
   }
   admitOperator(root: string, callID: string, args: unknown): Promise<OperatorTask> {
     return this.serial(root, () => this.admitOperatorOnce(root, callID, args));
