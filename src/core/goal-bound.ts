@@ -193,6 +193,9 @@ export type GoalFlightEvent =
        readonly evidence_fingerprint?: string; readonly duration_ms?: number; readonly reason?: string })
   | (GoalEventBase & { readonly kind: "goal.replanned"; readonly goal_id: string; readonly revision: number;
       readonly reason: "no-progress" })
+  | (GoalEventBase & { readonly kind: "goal.validation-registered"; readonly goal_id: string;
+      readonly reservation_id: string; readonly unit_id: string; readonly criterion_id: string;
+      readonly command: string; readonly registered_at: string })
   | (GoalEventBase & { readonly kind: "goal.terminal"; readonly goal_id: string; readonly receipt: GoalTerminalReceipt })
   | (GoalEventBase & { readonly kind: "goal.reported"; readonly goal_id: string; readonly report: GoalReport });
 
@@ -225,6 +228,8 @@ export interface GoalFlightState {
   readonly delivery: GoalDeliveryMode | null;
   readonly budget: GoalBudget | null;
   readonly acceptance_contract: GoalAcceptanceContract | null;
+  /** Native registration metadata only; the acceptance contract and its fingerprint stay frozen. */
+  readonly validation_registrations?: Readonly<Record<string, { readonly unit_id: string; readonly command: string; readonly registered_at: string }>>;
   readonly consumed_units: number;
   readonly consumed_time_ms: number | null;
   readonly consumed_cost_usd: number | null;
@@ -298,7 +303,10 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightState, "goal_id" | "revision" | "scope_epoch" | "acceptance_fingerprint" | "acceptance_contract">): boolean {
+export const goalValidationCommand = (state: Pick<GoalFlightState, "validation_registrations">, criterion: GoalAcceptanceCriterion): string | undefined =>
+  state.validation_registrations?.[criterion.criterion_id]?.command ?? criterion.validation_command;
+
+export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightState, "goal_id" | "revision" | "scope_epoch" | "acceptance_fingerprint" | "acceptance_contract" | "validation_registrations">): boolean {
   if (typeof value !== "object" || value === null || typeof value.measurement !== "object" || value.measurement === null ||
     typeof value.identity !== "object" || value.identity === null || typeof value.execution !== "object" || value.execution === null ||
     !Array.isArray(value.measurement.criterion_ids) || !Array.isArray(value.measurement.oracle_coverage) ||
@@ -348,8 +356,11 @@ export function validGoalEvidence(value: GoalEvidence, state: Pick<GoalFlightSta
        (criterion.candidate_binding === "current-protected"
          ? protectedBindingValid && HASH.test(value.identity.candidate) && (dockerWorkspace === undefined || dockerWorkspace.candidate === value.identity.candidate)
         : criterion.candidate === value.identity.candidate) &&
-      (criterion.validation_command === undefined ||
-        (value.execution.command.length === 1 && value.execution.command[0] === criterion.validation_command)) &&
+      (goalValidationCommand(state, criterion) === undefined ||
+        (value.execution.command.length === 1 && value.execution.command[0] === goalValidationCommand(state, criterion))) &&
+      (!state.validation_registrations?.[criterion.criterion_id] ||
+        value.execution.units.includes(state.validation_registrations[criterion.criterion_id]!.unit_id) &&
+        Date.parse(value.execution.started_at) >= Date.parse(state.validation_registrations[criterion.criterion_id]!.registered_at)) &&
       criterion.fixture === value.identity.fixture &&
       criterion.proof_scope === value.proof_scope && criterion.expected_outcome === value.execution.outcome);
   return text(value.evidence_id) && value.goal_id === state.goal_id && value.goal_revision === state.revision &&
@@ -446,7 +457,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         validation_budget: { ...state.validation_budget,
           limit: state.validation_budget.limit === null ? null : Math.max(
             state.validation_budget.limit, state.validation_budget.consumed, event.budget.max_units) },
-        acceptance_contract: event.acceptance_contract,
+        acceptance_contract: event.acceptance_contract, validation_registrations: undefined,
         session_ids: addUnique(state.session_ids, event.session_id), phase: "active", stop_reason: null,
         receipt: null, tickets: [], ...(event.reset_no_progress === true
           ? { no_progress_results: 0, replan_required: false, replan_used: false }
@@ -454,6 +465,15 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       if (event.reset_no_progress === true) replanRevision = null;
       legacyResetRevision = event.reset_no_progress === undefined;
       if (validationAdmissionLimit !== null) validationAdmissionLimit = Math.max(event.budget.max_units, state.validation_budget.consumed);
+    } else if (event.kind === "goal.validation-registered") {
+      requireState(state.phase === "active" && state.outstanding_reservations.some(item =>
+        item.reservation_id === event.reservation_id && item.unit_id === event.unit_id) &&
+        state.acceptance_contract?.criteria.some(item => item.criterion_id === event.criterion_id) === true &&
+        commandText(event.command) && instant(event.registered_at) && Date.parse(event.registered_at) <= Date.parse(event.at),
+        "transition", "Validation registration requires the same active reserved unit and a current criterion.");
+      state = { ...state, validation_registrations: { ...state.validation_registrations,
+        [event.criterion_id]: { unit_id: event.unit_id, command: event.command, registered_at: event.registered_at } },
+        satisfied_criteria: state.satisfied_criteria.filter(id => id !== event.criterion_id) };
     } else if (event.kind === "ticket.issued") {
       requireState(state.phase === "active" && event.revision === state.revision && event.scope_epoch === state.scope_epoch &&
         event.origin_user_message_id === state.latest_user_message_id && event.sequence === state.tickets.length + 1 &&

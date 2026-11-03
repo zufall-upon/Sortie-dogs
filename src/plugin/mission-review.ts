@@ -5,7 +5,7 @@ import { lstat, readlink, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
-import type { OperatorState } from "../core/operator-runtime.js";
+import { unitValidation, unitValidationCwd, type OperatorState } from "../core/operator-runtime.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
 import { MISSION_REVIEW_REFERENCE, missionReviewScope, type MissionEvidenceExcerpt, type MissionReviewScope, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
@@ -15,7 +15,7 @@ import { declaredArtifacts } from "./declared-artifacts.js";
 import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers, normalizeCommand } from "./gate.js";
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
-import type { ReviewerCorrectionCheck } from "./runtime-bridge.js";
+import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -40,9 +40,9 @@ export const validationDirectoryMatches = (commands: readonly string[], actual: 
 export function missionReviewValidation(run: OperatorState, statePath: string) {
   return run.units.map(unit => ({
     unit_id: unit.unit.id,
-    command: unit.unit.validation,
-    ...(unit.directExecution?.validationCwd ?? unit.unit.validation_cwd ? {
-      validation_cwd: unit.directExecution?.validationCwd ?? unit.unit.validation_cwd,
+    command: unitValidation(unit),
+    ...(unitValidationCwd(unit) ? {
+      validation_cwd: unitValidationCwd(unit),
     } : {}),
     evidence: unit.evidence.map(({ protected_binding, ...evidence }) => ({
       ...evidence,
@@ -354,11 +354,15 @@ export async function reviewerCorrectionValidationFresh(validation: readonly str
 }
 
 /** Preserve a current ordered prefix while the next author executes the remaining recipe. */
-export async function directHandoffValidationChecks(...args: Parameters<typeof reviewerCorrectionValidationFresh>): Promise<readonly ReviewerCorrectionCheck[]> {
+export async function directHandoffValidationChecks(...args: Parameters<typeof reviewerCorrectionValidationFresh>): Promise<readonly DirectHandoffValidationCheck[]> {
   const [validation, child, history, started, checks, root, directories, registeredAt] = args;
   for (let count = validation.length; count > 0; count--) {
     const result = await reviewerCorrectionValidationFresh(validation.slice(0, count), child, history, started, checks, root, directories, registeredAt);
-    if (result.ready) return checks.filter(check => result.matched?.some(item => item.callID === check.callID));
+    if (result.ready) return checks.flatMap(check => {
+      const matchedOccurrences = result.matched?.filter(item => item.callID === check.callID)
+        .map(({ member, occurrence }) => ({ member, occurrence })) ?? [];
+      return matchedOccurrences.length ? [{ ...check, matchedOccurrences }] : [];
+    });
   }
   return [];
 }

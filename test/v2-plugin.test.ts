@@ -2371,6 +2371,44 @@ test("V2 omission sentinel reaches the legacy handoff executor without a replace
   } finally { cleanup?.(); }
 });
 
+test("documented V2 worker handoff passes the actual schema and transfers the real direct admission", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-direct-handoff-")), fixture = contextFixture();
+  let cleanup: (() => void) | void;
+  try {
+    await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    fixture.history.length = 0;
+    fixture.context.location.directory = directory;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator",
+      model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup({ ...fixture.context,
+      message: { list: async () => ({ data: fixture.history, cursor: { next: null } }) } });
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request", prompt: { text: "Create result.txt and validate it." } });
+    const call = async (name: string, input: Record<string, unknown>) => {
+      const tool = fixture.tools.find(tool => tool.name === `sortie_v010_${name}`) as any;
+      const args = { ...Object.fromEntries(Object.keys(tool.input.properties).map(key => [key, ""])), ...input };
+      const validate = new Ajv({ strict: false }).compile(tool.input);
+      assert.equal(validate(args), true, JSON.stringify(validate.errors));
+      return JSON.parse((await tool.execute(args, { sessionID: "root", callID: `call_${name}` })).content);
+    };
+    await call("start_mission", { requirements: ["Validated result.txt"] });
+    const direct = await call("plan_units", { executor: "self", units: [{ title: "Result", objective: "Create and validate result.txt",
+      read: [], write: ["result.txt"], validation: ["node check.mjs"] }] });
+    assert.equal(direct.status, "direct-unit-running");
+    const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE), before = await runtime.required("root");
+    const plan = fixture.tools.find(tool => tool.name === "sortie_v010_plan_units") as any;
+    assert.match(plan.input.properties.executor.description, /units=\"\" in V2/);
+    const handed = await call("plan_units", { executor: "worker", units: "", handoff_context: "Continue the same unit." });
+    const after = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.ok(handed.task);
+    assert.equal(after.runID, before.runID);
+    assert.equal(after.units[0]!.status, "pending", JSON.stringify(handed));
+    assert.equal(after.units[0]!.callID, before.units[0]!.callID, "reservation anchor is retained");
+    assert.equal(after.units[0]!.directHandoffs!.length, 1);
+    assert.equal(after.dispatched, 0, "handoff returns a Task; it does not fabricate its admission");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 lowers installed V1 Zod optional strings before provider submission and restores omission on execution", async () => {
   const fixture = contextFixture();
   const seen: Record<string, string>[] = [];

@@ -120,7 +120,7 @@ import { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "../core/ch
 import { FailureSwarmRuntime, type FailureSwarmRequest, type ReadOnlyDiagnosisDescriptor } from "../core/failure-swarm-runtime.js";
 import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
 import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
-import { GOAL_BOUND_METADATA_KEY, goalFingerprint, selectGoalDelivery, validGoalEvidence,
+import { GOAL_BOUND_METADATA_KEY, goalFingerprint, goalValidationCommand, selectGoalDelivery, validGoalEvidence,
   type GoalAcceptanceContract, type GoalDeliveryMode, type GoalEvidence, type GoalFlightState,
   type GoalStopReason, type GoalTerminalReceipt, type GoalValidationRetryAuthorization } from "../core/goal-bound.js";
 import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
@@ -1843,7 +1843,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (dockerTool && dockerRequest === undefined) return;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
-    const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true ||
+      await input.runtimeBridge?.ownsValidationRegistration?.(toolInput.sessionID) === true;
     const directory = dockerRequest?.cwd ?? resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
     // A check is proof only in its registered cwd. Snapshot the same admitted source
     // recipe at actual native start; never retrofit it to older external-cwd history.
@@ -1873,7 +1874,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const unitID = authorization.taskID;
     const repairResume = operatorContractRepairResumes.get(root);
     const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
-      (correction ? criterion.validation_command !== undefined && correction.commands.includes(criterion.validation_command) : criterion.validation_command === rawCommand) &&
+      (correction ? goalValidationCommand(goal, criterion) !== undefined && correction.commands.includes(goalValidationCommand(goal, criterion)!) : goalValidationCommand(goal, criterion) === rawCommand) &&
       criterion.expected_outcome === "pass") ?? [];
     const denyValidation = (reason: string): Error => {
       goalValidationDefects.add(toolInput.sessionID);
@@ -1898,7 +1899,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const requestedFull = criteria.some((criterion) => criterion.proof_scope === "requested-full");
       const coordinatorOwned = requestedFull && unitID !== undefined &&
         await input.runtimeBridge?.ownsCanonicalValidation?.(root, unitID, toolInput.sessionID,
-          correction ? criteria[0]!.validation_command! : rawCommand) === true;
+          correction ? goalValidationCommand(goal, criteria[0]!)! : rawCommand) === true;
       if (requestedFull && !coordinatorOwned) throw denyValidation("owner-mismatch: coordinator-routing-unavailable");
       const profile = loaded?.validationProfile ?? DEFAULT_PLUGIN_OPTIONS.validationProfile;
       const scope = coordinatorOwned ? "full" : profile === "fast" ? "static" : profile === "assurance" ? "related" : "targeted";
@@ -2885,7 +2886,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         Date.parse(execution.startedAt) >= Date.parse(check.startedAt));
       return laterFailure ? [] : observedHostGoalEvidence({ ...check, owner: "coordinator", outcome: "pass",
         immutableRef: goalFingerprint({ direct_check: check }),
-        correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID, commands: check.command } }, state, reservation.unitID);
+        correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID,
+          commands: check.matchedOccurrences.map(item => check.command[item.member]!) } }, state, reservation.unitID);
     });
     const hostEvidence = [...new Map((directEvidence ?? [...observedEvidence, ...inherited]).map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
@@ -8688,6 +8690,19 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionRoots.set(child, root);
       sessionTaskIDs.set(child, taskID);
       activateSession(child);
+    },
+    registerDirectValidation: async (root, actor, criterionID, command, registeredAt) => {
+      const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
+      if (!direct || direct.root !== root || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, direct.taskID, actor, command)) {
+        throw new Error("mission-validation-registration-owner-mismatch");
+      }
+      const ledger = await goalLedger(root), state = (await ledger.readGoal()).state;
+      const reservation = state.outstanding_reservations.find(item => item.unit_id === direct.taskID && item.session_id === root);
+      if (!reservation || state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
+      const prior = state.validation_registrations?.[criterionID];
+      if (prior?.unit_id === direct.taskID && prior.command === command && prior.registered_at === registeredAt) return;
+      await ledger.appendGoal({ kind: "goal.validation-registered", at: new Date().toISOString(), goal_id: state.goal_id,
+        reservation_id: reservation.reservation_id, unit_id: direct.taskID, criterion_id: criterionID, command, registered_at: registeredAt });
     },
     activateDirectUnit: (root, actor, prompt, handoffPath) => serializeChatTransition(actor, async () => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);

@@ -47,6 +47,11 @@ export interface ReviewerCorrectionCheck {
   readonly generatedInputs?: string;
 }
 
+/** Live projection of reusable occurrences; never rewrites the saved native check. */
+export interface DirectHandoffValidationCheck extends ReviewerCorrectionCheck {
+  readonly matchedOccurrences: readonly { readonly member: number; readonly occurrence: number }[];
+}
+
 /** Exact durable Mission Task claim, not authority supplied by a tool argument or Read. */
 export interface MissionImplementationAdmission {
   readonly runID: string;
@@ -83,13 +88,15 @@ export interface RuntimeBridge {
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
+  /** Native check capture only; does not grant Reviewer correction or artifact authority. */
+  ownsValidationRegistration?(childSessionID: string): Promise<boolean>;
   /** Existing controller executing a declared unit itself; never a fictitious native Task. */
   directMissionExecution?(sessionID: string): Promise<{ root: string; taskID: string; callID: string; startedAt: string } | undefined>;
   /** The same unit's original reservation and completed direct-author usage segments. */
   missionDispatchOrigin?(rootSessionID: string, taskID: string, callID: string): Promise<{
     callID: string; startedAt: string; segments: readonly { sessionID: string; startedAt: string; endedAt: string }[];
   } | undefined>;
-  missionHandoffChecks?(rootSessionID: string, taskID: string, callID: string): Promise<readonly ReviewerCorrectionCheck[]>;
+  missionHandoffChecks?(rootSessionID: string, taskID: string, callID: string): Promise<readonly DirectHandoffValidationCheck[]>;
   reviewerCorrectionValidationMembers?(childSessionID: string, command: string, directory?: string): Promise<string[] | undefined>;
   missionValidationDirectoryMatches?(rootSessionID: string, taskID: string, childSessionID: string,
     commands: readonly string[], directory: string): Promise<boolean>;
@@ -127,6 +134,7 @@ export interface RuntimeBridge {
     restoreAcceptanceRemediationBaseline(rootSessionID: string, request: { failedTaskID: string;
       criteria: readonly string[]; fingerprint: string; currentTaskIDs: readonly string[] }): Promise<void>;
     registerGoalDeclaration(rootSessionID: string, prompt: string, missionRevision?: boolean): Promise<void>;
+    registerDirectValidation(rootSessionID: string, actor: string, criterionID: string, command: string, registeredAt: string): Promise<void>;
     relinkRegisteredGoal(rootSessionID: string, request: { prompt: string; expectedFingerprint: string;
       registeredAt: string }): Promise<void>;
     proposalGoalBinding(rootSessionID: string): Promise<OperatorProposalGoalBinding>;

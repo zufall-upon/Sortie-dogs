@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
-import { parseOperatorPlan, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
+import { parseOperatorPlan, unitValidation, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand, shellCommandBase, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
@@ -969,7 +969,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       // Settled proof already records these commands. Do not fetch the same native
       // history again merely to render acceptance; freshness is checked separately.
       const proofs = unit.evidence ?? [];
-      if (unit.status === "succeeded" && unit.unit.validation.every(command => proofs.some(proof =>
+      if (unit.status === "succeeded" && unitValidation(unit).every(command => proofs.some(proof =>
         proof.execution.exit_code === 0 && proof.execution.outcome === "pass" &&
         proof.execution.command.includes(command)))) {
         return { ...provenance, status: "recorded-formal-evidence",
@@ -978,7 +978,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       }
       try {
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
-        return { ...provenance, status: "available", observations: await observe(unit.unit.validation, unit.childSessionID,
+        return { ...provenance, status: "available", observations: await observe(unitValidation(unit), unit.childSessionID,
           unit.directExecution ? Date.parse(unit.directExecution.startedAt) :
             unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
       } catch (error) {
@@ -1055,7 +1055,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
       units: run.units.map(unit => ({ id: unit.unit.id, title: unit.unit.title, status: unit.status,
         child_session_id: unit.childSessionID, result_class: unit.resultClass, evidence: unit.evidence,
         handoff_path: unit.handoffPath, operation_manifest_path: unit.manifestPath,
-         scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
+         scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unitValidation(unit),
          normal_remediation_used: unit.normalRemediationUsed ?? false,
          ...(unit.failure ? { failure: { outcome: unit.failure.outcome, exit_code: unit.failure.exitCode } } : {}),
          ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),

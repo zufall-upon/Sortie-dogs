@@ -135,6 +135,9 @@ interface UnitState {
     checks?: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
     validationRegisteredAt?: Readonly<Record<string, string>> };
   evidence: readonly GoalEvidence[];
+  /** Effective check registration, separate from the immutable admitted contract. */
+  validationRegistration?: { validation: readonly string[]; cwd: Readonly<Record<string, string>>;
+    registeredAt: Readonly<Record<string, string>>; checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
   /** Implementation in the existing controller session, without a native child Task. */
   directExecution?: {
     actor: string;
@@ -142,6 +145,7 @@ interface UnitState {
     finishedAt?: string;
     registrationRecovery?: { at: string; previousStatus: "failed" | "cancelled"; previousResultClass: string | null };
     checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
+    validation?: readonly string[];
     validationCwd?: Readonly<Record<string, string>>;
     validationRegisteredAt?: Readonly<Record<string, string>>;
   };
@@ -482,6 +486,26 @@ export function parseOperatorPlan(value: unknown, scopeFormat: "repository" | "e
   })));
   expandGoalDeclaration(value.goal_declaration);
   return { ...value, acceptance: normalizeAcceptanceCriteria(value.acceptance) } as unknown as OperatorPlan;
+}
+
+export const unitValidation = (unit: OperatorState["units"][number]): readonly string[] =>
+  unit.validationRegistration?.validation ?? unit.unit.validation;
+export const unitValidationCwd = (unit: OperatorState["units"][number]): Readonly<Record<string, string>> | undefined =>
+  unit.validationRegistration?.cwd ?? unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
+/** Strip only the owning unit's registration fields when comparing its frozen plan. */
+export function directValidationRegistrationPlanHash(state: OperatorState, plan: OperatorPlan, unitID: string): string {
+  const original = state.units.find(item => item.unit.id === unitID)?.unit;
+  const proposed = plan.units.find(item => item.id === unitID);
+  const criteria = plan.goal_declaration.criteria;
+  const goal = Array.isArray(criteria) ? { ...plan.goal_declaration, criteria: criteria.map(criterion =>
+    record(criterion) && criterion.criterion_id === unitID && criterion.validation_command === proposed?.validation.at(-1)
+      ? { ...criterion, validation_command: original?.validation.at(-1) } : criterion) } : plan.goal_declaration;
+  return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
+    const prior = state.units[index]?.unit;
+    if (!prior || prior.id !== unitID || next.id !== unitID) return next;
+    const { validation_cwd: _cwd, ...rest } = next;
+    return { ...rest, validation: prior.validation, ...(prior.validation_cwd ? { validation_cwd: prior.validation_cwd } : {}) };
+  }) }));
 }
 
 /** Root-owned durable queue. It never executes code, changes acceptance, or accepts a candidate. */
@@ -929,26 +953,22 @@ export class OperatorRuntime {
       if (state.runID !== runID || state.phase !== "running" || active.length !== 1 || !unit?.directExecution ||
           unit.directExecution.actor !== actor || unit.directExecution.finishedAt || unit.reviewerCorrection ||
           plan.units.length !== state.units.length) throw new Error("mission-validation-registration-owner-mismatch");
-      const original = { ...plan, units: plan.units.map((next, i) => {
-        const prior = state.units[i]!.unit;
-        if (prior.validation_cwd) return { ...next, validation_cwd: prior.validation_cwd };
-        const { validation_cwd: _cwd, ...rest } = next;
-        return rest;
-      }) };
-      if (hash(JSON.stringify(original)) !== state.planHash || plan.units.some((next, i) =>
-          next.id !== unit.unit.id && JSON.stringify(next.validation_cwd) !== JSON.stringify(state.units[i]!.unit.validation_cwd))) {
+      if (directValidationRegistrationPlanHash(state, plan, unit.unit.id) !== state.planHash) {
         throw new Error("mission-validation-registration-contract-mismatch");
       }
-      const cwd = plan.units.find(next => next.id === unit.unit.id)!.validation_cwd ?? {};
-      const previousCwd = unit.directExecution.validationCwd ?? unit.unit.validation_cwd ?? {};
-      if (JSON.stringify(cwd) !== JSON.stringify(previousCwd)) {
+      const next = plan.units.find(next => next.id === unit.unit.id)!;
+      const validation = next.validation.map(normalizeCommand), cwd = next.validation_cwd ?? {};
+      const previousValidation = unitValidation(unit), previousCwd = unitValidationCwd(unit) ?? {};
+      if (JSON.stringify(validation) !== JSON.stringify(previousValidation) || JSON.stringify(cwd) !== JSON.stringify(previousCwd)) {
         // Keep old checks as history, never attach a new recipe to their old successes.
         const registeredAt = { ...unit.directExecution.validationRegisteredAt }, now = new Date().toISOString();
-        for (const command of unit.unit.validation.map(normalizeCommand)) {
-          if (resolve(this.projectRoot, cwd[command] ?? ".") !== resolve(this.projectRoot, previousCwd[command] ?? ".")) {
+        for (const command of validation) {
+          if (previousValidation.filter(item => item === command).length !== validation.filter(item => item === command).length ||
+              resolve(this.projectRoot, cwd[command] ?? ".") !== resolve(this.projectRoot, previousCwd[command] ?? ".")) {
             registeredAt[command] = now;
           }
         }
+        unit.validationRegistration = { validation, cwd, registeredAt, checks: unit.validationRegistration?.checks ?? [] };
         unit.directExecution.validationCwd = cwd;
         unit.directExecution.validationRegisteredAt = registeredAt;
         await this.save(state);
@@ -998,9 +1018,9 @@ export class OperatorRuntime {
     return this.serial(root, async () => {
       const state = await this.required(root);
       const unit = state.units.find(item => /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-      const execution = unit?.reviewerCorrection ?? unit?.directExecution;
+      const execution = unit?.reviewerCorrection ?? unit?.directExecution ?? unit?.validationRegistration;
       if (!unit || !execution || unit.callID !== check.dispatchCallID || unit.childSessionID !== check.childSessionID ||
-          (unit.reviewerCorrection?.author ?? unit.directExecution?.actor) !== check.childSessionID) throw new Error("mission-review-correction-check-owner-mismatch");
+          (unit.reviewerCorrection?.author ?? unit.directExecution?.actor ?? unit.childSessionID) !== check.childSessionID) throw new Error("mission-review-correction-check-owner-mismatch");
       const checks = execution.checks ??= [];
       if (checks.some(item => item.callID === check.callID)) return;
       checks.push(structuredClone(check));
@@ -1063,9 +1083,9 @@ export class OperatorRuntime {
           plan.units.length !== 1 || plan.acceptance.length !== previous.acceptance.length ||
           previous.acceptance.some((text, i) => text !== plan.acceptance[i]) ||
           JSON.stringify(plan.acceptance_proof) !== JSON.stringify(previous.acceptanceProof) ||
-          JSON.stringify(plan.units[0]!.validation) !== JSON.stringify(previous.units.flatMap(item => item.unit.validation)) ||
+          JSON.stringify(plan.units[0]!.validation) !== JSON.stringify(previous.units.flatMap(unitValidation)) ||
           JSON.stringify(plan.units[0]!.validation_cwd ?? {}) !== JSON.stringify(Object.assign({},
-            ...previous.units.map(item => item.directExecution?.validationCwd ?? item.unit.validation_cwd ?? {}))) ||
+            ...previous.units.map(item => unitValidationCwd(item) ?? {}))) ||
           JSON.stringify(plan.source_refs) !== JSON.stringify(previous.sourceRefs) ||
           plan.units.some(unit => unit.write.some(path => !this.pathAuthorized(path, mission.reviewerCorrection!.writeUnion))))) {
         throw new Error("mission-review-correction-contract-mismatch");
@@ -1572,15 +1592,16 @@ export class OperatorRuntime {
         throw new Error("mission-direct-handoff-unavailable");
       }
       await this.verifyControls(unit);
-      const segment = { ...structuredClone(unit.directExecution), callID: unit.callID, handedOffAt: new Date().toISOString() };
+      const segment = { ...structuredClone(unit.directExecution), validation: unitValidation(unit),
+        callID: unit.callID, handedOffAt: new Date().toISOString() };
       // Keep the original controls immutable. Publish continuation context and the new
       // Task reference together in the atomic run save, so a crash has no half-updated pins.
       const continuation = { actor, unit_id: unit.unit.id, at: segment.handedOffAt,
-        instruction: "Continue existing changes and remaining action. The authoritative handoff retains the exact original requirements. Reuse current source-bound checks; inspect missing facts only. Handoff itself is not validation.",
+        instruction: "Continue existing changes and remaining action. The authoritative handoff retains the exact original requirements. This continuation's validation/validation_cwd is the effective registration, superseding only the frozen check recipe. Reuse current source-bound checks; inspect missing facts only. Handoff itself is not validation.",
         continuity: context.continuity,
         checks: segment.checks.map(({ callID, command, directory, exitCode, startedAt, endedAt }) =>
           ({ callID, command, directory, exitCode, startedAt, endedAt })),
-        validation_cwd: segment.validationCwd ?? unit.unit.validation_cwd, details_ref: this.statePath(root) };
+        validation: segment.validation, validation_cwd: unitValidationCwd(unit), details_ref: this.statePath(root) };
       unit.task = { ...unit.task, prompt: `${unit.task.prompt.replace(/\ndirect_handoff: .+$/mu, "")}\ndirect_handoff: ${JSON.stringify(continuation)}` };
       (unit.directHandoffs ??= []).push(segment);
       delete unit.directExecution;
@@ -1696,7 +1717,7 @@ export class OperatorRuntime {
   private async captureContractRepair(state: OperatorState, unit: UnitState, error: OperatorContractError,
     command: string): Promise<OperatorContractRepairState> {
     const normalized = normalizeCommand(command);
-    const commandIndex = unit.unit.validation.map(normalizeCommand).indexOf(normalized);
+    const commandIndex = unitValidation(unit).map(normalizeCommand).indexOf(normalized);
     if (commandIndex < 0) throw new Error("operator-contract-repair-validation-command-missing");
     const paths = [...new Set(error.diagnostics.flatMap(item => item.repair_paths ?? []))].sort();
     let files: OperatorContractRepairFileIdentity[] = [];
@@ -1710,7 +1731,7 @@ export class OperatorRuntime {
     return { code: "operator-git-change-outside-write-union", unit_id: unit.unit.id,
       diagnostics: structuredClone(error.diagnostics), diagnostics_truncated: error.diagnostics_truncated,
       repair_generation: 0, mode, repair_fingerprint: repairFingerprint, files,
-      remaining_validation: unit.unit.validation.slice(commandIndex).map(normalizeCommand) };
+      remaining_validation: unitValidation(unit).slice(commandIndex).map(normalizeCommand) };
   }
   recordContractRepair(root: string, actor: string, error: OperatorContractError, command: string): Promise<OperatorState> {
     return this.serial(root, async () => {
@@ -2369,7 +2390,7 @@ export class OperatorRuntime {
         id: unit.unit.id, status: unit.status, child_session_id: unit.childSessionID, result_class: unit.resultClass,
          task_ref: unit.status === "pending" ? (unit.repairValidation === null ? this.workerTask(state, unit).prompt : this.repairWorkerTask(state, unit).prompt) : null,
         handoff_path: unit.handoffPath, operation_manifest_path: unit.manifestPath,
-         scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unit.unit.validation,
+          scope_read: unit.unit.read, scope_write: unit.unit.write, validation: unitValidation(unit),
          acceptance_indices: unit.unit.acceptance_indices,
          normal_remediation_used: unit.normalRemediationUsed ?? false,
          ...(unit.terminalRescue ? { terminal_rescue: { attempt_id: unit.terminalRescue.attempt_id,
@@ -2396,7 +2417,7 @@ export class OperatorRuntime {
       unit_id: unit.unit.id, task_id: /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1],
       project_root: this.projectRoot, handoff_path: this.controlReference(unit.handoffPath), operation_manifest: this.controlReference(unit.manifestPath),
       objective: unit.unit.objective, read: unit.unit.read, write: unit.unit.write,
-      validation: unit.unit.validation, acceptance: state.acceptance,
+      validation: unitValidation(unit), acceptance: state.acceptance,
       ...(unit.repairValidation === null ? {} : { validation_only: true }),
     })}\nThis is the durable assignment for this same Worker, including after compaction or reload. ` +
       "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest using these project-relative paths without prepending project_root, and inspect the actual diff and outputs before claiming no edits or replaying work. " +
