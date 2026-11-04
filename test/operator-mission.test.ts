@@ -8,7 +8,8 @@ import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccept
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { missionCoordinatorContent, missionOperatorContent, missionWorkerContent } from "../dist/runtime-mission-assets.js";
-import { terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
+import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
+import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
@@ -65,6 +66,96 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+test("compaction model views retain captured mission evidence references without copying snapshot paths", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+  const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  await missions.capture("root", { id: "original-with-attachment", text: "Fix the result; preserve the original attachment and unmet requirements." });
+  const started = await missions.start("root", ["Fix the result", "Preserve the original attachment and unmet requirements"]);
+  const run = await operators.prepareMission("root", missionPlan(started, [unit]));
+  const paths = Array.from({ length: 10_000 }, (_, index) => `generated/protected/${index}/${"x".repeat(90)}.txt`);
+  const evidence = { evidence_id: "proof-1", identity: { source: "source-hash", candidate: "candidate-hash", fixture: "fixture" },
+    execution: { command: ["node check.mjs"], exit_code: 1, outcome: "fail", started_at: "start", ended_at: "end", units: ["unit-1"] },
+    proof_scope: "requested-full", protected_binding: { manifest_path: "fixture-manifest.json", manifest_hash: "manifest-hash",
+      source_policy: "declared-paths-v1", source_paths: paths, candidate_paths: [],
+      freshness: { protected_paths: paths, scratch_paths: [], environment: { NODE: "fixture" } } } };
+  run.units[0]!.evidence = [evidence as never];
+  const check = { callID: "check", dispatchCallID: "dispatch", childSessionID: "worker", command: ["node check.mjs"],
+    startedAt: "start", endedAt: "end", exitCode: 1, source: "source-hash", candidate: "candidate-hash", fresh: false,
+    binding: evidence.protected_binding };
+  run.units[0]!.directExecution = { actor: "coordinator", startedAt: "start", checks: [check as never] };
+  run.units[0]!.reviewerCorrection = { author: "worker", reviewIdentity: "review", writeUnion: ["src"], checks: [check as never] };
+  run.units[0]!.validationRegistration = { validation: ["node check.mjs"], cwd: {}, registeredAt: {}, checks: [check as never] };
+  run.units[0]!.directHandoffs = [{ actor: "coordinator", startedAt: "start", callID: "handoff", handedOffAt: "end", checks: [check as never] }];
+  run.units[0]!.status = "failed";
+  run.units[0]!.childSessionID = "worker";
+  run.phase = "awaiting-decision";
+  await writeFile(operators.statePath("root"), JSON.stringify(run));
+  const mission = await missions.update("root", item => { item.runID = run.runID; item.coordinator = "coordinator"; item.phase = "running"; });
+  const before = await readFile(operators.statePath("root"), "utf8");
+  assert.ok(Buffer.byteLength(before) > 1024 * 1024, "the cold persisted execution exceeds the former size limit");
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id,
+      agent: path.id === "root" ? "dog-operator" : "dogs-coordinator", ...(path.id === "root" ? {} : { parentID: "root" }) } }),
+    messages: async () => ({ data: [] }), children: async () => ({ data: [] }),
+  } } } as never);
+  const raw = missionPacket(mission, run, false) as any;
+  for (const [sessionID, prefix, suffix] of [
+    ["root", "Durable registered operator checkpoint: ", ". This reference, not summary prose, selects current work."],
+    ["coordinator", "Mission continuation: ", ". Continue in this same Coordinator."],
+  ]) {
+    const output: { context?: string[]; prompt?: string } = {};
+    await hooks["experimental.session.compacting"]!({ sessionID }, output);
+    const text = output.context!.find(item => item.startsWith(prefix))!;
+    assert.ok(text, `missing ${sessionID} checkpoint`);
+    const projected = JSON.parse(text.slice(prefix.length, text.indexOf(suffix, prefix.length)));
+    assert.ok(text.length < JSON.stringify(raw).length / 10, `${sessionID}: the snapshot recipe is not model context`);
+    assert.deepEqual(projected.requirements, raw.requirements);
+    assert.deepEqual(projected.original_request_refs, ["user:original-with-attachment"]);
+    assert.equal(projected.next_action, raw.next_action);
+    assert.equal(projected.units[0].status, "failed");
+    assert.equal(projected.units[0].child_session_id, "worker");
+    const { protected_binding: _binding, ...measured } = evidence;
+    assert.deepEqual(projected.units[0].evidence[0], { ...measured,
+      protected_binding_ref: { manifest_path: "fixture-manifest.json", manifest_hash: "manifest-hash", source_policy: "declared-paths-v1" } },
+      "command, failure, proof identity and coverage remain exactly as measured");
+    assert.equal(projected.units[0].evidence_details_ref.path, operators.statePath("root"));
+    assert.equal(projected.units[0].evidence_details_ref.run_id, run.runID);
+    assert.equal(projected.units[0].evidence_details_ref.unit_id, "unit-1");
+  }
+  const v2Hooks = new Map<string, (event: any) => Promise<void>>(), storage = new Map<string, unknown>();
+  const v2 = { location: { directory }, options: {}, app: { version: "2.2.5" },
+    storage: { get: async (key: string) => structuredClone(storage.get(key)),
+      set: async (key: string, value: unknown) => { storage.set(key, structuredClone(value)); } },
+    event: { subscribe: async function* () {} },
+    tool: { transform: async () => ({ dispose() {} }), hook: async () => ({ dispose() {} }) },
+    permission: { hook: async () => ({ dispose() {} }) },
+    session: { get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID,
+      agent: sessionID === "root" ? "dog-operator" : "dogs-coordinator", ...(sessionID === "root" ? {} : { parentID: "root" }) }),
+      context: async () => [],
+      hook: async (name: string, callback: (event: any) => Promise<void>) => { v2Hooks.set(name, callback); return { dispose() {} }; } },
+  } as never;
+  const cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup(v2);
+  try {
+    const event = { sessionID: "root", agent: "dog-operator", messages: [], system: [] as any[], tools: {} };
+    await v2Hooks.get("compaction")!(event);
+    const text = event.system.find(item => item.text.startsWith("Durable registered operator checkpoint: "))?.text as string;
+    assert.ok(text && text.length < JSON.stringify(raw).length / 10, "the public V2 compaction hook receives the compact checkpoint");
+    assert.match(text, /proof-1/);
+    assert.doesNotMatch(text, /generated\/protected\/0\//);
+  } finally { cleanup?.(); }
+  assert.equal(await readFile(operators.statePath("root"), "utf8"), before, "compaction must not rewrite evidence or freshness");
+  const loaded = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+  assert.deepEqual(loaded.units[0]!.evidence, [evidence], "cold recovery retains the complete freshness recipe");
+  assert.deepEqual(loaded.units[0]!.directExecution!.checks, [check]);
+  assert.deepEqual(loaded.units[0]!.reviewerCorrection!.checks, [check]);
+  assert.deepEqual(loaded.units[0]!.validationRegistration!.checks, [check]);
+  assert.deepEqual(loaded.units[0]!.directHandoffs![0]!.checks, [check]);
+  const invalid = { ...run, decision: "x".repeat(1024 * 1024 + 1) };
+  await writeFile(operators.statePath("root"), JSON.stringify(invalid));
+  await assert.rejects(new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), /operator-state-too-large/,
+    "oversized non-snapshot execution fields still receive the existing error");
+}));
 
 test("Operator strategy distinguishes failed methods from required outcomes without adding an approval ritual", () => {
   const policy = missionOperatorContent(V010_RUNTIME_PROFILE, "test");

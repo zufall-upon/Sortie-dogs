@@ -612,7 +612,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // not by resetting the goal budget. This checkpoint grants no dispatch itself.
         if (mission && (!["completed", "cancelled"].includes(mission.phase) ||
             (mission.phase === "cancelled" && run))) {
-          return JSON.stringify(missionPacket(mission, run, false));
+          return JSON.stringify(compactMissionEvidence(missionPacket(mission, run, false), run, root));
         }
         return await operators.continuationCheckpoint(root) ?? await proposals.continuationCheckpoint(root);
       },
@@ -4585,7 +4585,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if ((await identity(request.sessionID)).role === "dog-operator") {
           const mission = await missions.read(root);
           if (mission?.coordinator === request.sessionID) {
-            (output.context ??= []).push(`Mission continuation: ${JSON.stringify(missionPacket(mission, await operators.read(root), false))}. ` +
+            const run = await operators.read(root);
+            (output.context ??= []).push(`Mission continuation: ${JSON.stringify(compactMissionEvidence(missionPacket(mission, run, false), run, root))}. ` +
               `Continue in this same Coordinator. Use ${status} or ${next}; retain original requirements and cumulative budget. No proposal/approval phase.`);
             return;
           }

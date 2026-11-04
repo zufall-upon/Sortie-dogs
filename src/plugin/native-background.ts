@@ -1,4 +1,6 @@
 import type { OpenCodeV2Context } from "./v2.js";
+import type { GoalEvidence } from "../core/goal-bound.js";
+import { missionEvidenceView } from "./mission-review.js";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -20,6 +22,26 @@ export interface NativeBackgroundDispatch {
   settled?: boolean;
   /** Host-reconciled output for this exact native invocation, not another completion prompt. */
   result?: string;
+}
+
+/** Project the captured Coordinator result, not today's potentially different run or evidence. */
+function modelResult(dispatch: NativeBackgroundDispatch, result: string): string {
+  if (!object(dispatch.owner) || !object(dispatch.owner.profile) || dispatch.owner.profile.mission !== true) return result;
+  let packet: unknown;
+  try { packet = JSON.parse(result); } catch { return result; }
+  if (!object(packet) || typeof packet.mission_id !== "string" || typeof packet.run_id !== "string" || !Array.isArray(packet.units)) return result;
+  let changed = false;
+  const units = packet.units.map(unit => {
+    if (!object(unit) || typeof unit.id !== "string" || !Array.isArray(unit.evidence) ||
+        !unit.evidence.every((item: unknown) => object(item) && (item.protected_binding === undefined || object(item.protected_binding))) ||
+        !unit.evidence.some((item: ObjectValue) => object(item.protected_binding))) return unit;
+    changed = true;
+    return { ...unit, evidence: missionEvidenceView(unit.evidence as GoalEvidence[]),
+      evidence_details_ref: { storage: "sortie-dogs.v010", key: key(dispatch.parent), call_id: dispatch.callID,
+        run_id: packet.run_id, unit_id: unit.id, field: "result.units[].evidence",
+        omitted: "captured host snapshot recipe; the original result remains in this native background dispatch" } };
+  });
+  return changed ? JSON.stringify({ ...packet, units }) : result;
 }
 
 /** Lifecycle transport for native Jobs, not a scheduler. The host owns execution and wakeup. */
@@ -125,7 +147,7 @@ export class NativeBackgroundLifecycle {
           const recovered = await this.recoverResult(parent, dispatch.callID, dispatch.child, dispatch.promptID);
           if (recovered !== undefined) { dispatch.result = recovered; changed = true; }
         }
-        if (dispatch.result !== undefined) additions.set(text, { callID: dispatch.callID, text: dispatch.result });
+        if (dispatch.result !== undefined) additions.set(text, { callID: dispatch.callID, text: modelResult(dispatch, dispatch.result) });
       }
       if (changed) await this.write(parent, dispatches);
       const projected = new Set(messages.filter(object).flatMap(message => object(message.metadata) &&
