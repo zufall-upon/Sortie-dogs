@@ -185,6 +185,8 @@ export interface RuntimeBridge {
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
+    missionDirectTerminal(rootSessionID: string, dispatch: { taskID: string; callID: string; actor: string },
+      writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
     restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
     activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
       admission: MissionImplementationAdmission): Promise<void>;

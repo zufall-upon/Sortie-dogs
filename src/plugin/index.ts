@@ -8262,6 +8262,49 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       }
     },
   };
+  // Both direct and Worker retries must prove the exact reservation settled and its writer released.
+  // A direct actor is not a native child Task and must not acquire a fabricated terminal record.
+  async function missionDispatchWriterReleased(root: string, taskID: string, callID: string, actor: string,
+    writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }> {
+    const snapshot = await (await goalLedger(root)).readGoal();
+    const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, taskID, callID);
+    const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: taskID, call_id: origin?.callID ?? callID });
+    if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
+        !snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.goal_id === snapshot.state.goal_id &&
+          event.unit_id === taskID && event.reservation_id === reservationID)) {
+      return { ready: false, reason: "exact_dispatch_settlement_missing" };
+    }
+    const active = activeSessions.get(actor), authorization = sessionAuthorizations.get(actor);
+    if (authorization && (authorization.rootSessionID !== root || authorization.taskID !== taskID ||
+        authorization.dispatchCallID !== callID)) return { ready: false, reason: "writer_owned_by_other_dispatch" };
+    if (active?.inFlightCalls.size) {
+      const response = await input.client?.session?.messages?.({ path: { id: actor }, query: { directory: input.directory } }).catch(() => undefined);
+      const history = isRecord(response) && Array.isArray(response.data) ? response.data : undefined;
+      if (!history) return { ready: false, reason: "tool_terminal_records_unavailable" };
+      for (const pendingID of active.inFlightCalls) {
+        const parts = history.flatMap(message => isRecord(message) && isRecord(message.info) &&
+          message.info.sessionID === actor && Array.isArray(message.parts) ? message.parts : [])
+          .filter(part => isRecord(part) && part.type === "tool" && part.callID === pendingID);
+        if (parts.length !== 1 || !isRecord(parts[0]) || !isRecord(parts[0].state) ||
+            !["completed", "error"].includes(String(parts[0].state.status))) return { ready: false, reason: "tool_dispatch_active_or_unproven" };
+      }
+      active.inFlightCalls.clear();
+    }
+    const released = JSON.parse(await releaseWriteGate(actor));
+    if (released.status === "denied") return { ready: false, reason: released.reason };
+    if (active) active.released = true;
+    const scopeRoot = await durableScopeRoot(project?.root ?? input.directory);
+    if (scopeRoot === undefined) return active?.parallel === "valid"
+      ? { ready: false, reason: "writer_registry_unavailable" } : { ready: true };
+    try {
+      const local = writeScopes.map(path => relative(project?.root ?? input.directory,
+        resolve(project?.root ?? input.directory, normalizeManifestScope(path).path)).replaceAll("\\", "/"))
+        .filter(path => path !== ".." && !path.startsWith("../") && !isAbsolute(path));
+      const scope = normalizeWorktreeScope({ read: [], write: local });
+      return await new ScopeLeaseRegistry(scopeRoot).hasConflictingLease(scope)
+        ? { ready: false, reason: "writer_lease_owned_elsewhere" } : { ready: true };
+    } catch { return { ready: false, reason: "writer_registry_unavailable" }; }
+  }
   input.runtimeBridge?.connected?.({
     renderReturnReport: async (root, text, expectedReceipt, missionReview, reviewEvidenceGaps) => {
       let rendered: string | undefined;
@@ -8811,49 +8854,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         throw new Error("mission-activation-grant-stale");
       }
     }),
-      missionWorkerTerminal: async (root, terminal, writeScopes) => {
-        const childSessionID = terminal.childSessionID;
-        const snapshot = await (await goalLedger(root)).readGoal();
-        const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, terminal.taskID, terminal.callID);
-        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: terminal.taskID, call_id: origin?.callID ?? terminal.callID });
-        if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID) ||
-            !snapshot.records.some(({ event }) => event.kind === "unit.settled" && event.goal_id === snapshot.state.goal_id &&
-              event.unit_id === terminal.taskID && event.reservation_id === reservationID)) {
-          return { ready: false, reason: "exact_dispatch_settlement_missing" };
-        }
-        const active = activeSessions.get(childSessionID), authorization = sessionAuthorizations.get(childSessionID);
-        if (authorization && (authorization.rootSessionID !== root || authorization.taskID !== terminal.taskID ||
-            authorization.dispatchCallID !== terminal.callID)) {
-          return { ready: false, reason: "writer_owned_by_other_dispatch" };
-        }
-        if (active?.inFlightCalls.size) {
-          const response = await input.client?.session?.messages?.({ path: { id: childSessionID }, query: { directory: input.directory } }).catch(() => undefined);
-          const history = isRecord(response) && Array.isArray(response.data) ? response.data : undefined;
-          if (!history) return { ready: false, reason: "tool_terminal_records_unavailable" };
-          for (const callID of active.inFlightCalls) {
-            const parts = history.flatMap(message => isRecord(message) && isRecord(message.info) &&
-              message.info.sessionID === childSessionID && Array.isArray(message.parts) ? message.parts : [])
-              .filter(part => isRecord(part) && part.type === "tool" && part.callID === callID);
-            if (parts.length !== 1 || !isRecord(parts[0]) || !isRecord(parts[0].state) ||
-                !["completed", "error"].includes(String(parts[0].state.status))) return { ready: false, reason: "tool_dispatch_active_or_unproven" };
-          }
-          active.inFlightCalls.clear();
-        }
-        const released = JSON.parse(await releaseWriteGate(childSessionID));
-        if (released.status === "denied") return { ready: false, reason: released.reason };
-        if (active) active.released = true;
-        const scopeRoot = await durableScopeRoot(project?.root ?? input.directory);
-        if (scopeRoot === undefined) return active?.parallel === "valid"
-          ? { ready: false, reason: "writer_registry_unavailable" } : { ready: true };
-        try {
-          const local = writeScopes.map(path => relative(project?.root ?? input.directory,
-            resolve(project?.root ?? input.directory, normalizeManifestScope(path).path)).replaceAll("\\", "/"))
-            .filter(path => path !== ".." && !path.startsWith("../") && !isAbsolute(path));
-          const scope = normalizeWorktreeScope({ read: [], write: local });
-          return await new ScopeLeaseRegistry(scopeRoot).hasConflictingLease(scope)
-            ? { ready: false, reason: "writer_lease_owned_elsewhere" } : { ready: true };
-        } catch { return { ready: false, reason: "writer_registry_unavailable" }; }
-      },
+      missionWorkerTerminal: (root, terminal, writeScopes) =>
+        missionDispatchWriterReleased(root, terminal.taskID, terminal.callID, terminal.childSessionID, writeScopes),
+      missionDirectTerminal: (root, dispatch, writeScopes) =>
+        missionDispatchWriterReleased(root, dispatch.taskID, dispatch.callID, dispatch.actor, writeScopes),
     expandMissionWriteGate,
     registerGoalDeclaration: async (root, prompt, missionRevision) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");

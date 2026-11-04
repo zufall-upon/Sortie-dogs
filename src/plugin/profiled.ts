@@ -888,7 +888,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           : undefined;
         const attemptFailure = result.disposition === "cancelled"
           ? { category: "cancellation" as const, code: "native-task-cancelled" }
-          : result.resultClass === "acceptance" && result.failure?.outcome === "fail" && observed.outcome === "completed"
+          : result.resultClass === "acceptance" && result.failure?.outcome === "fail" &&
+              (observed.outcome === "completed" || !!unit.directExecution?.finishedAt)
             ? { category: "implementation" as const,
                 code: `validation-failed:${result.failure.exitCode ?? "unknown"}` }
             : result.resultClass === "process-defect"
@@ -1015,9 +1016,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           unit.childSessionID !== attempt.childSessionID || /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] !== attempt.taskID) {
         return { status: "non_rescue", reason: "terminal_identity_conflict" };
       }
-      if (unit.directExecution) return unit.directExecution.finishedAt && unit.status !== "running"
-        ? { status: "ready", child: unit.directExecution.actor }
-        : { status: "non_rescue", reason: "direct_unit_still_running" };
+      if (unit.directExecution) {
+        if (!unit.directExecution.finishedAt || unit.status === "running") return { status: "non_rescue", reason: "direct_unit_still_running" };
+        if (unit.directExecution.actor !== attempt.childSessionID) return { status: "non_rescue", reason: "terminal_identity_conflict" };
+        if (checkLiveOutcome) {
+          try { await control.assertActiveGoal(root, await operators.completionGoalFingerprint(run)); }
+          catch { return { status: "non_rescue", reason: "goal_not_active" }; }
+          const budget = await control.currentBudget(root, { reconcileUsage: false });
+          if (!budget || budget.reserved_units !== 0) return { status: "non_rescue", reason: "goal_reservation_unsettled" };
+          const released = await control.missionDirectTerminal(root, { taskID: attempt.taskID, callID: attempt.callID,
+            actor: unit.directExecution.actor }, unit.unit.write);
+          if (!released.ready) return { status: "non_rescue", reason: released.reason ?? "writer_not_released" };
+        }
+        return { status: "ready", child: unit.directExecution.actor };
+      }
       const observed = await observeWorkerTerminal(mission, run, attempt, !checkLiveOutcome);
       if (observed.status !== "ready") return observed;
       try {
@@ -1211,7 +1223,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           run.units[0]?.status === "failed" && run.units[0]?.resultClass === "acceptance" &&
           run.units[0]?.failure?.outcome === "fail" && !run.units[0]?.normalRemediationUsed) {
         return { ...packet, task: missions.task(mission),
-          next_action: `Fast-lane: declared validation failed. After the Worker returns, for the same scope and command ` +
+          next_action: `Fast-lane: declared validation failed. After the ${run.units[0]?.directExecution ? "direct execution settles" : "Worker returns"}, for the same scope and command ` +
             `call ${retryMissionUnit} once, then ${startDirectUnit} to correct and formally validate here when you have the context; ` +
             `delegate its Worker only when useful. For a changed contract use ${planUnits} with executor=self, reason and one ` +
             `corrective unit. The Coordinator remains available for actual coordination. Keep cumulative budget and failed history.` };
@@ -2197,8 +2209,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const unit = run.units.find(item => item.directExecution?.actor === actor && item.status === "running")!;
         const taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)![1]!;
         await missions.update(root, mission => {
+          const previous = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.unitID === unit.unit.id);
           (mission.attempts ??= []).push({ attemptID: randomUUID(), runID: run.runID, unitID: unit.unit.id,
-            taskID, kind: "direct_execution", status: "dispatched", callID: unit.callID!, childSessionID: actor });
+            taskID, kind: "direct_execution", ...(unit.normalRemediationUsed ? { normalRemediation: true } : {}),
+            ...(previous ? { predecessorAttemptID: previous.attemptID } : {}), status: "dispatched", callID: unit.callID!, childSessionID: actor });
         });
         direct = await directExecution(actor);
       }
@@ -2214,7 +2228,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         "mission-run-registration-incomplete: retry plan_units with the same plan to finish goal registration and Mission binding; no unit admitted");
       await operators.verifyContinuityControls(run);
     }
-    async function assertDirectPlanningQuiescent(actor: string, planningCallID?: string) {
+    async function assertDirectPlanningQuiescent(actor: string, planningCallID?: string, planningTool = planUnits) {
       await control!.assertDirectUnitQuiescent(actor);
       // Cold hook state is not proof. Only the exact current planner may be pending;
       // a completed background launch or another Task remains an active/unproven writer.
@@ -2228,7 +2242,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         for (const part of message.parts) {
           if (!record(part) || typeof part.type !== "string") throw new Error("mission-replan-terminal-unreconciled:tool_terminal_records_unavailable");
           if (part.type !== "tool") continue;
-          if (part.callID === planningCallID && planningCallID && part.tool === planUnits) continue;
+          if (part.callID === planningCallID && planningCallID && part.tool === planningTool) continue;
           if (typeof part.callID !== "string") throw new Error("mission-replan-terminal-unreconciled:tool_identity_unavailable");
           const prior = calls.get(part.callID);
           if (prior && prior.tool !== part.tool) throw new Error("mission-replan-terminal-unreconciled:tool_identity_conflict");
@@ -2474,38 +2488,55 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         return JSON.stringify({ status: "recorded", consultation: consultation.consultations?.at(-1) });
       } };
     const retryMissionUnit = `${profile.toolPrefix}retry_mission_unit`, rescueMissionUnit = `${profile.toolPrefix}rescue_mission_unit`;
-    tools[retryMissionUnit] = { description: "Owning Coordinator or Fast-lane Operator: after a host-classified Worker validation failure, prepare one same-scope remediation. Use start_direct_unit to correct and formally validate in this session, or dispatch the returned Worker when useful. Native child termination, released reservation/writer, and remaining cumulative unit budget are required; acceptance and scope remain intact.",
+    tools[retryMissionUnit] = { description: "Owning Coordinator or Fast-lane Operator: after a host-classified direct or Worker validation failure, prepare one same-scope remediation. Use start_direct_unit to correct and formally validate in this session, or dispatch the returned Worker when useful. Exact settlement, a quiescent and released writer, and remaining cumulative unit budget are required; acceptance and scope remain intact.",
       args: { unit_id: stringSchema }, execute: async (args, context) => {
-        const { root, mission } = await missionAuthority(context.sessionID);
-        if (context.sessionID !== (mission.coordinator ?? root) ||
-            (await identity(context.sessionID)).role !== (mission.coordinator ? "dog-operator" : "dog-coordinator")) {
-          throw new Error("mission-remediation-coordinator-required");
-        }
-        const run = await operators.required(root), unitID = String(args.unit_id);
-        const unit = run.units.find(item => item.unit.id === unitID);
-        const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.unitID === unitID);
-        if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
-            unit.normalRemediationUsed || !attempt || attempt.kind !== "implementation" || attempt.status !== "failed" ||
-            attempt.failure?.category !== "implementation") throw new Error("operator-mission-normal-remediation-unavailable");
-        const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
-        if (terminal.status !== "ready") {
-          const packet = missionPacket(mission, run);
-          return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: terminal.reason });
-        }
-        const budget = await control!.currentBudget(root);
-        if (!budget || budget.remaining_units < 1) {
-          const packet = missionPacket(mission, run);
-          return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: "budget_exhausted", budget });
-        }
-        const prepared = await operators.prepareMissionNormalRemediation(root, run.runID, unitID);
-        control!.enableUnits(root, 1);
-        const next = await operators.next(root, context.sessionID);
-        return JSON.stringify({ status: "normal_remediation_prepared", run_id: prepared.runID,
-          unit_id: unitID, task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
+        const { root } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, async () => {
+          const { mission } = await missionAuthority(context.sessionID);
+          if (context.sessionID !== (mission.coordinator ?? root) ||
+              (await identity(context.sessionID)).role !== (mission.coordinator ? "dog-operator" : "dog-coordinator")) {
+            throw new Error("mission-remediation-coordinator-required");
+          }
+          const run = await operators.required(root), unitID = String(args.unit_id);
+          const unit = run.units.find(item => item.unit.id === unitID);
+          const attempt = [...(mission.attempts ?? [])].reverse().find(item => item.runID === run.runID && item.unitID === unitID);
+          const oldDirectUnknown = attempt?.kind === "direct_execution" && attempt.failure?.category === "unknown" &&
+            attempt.failure.code === "acceptance" && typeof unit?.failure?.exitCode === "number" && unit.failure.exitCode !== 0 &&
+            unit.directExecution?.checks.some(check => check.exitCode === unit.failure?.exitCode &&
+              JSON.stringify(check.command) === JSON.stringify(unit.failure?.command));
+          if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
+              unit.normalRemediationUsed || !attempt || !["implementation", "direct_execution"].includes(attempt.kind) || attempt.status !== "failed" ||
+              (attempt.failure?.category !== "implementation" && !oldDirectUnknown)) throw new Error("operator-mission-normal-remediation-unavailable");
+          if (attempt.kind === "direct_execution") {
+            try { await assertDirectPlanningQuiescent(context.sessionID, context.callID, retryMissionUnit); }
+            catch (error) {
+              const packet = missionPacket(mission, run);
+              return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue",
+                reason: error instanceof Error ? error.message : "direct_unit_tools_unreconciled" });
+            }
+          }
+          const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
+          if (terminal.status !== "ready") {
+            const packet = missionPacket(mission, run);
+            return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: terminal.reason });
+          }
+          const budget = await control!.currentBudget(root);
+          if (!budget || budget.remaining_units < 1) {
+            const packet = missionPacket(mission, run);
+            return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason: "budget_exhausted", budget });
+          }
+          const prepared = await operators.prepareMissionNormalRemediation(root, run.runID, unitID);
+          control!.enableUnits(root, 1);
+          const next = await operators.next(root, context.sessionID);
+          return JSON.stringify({ status: "normal_remediation_prepared", run_id: prepared.runID,
+            unit_id: unitID, task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
+        });
       } };
     tools[rescueMissionUnit] = { description: "Coordinator: only after the same unit's one ordinary remediation failed the same declared validation, evaluate one optional Astra Rescue. The host requires the current Mission failure class, reconciled native terminal, exact current candidate/acceptance/scope/validation, discovered model availability, one-use and cumulative budget; the returned Worker must still pass ordinary validation, independent review, and root acceptance. This is not the legacy sortie_execute_terminal_rescue tool.",
       args: { unit_id: stringSchema }, execute: async (args, context) => {
-        const { root, mission } = await missionAuthority(context.sessionID);
+        const { root } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, async () => {
+        const { mission } = await missionAuthority(context.sessionID);
         if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
           throw new Error("mission-rescue-coordinator-required");
         }
@@ -2519,9 +2550,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return JSON.stringify({ ...packet, run_status: packet.status, status: "non_rescue", reason });
         };
         if (!unit || unit.status !== "failed" || unit.resultClass !== "acceptance" || unit.failure?.outcome !== "fail" ||
-            unit.normalRemediationUsed !== true || unit.terminalRescue || !attempt || attempt.kind !== "normal_remediation" ||
+            unit.normalRemediationUsed !== true || unit.terminalRescue || !attempt ||
+            !(attempt.kind === "normal_remediation" || attempt.kind === "direct_execution" && attempt.normalRemediation === true) ||
             attempt.status !== "failed" || attempt.resultClass !== "acceptance" || attempt.failure?.category !== "implementation") {
           return nonRescue("normal_remediation_not_exhausted");
+        }
+        if (attempt.kind === "direct_execution") {
+          try { await assertDirectPlanningQuiescent(context.sessionID, context.callID, rescueMissionUnit); }
+          catch (error) { return nonRescue(error instanceof Error ? error.message : "direct_unit_tools_unreconciled"); }
         }
         const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
         if (terminal.status !== "ready") return nonRescue(terminal.reason);
@@ -2588,6 +2624,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           selected_variant: policy.proposal.target.variant, accepted_base_candidate_id: policy.proposal.accepted_base_candidate_id,
           obligations: policy.proposal.obligations }, run_id: prepared.runID, unit_id: unitID,
           task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
+        });
       } };
     function declaredMissionExecution(mission: OperatorMission, execution?: unknown): OperatorMission["execution"] {
       const operation = mission.execution;
