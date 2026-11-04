@@ -53,6 +53,8 @@ export interface MissionAttempt {
   /** Fingerprint of the settled scoped candidate against which a later Rescue is proposed. */
   candidateID?: string;
   kind: "implementation" | "normal_remediation" | "astra_rescue" | "reviewer_correction" | "direct_execution";
+  /** A direct execution may itself be the one ordinary remediation. */
+  normalRemediation?: boolean;
   status: "pending" | "dispatched" | "succeeded" | "failed" | "cancelled" | "unconfirmed" | "handed-off";
   callID?: string;
   childSessionID?: string;
@@ -1077,7 +1079,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
       : run?.phase === "awaiting-decision" ? (run.units.some(unit => unit.dispatchDenial)
         ? "Coordinator: inspect units[].dispatch_denial before changing the plan. Correct only its diagnosed cause; do not repeat an unchanged refused Task or replan for a host-state mismatch. Report an unresolved runtime mismatch with the loaded runtime identity; preserve requirements and cumulative spend."
         : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed)
-          ? "Coordinator: one exact declared validation failed. Reconcile the returned Worker and cumulative budget, then call retry_mission_unit once for that unit before replanning. This preserves the same scope and acceptance."
+          ? `Coordinator: one exact declared validation failed. Reconcile the ${run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && !unit.normalRemediationUsed && unit.directExecution) ? "settled direct execution" : "returned Worker"} and cumulative budget, then call retry_mission_unit once for that unit before replanning. This preserves the same scope and acceptance.`
           : run.units.some(unit => unit.status === "failed" && unit.resultClass === "acceptance" && unit.failure?.outcome === "fail" && unit.normalRemediationUsed && !unit.terminalRescue)
             ? "Coordinator: the one ordinary remediation failed the declared validation again. If its native terminal, writer release, exact candidate and cumulative budget permit, call rescue_mission_unit once; inspect and report a non_rescue reason, then continue ordinary correction within budget. Rescue does not bypass validation, review or root acceptance."
             : "Coordinator: correct the cause and call plan_units with the remaining work and all requirements; budget is cumulative.")

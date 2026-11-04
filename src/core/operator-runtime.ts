@@ -151,6 +151,9 @@ interface UnitState {
   };
   /** Actual direct author segments retained when the same unit is handed to a Worker. */
   directHandoffs?: (NonNullable<UnitState["directExecution"]> & { callID: string; handedOffAt: string; settledCallID?: string })[];
+  /** Settled direct attempts are historical, not handoffs or validation for a later attempt. */
+  priorDirectExecutions?: (NonNullable<UnitState["directExecution"]> & { callID: string; resultClass: string | null;
+    failure?: SerialDispatchSettlement["failure"] })[];
   resultClass: string | null;
   failure?: SerialDispatchSettlement["failure"];
   normalRemediationUsed?: boolean;
@@ -603,6 +606,7 @@ export class OperatorRuntime {
         ...(unit.reviewerCorrection ? { reviewerCorrection: sizedChecks(unit.reviewerCorrection) } : {}),
         ...(unit.validationRegistration ? { validationRegistration: sizedChecks(unit.validationRegistration) } : {}),
         ...(Array.isArray(unit.directHandoffs) ? { directHandoffs: unit.directHandoffs.map(sizedChecks) } : {}),
+        ...(Array.isArray(unit.priorDirectExecutions) ? { priorDirectExecutions: unit.priorDirectExecutions.map(sizedChecks) } : {}),
         };
       }) : execution.units };
       if (Buffer.byteLength(JSON.stringify(sized)) > OPERATOR_LIMITS.planBytes * 4) throw new Error("operator-state-too-large");
@@ -2032,10 +2036,17 @@ export class OperatorRuntime {
           unit.failure.outcome !== "fail" || unit.normalRemediationUsed || unit.terminalRescue ||
           state.units.some(candidate => candidate.terminalRescue)) throw new Error("operator-mission-normal-remediation-unavailable");
       await this.verifyControls(unit);
+      if (unit.directExecution) {
+        if (!unit.directExecution.finishedAt || !unit.callID) throw new Error("operator-mission-normal-remediation-unavailable");
+        (unit.priorDirectExecutions ??= []).push({ ...structuredClone(unit.directExecution), callID: unit.callID,
+          resultClass: unit.resultClass, failure: structuredClone(unit.failure) });
+        delete unit.directExecution;
+      }
       // The ordinary retry keeps its exact scope and validation, but the next Worker needs the
       // host-observed failed command/exit rather than reconstructing it from an earlier session.
       unit.task = { ...unit.task, prompt: `${unit.task.prompt}\nnormal_remediation_prior_validation: ${JSON.stringify({
-        command: unit.failure.command, exit_code: unit.failure.exitCode })}` };
+        command: unit.failure.command, exit_code: unit.failure.exitCode })}${unit.validationRegistration
+        ? `\nnormal_remediation_validation: ${JSON.stringify({ validation: unitValidation(unit), validation_cwd: unitValidationCwd(unit) })}` : ""}` };
       unit.normalRemediationUsed = true;
       unit.status = "pending";
       unit.callID = null;
