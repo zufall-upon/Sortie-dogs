@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NativeBackgroundLifecycle } from "../dist/plugin/native-background.js";
+import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 
 function fixture() {
   const state = new Map<string, unknown>();
@@ -244,4 +245,79 @@ test("a receipt projection failure never suppresses the actual native result or 
   const messages = [{ role: "user", content: [{ type: "text", text: "native" }] }];
   assert.deepEqual(await lifecycle.project("root", messages), messages);
   assert.equal(await lifecycle.awaiting("root"), false);
+});
+
+test("saved Coordinator completion projects its captured evidence in native context and compaction without changing storage", async () => {
+  const f = fixture(), now = Date.now();
+  const paths = Array.from({ length: 44_629 }, (_, index) => `generated/protected/${index}/${"x".repeat(90)}.txt`);
+  const evidence = { evidence_id: "proof-captured", identity: { source: "old-source", candidate: "old-candidate" },
+    execution: { command: ["node check.mjs"], exit_code: 1, outcome: "fail", started_at: "start", ended_at: "end" },
+    proof_scope: "requested-full", protected_binding: { manifest_path: "manifest.json", manifest_hash: "old-manifest",
+      source_policy: "declared-paths-v1", source_paths: paths, candidate_paths: [],
+      freshness: { protected_paths: paths, scratch_paths: [], environment: { NODE: "captured" } } } };
+  const packet = { mission_id: "mission-old", run_id: "run-old", phase: "running", status: "awaiting-decision",
+    requirements: [{ id: "R1", text: "Keep the full ordered request and attachment reference." }],
+    original_request_refs: ["user:original-with-attachment"], budget: { consumed_units: 3, reserved_units: 1, remaining_units: 2 },
+    next_action: "Continue the same failed unit", coordinator_report: "Failed; do not claim success.",
+    units: [{ id: "unit-1", status: "failed", child_session_id: "worker", evidence: [evidence] }] };
+  const captured = JSON.stringify(packet);
+  const saved = [{ parent: "root", child: "child", callID: "call", agent: "dogs-coordinator", input: {}, baseline: [],
+    owner: { profile: { root: "root", mission: true } }, admittedAt: now - 1, launched: true, settled: true,
+    terminal: "succeeded", result: captured }];
+  f.state.set("v2-background-dispatches:root", structuredClone(saved));
+  const text = "native notification";
+  f.history.root!.push({ type: "synthetic", text, time: { created: now },
+    metadata: { source: "subagent", childID: "child", state: "completed" } });
+  const sessionHooks = new Map<string, (event: any) => Promise<void>>();
+  const base = f.context as any;
+  const context = { ...base, location: { directory: process.cwd() }, options: {}, app: { version: "2.2.5" },
+    event: { subscribe: async function* () {} },
+    tool: { transform: async () => ({ dispose() {} }), hook: async () => ({ dispose() {} }) },
+    permission: { hook: async () => ({ dispose() {} }) },
+    session: { ...base.session, hook: async (name: string, callback: (event: any) => Promise<void>) => { sessionHooks.set(name, callback); return { dispose() {} }; } },
+  } as never;
+  const cleanup = await createSortieDogsV2Plugin(async () => ({
+    "experimental.chat.system.transform": async () => {}, "experimental.session.compacting": async () => {},
+  })).setup(context);
+  try {
+    for (const hook of ["context", "compaction"]) {
+      const originalMessages = [{ role: "user", content: [{ type: "text", text }] }];
+      const event = { sessionID: "root", agent: "dog-operator", messages: structuredClone(originalMessages), system: [] as any[], tools: {} };
+      await sessionHooks.get(hook)!(event);
+      assert.equal(event.messages.length, 2, hook);
+      const result = (event.messages[1] as any).content[0].text as string;
+      const projected = JSON.parse(result.slice(result.indexOf("\n", result.indexOf("\n") + 1) + 1));
+      assert.ok(result.length < 10_000, `${hook}: generated 44,629-path snapshot must not be copied`);
+      const { units: _units, ...nonEvidence } = packet;
+      const { units: projectedUnits, ...projectedNonEvidence } = projected;
+      assert.deepEqual(projectedNonEvidence, nonEvidence, "requirements, budget, failure and coordinator report are retained");
+      const { protected_binding: _binding, ...measured } = evidence;
+      assert.deepEqual(projectedUnits[0].evidence[0], { ...measured,
+        protected_binding_ref: { manifest_path: "manifest.json", manifest_hash: "old-manifest", source_policy: "declared-paths-v1" } });
+      assert.deepEqual(projectedUnits[0].evidence_details_ref, { storage: "sortie-dogs.v010", key: "v2-background-dispatches:root",
+        call_id: "call", run_id: "run-old", unit_id: "unit-1", field: "result.units[].evidence",
+        omitted: "captured host snapshot recipe; the original result remains in this native background dispatch" });
+      assert.deepEqual(event.messages[0], originalMessages[0]);
+      assert.deepEqual(f.state.get("v2-background-dispatches:root"), saved, "projection never replaces captured storage with current state");
+    }
+  } finally { cleanup?.(); }
+});
+
+test("background projection leaves unrelated JSON and malformed captured evidence untouched", async () => {
+  const f = fixture(), now = Date.now(), text = "native notification";
+  f.history.root!.push({ type: "synthetic", text, time: { created: now },
+    metadata: { source: "subagent", childID: "child", state: "completed" } });
+  const packet = { mission_id: "mission", run_id: "run", units: [{ id: "unit", evidence: [{ protected_binding: null, result: "keep" }] }] };
+  const input = [{ role: "user", content: [{ type: "text", text }] }];
+  for (const [owner, result] of [
+    [{ profile: { mission: false } }, JSON.stringify({ ...packet, units: [{ id: "unit", evidence: [{ protected_binding: { source_paths: ["keep"] } }] }] })],
+    [{ profile: { mission: true } }, JSON.stringify(packet)],
+  ] as const) {
+    f.state.set("v2-background-dispatches:root", [{ parent: "root", child: "child", callID: "call", owner,
+      input: {}, baseline: [], admittedAt: now - 1, launched: true, settled: true, terminal: "succeeded", result }]);
+    const lifecycle = new NativeBackgroundLifecycle(f.context, async () => { throw Error("must not resettle"); });
+    const projected = await lifecycle.project("root", input) as any[];
+    assert.ok(projected[1].content[0].text.endsWith(result), "unrecognized evidence is not silently transformed");
+    assert.equal((f.state.get("v2-background-dispatches:root") as any[])[0].result, result);
+  }
 });

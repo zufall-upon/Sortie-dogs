@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { unitValidation, unitValidationCwd, type OperatorState } from "../core/operator-runtime.js";
+import type { GoalEvidence } from "../core/goal-bound.js";
 import { TOOL_ENVIRONMENT } from "../runtime-mission-assets.js";
 import { MISSION_REVIEW_REFERENCE, missionReviewScope, type MissionEvidenceExcerpt, type MissionReviewScope, type OperatorMission } from "../core/operator-mission.js";
 import { canonicalAgent, type RuntimeProfile } from "../core/runtime-profile.js";
@@ -36,6 +37,19 @@ export const validationDirectoryMatches = (commands: readonly string[], actual: 
   directories?: Readonly<Record<string, string>>): boolean => directory === undefined || commands.every(command =>
     resolve(directory, directories?.[normalizeCommand(command)] ?? ".") === resolve(directory, actual ?? "."));
 
+/** Project measured evidence without copying the host's protected snapshot recipe. */
+export function missionEvidenceView(items: readonly GoalEvidence[]) {
+  return items.map(({ protected_binding, ...evidence }) => ({
+    ...evidence,
+    ...(protected_binding ? { protected_binding_ref: {
+      manifest_path: protected_binding.manifest_path,
+      manifest_hash: protected_binding.manifest_hash,
+      source_policy: protected_binding.source_policy,
+      ...(protected_binding.docker_workspace ? { docker_workspace: protected_binding.docker_workspace } : {}),
+    } } : {}),
+  }));
+}
+
 /** Reviewer-facing evidence preserves execution/coverage; the host retains the full snapshot recipe. */
 export function missionReviewValidation(run: OperatorState, statePath: string) {
   return run.units.map(unit => ({
@@ -44,15 +58,7 @@ export function missionReviewValidation(run: OperatorState, statePath: string) {
     ...(unitValidationCwd(unit) ? {
       validation_cwd: unitValidationCwd(unit),
     } : {}),
-    evidence: unit.evidence.map(({ protected_binding, ...evidence }) => ({
-      ...evidence,
-      ...(protected_binding ? { protected_binding_ref: {
-        manifest_path: protected_binding.manifest_path,
-        manifest_hash: protected_binding.manifest_hash,
-        source_policy: protected_binding.source_policy,
-        ...(protected_binding.docker_workspace ? { docker_workspace: protected_binding.docker_workspace } : {}),
-      } } : {}),
-    })),
+    evidence: missionEvidenceView(unit.evidence),
     ...(unit.reviewerCorrection ? { correction_checks: (unit.reviewerCorrection.checks ?? []).map(check => ({
       call_id: check.callID, dispatch_call_id: check.dispatchCallID, child_session_id: check.childSessionID,
       command: check.command, directory: check.directory, exit_code: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
