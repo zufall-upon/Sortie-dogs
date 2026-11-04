@@ -13,6 +13,105 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
+for (const owner of ["ended", "live", "unknown", "background-tool"] as const)
+test(`Operator method correction reaches only the ended retained direct owner: ${owner}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-strategy-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if (readFileSync("result.txt", "utf8") !== "ready\\n") process.exit(1);\n');
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    };
+    const aborted: string[] = [];
+    const history: Record<string, Record<string, unknown>[]> = {};
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      abort: async ({ path }: { path: { id: string } }) => { aborted.push(path.id); return { data: true }; },
+    } } } as never);
+    const chat = async (id: string, messageID: string, text: string) => hooks["chat.message"]!({
+      sessionID: id, messageID, agent: identities[id]!.agent,
+    }, { message: { id: messageID, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text }] });
+    const requirements = ["Deliver a validated ready result"];
+    await chat("root", "request", "Deliver a validated ready result without repeating a stalled approach.");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements }, { sessionID: "root" }));
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+      { args: structuredClone(started.task) });
+    await chat("coordinator", "coordinator-request", started.task.prompt);
+    const declaration = { title: "Create ready result", objective: "Write the result and validate it", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] };
+    await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration] },
+    { sessionID: "coordinator" });
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    if (owner !== "live") {
+      if (owner !== "unknown") identities.coordinator!.outcome = "interrupted";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { status: "error", output: "Method stalled; the direct unit is retained", metadata: { sessionId: "coordinator" } });
+    }
+    if (owner === "background-tool") history.coordinator = [{ info: { role: "assistant", sessionID: "coordinator" }, parts: [{
+      type: "tool", tool: "shell", callID: "unresolved-background", state: { status: "completed", metadata: { status: "running" } },
+    }] }];
+    const prior = await missions.required("root"), run = await operators.required("root");
+    const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" })).budget;
+    const proposed = { ...declaration, objective: "Use the existing result directly instead of rebuilding an unnecessary helper" };
+    const reason = "The selected helper stalled; use the already available source to finish the same result";
+    const notes = "Keep node check.mjs mandatory. Do not repeat the stalled helper or restart the operation.";
+    const correction = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [proposed],
+      reason, handoff_context: notes }, { sessionID: "root" }));
+    assert.equal(correction.status, owner === "ended" ? "mission-coordinator-required" : "mission-coordinator-active");
+    assert.deepEqual(await operators.required("root"), run, "proposing a different method does not admit its contract or replace the retained run");
+    assert.deepEqual(await missions.required("root"), prior, "no logging-only state change or fabricated terminal");
+    assert.deepEqual(aborted, [], "a strategy proposal never stops an owner");
+    const afterProposal = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" })).budget;
+    for (const key of ["consumed_units", "reserved_units", "remaining_units", "settled_time_ms", "settled_cost_usd"])
+      assert.equal(afterProposal[key], budget[key], `proposing a method preserves ${key}`);
+    if (owner !== "ended") {
+      assert.equal(correction.task, undefined, "live, unknown and background-tool ownership cannot produce a duplicate continuation");
+      return;
+    }
+    assert.equal(correction.task.task_id, "coordinator");
+    assert.equal(correction.task.subagent_type, "dogs-coordinator");
+    const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    assert.match(status.next_action, /compare the original goal, actual result and concrete unmet work/u);
+    assert.match(status.next_action, /plan_units with proposed units, reason and handoff_context/u);
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "method-continuation" },
+      { args: structuredClone(correction.task) });
+    const resumed = { message: { id: "method-input", agent: "dogs-coordinator" }, parts: [{ type: "text", text: correction.task.prompt }] };
+    await hooks["chat.message"]!({ sessionID: "coordinator", messageID: "method-input", agent: "dogs-coordinator" }, resumed);
+    assert.ok(resumed.parts[0]!.text.includes(proposed.objective), "the actual resumed author's input contains the concrete alternative");
+    assert.ok(resumed.parts[0]!.text.includes(reason));
+    assert.ok(resumed.parts[0]!.text.includes(notes), "retained mandatory check and no-replay boundary reach the author, not only storage");
+    assert.deepEqual((await operators.required("root")).units, run.units, "continuation does not start a second unit");
+    const write = { filePath: join(directory, "result.txt"), content: "ready\n" };
+    await hooks["tool.execute.before"]!({ tool: "write", sessionID: "coordinator", callID: "write" }, { args: write });
+    await writeFile(write.filePath, write.content);
+    await hooks["tool.execute.after"]!({ tool: "write", sessionID: "coordinator", callID: "write", args: write }, { output: "written" });
+    const check = { command: "node check.mjs", workdir: directory };
+    const checkStart = Date.now();
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "check" }, { args: check });
+    await exec(process.execPath, ["check.mjs"], { cwd: directory });
+    history.coordinator = [{ info: { role: "assistant", sessionID: "coordinator" }, parts: [{ type: "tool", tool: "shell", callID: "check",
+      state: { status: "completed", input: check, metadata: { exit: 0 }, time: { start: checkStart, end: Date.now() } } }] }];
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "check", args: check },
+      { output: "", metadata: { exit: 0, status: "completed" } });
+    const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "coordinator" }));
+    assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+    const after = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "progress" }, { sessionID: "root" }));
+    assert.equal(after.mission_id, prior.id);
+    assert.equal(after.run_id, run.runID);
+    assert.equal(after.budget.consumed_units, 1, "the original admission settles once after its real check");
+    assert.equal(after.budget.reserved_units, 0);
+    assert.equal(finished.units.length, 1);
+    assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+      proof.execution.command.includes("node check.mjs")), "finish records the actual canonical check for the retained admission");
+    assert.notEqual((await missions.required("root")).phase, "completed", "method guidance and a unit check are not Mission acceptance");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 function assertStatusOrder(packet: Record<string, unknown>): void {
   const keys = Object.keys(packet), summary = keys.indexOf("acceptance_summary"), units = keys.indexOf("units");
   assert.equal(keys[0], "mission_id", "status leads with actionable identity, not bulky acceptance evidence");

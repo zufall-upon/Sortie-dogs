@@ -66,6 +66,18 @@ const unit = { title: "Fix result", objective: "Implement the requested result w
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
 
+test("Operator strategy distinguishes failed methods from required outcomes without adding an approval ritual", () => {
+  const policy = missionOperatorContent(V010_RUNTIME_PROFILE, "test");
+  assert.match(policy, /Own strategy, not just the relay of a stopped author's reply/u);
+  assert.match(policy, /Continue planned useful work without\s+intervention; suppress unnecessary expansion/u);
+  assert.match(policy, /Separate a required outcome\/check from an AI-selected method/u);
+  assert.match(policy, /already registered as\s+formal validation still needs lawful recipe correction or replanning/u);
+  assert.match(policy, /give the existing author the concrete alternative, rationale and\s+retained obligations/u);
+  assert.match(policy, /plan_units with proposed\s+units, reason and handoff_context/u);
+  assert.match(policy, /Do not restart a release, cancel live work or take over implementation/u);
+  assert.match(policy, /Ordinary implementation decisions remain with the author; no per-Task approval/u);
+});
+
 test("cwd-registered native admissions survive cold evidence recovery without retrofitting legacy external checks", async t => {
   for (const mode of ["root-cwd", "legacy-root", "external-cwd", "legacy-external"] as const) await t.test(mode, async () => fixture(async area => {
     const root = join(area, "project"), external = join(area, "external");
