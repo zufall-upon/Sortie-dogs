@@ -22,9 +22,9 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
-const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
-  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded")) test(`${actor} direct execution: ${mode}`, async t => {
+  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const retry = mode.startsWith("retry-");
   const incomplete = mode === "blocked" || mode === "needs-decision" || retry;
@@ -71,10 +71,13 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     const history: Record<string, Record<string, unknown>[]> = {};
     const aborted: string[] = [];
     let historyAvailable = true;
+    let rescueAvailable = false;
     const compacted = mode.startsWith("compacted-");
     const paginatedStarts: string[] = [];
     let historyBarrier: (() => Promise<void>) | undefined;
-    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+    const create = () => SortieDogsV010Plugin({ directory, client: {
+      ...(mode === "retry-direct-rescue" ? { v2: { model: { list: async () => ({ data: rescueAvailable ? [{ providerID: "openai", id: "gpt-6-astra", enabled: true }] : [] }) } } } : {}),
+      session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
       messages: async ({ path }: { path: { id: string } }) => {
         await historyBarrier?.();
@@ -453,7 +456,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
         await assert.rejects(retryUnit(), /operator-mission-normal-remediation-unavailable/, "ordinary retry is one-use");
         if (mode.startsWith("retry-direct")) {
           assert.equal(JSON.parse(await hooks.tool!.sortie_v010_start_direct_unit.execute({}, { sessionID: actor })).status, "direct-unit-running");
-          if (mode === "retry-direct-failed") {
+          if (mode === "retry-direct-failed" || mode === "retry-direct-rescue") {
             assert.equal(await check(), 1);
             await hooks.tool!.sortie_v010_submit_mission.execute({ status: "blocked", summary }, { sessionID: actor });
             const failedAgain = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -465,6 +468,82 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
               const rescue = JSON.parse(await hooks.tool!.sortie_v010_rescue_mission_unit.execute({ unit_id: "unit-1" }, { sessionID: actor }));
               assert.equal(rescue.status, "non_rescue");
               assert.equal(rescue.reason, "target_unavailable", "direct remediation reaches the ordinary Rescue policy without inventing a target");
+              if (mode === "retry-direct-rescue") {
+                rescueAvailable = true;
+                const beforeRescue = await readRun();
+                const beforeBudget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+                const rescueUnit = () => hooks.tool!.sortie_v010_rescue_mission_unit.execute({ unit_id: "unit-1" },
+                  { sessionID: actor, callID: "current-rescue" });
+                historyAvailable = false;
+                assert.equal(JSON.parse(await rescueUnit()).status, "non_rescue", "missing native history cannot release a direct writer");
+                historyAvailable = true;
+                const background = { info: { role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "bash", callID: "rescue-background",
+                  state: { status: "completed", metadata: { status: "running" } } }] };
+                history[actor]!.push(background);
+                hooks = await create();
+                const guarded = JSON.parse(await rescueUnit());
+                assert.equal(guarded.status, "non_rescue");
+                assert.match(guarded.reason, /tool_dispatch_active_or_unproven/);
+                assert.deepEqual((await readRun()).units, beforeRescue.units, "cold unproven writer cannot change the unit owner");
+                assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, beforeBudget);
+                background.parts[0]!.state.metadata.status = "completed";
+                history[actor]!.push({ info: { role: "assistant", sessionID: actor }, parts: [{ type: "tool", tool: "sortie_v010_rescue_mission_unit",
+                  callID: "current-rescue", state: { status: "running" } }] });
+                let entered!: () => void, release!: () => void;
+                const enteredHistory = new Promise<void>(resolve => { entered = resolve; });
+                const holdHistory = new Promise<void>(resolve => { release = resolve; });
+                historyBarrier = async () => { entered(); await holdHistory; };
+                const preparing = rescueUnit();
+                await enteredHistory;
+                let admitted = false;
+                const readArgs = { filePath: join(directory, "check.mjs") };
+                const concurrent = hooks["tool.execute.before"]!({ tool: "read", sessionID: actor, callID: "rescue-concurrent-read" }, { args: readArgs })
+                  .then(() => { admitted = true; });
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(admitted, false, "native admission waits for the entire direct Rescue transition");
+                historyBarrier = undefined; release();
+                const prepared = JSON.parse(await preparing);
+                await concurrent;
+                await hooks["tool.execute.after"]!({ tool: "read", sessionID: actor, callID: "rescue-concurrent-read", args: readArgs }, { output: "inspected" });
+                history[actor]!.pop();
+                assert.equal(prepared.status, "prepared", JSON.stringify(prepared));
+                const queued = await readRun();
+                assert.equal(queued.units[0]!.directExecution, undefined, "the previous direct owner is historical, not the Rescue Worker");
+                assert.equal(queued.units[0]!.priorDirectExecutions!.length, 2);
+                assert.deepEqual(queued.units[0]!.priorDirectExecutions![1]!.checks, beforeRescue.units[0]!.directExecution!.checks);
+                agents.worker = { agent: "dog-worker-v010", parentID: actor, outcome: "running" };
+                const task = { args: structuredClone(prepared.task) };
+                await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "rescue-worker-call" }, task);
+                await prompt("worker", task.args.prompt);
+                const current = (await readRun()).units[0]!;
+                await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "rescue-handoff" }, { args: { filePath: current.handoffPath } });
+                await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "rescue-handoff", args: { filePath: current.handoffPath } },
+                  { output: await readFile(current.handoffPath, "utf8") });
+                await write("fixed\n", resultPath, "worker");
+                assert.equal(await check(directory, checkCommand, "worker"), 0);
+                agents.worker.outcome = "completed";
+                await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: "rescue-worker-call" },
+                  { output: "DONE", metadata: { sessionId: "worker", status: "completed" } });
+                const rescued = await readRun();
+                assert.equal(rescued.runID, active.runID);
+                assert.equal(rescued.units[0]!.status, "succeeded");
+                const currentMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+                assert.equal(currentMission.id, started.mission_id);
+                assert.equal(currentMission.attempts?.at(-1)?.kind, "astra_rescue");
+                assert.equal(currentMission.attempts?.at(-1)?.terminal?.childSessionID, "worker");
+                const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"] }, { sessionID: actor }));
+                await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "rescue-review" }, { args: structuredClone(review.task) });
+                agents.reviewer!.outcome = "completed";
+                await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: "rescue-review" },
+                  { output: "PASS\nThe corrected result and native validation agree.", metadata: { sessionId: "reviewer" } });
+                await hooks.tool!.sortie_v010_submit_mission.execute({ status: "ready", summary: "Rescue result validated and reviewed" }, { sessionID: actor });
+                assert.equal(JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" })).status, "succeeded");
+                const finalBudget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+                assert.equal(finalBudget.consumed_units, beforeBudget.consumed_units + 1);
+                assert.equal(finalBudget.reserved_units, 0);
+                assert.deepEqual(aborted, []);
+                return;
+              }
             }
             const afterBudget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
             assert.equal(afterBudget.consumed_units, settledBudget.consumed_units + 1);

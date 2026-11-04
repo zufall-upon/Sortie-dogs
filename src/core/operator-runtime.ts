@@ -2101,6 +2101,12 @@ export class OperatorRuntime {
       await this.verifyControls(unit);
       // The Rescue route is sealed in host-owned operator state and the returned Task reference.
       // Do not alter the registered handoff or expose the stable runtime's rescue capability.
+      if (unit.directExecution) {
+        if (!unit.directExecution.finishedAt || !unit.callID) throw new Error("operator-mission-terminal-rescue-unavailable");
+        (unit.priorDirectExecutions ??= []).push({ ...structuredClone(unit.directExecution), callID: unit.callID,
+          resultClass: unit.resultClass, failure: structuredClone(unit.failure) });
+        delete unit.directExecution;
+      }
       unit.task = { ...unit.task, prompt: unit.task.prompt.replace(header,
         line => `${line}\nterminal_rescue_attempt: ${input.attempt_id}`) };
       unit.terminalRescue = { attempt_id: input.attempt_id, selected_model: input.selected_model,

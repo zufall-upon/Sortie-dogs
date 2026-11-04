@@ -2534,7 +2534,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       } };
     tools[rescueMissionUnit] = { description: "Coordinator: only after the same unit's one ordinary remediation failed the same declared validation, evaluate one optional Astra Rescue. The host requires the current Mission failure class, reconciled native terminal, exact current candidate/acceptance/scope/validation, discovered model availability, one-use and cumulative budget; the returned Worker must still pass ordinary validation, independent review, and root acceptance. This is not the legacy sortie_execute_terminal_rescue tool.",
       args: { unit_id: stringSchema }, execute: async (args, context) => {
-        const { root, mission } = await missionAuthority(context.sessionID);
+        const { root } = await missionAuthority(context.sessionID);
+        return serializeDispatchTransition(root, async () => {
+        const { mission } = await missionAuthority(context.sessionID);
         if (context.sessionID !== mission.coordinator || (await identity(context.sessionID)).role !== "dog-operator") {
           throw new Error("mission-rescue-coordinator-required");
         }
@@ -2552,6 +2554,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             !(attempt.kind === "normal_remediation" || attempt.kind === "direct_execution" && attempt.normalRemediation === true) ||
             attempt.status !== "failed" || attempt.resultClass !== "acceptance" || attempt.failure?.category !== "implementation") {
           return nonRescue("normal_remediation_not_exhausted");
+        }
+        if (attempt.kind === "direct_execution") {
+          try { await assertDirectPlanningQuiescent(context.sessionID, context.callID, rescueMissionUnit); }
+          catch (error) { return nonRescue(error instanceof Error ? error.message : "direct_unit_tools_unreconciled"); }
         }
         const terminal = await missionWorkerTerminalProof(root, mission, run, attempt, true);
         if (terminal.status !== "ready") return nonRescue(terminal.reason);
@@ -2618,6 +2624,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           selected_variant: policy.proposal.target.variant, accepted_base_candidate_id: policy.proposal.accepted_base_candidate_id,
           obligations: policy.proposal.obligations }, run_id: prepared.runID, unit_id: unitID,
           task: record(next) ? next.task : undefined, budget: await control!.currentBudget(root) });
+        });
       } };
     function declaredMissionExecution(mission: OperatorMission, execution?: unknown): OperatorMission["execution"] {
       const operation = mission.execution;
