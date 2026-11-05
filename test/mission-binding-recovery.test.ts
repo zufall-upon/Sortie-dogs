@@ -10,6 +10,210 @@ import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
+
+for (const actor of ["root", "coordinator"]) for (const interruption of ["none", "accepted", "binding"]) test(`queued Mission after terminal: ${actor} ${interruption}`, async t => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/queued-registration-"));
+  try {
+    const agents: Record<string, object> = { root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" } };
+    const history: Record<string, object[]> = {};
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...agents[path.id] } }),
+      messages: async ({ path }: { path: { id: string } }) => ({ data: history[path.id] ?? [] }), children: async () => ({ data: [] }),
+    } } } as never);
+    let hooks = await create();
+    const tool = async (id: string, name: string, args: object = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+    const chat = async (id: string, text: string, messageID: string, agent = "dog-operator") => {
+      const message = { info: { id: messageID, sessionID: id, role: "user", agent, time: { created: Date.now() } }, parts: [{ type: "text", text }] };
+      (history[id] ??= []).push(message);
+      await hooks["chat.message"]!({ sessionID: id, messageID, agent }, {
+        message: { id: messageID, agent, model: { providerID: "openai", modelID: "gpt-6.1-sol" } }, parts: message.parts,
+      });
+    };
+    await chat("root", "Complete A, then process my pending requests", "request-a");
+    await tool("root", "start_mission", { requirements: ["Complete A"] });
+    const ledgerPath = join(directory, ".sortie-dogs-v010/run-flight", `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    const ledger = await RunFlightLedger.openGoal(ledgerPath);
+    const initial = (await ledger.readGoal()).state, at = new Date().toISOString(), goalID = initial.goal_id!;
+    const criterion = { criterion_id: "a", target: "A", entrypoint: "check A", workload: "A", oracle_coverage: ["A"],
+      build_boundary: "included" as const, source: "source", candidate: "candidate", fixture: "A", validation_command: "check A", proof_scope: "requested-full" as const, expected_outcome: "pass" as const };
+    // Construct the saved predecessor state, not 28 new native model/test executions.
+    for (let revision = 2; revision <= 27; revision++) await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID,
+      revision, scope_epoch: revision, acceptance_fingerprint: goalFingerprint("A"), origin_user_message_id: "request-a",
+      session_id: "root", selected_agent: "dog-coordinator", delivery: "mvp-first", budget: initial.budget!, acceptance_contract: { criteria: [criterion] } });
+    for (let i = 0; i < 28; i++) {
+      const state = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goalID, unit_id: `a-${i}`, reservation_id: `a-${i}`, session_id: "root", ticket_id: null });
+      const evidence = i === 27 ? evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint("saved A"), command: ["check A"],
+        startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true, source: "source", candidate: "candidate",
+        binding: { manifest_hash: goalFingerprint("fixture manifest"), project_root: directory, manifest_path: "fixture.json", source_paths: [], candidate_paths: [] } }, state, `a-${i}`) : [];
+      await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goalID, unit_id: `a-${i}`, reservation_id: `a-${i}`, receipt_id: `a-${i}`,
+        ...(i === 0 ? { native_session_id: "a-author" } : {}),
+        disposition: i === 27 ? "succeeded" : "failed", result_class: "process-defect", progress_fingerprint: evidence.length ? goalFingerprint(evidence) : null,
+        evidence, elapsed_ms: 17, cost_usd: actor === "root" && i === 0 ? null : 0.25 });
+    }
+    await chat("root", "Process the separately requested B", "request-b");
+    const state = (await ledger.readGoal()).state;
+    const receipt = { goal_id: goalID, terminal_revision: 27, acceptance_fingerprint: state.acceptance_fingerprint!,
+      started_at: initial.goal_id ? (await ledger.readGoal()).records[0]!.event.at : at, ended_at: new Date().toISOString(),
+      status: "succeeded" as const, stop_reason: "completed" as const, unit_ids: state.unit_ids, session_ids: state.session_ids, evidence_refs: state.evidence_refs, milestone_at: null };
+    await ledger.appendGoal({ kind: "goal.terminal", at: receipt.ended_at, goal_id: goalID, receipt });
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.update("root", mission => { mission.phase = "completed"; });
+    const prior = await ledger.readGoal();
+    const started = await tool("root", "start_mission", { intent: "replace", requirements: ["Process B"] });
+    if (actor === "coordinator") {
+      await hooks["tool.execute.before"]!({ sessionID: "root", callID: "coordinator-call", tool: "task" }, { args: structuredClone(started.task) });
+      await chat("coordinator", started.task.prompt, "coordinator-request", "dogs-coordinator");
+    }
+    const missionBefore = await missions.required("root");
+    const plan = { executor: "worker", units: [{ title: "B", objective: "Process B", read: [], write: ["result.txt"], validation: ["node check.mjs"] }] };
+    const append = RunFlightLedger.prototype.appendGoal, update = OperatorMissionRuntime.prototype.update;
+    if (actor === "root" && interruption === "none") {
+      const accepted = { kind: "goal.queued-accepted" as const, at, goal_id: "goal-b", revision: 1 as const, scope_epoch: 1 as const,
+        acceptance_fingerprint: goalFingerprint("B"), origin_user_message_id: "request-b", origin_session_id: "root", selected_agent: "dog-coordinator",
+        delivery: "mvp-first" as const, budget: state.budget!, acceptance_contract: null,
+        queued_from: { goal_id: goalID, receipt_fingerprint: goalFingerprint(receipt), mission_id: missionBefore.id, request_fingerprint: goalFingerprint(missionBefore.requests[0]) } };
+      for (const change of [{ budget: { ...state.budget!, max_units: 64 } }, { budget: { ...state.budget!, max_units: 4 } },
+        { queued_from: { ...accepted.queued_from, receipt_fingerprint: goalFingerprint("wrong receipt") } }]) {
+        await assert.rejects(ledger.appendGoal({ ...accepted, ...change }), /exact settled terminal budget predecessor/);
+        assert.deepEqual(await ledger.readGoal(), prior);
+      }
+      await assert.rejects(ledger.appendGoal({ ...accepted, origin_user_message_id: "request-a" }), /Accepted goal conflicts with its durable user message identity/);
+      assert.deepEqual(await ledger.readGoal(), prior);
+      const native = history.root![1] as { info: { sessionID: string; role: string }; parts: { type: string; text: string; synthetic?: boolean }[] };
+      const original = structuredClone(native);
+      // Exact native request identity, not a model-authored ID or same-looking text, is authority.
+      for (const defect of ["missing", "foreign", "assistant", "synthetic", "changed"] as const) {
+        Object.assign(native, structuredClone(original));
+        if (defect === "missing") history.root = [history.root![0]!];
+        if (defect === "foreign") native.info.sessionID = "other-root";
+        if (defect === "assistant") native.info.role = "assistant";
+        if (defect === "synthetic") native.parts[0]!.synthetic = true;
+        if (defect === "changed") native.parts[0]!.text = "unrelated content";
+        await assert.rejects(tool(actor, "plan_units", plan), /mission-goal-request-native-proof-unavailable/, defect);
+        assert.deepEqual(await ledger.readGoal(), prior);
+        history.root = [history.root![0]!, native];
+      }
+      Object.assign(native, original);
+    }
+    let injected = false;
+    if (interruption === "accepted") t.mock.method(RunFlightLedger.prototype, "appendGoal", async function (this: RunFlightLedger, event: Parameters<typeof append>[0]) {
+      const result = await append.call(this, event);
+      if (event.kind === "goal.queued-accepted" && !injected) { injected = true; throw new Error("injected-after-accept"); }
+      return result;
+    });
+    if (interruption === "binding") t.mock.method(OperatorMissionRuntime.prototype, "update", function (this: OperatorMissionRuntime, root: string, mutate: Parameters<typeof update>[1]) {
+      return update.call(this, root, mission => { const before = mission.runID; mutate(mission);
+        if (mission.runID !== before && !injected) { injected = true; throw new Error("injected-binding"); } });
+    });
+    if (interruption !== "none") {
+      await assert.rejects(tool(actor, "plan_units", plan), /injected-/);
+      t.mock.restoreAll();
+      const prepared = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(prepared.phase, "prepared"); assert.equal(prepared.units[0]!.status, "pending");
+      await assert.rejects(tool(actor, "start_direct_unit"), /mission-run-registration-incomplete/);
+      hooks = await create();
+      await tool(actor, "plan_units", plan);
+      const recovered = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(recovered.runID, prepared.runID); assert.equal(recovered.planHash, prepared.planHash);
+      assert.deepEqual(recovered.units[0]!.hashes, prepared.units[0]!.hashes);
+    } else await tool(actor, "plan_units", plan);
+    const registered = await ledger.readGoal(), missionAfter = await missions.required("root");
+    assert.equal(missionAfter.id, missionBefore.id); assert.deepEqual(missionAfter.requests, missionBefore.requests);
+    assert.deepEqual(missionAfter.requirements, missionBefore.requirements);
+    assert.notEqual(registered.state.goal_id, goalID); assert.equal(registered.state.origin_user_message_id, "request-b");
+    assert.equal(registered.state.consumed_units, 28); assert.equal(registered.state.budget!.max_units, 32);
+    assert.equal(registered.state.outstanding_reservations.length, 0); assert.equal(registered.state.consumed_time_ms, prior.state.consumed_time_ms);
+    assert.equal(registered.state.consumed_cost_usd, actor === "root" ? null : 7, "predecessor usage, including unknown cost, is retained");
+    assert.deepEqual(registered.records.slice(0, prior.records.length), prior.records, "old receipt, failures, evidence and hashes remain byte-for-byte bound");
+    assert.equal(registered.records.filter(({ event }) => event.kind === "goal.queued-accepted").length, 1);
+    assert.deepEqual(registered.state.satisfied_criteria, [], "A's passing evidence is not B's proof");
+    assert.deepEqual(registered.state.unit_ids, []);
+    // A normal registration retry must reuse the prepared run and consume no extra budget.
+    const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    await tool(actor, "plan_units", plan);
+    assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, run.runID);
+    assert.deepEqual((await ledger.readGoal()).records, registered.records);
+    if (actor === "coordinator" && interruption === "none") {
+      await assert.rejects(tool(actor, "plan_units", { executor: "worker", reason: "Exercise retained remaining allowance", units:
+        Array.from({ length: 5 }, (_, i) => ({ ...plan.units[0], title: `B-${i}`, validation: [`node check-${i}.mjs`] })) }),
+      /mission-budget-exhausted: plan needs 5 units; 4 remain/);
+      assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, run.runID);
+    }
+    const currentGoalID = registered.state.goal_id!;
+    if (interruption === "none") {
+      if (actor === "root") {
+        agents.holder = { agent: "dog-operator" };
+        await chat("holder", "Hold the fixture output", "holder-request");
+        await tool("holder", "start_mission", { requirements: ["Hold the fixture output"] });
+        await tool("holder", "plan_units", { ...plan, executor: "self" });
+        await assert.rejects(tool(actor, "start_direct_unit"), /mission-direct-activation:manifest-overlap/);
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("holder")).units[0]!.status, "running");
+        await tool("holder", "submit_mission", { status: "blocked", summary: "Fixture holder releases its own unvalidated unit" });
+      }
+      assert.equal((await tool(actor, "start_direct_unit")).status, "direct-unit-running");
+      const admitted = await ledger.readGoal();
+      assert.equal(admitted.state.consumed_units, 28); assert.equal(admitted.state.outstanding_reservations.length, 1);
+      await tool(actor, "submit_mission", { status: "blocked", summary: "Fixture admission is not completed B validation" });
+      assert.equal((await ledger.readGoal()).state.consumed_units, 29);
+      return;
+    }
+    await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: currentGoalID, unit_id: "b-cost", reservation_id: "b-cost", session_id: "root", ticket_id: null });
+    await ledger.appendGoal({ kind: "unit.settled", at, goal_id: currentGoalID, unit_id: "b-cost", reservation_id: "b-cost", receipt_id: "b-cost",
+      native_session_id: "b-author", disposition: "failed", result_class: "process-defect", progress_fingerprint: null, evidence: [], elapsed_ms: 5, cost_usd: null });
+    const priced = await ledger.appendGoal({ kind: "unit.usage-reconciled", at, goal_id: currentGoalID, reservation_id: "b-cost", native_session_id: "b-author",
+      source: "native-usage-price-table", cost_usd: 0.5 });
+    assert.equal(priced.consumed_units, 29); assert.equal(priced.consumed_cost_usd, actor === "root" ? null : 7.5);
+    if (actor === "root" && interruption === "binding") {
+      const beforePricing = await ledger.readGoal();
+      history["a-author"] = [{ info: { id: "late-a-usage", role: "assistant", providerID: "openai", modelID: "gpt-6-luna-fast",
+        time: { created: 2000, completed: 3000 }, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } }];
+      const status = await tool("root", "operator_status");
+      assert.equal(status.budget.settled_cost_usd, 7.2503, "late A usage must reconcile the inherited budget, including B's own cost");
+      assert.equal(status.budget.consumed_units, 29); assert.equal(status.budget.reserved_units, 0);
+      const afterPricing = await ledger.readGoal();
+      assert.deepEqual(afterPricing.records.slice(0, beforePricing.records.length), beforePricing.records);
+      assert.deepEqual(afterPricing.records.slice(beforePricing.records.length).map(({ event }) => [event.kind, event.goal_id]),
+        [["unit.usage-reconciled", goalID]], "only append predecessor pricing; never rewrite A's receipt or B's acceptance/evidence");
+      assert.equal(afterPricing.state.goal_id, currentGoalID); assert.deepEqual(afterPricing.state.satisfied_criteria, []);
+      await tool("root", "operator_status");
+      assert.deepEqual(await ledger.readGoal(), afterPricing, "repeated status cannot price A twice");
+      await assert.rejects(ledger.appendGoal({ kind: "unit.usage-reconciled", at, goal_id: goalID, reservation_id: "a-0",
+        native_session_id: "wrong-author", source: "native-usage-price-table", cost_usd: 0.0003 }), /Usage reconciliation/);
+    }
+    if (actor === "root" && interruption === "accepted") {
+      await tool("root", "start_mission", { intent: "replace", requirements: ["Do not accept B a second time"] });
+      await assert.rejects(tool("root", "plan_units", plan), /mission-goal-request-already-accepted/);
+      assert.deepEqual((await ledger.readGoal()).state, priced);
+    }
+    for (let i = 0; i < 3; i++) await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: currentGoalID,
+      unit_id: `b-limit-${i}`, reservation_id: `b-limit-${i}`, session_id: "root", ticket_id: null });
+    await assert.rejects(ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: currentGoalID,
+      unit_id: "b-over-limit", reservation_id: "b-over-limit", session_id: "root", ticket_id: null }), /Goal unit budget exhausted/);
+    await assert.rejects(ledger.appendGoal({ kind: "goal.revised", at, goal_id: goalID, revision: 28, scope_epoch: 28,
+      acceptance_fingerprint: state.acceptance_fingerprint!, origin_user_message_id: "request-b", session_id: "root", selected_agent: "dog-coordinator",
+      delivery: "mvp-first", budget: state.budget!, acceptance_contract: state.acceptance_contract }), /Goal identity mismatch/);
+    if (actor === "root" && interruption === "binding") {
+      for (let i = 0; i < 3; i++) await ledger.appendGoal({ kind: "unit.settled", at, goal_id: currentGoalID,
+        unit_id: `b-limit-${i}`, reservation_id: `b-limit-${i}`, receipt_id: `b-limit-${i}`, native_session_id: "b-unpriced",
+        disposition: "cancelled", result_class: "interrupted", progress_fingerprint: null, evidence: [], elapsed_ms: 1, cost_usd: null });
+      const stopped = (await ledger.readGoal()).state;
+      await ledger.appendGoal({ kind: "goal.terminal", at, goal_id: currentGoalID, receipt: { ...receipt,
+        goal_id: currentGoalID, terminal_revision: stopped.revision, acceptance_fingerprint: stopped.acceptance_fingerprint!,
+        status: "stopped", stop_reason: "stopped", unit_ids: stopped.unit_ids, session_ids: stopped.session_ids, evidence_refs: stopped.evidence_refs } });
+      await ledger.appendGoal({ kind: "goal.accepted", at, goal_id: "ordinary-new-goal", revision: 1, scope_epoch: 1,
+        acceptance_fingerprint: goalFingerprint("ordinary new request"), origin_user_message_id: "ordinary-new-request",
+        origin_session_id: "root", selected_agent: "dog-coordinator", delivery: "mvp-first", budget: initial.budget!, acceptance_contract: null });
+      assert.equal((await tool("root", "operator_status")).budget.settled_cost_usd, 0, "ordinary acceptance still starts a separate budget");
+      const independent = await ledger.readGoal();
+      await assert.rejects(ledger.appendGoal({ kind: "unit.usage-reconciled", at, goal_id: currentGoalID, reservation_id: "b-limit-0",
+        native_session_id: "b-unpriced", source: "native-usage-price-table", cost_usd: 0.25 }), /Goal identity mismatch/);
+      assert.deepEqual(await ledger.readGoal(), independent, "pricing an unrelated previous budget cannot mutate the new goal");
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 for (const stage of ["goal", "binding"]) test(`prepared Mission ${stage} failure resumes the same run without premature admission`, async t => {
   const directory = await mkdtemp(resolve("_testenv/partial-registration-"));

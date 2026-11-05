@@ -145,11 +145,25 @@ export interface GoalValidationReopen extends GoalValidationRetryAuthorization {
   readonly prior_reservation_id: string;
   readonly prior_operation_id: string;
 }
-export type GoalFlightEvent =
-  | (GoalEventBase & { readonly kind: "goal.accepted"; readonly goal_id: string; readonly revision: 1;
+interface GoalAcceptanceEventBase extends GoalEventBase {
+      readonly goal_id: string; readonly revision: 1;
       readonly scope_epoch: 1; readonly acceptance_fingerprint: string; readonly origin_user_message_id: string;
       readonly origin_session_id: string; readonly selected_agent: string; readonly delivery: GoalDeliveryMode;
-      readonly budget: GoalBudget; readonly acceptance_contract: GoalAcceptanceContract | null })
+      readonly budget: GoalBudget; readonly acceptance_contract: GoalAcceptanceContract | null;
+}
+export interface QueuedGoalOrigin {
+  readonly goal_id: string;
+  readonly receipt_fingerprint: string;
+  readonly mission_id: string;
+  readonly request_fingerprint: string;
+}
+export type GoalAcceptanceEvent = (GoalAcceptanceEventBase & { readonly kind: "goal.accepted" }) |
+  (GoalAcceptanceEventBase & { readonly kind: "goal.queued-accepted"; readonly queued_from: QueuedGoalOrigin });
+export const isGoalAcceptance = (event: GoalFlightEvent): event is GoalAcceptanceEvent =>
+  event.kind === "goal.accepted" || event.kind === "goal.queued-accepted";
+
+export type GoalFlightEvent =
+  | GoalAcceptanceEvent
   | (GoalEventBase & { readonly kind: "goal.user-continued"; readonly goal_id: string;
       readonly origin_user_message_id: string; readonly session_id: string; readonly selected_agent: string })
   | (GoalEventBase & { readonly kind: "goal.revised"; readonly goal_id: string; readonly revision: number;
@@ -404,6 +418,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
   const recoverableSettlements = new Map<string, { unitID: string; revision: number; epoch: number;
     settlement: Extract<GoalFlightEvent, { kind: "unit.settled" }> }>();
   const unitCosts = new Map<string, { cost: number | null; session?: string }>();
+  const costKey = (goalID: string, reservationID: string) => JSON.stringify([goalID, reservationID]);
   const validationAdmissions = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>>();
   const validationSettlements = new Map<string, Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>>();
   const reopenedValidationEvidence = new Set<string>();
@@ -418,8 +433,22 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
     // older/newer telemetry definitions must not prevent an existing goal from resuming.
     if (event.kind === "goal.reported") continue;
     requireState(instant(event.at), "invalid", "Goal event timestamp is invalid.");
-    if (event.kind === "goal.accepted") {
-      unitCosts.clear();
+    if (isGoalAcceptance(event)) {
+      const queued = event.kind === "goal.queued-accepted";
+      if (queued) {
+        requireState(state.phase === "terminal" && state.receipt?.status === "succeeded" &&
+          state.outstanding_reservations.length === 0 && state.validation_budget.reservations.length === 0 &&
+          event.queued_from.goal_id === state.goal_id && event.goal_id !== state.goal_id &&
+          event.queued_from.receipt_fingerprint === goalFingerprint(state.receipt) &&
+          text(event.queued_from.mission_id) && HASH.test(event.queued_from.request_fingerprint) &&
+          goalFingerprint(event.budget) === goalFingerprint(state.budget) &&
+          !records.slice(0, index).some(({ event: prior }) => isGoalAcceptance(prior) &&
+            prior.origin_user_message_id === event.origin_user_message_id),
+        "transition", "Queued goal requires an unused request and the exact settled terminal budget predecessor.");
+      }
+      // Queued goals share one budget lineage, including prices that arrive after acceptance.
+      // An ordinary real-turn acceptance still starts an independent budget.
+      if (!queued) unitCosts.clear();
       requireState(state.goal_id === null || state.phase === "terminal" || state.phase === "stopped",
         "transition", "An active goal already owns this root.");
       requireState(text(event.goal_id) && HASH.test(event.acceptance_fingerprint) && text(event.origin_user_message_id) &&
@@ -429,7 +458,11 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         acceptance_fingerprint: event.acceptance_fingerprint, origin_user_message_id: event.origin_user_message_id,
         latest_user_message_id: event.origin_user_message_id, selected_agent: event.selected_agent,
         delivery: event.delivery, budget: event.budget, acceptance_contract: event.acceptance_contract, phase: "active",
-        session_ids: [event.origin_session_id] };
+        session_ids: [event.origin_session_id], ...(queued ? {
+          consumed_units: state.consumed_units, consumed_time_ms: state.consumed_time_ms,
+          consumed_cost_usd: state.consumed_cost_usd,
+          validation_budget: { ...state.validation_budget, evidence_keys: [] },
+        } : {}) };
       replanRevision = null;
       legacyResetRevision = false;
       recoverableSettlements.clear();
@@ -439,7 +472,9 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       validationAdmissionLimit = null;
       continue;
     }
-    requireState(state.goal_id !== null && event.goal_id === state.goal_id, "transition", "Goal identity mismatch.");
+    requireState(state.goal_id !== null && (event.goal_id === state.goal_id ||
+      event.kind === "unit.usage-reconciled" && unitCosts.has(costKey(event.goal_id, event.reservation_id))),
+    "transition", "Goal identity mismatch.");
     if (event.kind === "goal.user-continued") {
       requireState(state.phase !== "terminal" && text(event.origin_user_message_id) && text(event.session_id) && text(event.selected_agent), "transition", "Terminal goals cannot continue.");
       state = { ...state, latest_user_message_id: event.origin_user_message_id, selected_agent: event.selected_agent,
@@ -526,7 +561,7 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         : state.no_progress_results;
       const elapsed = state.consumed_time_ms === null || event.elapsed_ms === null ? null : state.consumed_time_ms + event.elapsed_ms;
       const cost = state.consumed_cost_usd === null || event.cost_usd === null ? null : state.consumed_cost_usd + event.cost_usd;
-      unitCosts.set(event.reservation_id, { cost: event.cost_usd, session: event.native_session_id });
+      unitCosts.set(costKey(event.goal_id, event.reservation_id), { cost: event.cost_usd, session: event.native_session_id });
       state = { ...state, consumed_units: state.consumed_units + 1, consumed_time_ms: elapsed, consumed_cost_usd: cost,
         no_progress_results: nextNoProgress, replan_required: nextNoProgress >= 2,
         outstanding_reservations: state.outstanding_reservations.filter((entry) => entry.reservation_id !== event.reservation_id),
@@ -537,12 +572,12 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         recoverableSettlements.set(event.receipt_id, { unitID: event.unit_id, revision: state.revision, epoch: state.scope_epoch, settlement: event });
       }
     } else if (event.kind === "unit.usage-reconciled") {
-      const prior = unitCosts.get(event.reservation_id);
-      requireState(event.goal_id === state.goal_id && prior !== undefined && prior.session === event.native_session_id &&
+      const key = costKey(event.goal_id, event.reservation_id), prior = unitCosts.get(key);
+      requireState(prior !== undefined && prior.session === event.native_session_id &&
         event.source === "native-usage-price-table" &&
         Number.isFinite(event.cost_usd) && event.cost_usd >= 0 &&
         (prior.cost === null || prior.cost === event.cost_usd), "transition", "Usage reconciliation must identify one settled native unit.");
-      unitCosts.set(event.reservation_id, { cost: event.cost_usd, session: event.native_session_id });
+      unitCosts.set(key, { cost: event.cost_usd, session: event.native_session_id });
       const costs = [...unitCosts.values()];
       state = { ...state, consumed_cost_usd: costs.some(item => item.cost === null) ? null
         : costs.reduce((sum, item) => sum + item.cost!, 0) };

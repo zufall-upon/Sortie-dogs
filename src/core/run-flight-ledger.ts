@@ -1211,8 +1211,8 @@ export class RunFlightLedger {
             goalFingerprint(existing.evidence) === goalFingerprint(event.evidence) &&
             goalFingerprint(existing.direct_finish) === goalFingerprint(event.direct_finish)) return reduceGoalFlight(records);
       }
-      if (event.kind === "goal.accepted") {
-        const prior = records.find(({ event: stored }) => stored.kind === "goal.accepted" &&
+      if (event.kind === "goal.accepted" || event.kind === "goal.queued-accepted") {
+        const prior = records.find(({ event: stored }) => (stored.kind === "goal.accepted" || stored.kind === "goal.queued-accepted") &&
           stored.origin_user_message_id === event.origin_user_message_id);
         if (prior !== undefined) {
           if (recordHash(1, null, { ...event, at: prior.event.at }) !== recordHash(1, null, prior.event)) {

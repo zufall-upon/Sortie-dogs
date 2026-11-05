@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { GoalAcceptanceContract, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
+import { isGoalAcceptance, type GoalAcceptanceContract, type GoalTerminalReceipt, type GoalFlightEventRecord } from "../core/goal-bound.js";
 import { validationDurationGuidance } from "../core/validation-budget.js";
 import { DEDICATED_WORKER_ROLES, LUNA_FABRIC_WORKER_ROLE } from "./model-routing.ts";
 import { normalizeCommand } from "./gate.ts";
@@ -325,7 +325,7 @@ export function buildDebrief(receipt: GoalTerminalReceipt, contract: GoalAccepta
   const settled = events?.filter((event) => event.kind === "unit.settled") ?? [];
   const tasks = sessions.flatMap((session) => session.tasks);
   const terminal = events?.at(-1);
-  const fullLedger = events?.[0]?.kind === "goal.accepted" && terminal?.kind === "goal.terminal" &&
+  const fullLedger = events?.[0] !== undefined && isGoalAcceptance(events[0]) && terminal?.kind === "goal.terminal" &&
     terminal.receipt.terminal_revision === receipt.terminal_revision && terminal.receipt.status === receipt.status;
   const firstPassEligible = complete && fullLedger && receipt.status === "succeeded" && commands.size > 0 &&
     validation === "PASS" && reserved.length > 0 && reserved.length === settled.length && tasks.length === reserved.length;

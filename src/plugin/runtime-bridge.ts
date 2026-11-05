@@ -133,7 +133,8 @@ export interface RuntimeBridge {
       currentTaskIDs: readonly string[] }): Promise<void>;
     restoreAcceptanceRemediationBaseline(rootSessionID: string, request: { failedTaskID: string;
       criteria: readonly string[]; fingerprint: string; currentTaskIDs: readonly string[] }): Promise<void>;
-    registerGoalDeclaration(rootSessionID: string, prompt: string, missionRevision?: boolean): Promise<void>;
+    registerGoalDeclaration(rootSessionID: string, prompt: string, missionRevision?: boolean,
+      mission?: { id: string; requests: readonly { id: string; text: string }[] }): Promise<void>;
     registerDirectValidation(rootSessionID: string, actor: string, criterionID: string, command: string, registeredAt: string): Promise<void>;
     relinkRegisteredGoal(rootSessionID: string, request: { prompt: string; expectedFingerprint: string;
       registeredAt: string }): Promise<void>;
