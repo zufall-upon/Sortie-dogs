@@ -13,7 +13,9 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { runCodexMission } from "../dist/codex/run-mission.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
 import { directHandoffValidationChecks } from "../dist/plugin/mission-review.js";
 import nativeDockerTaskPlugin from "../scripts/frontierharness-docker-task.mjs";
 import { pathToFileURL } from "node:url";
@@ -22,9 +24,9 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
-const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
-  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue")) test(`${actor} direct execution: ${mode}`, async t => {
+  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity")) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const retry = mode.startsWith("retry-");
   const incomplete = mode === "blocked" || mode === "needs-decision" || retry;
@@ -666,6 +668,64 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     assert.equal(stale.status, "direct-unit-awaits-validation");
     await write("fixed\n");
     assert.equal(await check(), 0); // Real native write history requires a check after this edit.
+    let capacityFixture: { file: string; prior: Awaited<ReturnType<RunFlightLedger["readGoal"]>>; pathCount: number } | undefined;
+    if (mode === "ledger-capacity") {
+      // Generated historical recipes reproduce the observed 44,632-path evidence without
+      // copying private paths or creating tens of thousands of real files.
+      const paths = Array.from({ length: 44_632 }, (_, i) => `/virtual/${String(i).padStart(5, "0")}/${"x".repeat(95)}`);
+      const statePath = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root");
+      const saved = JSON.parse(await readFile(statePath, "utf8"));
+      const observed = saved.units[0].directExecution.checks.at(-1);
+      observed.binding.freshness.protected_paths.push(...paths);
+      await writeFile(statePath, JSON.stringify(saved));
+      const key = createHash("sha256").update("v010\u0000root").digest("hex");
+      const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`);
+      const ledger = await RunFlightLedger.openGoal(file);
+      for (let i = 0; i < 3; i++) {
+        const unit = `historical-${i}`, at = new Date().toISOString();
+        const state = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: (await ledger.readGoal()).state.goal_id!,
+          unit_id: unit, reservation_id: unit, session_id: actor, ticket_id: null });
+        const evidence = evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint(unit), command: [checkCommand],
+          startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true, source: observed.source, candidate: observed.candidate,
+          binding: observed.binding }, state, unit);
+        assert.equal(evidence.length, 1);
+        await ledger.appendGoal({ kind: "unit.settled", at, goal_id: state.goal_id!, unit_id: unit, reservation_id: unit,
+          receipt_id: unit, disposition: "succeeded", result_class: "acceptance", evidence,
+          progress_fingerprint: i === 0 ? goalFingerprint(evidence) : null, elapsed_ms: 1, cost_usd: 0.25 });
+      }
+      const bytes = Buffer.byteLength(await readFile(file));
+      t.diagnostic(`legacy goal ledger: ${bytes} bytes; generated protected paths: ${paths.length}`);
+      assert.ok(bytes > 15_000_000 && bytes < 16 * 1024 * 1024);
+      const prior = await ledger.readGoal();
+      const originalHash = createHash("sha256").update(await readFile(file)).digest("hex");
+      const assertUnchanged = async () => {
+        assert.equal(createHash("sha256").update(await readFile(file)).digest("hex"), originalHash);
+        assert.deepEqual((await ledger.readGoal()).state, prior.state);
+        assert.equal((await readRun()).units[0]!.status, "running");
+      };
+      // Both failures occur while the same public finish is settling the unit.
+      // An incomplete blob or failed index publication must leave the legacy
+      // ledger and the live reservation untouched and retryable.
+      hooks = await create();
+      const originalLink = fs.link;
+      const linkFault = t.mock.method(fs, "link", async (...args: Parameters<typeof fs.link>) => {
+        if (String(args[1]).startsWith(`${file}.blobs`)) throw new Error("fixture blob publication failure");
+        return Reflect.apply(originalLink, fs, args);
+      });
+      syncBuiltinESMExports();
+      await assert.rejects(hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }), /fixture blob publication failure/);
+      linkFault.mock.restore(); syncBuiltinESMExports(); await assertUnchanged(); hooks = await create();
+      const originalRename = fs.rename;
+      const renameFault = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+        if (String(args[1]) === file) throw new Error("fixture ledger rename failure");
+        return Reflect.apply(originalRename, fs, args);
+      });
+      syncBuiltinESMExports();
+      await assert.rejects(hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }), /fixture ledger rename failure/);
+      renameFault.mock.restore(); syncBuiltinESMExports(); await assertUnchanged();
+      capacityFixture = { file, prior, pathCount: paths.length };
+      hooks = await create();
+    }
     const checked = (await readRun()).units[0]!.directExecution!.checks;
     if (mode.startsWith("recovery") || mode === "finish-cancelled") {
       if (mode === "recovery-normal-succeeded") {
@@ -803,6 +863,91 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     assert.equal(done.phase, "awaiting-acceptance", JSON.stringify(done));
     assert.ok(done.units[0]!.evidence.length);
     assert.equal(done.units[0]!.directExecution!.checks.length, checked.length, "finish preserves observed validation without reruns");
+    if (capacityFixture) {
+      const { file, prior, pathCount } = capacityFixture;
+      const restored = await RunFlightLedger.readGoalFile(file);
+      assert.deepEqual(restored.records.slice(0, prior.records.length), prior.records, "legacy logical events and their hashes are unchanged");
+      assert.ok(Buffer.byteLength(JSON.stringify(restored.records)) > 16 * 1024 * 1024, "logical history exceeds the legacy byte limit");
+      assert.equal(restored.state.consumed_units, prior.state.consumed_units + 1);
+      assert.equal(restored.state.outstanding_reservations.length, 0);
+      const settled = restored.records.at(-1)!.event;
+      assert.equal(settled.kind, "unit.settled");
+      if (settled.kind !== "unit.settled") throw new Error("expected finish settlement");
+      assert.equal(settled.native_session_id, actor);
+      assert.deepEqual(settled.evidence, done.units[0]!.evidence);
+      assert.equal(restored.state.consumed_cost_usd, prior.state.consumed_cost_usd === null || settled.cost_usd === null
+        ? null : prior.state.consumed_cost_usd + settled.cost_usd);
+      const historical = prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "historical-0")!.event;
+      if (historical.kind !== "unit.settled") throw new Error("expected historical settlement");
+      assert.deepEqual(settled.evidence[0]!.protected_binding!.freshness!.protected_paths,
+        historical.evidence[0]!.protected_binding!.freshness!.protected_paths);
+      assert.ok(settled.evidence[0]!.protected_binding!.freshness!.protected_paths.length >= pathCount);
+      const document = JSON.parse(await readFile(file, "utf8"));
+      assert.equal(document.schema_version, "0.2");
+      assert.ok(document.goal_events.some((record: { event_blob?: unknown }) => record.event_blob));
+      assert.ok(Buffer.byteLength(JSON.stringify(document)) <= 16 * 1024 * 1024);
+      assert.ok(document.goal_events.filter((record: { event_blob?: unknown }) => record.event_blob)
+        .every((record: { event_blob: { chunks: { bytes: number }[] } }) => record.event_blob.chunks.every(chunk => chunk.bytes <= 1024 * 1024)));
+      // Simulate the unchanged 0.1 writer's locked read and closed version check.
+      const beforeLegacyWriter = await readFile(file);
+      const oldWriter = async () => {
+        const lock = await fs.open(`${file}.lock`, "wx");
+        try {
+          const raw = JSON.parse(await readFile(file, "utf8"));
+          if (raw.schema_version !== "0.1" || !Array.isArray(raw.goal_events)) throw new Error("Goal ledger document does not match the closed schema.");
+        } finally { await lock.close(); await fs.unlink(`${file}.lock`); }
+      };
+      await assert.rejects(oldWriter(), /closed schema/);
+      assert.deepEqual(await readFile(file), beforeLegacyWriter);
+
+      const copy = join(directory, "isolated-goal-copy.json");
+      await fs.copyFile(file, copy);
+      await fs.cp(`${file}.blobs`, `${copy}.blobs`, { recursive: true });
+      const first = await RunFlightLedger.openGoal(copy), second = await RunFlightLedger.openGoal(copy);
+      const next = (id: string) => ({ kind: "goal.user-continued" as const, at: new Date().toISOString(),
+        goal_id: restored.state.goal_id!, origin_user_message_id: id, session_id: actor, selected_agent: restored.state.selected_agent! });
+      await writeFile(`${copy}.lock`, "held");
+      await assert.rejects(first.appendGoal(next("held")), (error: unknown) => error instanceof Error && /lock remained busy/.test(error.message));
+      await fs.unlink(`${copy}.lock`);
+      const results = await Promise.allSettled([first.appendGoal(next("concurrent-one")), second.appendGoal(next("concurrent-two"))]);
+      for (const [index, result] of results.entries()) {
+        if (result.status === "rejected") {
+          assert.match(String(result.reason), /lock remained busy/);
+          await (index === 0 ? first : second).appendGoal(next(index === 0 ? "concurrent-one" : "concurrent-two"));
+        }
+      }
+      const concurrent = await RunFlightLedger.readGoalFile(copy);
+      assert.equal(concurrent.records.filter(record => record.event.kind === "goal.user-continued" &&
+        ["concurrent-one", "concurrent-two"].includes(record.event.origin_user_message_id)).length, 2);
+      assert.deepEqual(concurrent.records.slice(0, restored.records.length), restored.records);
+      // Inventory is an existing caller which distinguishes goal ledgers by the
+      // top-level goal_events key. A blob-backed active Codex goal must still
+      // prevent a new external writer from starting.
+      await first.appendGoal({ ...next("codex-unknown"), selected_agent: "codex" });
+      const inventory = join(directory, ".git", "sortie-dogs", "run-flight", "active-codex.json");
+      await mkdir(join(directory, ".git", "sortie-dogs", "run-flight"), { recursive: true });
+      await fs.copyFile(copy, inventory);
+      await fs.cp(`${copy}.blobs`, `${inventory}.blobs`, { recursive: true });
+      const manifest = join(directory, ".git", "codex-inventory-test.json");
+      await writeFile(manifest, JSON.stringify({ version: "0.1.0", task_id: "codex-test", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }));
+      await assert.rejects(runCodexMission({ projectRoot: directory, manifestPath: manifest, prompt: "Do not resend", executable: "must-not-start" }),
+        /codex-mission-outcome-unknown:no-resend/);
+      const copyBody = await readFile(copy, "utf8");
+      const invalid = JSON.parse(copyBody);
+      invalid.goal_events.find((record: { event_blob?: unknown }) => record.event_blob).event_blob.chunks[0].sha256 = "../outside";
+      await writeFile(copy, JSON.stringify(invalid));
+      await assert.rejects(RunFlightLedger.readGoalFile(copy), /blob chunk reference is malformed/);
+      await writeFile(copy, copyBody);
+      const chunk = document.goal_events.find((record: { event_blob?: unknown }) => record.event_blob).event_blob.chunks[0].sha256;
+      const chunkPath = join(`${copy}.blobs`, chunk), chunkBytes = await readFile(chunkPath);
+      await fs.unlink(chunkPath);
+      await assert.rejects(RunFlightLedger.readGoalFile(copy), /blob chunk is missing/);
+      await writeFile(chunkPath, chunkBytes.subarray(0, chunkBytes.length - 1));
+      await assert.rejects(RunFlightLedger.readGoalFile(copy), /blob chunk has an invalid size/);
+      chunkBytes[0] = chunkBytes[0]! ^ 1;
+      await writeFile(chunkPath, chunkBytes);
+      await assert.rejects(RunFlightLedger.readGoalFile(copy), /blob chunk hash mismatch/);
+    }
     const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     if (mode === "large-source") {
       const rawBytes = Buffer.byteLength(JSON.stringify(missionPacket(mission, done)));
@@ -879,6 +1024,15 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     }
     const completed = JSON.parse(await hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    if (capacityFixture) {
+      hooks = await create();
+      const cold = await RunFlightLedger.readGoalFile(capacityFixture.file);
+      assert.equal(cold.state.receipt?.status, "succeeded");
+      assert.equal(cold.state.consumed_units, capacityFixture.prior.state.consumed_units + 1);
+      assert.deepEqual(cold.records.slice(0, capacityFixture.prior.records.length), capacityFixture.prior.records);
+      const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+      assert.equal(status.units[0].status, "succeeded");
+    }
     assert.equal(await readFile(resolve(directory, resultPath), "utf8"), "fixed\n");
     assert.equal((await readRun()).units[0]!.directExecution?.actor, actor, "recovery and acceptance retain the same author without a user turn");
   } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(directory, { recursive: true, force: true });
