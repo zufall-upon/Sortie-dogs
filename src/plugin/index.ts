@@ -120,9 +120,9 @@ import { CancellableChildLifecycle, DEFAULT_CHILD_DEADLINE_MS } from "../core/ch
 import { FailureSwarmRuntime, type FailureSwarmRequest, type ReadOnlyDiagnosisDescriptor } from "../core/failure-swarm-runtime.js";
 import { EvidenceCapsuleStore } from "../core/evidence-capsule.js";
 import { RunFlightLedger, diagnosisContractHash, type DiagnosisSelection, type FlightObservation } from "../core/run-flight-ledger.js";
-import { GOAL_BOUND_METADATA_KEY, goalFingerprint, goalValidationCommand, selectGoalDelivery, validGoalEvidence,
+import { GOAL_BOUND_METADATA_KEY, goalFingerprint, goalValidationCommand, isGoalAcceptance, selectGoalDelivery, validGoalEvidence,
   type GoalAcceptanceContract, type GoalDeliveryMode, type GoalEvidence, type GoalFlightState,
-  type GoalStopReason, type GoalTerminalReceipt, type GoalValidationRetryAuthorization } from "../core/goal-bound.js";
+  type GoalStopReason, type GoalTerminalReceipt, type GoalValidationRetryAuthorization, type QueuedGoalOrigin } from "../core/goal-bound.js";
 import { LUNA_FABRIC_MAX_ACTIVE } from "../core/luna-fabric-scheduler.js";
 import { terminalRescueModel } from "./terminal-rescue-binding.js";
 import type { ModelTarget } from "./model-routing.js";
@@ -2075,10 +2075,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
   async function reconcileUnitUsage(root: string): Promise<void> {
     const ledger = await goalLedger(root), snapshot = await ledger.readGoal();
-    const reconciled = new Set(snapshot.records.flatMap(({ event }) => event.kind === "unit.usage-reconciled" ? [event.reservation_id] : []));
+    const lineage = new Set([snapshot.state.goal_id]);
+    for (const { event } of [...snapshot.records].reverse()) {
+      if (event.kind === "goal.queued-accepted" && lineage.has(event.goal_id)) lineage.add(event.queued_from.goal_id);
+    }
+    const costKey = (goalID: string, reservationID: string) => JSON.stringify([goalID, reservationID]);
+    const reconciled = new Set(snapshot.records.flatMap(({ event }) => event.kind === "unit.usage-reconciled"
+      ? [costKey(event.goal_id, event.reservation_id)] : []));
     for (const { event } of snapshot.records) {
-      if (event.kind !== "unit.settled" || event.goal_id !== snapshot.state.goal_id || event.cost_usd !== null ||
-          !event.native_session_id || reconciled.has(event.reservation_id)) continue;
+      if (event.kind !== "unit.settled" || !lineage.has(event.goal_id) || event.cost_usd !== null ||
+          !event.native_session_id || reconciled.has(costKey(event.goal_id, event.reservation_id))) continue;
       const cost = event.native_usage_segments ? await priceUsageSegments(event.native_usage_segments)
         : await nativeUnitCost(event.native_session_id, event.native_started_at);
       if (cost === null) continue;
@@ -2302,7 +2308,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   async function acceptRealGoalTurn(sessionID: string, messageID: string, selectedAgent: string,
-    parts: readonly unknown[]): Promise<void> {
+    parts: readonly unknown[], queuedFrom?: QueuedGoalOrigin): Promise<void> {
     // Root recovery can prove the persisted user message identity before its parts are available.
     // Preserve that existing empty projection while every observed non-empty shape stays strict.
     const safeParts: readonly FreshSessionPromptPart[] | undefined = parts.length === 0
@@ -2312,7 +2318,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     await recoverCompletedGoalReservations(sessionID);
     const ledger = await goalLedger(sessionID);
     const state = (await ledger.readGoal()).state;
-    if (state.latest_user_message_id === messageID) return;
+    if (queuedFrom && state.phase !== "terminal") throw new Error("mission-goal-request-terminal-mismatch");
+    if (state.latest_user_message_id === messageID && queuedFrom === undefined) return;
     const at = new Date().toISOString();
     const explicitContinuation = safeParts.filter((part): part is FreshSessionTextPart => part.type === "text")
       .map((part) => part.text).join("\n")
@@ -2327,17 +2334,57 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         (state.phase === "stopped" && !explicitContinuation && !durableContinuation)) {
       const acceptance = goalFingerprint({ message_id: messageID, parts: safeParts.map((part) =>
         part.type === "text" ? part.text : part) });
-      await ledger.appendGoal({ kind: "goal.accepted", at,
+      await ledger.appendGoal({ ...(queuedFrom ? { kind: "goal.queued-accepted" as const, queued_from: queuedFrom } : { kind: "goal.accepted" as const }), at,
         goal_id: goalFingerprint({ root: goalRoot(sessionID), origin_user_message_id: messageID }),
         revision: 1, scope_epoch: 1, acceptance_fingerprint: acceptance,
          origin_user_message_id: messageID, origin_session_id: sessionID, selected_agent: selectedAgent,
-         delivery: "mvp-first", budget: { max_units: 32, time_ms: null, cost_usd: null, source: "policy-default" },
+         delivery: "mvp-first", budget: queuedFrom ? state.budget! : { max_units: 32, time_ms: null, cost_usd: null, source: "policy-default" },
          acceptance_contract: null });
       rootAcceptanceContinuity.delete(sessionID);
       return;
     }
     await ledger.appendGoal({ kind: "goal.user-continued", at, goal_id: state.goal_id,
       origin_user_message_id: messageID, session_id: sessionID, selected_agent: selectedAgent });
+  }
+
+  async function acceptQueuedMissionGoal(root: string, prompt: string,
+    mission: { id: string; requests: readonly { id: string; text: string }[] }): Promise<void> {
+    const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
+    const request = mission.requests.at(-1);
+    if (!request) throw new Error("mission-goal-request-unavailable");
+    const requestFingerprint = goalFingerprint(request);
+    const prior = snapshot.records.find(({ event }) => isGoalAcceptance(event) && event.origin_user_message_id === request.id)?.event;
+    // Recovery after acceptance but before Mission/run binding must not accept or spend twice.
+    if (prior?.kind === "goal.queued-accepted") {
+      if (prior.goal_id !== state.goal_id || state.phase !== "active" || prior.queued_from.mission_id !== mission.id ||
+          prior.queued_from.request_fingerprint !== requestFingerprint) throw new Error("mission-goal-request-already-accepted");
+      return;
+    }
+    if (state.phase !== "terminal") return;
+    if (prior || request.id === state.origin_user_message_id || snapshot.records.some(({ event }) =>
+        event.kind === "goal.revised" && event.origin_user_message_id === request.id)) {
+      throw new Error("mission-goal-request-already-accepted");
+    }
+    const declaration = resolveGoalDeclaration(state, await resolveGoalPrompt(prompt)).declaration;
+    if (!declaration || !declaration.contract.criteria.every(criterion => criterion.fixture === mission.id)) {
+      throw new Error("mission-goal-request-binding-mismatch");
+    }
+    const response = await input.client?.session?.messages?.({ path: { id: root }, query: { directory: input.directory } });
+    const history = isRecord(response) && "data" in response ? response.data : response;
+    const matches = Array.isArray(history) ? history.filter(message => isRecord(message) &&
+      (isRecord(message.info) ? message.info.id : message.id) === request.id) : [];
+    const message = matches.length === 1 && isRecord(matches[0]) ? matches[0] : undefined;
+    const info = message && (isRecord(message.info) ? message.info : message);
+    const parts = message && Array.isArray(message.parts) && !syntheticPrompt(message.parts) ? freshSessionPrompt(message.parts) : undefined;
+    const created = info && isRecord(info.time) ? info.time.created : undefined;
+    if (!info || info.role !== "user" || info.sessionID !== root || info.agent !== COORDINATOR_AGENT || !parts ||
+        parts.filter((part): part is FreshSessionTextPart => part.type === "text").map(part => part.text).join("\n") !== request.text ||
+        typeof created !== "number" || !Number.isFinite(created) || !state.receipt ||
+        created < Date.parse(state.receipt.started_at) || created > Date.parse(state.receipt.ended_at)) {
+      throw new Error("mission-goal-request-native-proof-unavailable");
+    }
+    await acceptRealGoalTurn(root, request.id, COORDINATOR_AGENT, parts, { goal_id: state.goal_id!,
+      receipt_fingerprint: goalFingerprint(state.receipt), mission_id: mission.id, request_fingerprint: requestFingerprint });
   }
 
   async function acceptPersistedRealGoalEvent(sessionID: string, info: Record<string, unknown>): Promise<void> {
@@ -2422,7 +2469,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!readiness.ready) return undefined;
     }
     if (state.goal_id === null || state.outstanding_reservations.length > 0 || state.acceptance_fingerprint === null) return undefined;
-    const started = [...records].reverse().find(({ event }) => event.kind === "goal.accepted")?.event.at ?? new Date().toISOString();
+    const started = [...records].reverse().find(({ event }) => isGoalAcceptance(event))?.event.at ?? new Date().toISOString();
     const ended = new Date().toISOString();
     const startTime = Date.parse(started);
     const endTime = Date.parse(ended);
@@ -7894,7 +7941,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           const reviewGoal = await goalLedger(toolInput.sessionID).then(ledger => ledger.readGoal());
           let reviewSince = Number.POSITIVE_INFINITY, reviewFingerprint: string | undefined;
           for (const { event } of reviewGoal.records) {
-            if (event.kind === "goal.accepted" || (event.kind === "goal.revised" && event.acceptance_fingerprint !== reviewFingerprint)) {
+            if (isGoalAcceptance(event) || (event.kind === "goal.revised" && event.acceptance_fingerprint !== reviewFingerprint)) {
               reviewSince = Date.parse(event.at); reviewFingerprint = event.acceptance_fingerprint;
             }
           }
@@ -8506,7 +8553,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     proveApprovedRunAncestry: async (root, oldGoalID, parentRunID) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       const { records } = await (await goalLedger(root)).readGoal();
-      if (!records.some(({ event }) => event.kind === "goal.accepted" && event.goal_id === oldGoalID)) return false;
+      if (!records.some(({ event }) => isGoalAcceptance(event) && event.goal_id === oldGoalID)) return false;
       return records.some(({ event }) => event.kind === "dispatch.reserved" && event.goal_id === oldGoalID &&
         event.session_id === root && event.unit_id.startsWith(`${parentRunID}-`) &&
         records.some(({ event: settled }) => settled.kind === "unit.settled" && settled.goal_id === oldGoalID &&
@@ -8901,12 +8948,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       missionDirectTerminal: (root, dispatch, writeScopes) =>
         missionDispatchWriterReleased(root, dispatch.taskID, dispatch.callID, dispatch.actor, writeScopes),
     expandMissionWriteGate,
-    registerGoalDeclaration: async (root, prompt, missionRevision) => {
+    registerGoalDeclaration: async (root, prompt, missionRevision, mission) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
       // In one-shot CLI turns OpenCode may persist the user message only after chat.message returns.
       // Proposal preparation can reach registration first, so recover that exact pending real turn here
       // instead of freezing a prepared contract that can never consume its user revision authority.
       await recoverPendingRealGoalTurn(root);
+      if (missionRevision && mission) await acceptQueuedMissionGoal(root, prompt, mission);
       if (missionRevision) {
         // Profile-verified unchanged mission requirements permit the Coordinator to revise proof
         // commands, not acceptance or budgets. Counters/reservations stay in the same goal ledger.
@@ -8939,14 +8987,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (state.latest_user_message_id === null || goalDeclarationAuthority.get(root) !== state.latest_user_message_id) {
         throw new Error("operator-resume-latest-approval-missing");
       }
-      const related = snapshot.records.some(({ event }) => event.kind === "goal.accepted" &&
+      const related = snapshot.records.some(({ event }) => isGoalAcceptance(event) &&
         event.goal_id === state.goal_id && Date.parse(event.at) <= registeredAt);
       const latestApproval = [...snapshot.records].reverse().find(({ event }) => event.kind === "goal.user-continued" &&
         event.goal_id === state.goal_id && event.origin_user_message_id === state.latest_user_message_id);
       if (!related || latestApproval === undefined || Date.parse(latestApproval.event.at) < registeredAt) {
         throw new Error("operator-resume-registered-goal-relation-missing");
       }
-      if (snapshot.records.some(({ event }) => (event.kind === "goal.accepted" || event.kind === "goal.revised") &&
+      if (snapshot.records.some(({ event }) => (isGoalAcceptance(event) || event.kind === "goal.revised") &&
         event.goal_id === state.goal_id && Date.parse(event.at) >= registeredAt)) {
         throw new Error("operator-resume-registered-goal-newer-scope");
       }

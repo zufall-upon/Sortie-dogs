@@ -44,6 +44,14 @@ test("replays deduplicate goals and reopened completion replaces the previous co
   assert.deepEqual(result.firstPass, { count: 1, eligible: 1 });
 });
 
+test("queued acceptance retains separate predecessor and successor history without double counting", () => {
+  const a = history(receipt("a"), 10), b = history(receipt("b"), 20);
+  b[0] = record({ ...b[0]!.event, kind: "goal.queued-accepted" });
+  const result = summarizeCareer([a, b, a, b], coverage);
+  assert.equal(result.goals, 2); assert.equal(result.completed, 2);
+  assert.equal(result.workerTime.sum, 2000); assert.deepEqual(result.tokens, { sum: 30, covered: 2 });
+});
+
 test("rare AND evaluations preserve false versus unknown and never reward an unsuccessful receipt", () => {
   for (const recovery of ["true", "false", "unknown"] as ConditionState[]) {
     for (const coordination of ["true", "false", "unknown"] as ConditionState[]) {

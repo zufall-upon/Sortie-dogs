@@ -179,6 +179,8 @@ test("Clean Sweep requires complete terminal-matched attempt history and no resu
     { kind: "unit.settled", goal_id: "g", reservation_id: "r", disposition: "succeeded", result_class: "acceptance" },
     { kind: "goal.terminal", goal_id: "g", receipt }];
   assert.deepEqual(buildDebrief(receipt, contract, observation, records(events)).traits, ["一発完遂"]);
+  assert.deepEqual(buildDebrief(receipt, contract, observation, records([{ ...events[0], kind: "goal.queued-accepted" }, ...events.slice(1)])),
+    buildDebrief(receipt, contract, observation, records(events)), "queued acceptance is a new goal boundary, not an omitted or resumed history");
   const earned = buildDebrief(receipt, contract, observation, records(events));
   assert.match(renderDebriefTraitEvidence(earned, true).join("\n"), /一発完遂の条件 — 完全な対象履歴/u);
   assert.doesNotMatch(renderDebriefTraits(earned, true).join("\n"), /獲得記録あり/u, "unsaved evaluation is not an awarded record");

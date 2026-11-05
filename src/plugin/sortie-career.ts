@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { goalFingerprint, type GoalFlightEventRecord, type GoalTerminalReceipt } from "../core/goal-bound.ts";
+import { goalFingerprint, isGoalAcceptance, type GoalFlightEventRecord, type GoalTerminalReceipt } from "../core/goal-bound.ts";
 import { validGoalReport, type GoalReport } from "../core/goal-report.ts";
 import { RARE_RULES, rareEvaluation } from "../core/rare-awards.ts";
 import { rareDisplay } from "./sortie-debrief.ts";
@@ -44,10 +44,10 @@ export function summarizeCareer(histories: readonly (readonly GoalFlightEventRec
   const goals = new Map<string, { since: string | null; receipt: GoalTerminalReceipt | null;
     reports: Map<string, GoalReport>; units: Map<string, number | null> }>();
   for (const { event } of events) {
-    if (!goals.has(event.goal_id) && event.kind !== "goal.accepted") continue;
+    if (!goals.has(event.goal_id) && !isGoalAcceptance(event)) continue;
     const goal = goals.get(event.goal_id) ?? { since: null, receipt: null, reports: new Map(), units: new Map() };
     goals.set(event.goal_id, goal);
-    if (event.kind === "goal.accepted") goal.since ??= event.at;
+    if (isGoalAcceptance(event)) goal.since ??= event.at;
     if (event.kind === "goal.terminal") goal.receipt = event.receipt;
     if (event.kind === "goal.user-continued" || event.kind === "goal.revised") goal.receipt = null;
     if (event.kind === "unit.settled") goal.units.set(event.reservation_id, event.elapsed_ms);

@@ -2995,7 +2995,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // fails. Verify its pinned controls, then idempotently register the same declaration;
       // only the durable Mission binding below makes it eligible for admission.
       await operators.verifyContinuityControls(state);
-      await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true);
+      if (JSON.stringify(state.sourceRefs) !== JSON.stringify(mission.requests.map(request => `user:${request.id}`))) {
+        throw new Error("mission-goal-request-binding-mismatch");
+      }
+      await control!.registerGoalDeclaration(root, state.units[0]!.task.prompt, true, { id: mission.id, requests: mission.requests });
       await missions.update(root, item => {
         item.continuity = mission.continuity;
         item.reviewScope = missionReviewScope(item.reviewScope,
