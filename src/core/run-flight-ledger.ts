@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { EvidenceCapsuleStore } from "./evidence-capsule.js";
@@ -264,6 +264,109 @@ function validRescueContract(value: unknown): boolean {
 
 function recordHash(sequence: number, previousHash: string | null, event: unknown): string {
   return `sha256:${createHash("sha256").update(canonical({ sequence, previous_hash: previousHash, event })).digest("hex")}`;
+}
+
+// This is a storage version, not the version of the logical goal events. A 0.1
+// reader rejects it under the same lock rather than rewriting an unknown format.
+const GOAL_BLOB_STORAGE_VERSION = "0.2";
+const GOAL_BLOB_CHUNK_BYTES = 1024 * 1024;
+const GOAL_BLOB_INLINE_BYTES = 64 * 1024;
+type GoalBlobChunk = { readonly sha256: string; readonly bytes: number };
+type GoalBlobRecord = { readonly sequence: number; readonly previous_hash: string | null; readonly event_hash: string;
+  readonly event_blob: { readonly bytes: number; readonly chunks: readonly GoalBlobChunk[] } };
+
+function chunkHash(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+
+async function readGoalChunk(filePath: string, sha256: string, expected: number): Promise<Buffer> {
+  const blobPath = path.join(`${filePath}.blobs`, sha256);
+  let bytes: Buffer;
+  try {
+    const file = await open(blobPath, "r");
+    try {
+      if ((await file.stat()).size !== expected) throw new RunFlightLedgerError("conflict", "Goal ledger blob chunk has an invalid size.");
+      bytes = await file.readFile();
+    } finally { await file.close(); }
+  } catch (error) {
+    if (isObject(error) && error.code === "ENOENT") throw new RunFlightLedgerError("conflict", "Goal ledger blob chunk is missing.");
+    throw error;
+  }
+  if (bytes.length !== expected || chunkHash(bytes) !== sha256) throw new RunFlightLedgerError("conflict", "Goal ledger blob chunk hash mismatch.");
+  return bytes;
+}
+
+/** The ledger and its .blobs directory are one durable storage unit when copied. */
+async function readGoalBlob(filePath: string, value: unknown): Promise<unknown> {
+  if (!isObject(value) || !only(value, ["bytes", "chunks"]) || !Number.isSafeInteger(value.bytes) ||
+      Number(value.bytes) <= 0 || !Array.isArray(value.chunks) || value.chunks.length !== Math.ceil(Number(value.bytes) / GOAL_BLOB_CHUNK_BYTES)) {
+    throw new RunFlightLedgerError("invalid", "Goal ledger blob reference is malformed.");
+  }
+  const parts: Buffer[] = [];
+  for (const [index, chunk] of value.chunks.entries()) {
+    const expected = index === value.chunks.length - 1 ? Number(value.bytes) - index * GOAL_BLOB_CHUNK_BYTES : GOAL_BLOB_CHUNK_BYTES;
+    if (!isObject(chunk) || !only(chunk, ["sha256", "bytes"]) || typeof chunk.sha256 !== "string" ||
+        !PLAIN_HASH_PATTERN.test(chunk.sha256) || chunk.bytes !== expected) {
+      throw new RunFlightLedgerError("invalid", "Goal ledger blob chunk reference is malformed.");
+    }
+    parts.push(await readGoalChunk(filePath, chunk.sha256, expected));
+  }
+  try { return JSON.parse(Buffer.concat(parts).toString("utf8")); }
+  catch { throw new RunFlightLedgerError("invalid", "Goal ledger blob event is not valid JSON."); }
+}
+
+async function storeGoalBlob(filePath: string, data: Buffer): Promise<GoalBlobRecord["event_blob"]> {
+  const directory = `${filePath}.blobs`;
+  await mkdir(directory, { recursive: true });
+  const chunks: GoalBlobChunk[] = [];
+  for (let offset = 0; offset < data.length; offset += GOAL_BLOB_CHUNK_BYTES) {
+    const bytes = data.subarray(offset, offset + GOAL_BLOB_CHUNK_BYTES), sha256 = chunkHash(bytes);
+    const destination = path.join(directory, sha256), temporary = path.join(directory, `.${process.pid}.${randomUUID()}.tmp`);
+    let exists = true;
+    try { await access(destination); }
+    catch (error) { if (isObject(error) && error.code === "ENOENT") exists = false; else throw error; }
+    if (exists) {
+      await readGoalChunk(filePath, sha256, bytes.length);
+      chunks.push({ sha256, bytes: bytes.length });
+      continue;
+    }
+    let file;
+    try {
+      // Publish a complete immutable chunk, never a partially written hash-named file.
+      file = await open(temporary, "wx");
+      await file.writeFile(bytes);
+      await file.sync();
+      await file.close(); file = undefined;
+      try { await link(temporary, destination); }
+      catch (error) {
+        if (!isObject(error) || error.code !== "EEXIST") throw error;
+        // A previously published chunk can be reused only after validating it.
+        await readGoalChunk(filePath, sha256, bytes.length);
+      }
+    } finally { if (file) await file.close(); await unlink(temporary).catch(() => undefined); }
+    chunks.push({ sha256, bytes: bytes.length });
+  }
+  return { bytes: data.length, chunks };
+}
+
+async function goalStorageBody(filePath: string, records: readonly GoalFlightEventRecord[]): Promise<string> {
+  const legacy = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: records });
+  if (Buffer.byteLength(legacy) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return legacy;
+  const blobs = new Map<number, GoalBlobRecord>();
+  const encode = () => canonical({ schema_version: GOAL_BLOB_STORAGE_VERSION,
+    goal_events: records.map((record, index) => blobs.get(index) ?? record) });
+  // Usually only a handful of large validation events need external storage. If
+  // numerous medium records fill the index, externalize the remainder as well.
+  for (const threshold of [GOAL_BLOB_INLINE_BYTES, 0]) {
+    for (const [index, record] of records.entries()) {
+      if (blobs.has(index)) continue;
+      const data = Buffer.from(canonical(record.event));
+      if (data.length <= threshold) continue;
+      blobs.set(index, { sequence: record.sequence, previous_hash: record.previous_hash, event_hash: record.event_hash,
+        event_blob: await storeGoalBlob(filePath, data) });
+    }
+    const body = encode();
+    if (Buffer.byteLength(body) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return body;
+  }
+  throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
 }
 
 export function diagnosisContractHash(value: unknown): string {
@@ -1142,10 +1245,8 @@ export class RunFlightLedger {
           error.code === "budget" ? "budget" : error.code === "invalid" ? "invalid" : "transition", error.message);
         throw error;
       }
-      const body = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: next });
-      if (next.length > MAX_RUN_FLIGHT_EVENTS || Buffer.byteLength(body) > MAX_GOAL_FLIGHT_LEDGER_BYTES) {
-        throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
-      }
+      if (next.length > MAX_RUN_FLIGHT_EVENTS) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+      const body = await goalStorageBody(this.#filePath, next);
       const temporary = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`;
       await writeFile(temporary, body, { encoding: "utf8", flag: "wx" });
       try { await rename(temporary, this.#filePath); } catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
@@ -1173,10 +1274,20 @@ export class RunFlightLedger {
     let document: unknown;
     try { document = JSON.parse(raw); } catch { throw new RunFlightLedgerError("invalid", "Goal ledger is not valid JSON."); }
     if (!isObject(document) || !only(document, ["schema_version", "goal_events"]) ||
-      document.schema_version !== GOAL_BOUND_SCHEMA_VERSION || !Array.isArray(document.goal_events)) {
+      (document.schema_version !== GOAL_BOUND_SCHEMA_VERSION && document.schema_version !== GOAL_BLOB_STORAGE_VERSION) ||
+      !Array.isArray(document.goal_events) || document.goal_events.length > MAX_RUN_FLIGHT_EVENTS) {
       throw new RunFlightLedgerError("invalid", "Goal ledger document does not match the closed schema.");
     }
-    const records = document.goal_events as GoalFlightEventRecord[];
+    const records: GoalFlightEventRecord[] = [];
+    for (const stored of document.goal_events) {
+      if (isObject(stored) && Object.hasOwn(stored, "event_blob")) {
+        if (document.schema_version !== GOAL_BLOB_STORAGE_VERSION || !only(stored, ["sequence", "previous_hash", "event_hash", "event_blob"])) {
+          throw new RunFlightLedgerError("invalid", "Goal ledger blob record does not match the closed schema.");
+        }
+        records.push({ sequence: stored.sequence, previous_hash: stored.previous_hash, event_hash: stored.event_hash,
+          event: await readGoalBlob(this.#filePath, stored.event_blob) } as GoalFlightEventRecord);
+      } else records.push(stored as GoalFlightEventRecord);
+    }
     let previous: string | null = null;
     records.forEach((record, index) => {
       if (!isObject(record) || !only(record, ["sequence", "previous_hash", "event_hash", "event"]) ||
