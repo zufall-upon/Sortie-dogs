@@ -3458,6 +3458,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const inspected = new Map<string, InspectionCacheEntry>();
   const inspectionOperations = new Map<string, Promise<void>>();
   const sessionAuthorizations = new Map<string, SessionAuthorization>();
+  // Only an already-requested direct release may be retried by a later scope operation.
+  const pendingDirectReleases = new Map<string, { authorization: SessionAuthorization; root: string; taskID: string; callID?: string }>();
   const bindingPins = new Map<string, BindingPin>();
   const bindingOperations = new Set<string>();
   const activeSessions = new Map<string, ActiveSessionState>();
@@ -5624,6 +5626,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnostics.some(({ severity }) => severity === "error") ||
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
       ) return denyHandoffMismatch(handoffValue, contractDefects(diagnostics));
+      await retryPendingDirectReleases(inspectedEntry.rootSessionID);
       const conflictsWithActiveAuthorization = (
         writeScopes: readonly string[],
         readScopes: readonly string[],
@@ -5810,6 +5813,45 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     }
   }
 
+  /** Reconcile missed after hooks from exact native tool terminals, never from abort success alone. */
+  async function reconcileInFlightTools(actor: string): Promise<string | undefined> {
+    const active = activeSessions.get(actor);
+    if (!active?.inFlightCalls.size) return undefined;
+    const pending = [...active.inFlightCalls];
+    const response = await input.client?.session?.messages?.({ path: { id: actor }, query: { directory: input.directory } }).catch(() => undefined);
+    const history = isRecord(response) && Array.isArray(response.data) ? response.data : undefined;
+    if (!history) return "tool_terminal_records_unavailable";
+    for (const callID of pending) {
+      const parts = history.flatMap(message => isRecord(message) && isRecord(message.info) &&
+        message.info.sessionID === actor && Array.isArray(message.parts) ? message.parts : [])
+        .filter(part => isRecord(part) && part.type === "tool" && part.callID === callID);
+      if (parts.length !== 1 || !isRecord(parts[0]) || parts[0].sessionID !== undefined && parts[0].sessionID !== actor ||
+          !isRecord(parts[0].state) || !["completed", "error"].includes(String(parts[0].state.status)) ||
+          isRecord(parts[0].state.metadata) && ["running", "pending", "unknown"].includes(String(parts[0].state.metadata.status))) {
+        return "tool_dispatch_active_or_unproven";
+      }
+    }
+    // Calls admitted while history was loading remain in flight; never clear the entire set.
+    if (activeSessions.get(actor) !== active) return "tool_dispatch_active_or_unproven";
+    for (const callID of pending) active.inFlightCalls.delete(callID);
+    return active.inFlightCalls.size ? "tool_dispatch_active_or_unproven" : undefined;
+  }
+
+  async function retryPendingDirectReleases(root: string): Promise<void> {
+    for (const [actor, expected] of pendingDirectReleases) {
+      if (expected.root !== root) continue;
+      const matches = () => sessionAuthorizations.get(actor) === expected.authorization &&
+        expected.authorization.rootSessionID === expected.root && expected.authorization.taskID === expected.taskID &&
+        expected.authorization.dispatchCallID === expected.callID;
+      if (!matches()) { pendingDirectReleases.delete(actor); continue; }
+      if (await reconcileInFlightTools(actor) || !matches()) continue;
+      const released = JSON.parse(await releaseWriteGate(actor));
+      if (released.status === "denied") continue;
+      pendingDirectReleases.delete(actor);
+      releaseSessionEnforcement(actor);
+    }
+  }
+
   async function sessionGate(sessionID: string | undefined): Promise<WriteGate | undefined> {
     const now = Date.now();
     pruneSessionAuthorizations(sessionAuthorizations, activeSessions, now);
@@ -5849,6 +5891,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     bindingOperations.add(sessionID);
     const old = { ...authorization }, oldPin = bindingPins.get(sessionID), oldScope = authorization.lease?.scope;
     try {
+      await retryPendingDirectReleases(authorization.rootSessionID);
       await input.runtimeBridge.expandMissionScope(authorization.rootSessionID, sessionID, authorization.taskID, paths, async manifest => {
         const project = await createProjectPaths(authorization.projectRoot);
         const readScopes = await canonicalManifestReadScopes(project, manifest), writeScopes = await canonicalManifestWriteScopes(project, manifest);
@@ -5952,6 +5995,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
    * later becomes the coordinator is not reported as a revoked worker session.
    */
   function releaseSessionEnforcement(sessionID: string): void {
+    pendingDirectReleases.delete(sessionID);
     activeSessions.delete(sessionID);
     abandonSessionLease(sessionID);
     sessionAuthorizations.delete(sessionID);
@@ -6074,6 +6118,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function evictSession(sessionID: string): void {
+    pendingDirectReleases.delete(sessionID);
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     goalValidationDefects.delete(sessionID);
     liveUserTurnAuthority.delete(sessionID);
@@ -8277,19 +8322,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const active = activeSessions.get(actor), authorization = sessionAuthorizations.get(actor);
     if (authorization && (authorization.rootSessionID !== root || authorization.taskID !== taskID ||
         authorization.dispatchCallID !== callID)) return { ready: false, reason: "writer_owned_by_other_dispatch" };
-    if (active?.inFlightCalls.size) {
-      const response = await input.client?.session?.messages?.({ path: { id: actor }, query: { directory: input.directory } }).catch(() => undefined);
-      const history = isRecord(response) && Array.isArray(response.data) ? response.data : undefined;
-      if (!history) return { ready: false, reason: "tool_terminal_records_unavailable" };
-      for (const pendingID of active.inFlightCalls) {
-        const parts = history.flatMap(message => isRecord(message) && isRecord(message.info) &&
-          message.info.sessionID === actor && Array.isArray(message.parts) ? message.parts : [])
-          .filter(part => isRecord(part) && part.type === "tool" && part.callID === pendingID);
-        if (parts.length !== 1 || !isRecord(parts[0]) || !isRecord(parts[0].state) ||
-            !["completed", "error"].includes(String(parts[0].state.status))) return { ready: false, reason: "tool_dispatch_active_or_unproven" };
-      }
-      active.inFlightCalls.clear();
-    }
+    const pendingReason = await reconcileInFlightTools(actor);
+    if (pendingReason) return { ready: false, reason: pendingReason };
     const released = JSON.parse(await releaseWriteGate(actor));
     if (released.status === "denied") return { ready: false, reason: released.reason };
     if (active) active.released = true;
@@ -8802,6 +8836,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return settled;
     },
     releaseDirectUnit: async actor => {
+      const authorization = sessionAuthorizations.get(actor);
+      const expected = authorization && { authorization, root: authorization.rootSessionID,
+        taskID: authorization.taskID, callID: authorization.dispatchCallID };
+      if (expected) pendingDirectReleases.set(actor, expected);
+      await reconcileInFlightTools(actor);
+      const current = sessionAuthorizations.get(actor);
+      if (current && (!expected || current !== expected.authorization || current.rootSessionID !== expected.root ||
+          current.taskID !== expected.taskID || current.dispatchCallID !== expected.callID)) throw new Error("mission-direct-release:writer-changed");
       const released = JSON.parse(await releaseWriteGate(actor));
       if (released.status === "denied") throw new Error(`mission-direct-release:${released.reason}`);
       releaseSessionEnforcement(actor);

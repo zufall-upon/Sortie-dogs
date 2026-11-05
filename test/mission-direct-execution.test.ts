@@ -25,8 +25,10 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 const exec = promisify(execFile);
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
-  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity")) test(`${actor} direct execution: ${mode}`, async t => {
+const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+  (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
+  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const retry = mode.startsWith("retry-");
   const incomplete = mode === "blocked" || mode === "needs-decision" || retry;
@@ -129,6 +131,45 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
     const before = await readRun();
     assert.equal(before.units[0]!.directExecution?.actor, actor);
     assert.equal(before.dispatched, 0, "no native Worker Task was dispatched");
+    if (cancelledWriterModes.includes(mode)) {
+      const callID = "cancelled-question", args = { questions: [] };
+      await hooks["tool.execute.before"]!({ tool: "question", sessionID: actor, callID }, { args });
+      const part = { type: "tool", tool: "question", callID,
+        state: { status: mode === "cancel-delayed-writer" ? "running" : "error", input: args,
+          ...(mode === "cancel-background-writer" ? { metadata: { status: "unknown" } } : {}), time: { end: Date.now() } } };
+      history[actor] = [{ info: { role: "assistant", sessionID: mode === "cancel-foreign-writer" ? "another-actor" : actor },
+        parts: mode === "cancel-missing-writer" ? [] : mode === "cancel-duplicate-writer" ? [part, structuredClone(part)] : [part] }];
+      const stop = () => hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" });
+      if (mode === "cancel-stale-writer") await stop();
+      else await assert.rejects(stop(), /mission-direct-release:tools-in-flight/);
+      assert.equal((await readRun()).units[0]!.status, "cancelled");
+      const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      assert.equal(budget.reserved_units, 0);
+      if (actor === "coordinator") delete agents.reviewer;
+      const next = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validated fixed result"] }, { sessionID: "root" }));
+      if (actor === "coordinator") {
+        await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "old-resume" },
+          { args: { ...next.task, task_id: actor } }), /mission-dispatch-not-authorized/,
+        "cancellation recovery never authorizes redispatch of the old Coordinator");
+      }
+      const replacement = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{ ...declaration,
+        write: ["new-result.txt"] }] }, { sessionID: "root" }));
+      assert.equal(replacement.status, "direct-unit-running");
+      const expand = () => hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: replacement.unit_id, paths: ["result.txt"],
+        reason: "Continue the original result after cancelling its prior author" }, { sessionID: "root" });
+      if (mode !== "cancel-stale-writer") {
+        await assert.rejects(expand(), /mission-scope-update-writer-conflict:coordinator/);
+        part.state.status = "completed";
+        delete (part.state as { metadata?: unknown }).metadata;
+        history[actor] = [{ info: { role: "assistant", sessionID: actor }, parts: [part] }];
+      }
+      await expand();
+      await Promise.all([expand(), expand()]);
+      const after = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      assert.equal(after.consumed_units, budget.consumed_units, "release retry never settles the old reservation twice");
+      assert.equal(after.reserved_units, 1, "only the replacement direct unit reserves budget");
+      return;
+    }
     if (cancel) {
       hooks = await create();
       await hooks.tool!.sortie_v010_cancel_operator.execute({ reason: "plain" }, { sessionID: "root" });
