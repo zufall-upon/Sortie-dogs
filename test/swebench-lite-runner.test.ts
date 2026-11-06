@@ -121,7 +121,7 @@ test("benchmark waits for the selected model and variant before starting a V2 se
   }), /candidate-v2-model-route-unavailable/u);
 });
 
-test("isolated V2 runtime copies only its OAuth route into a private credential store", async () => {
+for (const inactiveUpdated of [1, 2]) test(`isolated V2 runtime copies the selected OAuth route over an inactive route: ${inactiveUpdated === 1 ? "equal timestamps" : "newer inactive"}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "swebench-v2-auth-"));
   const directory = join(root, "isolated"), sourcePath = join(root, "source.db"), targetPath = join(directory, "opencode.db");
   const schema = "CREATE TABLE credential (id TEXT, integration_id TEXT, label TEXT, value TEXT, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)";
@@ -134,7 +134,8 @@ test("isolated V2 runtime copies only its OAuth route into a private credential 
     const source = new DatabaseSync(sourcePath);
     try {
       const insert = source.prepare("INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-      insert.run("openai-route", "openai", "fixture", JSON.stringify({ type: "oauth", access: "dummy" }), null, null, null, 1, 1);
+      insert.run("old-route", "openai", "fixture", JSON.stringify({ type: "oauth", access: "expired" }), null, null, 0, 1, inactiveUpdated);
+      insert.run("openai-route", "openai", "fixture", JSON.stringify({ type: "oauth", access: "dummy" }), null, null, 1, 1, 1);
       insert.run("unrelated", "other", "fixture", JSON.stringify({ type: "oauth", access: "other" }), null, null, null, 1, 1);
     } finally { source.close(); }
     await seedIsolatedV2Credential(sourcePath, targetPath, directory);

@@ -39,7 +39,9 @@ export async function seedIsolatedV2Credential(sourcePath, targetPath, targetDir
   }
   const source = new DatabaseSync(sourcePath, { readOnly: true });
   try {
-    const credential = source.prepare('SELECT id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated FROM credential WHERE integration_id = ? ORDER BY time_updated DESC LIMIT 1').get('openai');
+    // Imported credentials can share timestamps, and an inactive route can be newer.
+    // Preserve the host's selected account rather than accidentally reviving an old token.
+    const credential = source.prepare('SELECT id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated FROM credential WHERE integration_id = ? ORDER BY active DESC, time_updated DESC, id DESC LIMIT 1').get('openai');
     assert(credential !== undefined && JSON.parse(credential.value).type === 'oauth', 'candidate-openai-credential-unavailable');
     await chmod(targetDirectory, 0o700);
     await chmod(targetPath, 0o600);
