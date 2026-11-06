@@ -163,8 +163,9 @@ add parallel writers, replay unknown commands or imply completion. More agents a
 For two genuinely independent implementation units, a Coordinator can request `plan_units parallel=true`.
 The host returns exact foreground `tasks[]` for separate managed worktrees and Luna Fast/max Workers.
 Each keeps its own existing Mission reservation and settlement. After native terminal/Writer release,
-`review_mission` combines the patches, runs their declared checks against that combined candidate through
-the existing validation budget, and prepares the ordinary Review. Root acceptance is still separate.
+`review_mission` combines the patches and returns exact native `shell` inputs for the declared checks.
+The Coordinator runs them with existing native permissions and validation accounting, then calls
+`review_mission` again to reuse successful evidence and prepare the ordinary Review. Root acceptance is still separate.
 Dirty bases, cross-unit read/write dependencies, unknown scopes, preparation failures, explicit incompatible
 Worker models, and plans with a Git delivery lifecycle retain serial execution before dispatch.
 An interrupted or failed dispatched pair retains its candidates and cumulative spend for reconciliation;

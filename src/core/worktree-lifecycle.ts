@@ -36,7 +36,7 @@ export interface WorktreeLifecycleOptions {
   readonly repositoryRoot: string;
   readonly worktreeRoot?: string;
   readonly gitPath?: string;
-  /** Host-owned in-progress candidates may be dirty without losing inventory ownership. */
+  /** Compatibility hint; dirt alone never revokes an exact inventory identity. */
   readonly activeWorktrees?: readonly string[];
 }
 
@@ -240,7 +240,6 @@ export class WorktreeLifecycle {
     private readonly gitPath: string,
     private readonly commonGitDir: string,
     private readonly rootIdentity: RootIdentity,
-    private readonly activeWorktrees: ReadonlySet<string>,
   ) {
     this.inventoryRoot = join(commonGitDir, "sortie-dogs", "worktrees-v1");
     this.inventoryPath = join(this.inventoryRoot, "inventory.json");
@@ -330,7 +329,7 @@ export class WorktreeLifecycle {
       ino: rootIno,
       statDev: rootStatDev,
       statIno: rootStatIno,
-    }, new Set((options.activeWorktrees ?? []).map(identity)));
+    });
     await lifecycle.reconcile();
     return lifecycle;
   }
@@ -675,8 +674,9 @@ export class WorktreeLifecycle {
           retained.push(record);
           continue;
         }
-        if (entry === undefined || await this.exactEntry(record, entry, true, record.expectedSha) === undefined ||
-          !this.activeWorktrees.has(record.identity) && !(await this.isClean(record.path))) {
+        // This inventory is shared by Missions. An opener cannot infer another owner's
+        // liveness from its own active IDs. Cleanup still requires an exact, clean tree.
+        if (entry === undefined || await this.exactEntry(record, entry, true, record.expectedSha) === undefined) {
           record.phase = "orphaned";
           changed = true;
         }

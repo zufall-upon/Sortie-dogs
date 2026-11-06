@@ -20,7 +20,7 @@ import { classifyUnitResult } from "./unit-result-classification.js";
 import { SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./consultation.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState, type WorkQuantityProgress } from "./work-quantity.js";
 import { applyPendingWork, rememberWorkRun } from "./work-quantity-observations.js";
-import { prepareMissionFabric, integrateMissionFabric, assertMissionFabricDelivered, cleanupMissionFabric, missionFabricScopeConflict,
+import { prepareMissionFabric, integrateMissionFabric, assertMissionFabricDelivered, cleanupMissionFabric, missionFabricScopeConflict, missionFabricTree,
   type MissionFabricState, type MissionFabricValidation } from "./mission-fabric.js";
 import type { ContainedValidationResult } from "./types.js";
 
@@ -1637,6 +1637,35 @@ export class OperatorRuntime {
     });
   }
   assertFabricDelivered(state: OperatorState): Promise<void> { return assertMissionFabricDelivered(this.projectRoot, state); }
+  /** Observe a real native shell call; never execute a stored command inside the plugin. */
+  admitFabricValidation(root: string, actor: string, callID: string, command: string, directory: string,
+    reserve: (request: MissionFabricValidation) => Promise<void>): Promise<boolean> {
+    return this.serial(root, async () => {
+      const state = await this.read(root), fabric = state?.fabric, request = fabric?.pendingValidation;
+      if (!state || !fabric || !request || actor !== root && actor !== state.operatorSessionID ||
+          command !== request.command || resolve(directory) !== resolve(request.directory)) return false;
+      if (state.phase !== "awaiting-acceptance" || fabric.phase !== "validating" || fabric.nativeCall ||
+          state.units.some(unit => unit.status !== "succeeded") || await missionFabricTree(request.directory) !== request.tree) {
+        throw new Error("mission-fabric-native-validation-not-ready: retain candidate and reconcile the existing native call");
+      }
+      await reserve(request);
+      fabric.nativeCall = { actor, callID, startedAt: Date.now() };
+      await this.save(state);
+      return true;
+    });
+  }
+  settleFabricValidation(root: string, actor: string, callID: string,
+    settle: (request: MissionFabricValidation, startedAt: number, fresh: boolean) => Promise<void>): Promise<boolean> {
+    return this.serial(root, async () => {
+      const state = await this.read(root), fabric = state?.fabric, request = fabric?.pendingValidation, call = fabric?.nativeCall;
+      if (!state || !fabric || !request || call?.actor !== actor || call.callID !== callID) return false;
+      const fresh = state.phase === "awaiting-acceptance" && await missionFabricTree(request.directory).catch(() => undefined) === request.tree;
+      await settle(request, call.startedAt, fresh);
+      delete fabric.nativeCall;
+      await this.save(state);
+      return true;
+    });
+  }
   private async nextOnce(root: string, actor: string): Promise<unknown> {
     const state = await this.required(root);
     if (actor === root && state.units.length > 1) {
@@ -1647,8 +1676,7 @@ export class OperatorRuntime {
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
     if (!["prepared", "running"].includes(state.phase)) return this.packet(state);
     if (state.fabric) {
-      if (state.units.some(unit => ["failed", "cancelled"].includes(unit.status))) return this.packet(state);
-      const pending = state.units.filter(unit => unit.status === "pending");
+      const pending = state.units.filter(unit => unit.status === "pending" && this.fabricDispatchReady(state, unit));
       for (const unit of pending) await this.verifyControls(unit);
       return pending.length ? { run_id: state.runID, generation: state.generation, tasks: pending.map(unit => this.workerTask(state, unit)),
         dispatch_instruction: "Dispatch these exact independent Tasks in one foreground parallel round. Keep each Task model and prompt. Each unit has its own worktree and existing Mission reservation. After native settlement, review_mission integrates and checks the combined candidate before ordinary Review." } : this.packet(state);
@@ -1742,6 +1770,10 @@ export class OperatorRuntime {
       return state;
     });
   }
+  private fabricDispatchReady(state: OperatorState, unit: UnitState): boolean {
+    if (state.units.some(item => item.status === "cancelled")) return false;
+    return !state.units.some(item => item.status === "failed") || unit.normalRemediationUsed === true;
+  }
   private async admitWorkerOnce(root: string, actor: string, callID: string, args: unknown): Promise<OperatorTask> {
     const state = await this.required(root);
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
@@ -1749,7 +1781,7 @@ export class OperatorRuntime {
     const unit = state.fabric ? state.units.find(item => item.status === "pending" && this.matchesWorkerTask(state, item, args))
       : state.units.find(item => item.status !== "succeeded");
     if (!unit || unit.status !== "pending" || !this.matchesWorkerTask(state, unit, args) ||
-        state.fabric && state.units.some(item => item.status === "failed" || item.status === "cancelled")) {
+        state.fabric && !this.fabricDispatchReady(state, unit)) {
       throw new Error("operator-unit-not-authorized");
     }
     await this.verifyControls(unit);

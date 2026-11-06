@@ -21,7 +21,9 @@ export interface MissionFabricState {
   patchPath?: string;
   patchHash?: string;
   unitTrees?: readonly string[];
-  checks: Array<{ command: string; tree: string; result: ContainedValidationResult }>;
+  checks: Array<{ command: string; tree: string; result: ContainedValidationResult; authority?: "native-shell-v1" }>;
+  pendingValidation?: MissionFabricValidation;
+  nativeCall?: { actor: string; callID: string; startedAt: number };
   cleanup?: { completed: string[]; retained: Array<{ worktree: string; reason: string }> };
 }
 export interface MissionFabricValidation {
@@ -29,6 +31,12 @@ export interface MissionFabricValidation {
   readonly directory: string;
   readonly tree: string;
   readonly command: string;
+}
+
+export class MissionFabricValidationRequired extends Error {
+  constructor(readonly request: MissionFabricValidation, readonly retryOf?: string) {
+    super("mission-fabric-native-validation-required");
+  }
 }
 
 function environment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -176,7 +184,7 @@ export async function integrateMissionFabric(project: string, directory: string,
       const normalized = normalizeManifestScope(grant);
       return path === normalized.path || normalized.directory && path.startsWith(`${normalized.path}/`);
     }))) throw Error("mission-fabric-change-outside-unit");
-    patches.push(await git(project, ["diff", "--binary", fabric.pin.sha, tree]));
+    patches.push(await git(project, ["diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", fabric.pin.sha, tree]));
   }
   const patch = patches.join("\n"), patchPath = join(project, directory, "contracts", `${state.runID}.fabric.patch`);
   if (fabric.patchHash && fabric.patchHash !== digest(patch)) throw Error("mission-fabric-patch-changed");
@@ -213,9 +221,13 @@ export async function integrateMissionFabric(project: string, directory: string,
   fabric.phase = "validating"; await save();
   for (const command of [...new Set(state.units.flatMap(unit => [...unit.unit.validation]))]) {
     signal?.throwIfAborted();
-    if (fabric.checks.some(check => check.command === command && check.tree === fabric.targetTree && check.result.ok)) continue;
-    const result = await validate({ runID: state.runID, directory: fabric.candidate.path, tree: fabric.targetTree, command });
-    fabric.checks.push({ command, tree: fabric.targetTree, result }); await save();
+    if (fabric.checks.some(check => check.command === command && check.tree === fabric.targetTree && check.result.ok &&
+        check.authority === "native-shell-v1")) continue;
+    fabric.pendingValidation = { runID: state.runID, directory: fabric.candidate.path, tree: fabric.targetTree, command };
+    await save();
+    const result = await validate(fabric.pendingValidation);
+    delete fabric.pendingValidation;
+    fabric.checks.push({ command, tree: fabric.targetTree, result, authority: "native-shell-v1" }); await save();
     if (!result.ok) throw Error("mission-fabric-combined-validation-failed");
   }
   if (await missionFabricTree(fabric.candidate.path) !== fabric.targetTree) throw Error("mission-fabric-validation-mutated-candidate");

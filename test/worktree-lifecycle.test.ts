@@ -725,17 +725,22 @@ test("restart adopts exact inventory and safely reconciles a missing clean artif
   }
 });
 
-test("host-active dirty candidates retain ownership across restart but changed Git identity does not", async () => {
+test("shared inventory retains other Missions' dirty candidates but rejects changed Git identity", async () => {
   const value = await fixture("active-dirty");
   try {
     const pin = await value.lifecycle.pinCleanBase();
-    const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["active", "unowned"]) });
+    const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["active", "other-mission"]) });
     for (const tree of created) await writeFile(join(tree.path, "shared.txt"), "in progress\n");
+    const observer = await WorktreeLifecycle.open({ repositoryRoot: value.repository });
+    assert.deepEqual((await observer.reconcile()).map(({ phase }) => phase), ["ready", "ready"]);
     const restarted = await WorktreeLifecycle.open({ repositoryRoot: value.repository, activeWorktrees: ["active"] });
-    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["ready", "orphaned"]);
+    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["ready", "ready"]);
+    await errorCode(restarted.cleanup("other-mission"), "unsafe-cleanup");
     await git(created[0]!.path, "add", "shared.txt");
     await git(created[0]!.path, "commit", "-qm", "diverged");
-    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["orphaned", "orphaned"]);
+    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["orphaned", "ready"]);
+    await restarted.discardOwnedChanges("other-mission", created[1]!.path, pin.sha, created[1]!.branch, ["shared.txt"]);
+    await restarted.cleanup("other-mission");
   } finally { await cleanupFixture(value); }
 });
 

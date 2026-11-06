@@ -7,7 +7,8 @@ import test from "node:test";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
-import { missionFabricScopeConflict, missionFabricTree } from "../dist/core/mission-fabric.js";
+import { MissionFabricValidationRequired, missionFabricScopeConflict, missionFabricTree } from "../dist/core/mission-fabric.js";
+import { WorktreeLifecycle } from "../dist/core/worktree-lifecycle.js";
 import { ensureGitManagedStateExcluded } from "../dist/core/git-managed-state.js";
 
 const exec = promisify(execFile);
@@ -36,7 +37,8 @@ async function fixture(action: (root: string, runtime: OperatorRuntime) => Promi
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 
-test("Fabric uses exact independent Tasks, survives cold claims and integrates once after both checks", async () => fixture(async (root, runtime) => {
+for (const noPrefix of [false, true]) test(`Fabric cold claims, integration and cleanup with diff.noprefix=${noPrefix}`, async () => fixture(async (root, runtime) => {
+  await exec("git", ["config", "diff.noprefix", String(noPrefix)], { cwd: root });
   const before = await missionFabricTree(root);
   let state = await runtime.prepareFabric("root");
   assert.ok(state.fabric, state.fabricFallback); assert.equal(state.fabricFallback, undefined);
@@ -74,6 +76,83 @@ test("Fabric uses exact independent Tasks, survives cold claims and integrates o
   assert.ok(await readFile(completed.fabric!.patchPath!, "utf8"), "combined patch retained after generated tree cleanup");
   await writeFile(join(root, "src/a.mjs"), "export default 2;\n");
   await assert.rejects(runtime.assertFabricDelivered(await runtime.required("root")), /delivery-changed/);
+}));
+
+test("both failed Workers can be explicitly retried in order across restart", async () => fixture(async (root, runtime) => {
+  const initial = await runtime.prepareFabric("root"), before = await missionFabricTree(root);
+  const { tasks } = await runtime.next("root", "coordinator") as any;
+  for (const i of [0, 1]) {
+    await runtime.admitWorker("root", "coordinator", `call-${i}`, tasks[i]);
+    await runtime.claimAdmittedWorkerPrompt("root", "coordinator", `worker-${i}`, tasks[i].prompt);
+  }
+  for (const i of [0, 1]) await runtime.settled({ rootSessionID: "root", callID: `call-${i}`, childSessionID: `worker-${i}`,
+    disposition: "failed", resultClass: "acceptance", evidence: [],
+    failure: { outcome: "fail", command: initial.units[i]!.unit.validation[0], exitCode: 1 } } as any);
+  for (const [i, name] of ["a", "b"].entries()) {
+    await runtime.prepareMissionNormalRemediation("root", initial.runID, initial.units[i]!.unit.id);
+    runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+    const { tasks: retries } = await runtime.next("root", "coordinator") as any;
+    assert.equal(retries.length, 1);
+    await runtime.admitWorker("root", "coordinator", `retry-${i}`, retries[0]);
+    await runtime.claimAdmittedWorkerPrompt("root", "coordinator", `retry-worker-${i}`, retries[0].prompt);
+    await writeFile(join(initial.units[i]!.fabricRoot!, `src/${name}.mjs`), "export default 1;\n");
+    await runtime.settled({ rootSessionID: "root", callID: `retry-${i}`, childSessionID: `retry-worker-${i}`,
+      disposition: "succeeded", resultClass: "acceptance", evidence: [{ measurement: { criterion_ids: [] } }] } as any);
+    if (i === 0) assert.equal((await runtime.required("root")).phase, "awaiting-decision");
+  }
+  assert.equal((await runtime.required("root")).dispatched, 4, "prior dispatches remain counted");
+  assert.equal(await missionFabricTree(root), before);
+  await runtime.integrateFabric("root", async ({ directory, command }) => {
+    await exec(process.execPath, [command.split(" ")[1]!], { cwd: directory });
+    return { ok: true, command: [command], exit_code: 0, fingerprint: "f".repeat(64), error: null };
+  });
+  assert.equal((await runtime.required("root")).fabric!.phase, "applied");
+}));
+
+test("preparing another Mission preserves the first Mission's dirty worktree ownership", async () => fixture(async (root, runtime) => {
+  const first = await runtime.prepareFabric("root");
+  await writeFile(join(first.units[0]!.fabricRoot!, "src/a.mjs"), "export default 1;\n");
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  await missions.capture("other", { id: "other-request", text: "Independently fix a and b" });
+  const mission = await missions.start("other", ["a and b return 1"]);
+  await runtime.prepareMission("other", missionPlan(mission, ["a", "b"].map(name => ({ title: name, objective: `Fix ${name}`,
+    read: [`src/${name}.mjs`, `test/${name}.mjs`], write: [`src/${name}.mjs`], validation: [`node test/${name}.mjs`] }))),
+    { sessionID: "other-coordinator", callID: "other-call" });
+  const second = await runtime.prepareFabric("other");
+  assert.ok(second.fabric, second.fabricFallback);
+  const lifecycle = await WorktreeLifecycle.open({ repositoryRoot: root });
+  assert.deepEqual((await lifecycle.reconcile()).map(tree => tree.phase), ["ready", "ready", "ready", "ready"]);
+  const tree = first.fabric!.trees[0]!;
+  await lifecycle.discardOwnedChanges(first.fabric!.tasks[0]!.worktree, tree.path, tree.baseSha, tree.branch, ["src/a.mjs"]);
+  await lifecycle.cleanup(first.fabric!.tasks[0]!.worktree);
+  assert.equal((await lifecycle.reconcile()).length, 3);
+}));
+
+test("native check admission binds actor, cwd and candidate and rejects changed results", async () => fixture(async (root, runtime) => {
+  const initial = await runtime.prepareFabric("root"), before = await missionFabricTree(root);
+  const { tasks } = await runtime.next("root", "coordinator") as any;
+  for (const [i, name] of ["a", "b"].entries()) {
+    await runtime.admitWorker("root", "coordinator", `call-${i}`, tasks[i]);
+    await runtime.claimAdmittedWorkerPrompt("root", "coordinator", `worker-${i}`, tasks[i].prompt);
+    await writeFile(join(initial.units[i]!.fabricRoot!, `src/${name}.mjs`), "export default 1;\n");
+    await runtime.settled({ rootSessionID: "root", callID: `call-${i}`, childSessionID: `worker-${i}`,
+      disposition: "succeeded", resultClass: "acceptance", evidence: [{ measurement: { criterion_ids: [] } }] } as any);
+  }
+  await assert.rejects(runtime.integrateFabric("root", async request => { throw new MissionFabricValidationRequired(request); }), MissionFabricValidationRequired);
+  const request = (await runtime.required("root")).fabric!.pendingValidation!;
+  let reserved = 0;
+  const reserve = async () => { reserved++; };
+  assert.equal(await runtime.admitFabricValidation("root", "unrelated", "check", request.command, request.directory, reserve), false);
+  assert.equal(await runtime.admitFabricValidation("root", "coordinator", "check", request.command, root, reserve), false);
+  assert.equal(reserved, 0);
+  assert.equal(await runtime.admitFabricValidation("root", "coordinator", "check", request.command, request.directory, reserve), true);
+  await assert.rejects(runtime.admitFabricValidation("root", "coordinator", "duplicate", request.command, request.directory, reserve), /not-ready/);
+  await writeFile(join(request.directory, "src/a.mjs"), "export default 2;\n");
+  runtime = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  assert.equal(await runtime.settleFabricValidation("root", "coordinator", "check", async (_request, _started, fresh) => {
+    assert.equal(fresh, false);
+  }), true);
+  assert.equal(await missionFabricTree(root), before);
 }));
 
 test("failed sibling does not revoke the other admitted writer or permit premature integration", async () => fixture(async (_root, runtime) => {
