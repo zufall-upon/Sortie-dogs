@@ -160,6 +160,13 @@ Handoff:    Coordinator → Worker (same unit, retained edits/context/checks/bud
 The default Mission profile is serial. Background responsiveness and status observations do not
 add parallel writers, replay unknown commands or imply completion. More agents are not the goal.
 
+Scout discovery can also diagnose a failed formal check: use only useful independent causal questions,
+in parallel when appropriate, and pass evidence and uncertainty into the existing correction handoff.
+Known causes go directly to correction; Scouts are not a retry/rescue prerequisite or a Review vote.
+This reuses parallel diagnosis, not the legacy Failure Swarm execution framework. Mission budgets count
+implementation units; Scout/Advisor consultation costs are outside that budget. Available all-role native
+usage is reported separately, not enforced as an all-role spending cap by the implementation-unit ledger.
+
 Goal history normally uses a single ledger file. If large evidence would exceed the ledger's
 16 MiB document limit, a successful append moves large logical events into immutable,
 hash-verified chunks alongside that file, without changing their event hashes or history. When

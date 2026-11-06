@@ -1,19 +1,22 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE, profileAgent } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { durableScopeRoot } from "../dist/core/durable-scope-root.js";
 
 const exec = promisify(execFile);
 const coordinatorRole = profileAgent(V010_RUNTIME_PROFILE, "dog-operator");
 const workerRole = profileAgent(V010_RUNTIME_PROFILE, "dog-worker");
 
-async function fixture(rescueWorks: boolean) {
+async function fixture(rescueWorks: boolean, actor = "coordinator") {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-rescue-"));
   await exec("git", ["init", "--quiet"], { cwd: root });
@@ -51,17 +54,19 @@ async function fixture(rescueWorks: boolean) {
   await chat("root", "Repair the validated result, preserving the declared validation.");
   const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute(
     { requirements: ["Produce the validated result"] }, { sessionID: "root" }));
-  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
-  await chat("coordinator", started.task.prompt);
+  if (actor === "coordinator") {
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+  }
   const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Validated result",
     objective: "Produce the result accepted by check.mjs", read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] },
-    { sessionID: "coordinator" }));
+    { sessionID: actor }));
 
   const dispatch = async (task: Record<string, unknown>, childID: string, callID: string, astra = false) => {
-    identities[childID] = { agent: workerRole, parentID: "coordinator", outcome: "succeeded",
+    identities[childID] = { agent: workerRole, parentID: actor, outcome: "succeeded",
       model: { providerID: "openai", id: astra ? "gpt-6-astra" : "gpt-6.1-terra", variant: astra ? "low" : "max" } };
     const output = { args: structuredClone(task) as Record<string, unknown> };
-    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID }, output);
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID }, output);
     const message = await chat(childID, String(output.args.prompt));
     return { output, message };
   };
@@ -86,7 +91,7 @@ async function fixture(rescueWorks: boolean) {
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: childID, callID: `${callID}-validation` },
         { output: stdout, metadata: { exit, status: exit === 0 ? "completed" : "error" } });
     }
-    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID },
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID },
       { output: `Worker ${childID} returned`, metadata: { sessionId: childID } });
     return exit;
   };
@@ -95,6 +100,69 @@ async function fixture(rescueWorks: boolean) {
     addAstra: () => { models = [...models, { providerID: "openai", id: "gpt-6-astra", enabled: true }]; },
     dispose: async () => rm(root, { recursive: true, force: true }) };
 }
+
+for (const actor of ["root", "coordinator"]) test(`parallel Scout diagnosis after failed remediation preserves Mission and hands off evidence: ${actor}`, async () => {
+  const state = await fixture(false, actor);
+  try {
+    const first = await state.dispatch(state.startTask, "worker-first", "first-call");
+    await state.executeAttempt("worker-first", "first-call", first.output, false);
+    const retry = JSON.parse(await state.hooks.tool!.sortie_v010_retry_mission_unit.execute(
+      { unit_id: "unit-1" }, { sessionID: actor }));
+    const second = await state.dispatch(retry.task, "worker-retry", "retry-call");
+    await state.executeAttempt("worker-retry", "retry-call", second.output, false);
+    const missions = new OperatorMissionRuntime(state.root, V010_RUNTIME_PROFILE);
+    const operators = new OperatorRuntime(state.root, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root"), runBefore = await operators.required("root");
+    assert.equal(before.attempts?.at(-1)?.kind, "normal_remediation");
+    assert.equal(runBefore.phase, "awaiting-decision");
+    const ledgerPath = join(dirname(await durableScopeRoot(state.root)), V010_RUNTIME_PROFILE.flightDirectory,
+      `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    const budget = await RunFlightLedger.readGoalFile(ledgerPath);
+    assert.equal(budget.state.consumed_units, 2);
+    // Independent hypotheses may use the same existing evidence code; there are no mandatory roles.
+    const questions = ["Does the fixture require a trailing newline?", "Does the check resolve result.txt from a different cwd?"];
+    await Promise.all(questions.map(async (question, index) => {
+      state.identities[`scout-${index}`] = { agent: "dog-scout-v010", parentID: actor, outcome: "succeeded",
+        model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } };
+      await state.hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: `diagnose-${index}` }, {
+        args: { subagent_type: "dog-scout-v010", prompt: `missing_evidence_code: validation\nproject_root: ${state.root}\n` +
+          `node check.mjs still exits 1 after correction. Expected fixed newline; observed missing result. ${question}` },
+      });
+    }));
+    const findings = ["check.mjs:2 requires fixed\\n exactly; the fixture does not accept a missing file.",
+      "check.mjs:2 reads relative to cwd. No evidence yet of a mismatched Worker cwd."];
+    await Promise.all(findings.map(async (result, index) => {
+      await state.chat(`scout-${index}`, `missing_evidence_code: validation\nproject_root: ${state.root}`);
+      await state.hooks["tool.execute.before"]!({ tool: "read", sessionID: `scout-${index}`, callID: `read-${index}` },
+        { args: { filePath: join(state.root, "check.mjs") } });
+      await state.hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: `diagnose-${index}` },
+        { output: result, metadata: { sessionId: `scout-${index}` } });
+    }));
+    const { consultations, ...after } = await missions.required("root");
+    const { consultations: _previous, ...unchanged } = before;
+    assert.deepEqual(after, unchanged, "diagnosis grants no writer, rescue, Review or acceptance");
+    assert.deepEqual(await new OperatorRuntime(state.root, V010_RUNTIME_PROFILE).required("root"), runBefore);
+    assert.deepEqual(await RunFlightLedger.readGoalFile(ledgerPath), budget, "consultations do not spend/reset implementation-unit budget");
+    assert.equal(consultations?.length, 2);
+    for (const item of consultations!) {
+      assert.equal(item.outcome, "completed");
+      assert.equal(item.observedModel, "openai/gpt-6-luna-fast");
+      assert.ok(findings.includes(item.result!));
+    }
+    const planned = JSON.parse(await state.hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Repair the observed result",
+      objective: "Write fixed with its newline per check.mjs:2; preserve the unresolved cwd question until validation.",
+      read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }],
+      reason: "Retained Scout evidence identifies missing output; no check change is needed.", handoff_context: findings.join("\n") },
+    { sessionID: actor }));
+    assert.ok(planned.task, JSON.stringify(planned));
+    const next = await new OperatorRuntime(state.root, V010_RUNTIME_PROFILE).required("root");
+    assert.notEqual(next.runID, runBefore.runID, JSON.stringify(planned));
+    const handoff = JSON.parse(await readFile(next.units[0]!.handoffPath, "utf8"));
+    for (const finding of findings) assert.ok(JSON.stringify(handoff.ext["sortie-dogs/mission-context"]).includes(JSON.stringify(finding).slice(1, -1)));
+    assert.equal((await missions.required("root")).id, before.id);
+    assert.deepEqual((await missions.required("root")).attempts, before.attempts, "replan retains failed remediation history");
+  } finally { await state.dispose(); }
+});
 
 for (const rescueWorks of [false, true]) test(`current Mission Astra Rescue keeps terminal, validation and acceptance separate: ${rescueWorks ? "validated" : "failed"}`, async () => {
   const state = await fixture(rescueWorks);

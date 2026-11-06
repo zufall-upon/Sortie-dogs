@@ -15,6 +15,23 @@ add a Coordinator only to launch Scouts, or impose a new per-turn consultation q
 For a Mission, start it normally before dispatching Scouts; no implementation unit or Coordinator is
 needed merely for discovery. A useful later question can still use Scout after an earlier Worker.
 
+## Conditional failure diagnosis
+
+After a failed formal check, especially when the same check still fails after ordinary correction, use
+Scouts only if independent unresolved causal questions can change the next repair. A known cause or cheap
+local check goes directly to the existing correction path. Diagnosis is optional, never a prerequisite
+for normal retry or Astra rescue. For two or three useful independent hypotheses, dispatch that many
+Scouts in the same tool round, foreground and parallel; one useful question needs one, no useful question
+needs none. Reuse manifest for implementation/callers, validation for tests/fixtures, and owner-risk for
+dependencies/shared state; independent questions may share a code. Do not invent questions to fill slots.
+Supply the actual failed command, expected/observed behavior, attempted correction and relevant source
+pointers. Distinguish a check failure from a check that never ran. Ask each Scout for evidence supporting
+or contradicting its hypothesis and remaining unknowns, not a vote or permission to repair. The parent
+selects one evidence-backed correction and carries its rationale, references and uncertainty into the
+existing Worker objective/handoff. Reuse retained findings; do not redispatch the same question against
+unchanged failure evidence. If needed evidence is outside repository reads, use the parent/Worker's
+existing diagnostics. Keep the same Mission, cumulative accounting and retry/rescue/Review boundaries.
+
 Each prompt includes one concrete question, an exact project_root and exactly one standalone line:
 missing_evidence_code: <${SCOUT_EVIDENCE_CODES.join(" | ")}>
 The code classifies discovery as well as a known gap; proof of a blocking deficit is not required.
