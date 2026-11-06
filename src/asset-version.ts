@@ -3,7 +3,7 @@
  * installed project marker without importing every asset body.
  */
 export const RUNTIME_ASSET_VERSION = "0.3.89-completion-proof-v1";
-export const V010_RUNTIME_ASSET_VERSION = "0.16.10-scout-initial-discovery-v1";
+export const V010_RUNTIME_ASSET_VERSION = "0.16.11-advisor-request-boundary-v1";
 export const CODEX_SKILL_ASSET_VERSION = "0.14.6-codex-skill-v1";
 
 export type RuntimeAssetVersion =

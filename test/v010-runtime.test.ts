@@ -51,6 +51,21 @@ async function fixture(run: (root: string) => Promise<void>) {
   }
 }
 
+test("Advisor bounds each accepted request, not the reused session, in canonical and Mission profiles", () => {
+  for (const [assets, name] of [[stableAssets, "dog-advisor"], [previewAssets, "dog-advisor-v010"]] as const) {
+    const advisor = assets.find(asset => asset.name === name)!.content;
+    assert.match(advisor, /each host-admitted Strategy request[\s\S]+one bounded consultation for one\s+candidate and one focused question/u);
+    assert.match(advisor, /bound is per request, not per session/u);
+    assert.match(advisor, /prior answer in this same session does not exhaust a\s+session-lifetime consultation slot/u);
+    assert.match(advisor, /later host-admitted request, assess its current question,\s+new evidence and explicit corrections/u);
+    assert.match(advisor, /Do not refuse it solely because this session already answered an earlier request/u);
+    assert.match(advisor, /Existing host admission, duplicate\/retry controls and explicit budgets\s+remain authoritative/u);
+    assert.match(advisor, /Advice grants no execution, retry, scope or budget authority and is not validation or acceptance/u);
+    assert.match(advisor, /complete bounded Strategy artifact; use only that artifact and invoke no tools/u);
+    assert.doesNotMatch(advisor, /Accept only one bounded Strategy request/u);
+  }
+});
+
 test("project memory commits semantic corrections and processed markers atomically across sessions", async () => fixture(async root => {
   const file = await projectMemoryFile(root), store = new ProjectMemory(file);
   assert.equal(await store.enabled(), false);
