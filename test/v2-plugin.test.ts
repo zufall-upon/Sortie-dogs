@@ -708,10 +708,10 @@ test("V2 adapter retains Docker codemode command/result as native observation wi
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel } of [{ legacy: false, commit: false, cancel: false },
+for (const { legacy, commit, cancel, fabric } of [{ legacy: false, commit: false, cancel: false, fabric: true }, { legacy: false, commit: false, cancel: false },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -738,6 +738,9 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
       };
       return hooks;
     }).setup({ ...fixture.context, location: { directory },
+      ...(fabric ? { agent: { ...fixture.context.agent, get: async () => ({ model: {
+        providerID: "openai", id: "gpt-6-luna-fast", variant: "max",
+      } }) } } : {}),
       session: { ...fixture.context.session,
         active: async () => ({}),
         interrupt: async () => ({ interrupted: false }),
@@ -786,6 +789,43 @@ test(`V2 ${cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound 
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict";\nimport {readFileSync} from "node:fs";\n' +
       'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
     await start();
+    if (fabric) {
+      await exec("git", ["add", "check.mjs"], { cwd: directory });
+      await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "commit", "-qm", "base"], { cwd: directory });
+      const original = "Create independent first.txt and second.txt in parallel managed worktrees";
+      await prompt("root", original);
+      const mission = await tool("root", "start_mission", { requirements: ["Create first.txt", "Create second.txt"] });
+      const coordinator = await before("root", "subagent", nativeTask(mission.task));
+      await prompt("coordinator", String(coordinator.input.prompt));
+      const plan = await tool("coordinator", "plan_units", { parallel: true, executor: "worker", units: ["first", "second"].map((name, i) => ({
+        title: name, objective: `Create ${name}.txt`, read: ["check.mjs"], write: [`${name}.txt`],
+        validation: [`node check.mjs ${name}`], requirement_ids: [`R${i + 1}`],
+      })) });
+      assert.equal(plan.tasks?.length, 2, JSON.stringify({ plan, state: await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root") }));
+      const calls = await Promise.all(plan.tasks.map((task: Record<string, unknown>) => before("coordinator", "subagent",
+        { ...nativeTask(task), model: task.model })));
+      assert.ok(calls.every(call => call.input.model === "openai/gpt-6-luna-fast#max"));
+      cleanup?.(); await start();
+      for (const i of [1, 0]) {
+        const child = ["first", "second"][i]!;
+        const expanded = await prompt(child, String(calls[i]!.input.prompt));
+        const state = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const unit = state.units[i]!;
+        const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
+        assert.equal(handoff, unit.handoffPath, "managed-root handoff stays absolute across outward and cold prompt projection");
+        assert.ok(isAbsolute(handoff));
+        const read = await before(child, "read", { path: handoff, limit: 2000 });
+        assert.match(await after(read, await readFile(handoff, "utf8")), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/);
+        const recovery = { sessionID: child, agent: "dog-worker-v010", system: [] as { text: string }[], tools: {} };
+        await fixture.sessionHooks.get("context")!(recovery);
+        const context = JSON.parse(recovery.system.find(part => part.text.startsWith("SORTIE_WORKER_CONTEXT\n"))!.text.split("\n")[1]!);
+        assert.equal(context.project_root, unit.fabricRoot);
+        assert.equal(context.handoff_path, handoff);
+      }
+      await tool("root", "cancel_operator", { reason: "End admission fixture with both exact native tasks accounted" });
+      return;
+    }
     if (commit) {
       await exec("git", ["config", "user.name", "Fixture User"], { cwd: directory });
       await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
@@ -2314,8 +2354,11 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.match(reflection.input.properties.scope!.description!, /empty string to omit/u);
     const plan = tools.find(tool => tool.name === "sortie_v010_plan_units")!;
     const validate = new Ajv({ strict: false }).compile(plan.input);
-    const capturedHandoff = { units: "", work_quantities: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker", purpose_decision: "" };
+    const capturedHandoff = { units: "", work_quantities: "", parallel: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker", purpose_decision: "" };
     assert.equal(validate(capturedHandoff), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, parallel: true }), true);
+    assert.equal(validate({ ...capturedHandoff, parallel: false }), true);
+    assert.equal(validate({ ...capturedHandoff, parallel: "true" }), false);
     assert.equal(validate({ ...capturedHandoff, units: "invented-plan" }), false);
     assert.equal(validate({ ...capturedHandoff, units: [] }), false, "empty units cannot masquerade as a new plan");
     const review = tools.find(tool => tool.name === "sortie_v010_review_mission")!;

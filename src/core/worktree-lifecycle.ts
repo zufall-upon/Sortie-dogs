@@ -36,6 +36,8 @@ export interface WorktreeLifecycleOptions {
   readonly repositoryRoot: string;
   readonly worktreeRoot?: string;
   readonly gitPath?: string;
+  /** Host-owned in-progress candidates may be dirty without losing inventory ownership. */
+  readonly activeWorktrees?: readonly string[];
 }
 
 export interface WorktreeBasePin {
@@ -238,6 +240,7 @@ export class WorktreeLifecycle {
     private readonly gitPath: string,
     private readonly commonGitDir: string,
     private readonly rootIdentity: RootIdentity,
+    private readonly activeWorktrees: ReadonlySet<string>,
   ) {
     this.inventoryRoot = join(commonGitDir, "sortie-dogs", "worktrees-v1");
     this.inventoryPath = join(this.inventoryRoot, "inventory.json");
@@ -247,10 +250,13 @@ export class WorktreeLifecycle {
   static async open(options: WorktreeLifecycleOptions): Promise<WorktreeLifecycle> {
     if (!isRecord(options) || !hasExactKeys(options, ["repositoryRoot",
       ...(options.worktreeRoot === undefined ? [] : ["worktreeRoot"]),
+      ...(options.activeWorktrees === undefined ? [] : ["activeWorktrees"]),
       ...(options.gitPath === undefined ? [] : ["gitPath"])]) ||
       !validText(options.repositoryRoot, MAX_PATH) ||
       (options.worktreeRoot !== undefined && !validText(options.worktreeRoot, MAX_PATH)) ||
-      (options.gitPath !== undefined && !validText(options.gitPath, MAX_PATH))) {
+      (options.gitPath !== undefined && !validText(options.gitPath, MAX_PATH)) ||
+      (options.activeWorktrees !== undefined && (!Array.isArray(options.activeWorktrees) ||
+        options.activeWorktrees.length > MAX_WORKTREES || options.activeWorktrees.some(id => !validText(id))))) {
       throw new WorktreeLifecycleError("invalid-request", "Lifecycle options are invalid.");
     }
     const gitPath = options.gitPath ?? "git";
@@ -324,7 +330,7 @@ export class WorktreeLifecycle {
       ino: rootIno,
       statDev: rootStatDev,
       statIno: rootStatIno,
-    });
+    }, new Set((options.activeWorktrees ?? []).map(identity)));
     await lifecycle.reconcile();
     return lifecycle;
   }
@@ -670,7 +676,7 @@ export class WorktreeLifecycle {
           continue;
         }
         if (entry === undefined || await this.exactEntry(record, entry, true, record.expectedSha) === undefined ||
-          !(await this.isClean(record.path))) {
+          !this.activeWorktrees.has(record.identity) && !(await this.isClean(record.path))) {
           record.phase = "orphaned";
           changed = true;
         }

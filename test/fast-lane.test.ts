@@ -5,6 +5,16 @@ import { FastLaneController, FastLaneDeniedError } from "../dist/plugin/fast-lan
 
 const worker = { subagent_type: "dog-worker", prompt: "role: implementation" };
 
+test("exact Mission parallel admission permits a second active worker without enabling legacy Fabric", () => {
+  const lane = new FastLaneController(); lane.beginTurn("mission-fabric", false);
+  lane.grantSerialUnits("mission-fabric", 2);
+  lane.beforeTool("mission-fabric", "task", worker);
+  assert.throws(() => lane.beforeTool("mission-fabric", "task", worker), /WORKER_LIMIT/);
+  assert.doesNotThrow(() => lane.beforeTool("mission-fabric", "task", worker, { missionParallelWorkerAuthorized: true }));
+  assert.throws(() => lane.beforeTool("mission-fabric", "task", worker), /WORKER_LIMIT/);
+  assert.equal(lane.snapshotWorkerAccounting("mission-fabric")?.totalWorkerDispatches, 2);
+});
+
 test("review verification retains lineage identity and restores completed host history", () => {
   const lane = new FastLaneController(); lane.beginTurn("review-lineage", false);
   const initial = "review_phase: initial\ncanonical_validation_exit: 0\nrisk_tags: [security]\ncandidate_id: logical-candidate\nrevision: old";

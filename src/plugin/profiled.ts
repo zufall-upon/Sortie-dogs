@@ -545,12 +545,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const reference = text.indexOf("\ncontract_reference: handoff\n"), acceptance = text.indexOf("\nacceptance:\n");
       const end = reference < 0 ? acceptance : acceptance < 0 ? reference : Math.min(reference, acceptance);
       if (end < 0) return text;
+      // A managed unit root differs from the native session directory. Keep its control paths
+      // absolute; parent-relative paths invite prepending the managed root a second time.
+      const project = /^project_root: (.+)$/mu.exec(text.slice(0, end))?.[1];
+      const sameProject = !project || resolve(project) === resolve(input.directory);
       return text.slice(0, end).replace(/^(handoff_path|goal_declaration_path): (.+)$/gm,
         (_line, name: string, path: string) => {
           const absolute = resolve(input.directory, path);
           const local = relative(input.directory, absolute);
           const inside = local !== ".." && !local.startsWith(`..${sep}`) && !isAbsolute(local);
-          return `${name}: ${outward && inside ? local.replaceAll("\\", "/") : absolute}`;
+          return `${name}: ${outward && inside && sameProject ? local.replaceAll("\\", "/") : absolute}`;
         }) + text.slice(end);
     }
     function translate(value: unknown, outward: boolean): unknown {
@@ -656,6 +660,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           state.units.some(unit => unit.status === "running" && unit.callID === callID &&
             /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] === taskID);
       },
+      ownsMissionParallelDispatch: async (root, callID, taskID) => {
+        const run = await operators.read(root), mission = await missions.read(root);
+        return !!run?.fabric && mission?.runID === run.runID && !["cancelled", "completed"].includes(mission.phase) &&
+          run.phase === "running" && run.units.some(unit => unit.status === "running" && unit.callID === callID &&
+            /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1] === taskID);
+      },
       ownsReviewerCorrection: async child => !!await reviewerCorrection(child),
       ownsValidationRegistration: async child => !!await registeredValidation(child),
       directMissionExecution: async actor => {
@@ -706,7 +716,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // Recovery also compares failed units after their native Task has ended.
         const unit = run?.units.find(item => item.childSessionID === child &&
           /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-        return !unit || validationDirectoryMatches(commands, directory, input.directory,
+        return !unit || validationDirectoryMatches(commands, directory, unit.fabricRoot ?? input.directory,
           unitValidationCwd(unit));
       },
       reviewerCorrectionValidation: async (root, callID, child, startedAt) => {
@@ -850,7 +860,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             (await identity(child)).parent !== (run.operatorSessionID ?? root) ||
             (unit.reviewerCorrection && (unit.reviewerCorrection.author !== child ||
               unit.reviewerCorrection.promptID !== admission.promptID || !await reviewerCorrection(child))))) return undefined;
-        return unit ? { projectRoot: operators.projectRoot, manifestPath: unit.manifestPath,
+        return unit ? { projectRoot: unit.fabricRoot ?? operators.projectRoot, manifestPath: unit.manifestPath,
           handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
       },
       defaultModelCatalog: { global: previewModelCatalog() },
@@ -1837,6 +1847,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           packet: missionPacket(mission, state) });
         if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionReview(context.sessionID, mission);
         if (args.run_id !== state.runID || args.acceptance_fingerprint !== state.acceptanceFingerprint) throw new Error("operator-completion-identity-mismatch");
+        if (state.fabric) await operators.assertFabricDelivered(state);
         if (!["awaiting-acceptance", "completed"].includes(state.phase) || state.units.some(unit => unit.status !== "succeeded")) {
           return JSON.stringify({ status: "not-ready", packet: operators.packet(state) });
         }
@@ -1964,7 +1975,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           await finishedSession(unit.childSessionID);
           try {
             recovered.set(unit.unit.id, await control!.recoverUnitEvidence(context.sessionID, { unitID: taskID,
-              childSessionID: unit.childSessionID, manifestPath: unit.manifestPath, manifestHash: unit.hashes[1]!, goalFingerprint }));
+              childSessionID: unit.childSessionID, manifestPath: unit.manifestPath, manifestHash: unit.hashes[1]!, goalFingerprint,
+              ...(unit.fabricRoot ? { projectRoot: unit.fabricRoot } : {}) }));
           } catch (error) {
             if (!(error instanceof Error) || error.message.split(":", 1)[0] !== "operator-recovery-proof-unavailable-or-stale") throw error;
             if (!operators.canRetryRepairValidation(state)) {
@@ -3022,6 +3034,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { units: { type: "array", minItems: 1, maxItems: 32, items: missionUnitSchema, "x-sortie-optional": true,
           description: "Useful work units. Omit only with executor=worker to hand off your currently running direct unit, retaining its contract and existing work." } as never,
         work_quantities: tools[startMission]!.args.work_quantities,
+        parallel: { type: "boolean", description: "Two independent implementation units: try separate managed worktrees and foreground parallel Luna Workers. Dirty base, cross-unit dependencies, unavailable preparation or an incompatible explicit Worker model return the ordinary serial path. Existing unit budget, native settlement and Review apply.", "x-sortie-optional": true } as never,
         execution: missionExecutionSchema as never,
         handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
@@ -3035,6 +3048,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, mission,
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
+            if ((args as Record<string, unknown>).parallel === true && args.executor !== "self" && mission.kind === "implementation") {
+              const run = await operators.required(root);
+              if (run.operatorSessionID === context.sessionID && run.phase === "prepared" && run.dispatched === 0) {
+                const selected = explicitWorkerSelection?.model
+                  ? `${explicitWorkerSelection.model}${explicitWorkerSelection.variant ? `#${explicitWorkerSelection.variant}` : ""}`
+                  : explicitWorkerSelection?.variant ? `variant:${explicitWorkerSelection.variant}` : undefined;
+                await operators.prepareFabric(root, selected);
+                return JSON.stringify(await operators.next(root, context.sessionID));
+              }
+            }
             const task = JSON.parse(planned).task;
             // A Coordinator continuation is not a newly prepared direct unit.
             return args.executor === "self" && record(task) && task.subagent_type !== profileAgent(profile, "dog-operator")
@@ -3274,6 +3297,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const readiness = await control!.completionReadiness(root);
           if (readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")) {
             throw new Error("mission-review-awaits-current-validation: revalidate the changed candidate in the same mission before Review");
+          }
+          if (run.fabric) {
+            if (!readiness.ready) throw new Error("mission-fabric-awaits-current-unit-proof");
+            await operators.integrateFabric(root, (request, signal) => control!.validateMissionFabric(root, request, signal), context.signal);
           }
           const correction = mission.corrections?.find(item => item.runID === run.runID);
           if (correction?.selfRecheck?.unresolvedFindings.length) throw new Error("mission-review-known-findings-require-correction");
@@ -4050,7 +4077,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {
           if (mission && !["completed", "cancelled"].includes(mission.phase)) await assertMissionRunBound(root);
-          const pendingUnit = state!.units.find(unit => unit.status !== "succeeded");
+          const pendingUnit = state!.fabric ? state!.units.find(unit => operators.matchesRecordedWorkerTask(state!, unit.unit.id, args))
+            : state!.units.find(unit => unit.status !== "succeeded");
+          if (pendingUnit?.fabricRoot && pendingUnit.task.model) {
+            if (args.model !== undefined && args.model !== pendingUnit.task.model) throw new Error("mission-fabric-explicit-model-mismatch");
+            args.model = pendingUnit.task.model;
+          }
           if (pendingUnit?.terminalRescue) {
             const requiredModel = pendingUnit.terminalRescue.selected_model;
             if (args.model !== undefined && args.model !== requiredModel) throw new Error("operator-mission-terminal-rescue-model-mismatch");

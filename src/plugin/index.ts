@@ -588,7 +588,7 @@ interface OpenCodeToolDefinition {
   args: Record<string, unknown>;
   execute(
     args: Record<string, string>,
-    context: { sessionID: string; agent?: string; callID?: string },
+    context: { sessionID: string; agent?: string; callID?: string; signal?: AbortSignal },
   ): Promise<string>;
 }
 
@@ -3112,11 +3112,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const savedBinding = prior?.kind === "unit.evidence-reconciled" ? prior.evidence[0]?.protected_binding :
       [...hostGoalExecutions.values()].find(execution => execution.root === root && execution.sessionID === request.childSessionID &&
         execution.endedAt !== undefined && execution.fresh === true)?.binding;
-    const refreshedBinding = savedBinding && await refreshProtectedSnapshot(input.directory, savedBinding);
+    const projectRoot = request.projectRoot ?? input.directory;
+    const refreshedBinding = savedBinding && await refreshProtectedSnapshot(projectRoot, savedBinding);
     // Historical admissions without a saved recipe must retain the old full manifest/path recipe.
     // Never acquire today's scratch exclusions when recovering yesterday's PASS.
     const current = savedBinding ? refreshedBinding && { binding: savedBinding, ...refreshedBinding } :
-      await protectedSnapshot({ projectRoot: input.directory, manifestPath: request.manifestPath, manifestHash: request.manifestHash }, { captureFreshness: false });
+      await protectedSnapshot({ projectRoot, manifestPath: request.manifestPath, manifestHash: request.manifestHash }, { captureFreshness: false });
     if (!current) throw new Error("operator-recovery-snapshot-unavailable");
     if (prior?.kind === "unit.evidence-reconciled") {
       if (!prior.evidence.every(entry => entry.identity.source === current.source && entry.identity.candidate === current.candidate && validGoalEvidence(entry, goal))) {
@@ -3132,7 +3133,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         outcome: "pass", immutableRef: execution.immutableRef!, fresh: true }, goal, request.unitID))
       .filter(entry => validGoalEvidence(entry, goal));
     if (liveEvidence.length > 0) {
-      const refreshed = await refreshProtectedSnapshot(input.directory, current.binding);
+      const refreshed = await refreshProtectedSnapshot(projectRoot, current.binding);
       if (!refreshed || refreshed.source !== current.source || refreshed.candidate !== current.candidate) {
         throw new Error("operator-recovery-proof-unavailable-or-stale");
       }
@@ -3191,7 +3192,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         evidence.push(...evidenceFromObservedExecution({ ...current, owner, command, immutableRef, startedAt, endedAt, exitCode: 0, outcome: "pass", fresh: true }, goal, request.unitID));
       }
     }
-    const refreshed = await refreshProtectedSnapshot(input.directory, current.binding);
+    const refreshed = await refreshProtectedSnapshot(projectRoot, current.binding);
     if (!evidence.length || !refreshed || refreshed.source !== current.source || refreshed.candidate !== current.candidate || !evidence.every(entry => validGoalEvidence(entry, goal))) {
       throw new Error("operator-recovery-proof-unavailable-or-stale");
     }
@@ -7964,11 +7965,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         }
         // Account the correction as implementation, without changing the native agent or Task input.
         const accountingArgs = correctionDispatch && isRecord(output.args) ? { ...output.args, subagent_type: SERIAL_WORKER_AGENT } : output.args;
+        const missionTaskID = implementationDispatch && isRecord(output.args) && typeof output.args.prompt === "string"
+          ? /^task_id: (.+)$/mu.exec(output.args.prompt)?.[1] : undefined;
+        const missionParallelWorkerAuthorized = toolInput.tool === "task" && missionTaskID !== undefined &&
+          await input.runtimeBridge?.ownsMissionParallelDispatch?.(toolInput.sessionID, toolInput.callID, missionTaskID) === true;
         const resumedWorkerSessionID = fastLane.beforeTool(toolInput.sessionID, toolInput.tool, accountingArgs, {
           readonlyDiagnosisAuthorized: readonlyDiagnosis,
           consultationFallbackAuthorized,
           parallelWorkerAlreadyBound,
           parallelWorkerAuthorized,
+          missionParallelWorkerAuthorized,
         });
         const registeredRepair = operatorContractRepairResumes.get(toolInput.sessionID);
         const repairResume = registeredRepair !== undefined && resumedWorkerSessionID === registeredRepair.childSessionID &&
@@ -9078,6 +9084,30 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return !snapshot.records.some(({ event }) => event.kind === "dispatch.reserved" && event.reservation_id === expected);
     },
     recoverUnitEvidence,
+    validateMissionFabric: async (root, candidate, signal) => {
+      const { runContainedValidation } = await import("../core/worktree-commit-artifact.js");
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), goal = snapshot.state;
+      if (!goal.goal_id || goal.phase !== "active" || goal.outstanding_reservations.length) throw new Error("mission-fabric-unsettled-goal");
+      const request: ValidationBudgetRequest = { run_id: goal.goal_id,
+        operation_id: `${candidate.runID}:fabric:${goalFingerprint([candidate.tree, candidate.command]).slice(7)}`,
+        source_snapshot: candidate.tree, candidate: candidate.tree, command: [candidate.command],
+        environment: validationEnvironment(candidate.directory), scope: "canonical", owner: "coordinator",
+        expected_evidence: ["combined-independent-candidate"], marginal_value: { unmet_criteria: [],
+          risk_hypothesis: "Independent unit patches may interact after integration" }, reason: "acceptance" };
+      const key = validationEvidenceKey(request);
+      const saved = snapshot.records.find(({ event }) => event.kind === "validation.settled" && event.evidence_key === key &&
+        event.outcome === "passed" && event.exit_code === 0);
+      if (saved) return { ok: true, command: [candidate.command], exit_code: 0,
+        fingerprint: goalFingerprint(saved.event).slice(7), error: null };
+      const reservation = await ledger.reserveValidation(request, Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1));
+      if (reservation.decision !== "ALLOW" || !reservation.reservation_id) throw new Error(`mission-fabric-validation:${reservation.reason}`);
+      const started = Date.now();
+      const result = await runContainedValidation({ cwd: candidate.directory,
+        executable: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh",
+        args: process.platform === "win32" ? ["/d", "/s", "/c", candidate.command] : ["-c", candidate.command], timeout_ms: 600_000 }, signal);
+      await ledger.settleValidation(reservation.reservation_id, request, signal?.aborted ? "cancelled" : result.ok ? "passed" : "failed", result.exit_code, Date.now() - started);
+      return result;
+    },
     completionReadiness: async root => {
       const { state, records } = await (await goalLedger(root)).readGoal();
       return goalCompletionReadiness(state, records.flatMap(({ event }) =>

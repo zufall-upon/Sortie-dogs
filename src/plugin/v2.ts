@@ -685,7 +685,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
           await background.reconcile(String(execution.sessionID ?? ""));
           let content: string;
           try { content = await definition.execute(legacyToolArgs(input, definition.args), {
-            sessionID: String(execution.sessionID ?? ""), ...(typeof execution.id === "string" ? { callID: execution.id } : {}), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}) }); }
+            sessionID: String(execution.sessionID ?? ""), ...(typeof execution.id === "string" ? { callID: execution.id } : {}), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}),
+            ...(execution.signal instanceof AbortSignal ? { signal: execution.signal } : {}) }); }
           finally { await reconcileCorrectionPermissions(String(execution.sessionID ?? "")); }
           if (name !== "sortie_v010_operator_status") return { content };
           const status: unknown = JSON.parse(content);

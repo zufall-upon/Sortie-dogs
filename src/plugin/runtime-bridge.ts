@@ -85,6 +85,7 @@ export interface RuntimeBridge {
   requiresValidationExecution?(rootSessionID: string, taskID: string, childSessionID: string, commands: readonly string[]): Promise<boolean>;
   /** A mission's hash-pinned Task has already passed durable run/acceptance admission. */
   ownsMissionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
+  ownsMissionParallelDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   /** Only an exact admitted correction Task is an implementation dispatch continuing the original Reviewer child. */
   ownsReviewerCorrectionDispatch?(rootSessionID: string, callID: string, taskID: string): Promise<boolean>;
   ownsReviewerCorrection?(childSessionID: string): Promise<boolean>;
@@ -178,12 +179,13 @@ export interface RuntimeBridge {
     }>;
     renderReturnReport(rootSessionID: string, text: string, receiptFingerprint: string,
       missionReview?: "PASS" | "evidence-gaps" | "skipped-low-risk" | "self-rechecked", reviewEvidenceGaps?: string): Promise<string | undefined>;
-    recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string;
+    recoverUnitEvidence(rootSessionID: string, request: { unitID: string; childSessionID: string; manifestPath: string; projectRoot?: string;
       manifestHash: string; goalFingerprint: string;
       direct?: { callID: string; startedAt: string; finishedAt: string; checks: readonly ReviewerCorrectionCheck[];
         validation: readonly string[]; directories?: Readonly<Record<string, string>>; registeredAt?: Readonly<Record<string, string>> };
     }): Promise<readonly GoalEvidence[]>;
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
+    validateMissionFabric(rootSessionID: string, request: import("../core/mission-fabric.js").MissionFabricValidation, signal?: AbortSignal): Promise<import("../core/types.js").ContainedValidationResult>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
     missionDirectTerminal(rootSessionID: string, dispatch: { taskID: string; callID: string; actor: string },
