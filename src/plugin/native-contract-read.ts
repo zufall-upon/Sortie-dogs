@@ -25,7 +25,10 @@ export async function nativeContractReadSnapshot(directory: string, input: unkno
   const absolute = resolve(directory, input.path);
   const scoped = relative(directory, absolute).replaceAll("\\", "/");
   if (scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return undefined;
-  const local = process.platform === "win32" ? scoped.toLowerCase() : scoped;
+  // Mission Fabric keeps generated contracts in the primary repository's managed trees.
+  // This only expands a successful read; exact Mission admission still owns activation.
+  const local = (process.platform === "win32" ? scoped.toLowerCase() : scoped)
+    .replace(/^\.git\/sortie-dogs\/managed-worktrees-v1\/wt-[a-f0-9]{16}-[a-f0-9]{32}\//u, "");
   const generated = Object.values(RUNTIME_PROFILES).some(profile => {
     const root = process.platform === "win32" ? profile.stateDirectory.toLowerCase() : profile.stateDirectory;
     const rest = local.startsWith(`${root}/`) ? local.slice(root.length + 1) : "";

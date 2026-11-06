@@ -725,6 +725,20 @@ test("restart adopts exact inventory and safely reconciles a missing clean artif
   }
 });
 
+test("host-active dirty candidates retain ownership across restart but changed Git identity does not", async () => {
+  const value = await fixture("active-dirty");
+  try {
+    const pin = await value.lifecycle.pinCleanBase();
+    const created = await value.lifecycle.createMany({ pin, tasks: tasks(pin, ["active", "unowned"]) });
+    for (const tree of created) await writeFile(join(tree.path, "shared.txt"), "in progress\n");
+    const restarted = await WorktreeLifecycle.open({ repositoryRoot: value.repository, activeWorktrees: ["active"] });
+    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["ready", "orphaned"]);
+    await git(created[0]!.path, "add", "shared.txt");
+    await git(created[0]!.path, "commit", "-qm", "diverged");
+    assert.deepEqual((await restarted.reconcile()).map(({ phase }) => phase), ["orphaned", "orphaned"]);
+  } finally { await cleanupFixture(value); }
+});
+
 test("restart preserves dirty, diverged, and missing-diverged artifacts as orphaned", async () => {
   const value = await fixture("orphan");
   try {
@@ -913,8 +927,8 @@ const exclusiveTestNames = new Set([
 ]);
 
 nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (context) => {
-  assert.equal(registeredTests.length, 28);
-  assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 28);
+  assert.equal(registeredTests.length, 29);
+  assert.equal(new Set(registeredTests.map(({ name }) => name)).size, 29);
   await mkdir(fixtureRoot, { recursive: true });
   const initialFixtureRoots = new Set(
     (await readdir(fixtureRoot)).filter((name) => name.startsWith("sortie-worktree-")),
@@ -922,7 +936,7 @@ nodeTest("worktree lifecycle registered tests", { concurrency: 4 }, async (conte
 
   const safeTests = registeredTests.filter(({ name }) => !exclusiveTestNames.has(name));
   const exclusiveTests = registeredTests.filter(({ name }) => exclusiveTestNames.has(name));
-  assert.equal(safeTests.length, 26);
+  assert.equal(safeTests.length, 27);
   assert.equal(exclusiveTests.length, 2);
 
   let activeSafe = 0;

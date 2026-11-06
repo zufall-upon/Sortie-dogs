@@ -160,6 +160,17 @@ Handoff:    Coordinator → Worker (same unit, retained edits/context/checks/bud
 The default Mission profile is serial. Background responsiveness and status observations do not
 add parallel writers, replay unknown commands or imply completion. More agents are not the goal.
 
+For two genuinely independent implementation units, a Coordinator can request `plan_units parallel=true`.
+The host returns exact foreground `tasks[]` for separate managed worktrees and Luna Fast/max Workers.
+Each keeps its own existing Mission reservation and settlement. After native terminal/Writer release,
+`review_mission` combines the patches, runs their declared checks against that combined candidate through
+the existing validation budget, and prepares the ordinary Review. Root acceptance is still separate.
+Dirty bases, cross-unit read/write dependencies, unknown scopes, preparation failures, explicit incompatible
+Worker models, and plans with a Git delivery lifecycle retain serial execution before dispatch.
+An interrupted or failed dispatched pair retains its candidates and cumulative spend for reconciliation;
+it never silently restarts as serial. Successful acceptance retains the patch/check receipts and cleans up
+unchanged owned worktrees. This is an opt-in two-unit path, not automatic model routing or the legacy Fabric ledger.
+
 Scout discovery can also diagnose a failed formal check: use only useful independent causal questions,
 in parallel when appropriate, and pass evidence and uncertainty into the existing correction handoff.
 Known causes go directly to correction; Scouts are not a retry/rescue prerequisite or a Review vote.

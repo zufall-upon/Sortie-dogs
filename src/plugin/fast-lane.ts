@@ -80,6 +80,8 @@ export interface FastLaneToolOptions {
   readonly consultationFallbackAuthorized?: boolean;
   readonly parallelWorkerAlreadyBound?: boolean;
   readonly parallelWorkerAuthorized?: boolean;
+  /** Exact host-admitted independent Mission unit; Goal owns its cumulative budget. */
+  readonly missionParallelWorkerAuthorized?: boolean;
 }
 
 function taskArgument(args: unknown, key: string): string | undefined {
@@ -426,7 +428,7 @@ export class FastLaneController {
         if (state.workerDispatches >= state.parallelWorkerLimit || state.totalWorkerDispatches >= state.workerLimit) {
           throw new FastLaneDeniedError("WORKER_LIMIT");
         }
-      } else if (state.workerInFlight) {
+      } else if (state.workerInFlight && options.missionParallelWorkerAuthorized !== true) {
         throw new FastLaneDeniedError("WORKER_LIMIT");
       }
       state.workerDispatches += 1;

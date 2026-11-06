@@ -20,6 +20,9 @@ import { classifyUnitResult } from "./unit-result-classification.js";
 import { SOURCE_REVIEW_PHASES, SOURCE_REVIEW_RISK_TAGS } from "./consultation.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState, type WorkQuantityProgress } from "./work-quantity.js";
 import { applyPendingWork, rememberWorkRun } from "./work-quantity-observations.js";
+import { prepareMissionFabric, integrateMissionFabric, assertMissionFabricDelivered, cleanupMissionFabric, missionFabricScopeConflict,
+  type MissionFabricState, type MissionFabricValidation } from "./mission-fabric.js";
+import type { ContainedValidationResult } from "./types.js";
 
 export const OPERATOR_LIMITS = Object.freeze({ units: 32, planBytes: 256 * 1024, packetBytes: 24 * 1024,
   remediationReserve: 32 });
@@ -85,6 +88,7 @@ export interface OperatorPlan {
   readonly git_lifecycle?: OperatorGitLifecycle;
 }
 export interface OperatorTask {
+  readonly model?: string;
   readonly description: string;
   readonly subagent_type: string;
   readonly prompt: string;
@@ -122,6 +126,7 @@ export type OperatorProposal = { status: "prepared"; state: OperatorState } | {
 };
 type OperatorPhase = "prepared" | "running" | "awaiting-decision" | "awaiting-acceptance" | "completed" | "cancelled";
 interface UnitState {
+  readonly fabricRoot?: string;
   readonly unit: OperatorUnit;
   task: OperatorTask;
   readonly handoffPath: string;
@@ -219,6 +224,8 @@ export interface OperatorAcceptanceAnchor {
   readonly handoffHash: string;
 }
 export interface OperatorState {
+  fabric?: MissionFabricState;
+  fabricFallback?: string;
   /** Display metadata only, never part of the immutable execution plan. */
   workQuantity?: WorkQuantityState;
   readonly schema_version: "0.1";
@@ -513,6 +520,7 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
 
 /** Root-owned durable queue. It never executes code, changes acceptance, or accepts a candidate. */
 export class OperatorRuntime {
+  private readonly fabricControllers = new Map<string, AbortController>();
   private readonly states = new Map<string, OperatorState>();
   private readonly writes = new Map<string, Promise<void>>();
   private readonly transactions = new Map<string, Promise<unknown>>();
@@ -1504,7 +1512,8 @@ export class OperatorRuntime {
       if (state.phase !== "running") throw new Error("operator-worker-claim-revoked");
       const expectedParent = state.operatorSessionID ?? (state.units.length === 1 ? root : null);
       if (expectedParent === null || parent !== expectedParent) throw new Error("operator-worker-parent-mismatch");
-      const unit = state.units.find(item => item.status === "running" && item.callID !== null);
+      const unit = state.units.find(item => item.status === "running" && item.callID !== null &&
+        (!state.fabric || prompt === item.task.prompt || prompt === this.workerTask(state, item).prompt));
       const expected = unit?.repairValidation === null ? unit?.task : unit === undefined ? undefined : this.repairWorkerTask(state, unit);
       if (!unit || expected === undefined || (prompt !== expected.prompt && (unit.repairValidation !== null || prompt !== this.workerTask(state, unit).prompt))) {
         throw new Error("operator-worker-task-reference-mismatch");
@@ -1602,6 +1611,32 @@ export class OperatorRuntime {
   next(root: string, actor: string): Promise<unknown> {
     return this.serial(root, () => this.nextOnce(root, actor));
   }
+  prepareFabric(root: string, model?: string): Promise<OperatorState> {
+    return this.serial(root, async () => {
+      const state = await this.required(root);
+      try { await ensureGitManagedStateExcluded(this.projectRoot, this.profile, this.gitPath); }
+      catch { state.fabricFallback ??= "repository-unavailable"; }
+      await prepareMissionFabric(this.projectRoot, this.profile.stateDirectory, state, model);
+      await this.save(state);
+      return state;
+    });
+  }
+  integrateFabric(root: string, validate: (request: MissionFabricValidation, signal: AbortSignal) => Promise<ContainedValidationResult>,
+    signal?: AbortSignal): Promise<void> {
+    return this.serial(root, async () => {
+      const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      this.fabricControllers.set(root, controller);
+      try {
+        const state = await this.required(root);
+        await integrateMissionFabric(this.projectRoot, this.profile.stateDirectory, state, () => this.save(state),
+          request => validate(request, controller.signal), controller.signal);
+      } finally { signal?.removeEventListener("abort", abort); this.fabricControllers.delete(root); }
+    });
+  }
+  assertFabricDelivered(state: OperatorState): Promise<void> { return assertMissionFabricDelivered(this.projectRoot, state); }
   private async nextOnce(root: string, actor: string): Promise<unknown> {
     const state = await this.required(root);
     if (actor === root && state.units.length > 1) {
@@ -1611,6 +1646,13 @@ export class OperatorRuntime {
     }
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
     if (!["prepared", "running"].includes(state.phase)) return this.packet(state);
+    if (state.fabric) {
+      if (state.units.some(unit => ["failed", "cancelled"].includes(unit.status))) return this.packet(state);
+      const pending = state.units.filter(unit => unit.status === "pending");
+      for (const unit of pending) await this.verifyControls(unit);
+      return pending.length ? { run_id: state.runID, generation: state.generation, tasks: pending.map(unit => this.workerTask(state, unit)),
+        dispatch_instruction: "Dispatch these exact independent Tasks in one foreground parallel round. Keep each Task model and prompt. Each unit has its own worktree and existing Mission reservation. After native settlement, review_mission integrates and checks the combined candidate before ordinary Review." } : this.packet(state);
+    }
     const current = state.units.find(unit => unit.status !== "succeeded");
     if (!current) {
       const readiness = this.gitAcceptanceReadiness(state);
@@ -1704,8 +1746,10 @@ export class OperatorRuntime {
     const state = await this.required(root);
     if (actor !== state.operatorSessionID && !(actor === root && state.units.length === 1 && state.operatorSessionID === null)) throw new Error("operator-owner-mismatch");
     if (!["prepared", "running"].includes(state.phase)) throw new Error("operator-grant-revoked");
-    const unit = state.units.find(item => item.status !== "succeeded");
-    if (!unit || unit.status !== "pending" || !this.matchesWorkerTask(state, unit, args)) {
+    const unit = state.fabric ? state.units.find(item => item.status === "pending" && this.matchesWorkerTask(state, item, args))
+      : state.units.find(item => item.status !== "succeeded");
+    if (!unit || unit.status !== "pending" || !this.matchesWorkerTask(state, unit, args) ||
+        state.fabric && state.units.some(item => item.status === "failed" || item.status === "cancelled")) {
       throw new Error("operator-unit-not-authorized");
     }
     await this.verifyControls(unit);
@@ -1741,7 +1785,7 @@ export class OperatorRuntime {
     unit.status = "failed";
     unit.resultClass = "process-defect";
     if (reason) unit.dispatchDenial = reason.slice(0, 4000);
-    state.phase = "awaiting-decision";
+    state.phase = state.fabric && state.units.some(item => item.status === "running") ? "running" : "awaiting-decision";
     state.decision = decision;
     await this.save(state);
   }
@@ -1972,6 +2016,9 @@ export class OperatorRuntime {
         }
       }
       const write = [...new Set([...unit.unit.write, ...requested.filter(path => !this.pathAuthorized(path, unit.unit.write))])];
+      if (state.fabric && missionFabricScopeConflict(state.units.map(item => item === unit ? { ...item.unit, write } : item.unit))) {
+        throw new Error("mission-fabric-scope-dependency: settle the admitted candidates before serial replanning");
+      }
       if (JSON.stringify(write) === JSON.stringify(unit.unit.write)) return;
       const oldManifest = await readFile(unit.manifestPath, "utf8"), oldHandoff = await readFile(unit.handoffPath, "utf8");
       const manifest = { ...JSON.parse(oldManifest), write } as import("./types.js").OperationManifest;
@@ -2023,6 +2070,10 @@ export class OperatorRuntime {
       const readiness = this.gitAcceptanceReadiness(state);
       state.phase = readiness === null ? "awaiting-acceptance" : "awaiting-decision";
       state.decision = readiness;
+    }
+    if (state.fabric) {
+      if (state.units.some(item => item.status === "running")) state.phase = "running";
+      else if (state.units.some(item => item.status === "failed" || item.status === "cancelled")) state.phase = "awaiting-decision";
     }
     await this.save(state);
   }
@@ -2158,6 +2209,7 @@ export class OperatorRuntime {
     return state;
   }
   interrupted(root: string, reason: string): Promise<readonly string[]> {
+    this.fabricControllers.get(root)?.abort(new Error(reason));
     return this.serial(root, () => this.interruptedOnce(root, reason));
   }
   recordStoppedChild(root: string, runID: string, child: string): Promise<void> {
@@ -2205,6 +2257,13 @@ export class OperatorRuntime {
       state.phase = "completed";
       state.receipt = receipt;
       await this.save(state);
+      await cleanupMissionFabric(this.projectRoot, state, () => this.save(state)).catch(async error => {
+        if (state.fabric) {
+          (state.fabric.cleanup ??= { completed: [], retained: [] }).retained.push({ worktree: state.runID,
+            reason: error instanceof Error ? error.message : "cleanup-unavailable" });
+          await this.save(state);
+        }
+      });
     }
   }
   async required(root: string): Promise<OperatorState> {
@@ -2395,6 +2454,9 @@ export class OperatorRuntime {
       : `call ${this.profile.toolPrefix}cancel_operator, then call ${this.profile.toolPrefix}prepare_operator with an approved replacement plan for the same goal and exact acceptance; start from git_lifecycle.committed_head, keep writes within git_lifecycle.approved_write_union, retain consumed budget, and do not call resume_operator or edit the committed candidate${carriedAction}`;
     const awaitingAcceptanceNextAction = `assess the independent-review requirement and obtain review when required, copying review_dispatch_contract.required_prompt_lines into the reviewer Task prompt with real values; if review PASSes (or policy records an allowed skip), call ${this.profile.toolPrefix}complete_operator with this run_id and acceptance_fingerprint; if review has blocking findings wholly inside the existing exact acceptance, the union of git_lifecycle.approved_write_union and git_lifecycle.remediation_reserve, and remaining cumulative budget, do not complete or ask for user approval: call ${this.profile.toolPrefix}cancel_operator with reason review-blocking, then call ${this.profile.toolPrefix}prepare_operator for one same-goal replacement from git_lifecycle.committed_head targeting only those findings; copy this packet's acceptance array verbatim into the replacement plan without paraphrase, deletion, addition, or reordering, preserve accepted-criteria lineage, and run final canonical validation/review; if the replacement is refused for write scope, report replacement_constraints.blocked_write_paths to the user as the exact paths needing approval and stop, then after the user approves resend the same replacement with git_lifecycle.remediation_scope_expansion set to exactly those paths; if acceptance or budget must increase, stop for the user decision`;
     const packet = { profile: state.profile, run_id: state.runID, root_session_id: state.rootSessionID, generation: state.generation,
+      ...(state.fabric ? { fabric: { phase: state.fabric.phase, base_sha: state.fabric.pin.sha,
+        units: state.units.map(unit => ({ id: unit.unit.id, status: unit.status, project_root: unit.fabricRoot })),
+        checks: state.fabric.checks } } : state.fabricFallback ? { fabric_serial_fallback: state.fabricFallback } : {}),
       ...(state.workQuantity ? { work_quantity: projectWorkQuantity(state.workQuantity, state.phase === "completed", state.phase === "cancelled") } : {}),
       sequence: state.sequence, status: state.phase, repair_generation: state.repairGeneration,
       acceptance: state.acceptance, acceptance_fingerprint: state.acceptanceFingerprint,
@@ -2494,12 +2556,13 @@ export class OperatorRuntime {
     // Keep this prefix stable across reads/edits: changing counters belong in status/tool results.
     return `SORTIE_WORKER_CONTEXT\n${JSON.stringify({ root_session_id: root, run_id: state.runID,
       unit_id: unit.unit.id, task_id: /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1],
-      project_root: this.projectRoot, handoff_path: this.controlReference(unit.handoffPath), operation_manifest: this.controlReference(unit.manifestPath),
+      project_root: unit.fabricRoot ?? this.projectRoot, handoff_path: unit.fabricRoot ? unit.handoffPath : this.controlReference(unit.handoffPath), operation_manifest: unit.fabricRoot ? unit.manifestPath : this.controlReference(unit.manifestPath),
       objective: unit.unit.objective, read: unit.unit.read, write: unit.unit.write,
       validation: unitValidation(unit), acceptance: state.acceptance,
       ...(unit.repairValidation === null ? {} : { validation_only: true }),
     })}\nThis is the durable assignment for this same Worker, including after compaction or reload. ` +
-      "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest using these project-relative paths without prepending project_root, and inspect the actual diff and outputs before claiming no edits or replaying work. " +
+      (unit.fabricRoot ? `Use absolute file paths in project_root and shell workdir=${unit.fabricRoot}. Read the retained handoff first. ` :
+      "A missing path in a summary does not mean the handoff is missing. Read the retained handoff/manifest using these project-relative paths without prepending project_root, and inspect the actual diff and outputs before claiming no edits or replaying work. ") +
       `Use ${this.profile.toolPrefix}operator_status for observed validation and remaining work; do not repeat successful checks for an unchanged candidate. ` +
       "This context is an assignment, not proof of execution or acceptance.";
   }
