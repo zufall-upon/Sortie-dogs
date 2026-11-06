@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 
 import V2Plugin, {
   createSortieDogsV2Plugin,
@@ -196,6 +197,18 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+test("V2 legacy hooks can restrict native permission effects but cannot upgrade them", async () => {
+  for (const native of ["allow", "ask", "deny"] as const) for (const legacy of ["allow", "ask", "deny"] as const) {
+    const fixture = contextFixture();
+    const cleanup = await createSortieDogsV2Plugin(async () => ({ "permission.ask": async (_request, output) => { output.status = legacy; } })).setup(fixture.context);
+    try {
+      const event = { sessionID: "root", action: "shell", resources: ["node --version"], effect: native as string };
+      await fixture.permissionHooks.get("evaluate")!(event);
+      assert.equal(event.effect, [native, legacy].includes("deny") ? "deny" : [native, legacy].includes("ask") ? "ask" : "allow");
+    } finally { cleanup?.(); }
+  }
+});
 
 test("generated Mission Worker assets expose same-Task scope repair, not Coordinator controls", () => {
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
@@ -708,10 +721,12 @@ test("V2 adapter retains Docker codemode command/result as native observation wi
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric } of [{ legacy: false, commit: false, cancel: false, fabric: true }, { legacy: false, commit: false, cancel: false },
+for (const { legacy, commit, cancel, fabric, permission } of [
+  ...["allow", "deny", "ask", "cancel"].map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
+  { legacy: false, commit: false, cancel: false },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -723,6 +738,7 @@ test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot 
     unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  let loseNextAfter = false;
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
@@ -770,6 +786,7 @@ test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot 
         state: { status: "completed", input: event.input, content: [{ type: "text", text: content }], metadata },
         time: { created: now, ran: now, completed: now } }] });
     const completed = { ...event, status: "completed", result: { content, metadata } };
+    if (loseNextAfter) { loseNextAfter = false; return content; }
     await fixture.toolHooks.get("execute.after")!(completed);
     return completed.result.content;
   };
@@ -790,6 +807,7 @@ test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot 
       'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
     await start();
     if (fabric) {
+      await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(`${process.argv[2]}.txt`, "utf8") !== "ready\\n") process.exit(1); console.log("PASS");\n');
       await exec("git", ["add", "check.mjs"], { cwd: directory });
       await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
         "commit", "-qm", "base"], { cwd: directory });
@@ -806,7 +824,6 @@ test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot 
       const calls = await Promise.all(plan.tasks.map((task: Record<string, unknown>) => before("coordinator", "subagent",
         { ...nativeTask(task), model: task.model })));
       assert.ok(calls.every(call => call.input.model === "openai/gpt-6-luna-fast#max"));
-      cleanup?.(); await start();
       for (const i of [1, 0]) {
         const child = ["first", "second"][i]!;
         const expanded = await prompt(child, String(calls[i]!.input.prompt));
@@ -823,7 +840,61 @@ test(`V2 ${fabric ? "parallel managed-root" : cancel ? "cancelled Worker cannot 
         assert.equal(context.project_root, unit.fabricRoot);
         assert.equal(context.handoff_path, handoff);
       }
-      await tool("root", "cancel_operator", { reason: "End admission fixture with both exact native tasks accounted" });
+      for (const [i, child] of ["first", "second"].entries()) {
+        const state = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), unit = state.units[i]!;
+        const target = join(unit.fabricRoot!, `${child}.txt`);
+        const patch = await before(child, "patch", { patchText: `*** Begin Patch\n*** Add File: ${target}\n+ready\n*** End Patch` });
+        await writeFile(target, "ready\n"); await after(patch, "Created file");
+        const check = await before(child, "shell", { command: `node check.mjs ${child}`, workdir: unit.fabricRoot });
+        await exec(process.execPath, ["check.mjs", child], { cwd: unit.fabricRoot });
+        await after(check, "PASS", { exit: 0 });
+        agents[child]!.outcome = "succeeded";
+        const settled = await after(calls[i]!, "Validation passed", { sessionID: child });
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[i]!.status, "succeeded", settled);
+      }
+      const reviewInput = { risk_tags: ["public-logic"], traces: ["R1: first.txt checked", "R2: second.txt checked"] };
+      for (const child of ["first", "second"]) {
+        const pending = await tool("coordinator", "review_mission", reviewInput);
+        assert.equal(pending.status, "awaiting-native-validation");
+        assert.equal(pending.native_tool, "shell");
+        assert.equal(pending.input.command, `node check.mjs ${child}`);
+        await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/, "Review preparation cannot run or apply checks itself");
+        const check = await before("coordinator", "shell", pending.input);
+        const effect = permission === "cancel" ? "allow" : permission;
+        const permissionEvent = { sessionID: "coordinator", action: "shell", resources: [pending.input.command], effect };
+        await fixture.permissionHooks.get("evaluate")!(permissionEvent);
+        assert.equal(permissionEvent.effect, effect, "existing native ask/deny is never upgraded");
+        if (permission !== "allow") {
+          if (permission === "cancel") await tool("root", "cancel_operator", { reason: "Cancel pending combined validation" });
+          const failed = { ...check, status: "error", error: { message: "Native permission rejected or pending ask cancelled" } };
+          await fixture.toolHooks.get("execute.after")!(failed);
+          const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE), state = await runtime.required("root");
+          assert.equal(state.fabric!.nativeCall, undefined);
+          assert.equal(state.fabric!.phase, "validating");
+          if (permission === "cancel") assert.equal(state.phase, "cancelled");
+          assert.equal(state.dispatched, 2);
+          if (permission !== "cancel") await assert.rejects(tool("coordinator", "review_mission", reviewInput), /native-validation-interrupted/);
+          const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+          assert.equal(ledger.state.validation_budget.reservations.length, 0);
+          const settled = ledger.records.filter(({ event }) => event.kind === "validation.settled").at(-1)!.event as any;
+          assert.equal(settled.exit_code, null);
+          await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/);
+          return;
+        }
+        await exec(process.execPath, ["check.mjs", child], { cwd: pending.input.workdir });
+        cleanup?.(); await start();
+        loseNextAfter = child === "first";
+        await after(check, "PASS", { exit: 0 });
+      }
+      const review = await tool("coordinator", "review_mission", reviewInput);
+      assert.ok(review.task, JSON.stringify(review));
+      assert.equal(await readFile(join(directory, "first.txt"), "utf8"), "ready\n");
+      const final = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(final.fabric!.checks.length, 2);
+      assert.equal(final.fabric!.phase, "applied");
+      assert.ok(final.fabric!.checks.every(check => check.authority === "native-shell-v1"));
+      assert.equal(final.dispatched, 2);
       return;
     }
     if (commit) {

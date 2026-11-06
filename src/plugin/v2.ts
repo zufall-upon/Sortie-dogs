@@ -901,11 +901,13 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   await context.permission.hook("evaluate", async event => {
     const alias = event.action === "subagent" && array(event.resources).some(correctionAgent);
     let original = alias ? await originalReviewerPermission(context, String(event.sessionID)) : undefined;
-    const output = { status: event.effect === "deny" ? "deny" : event.effect === "allow" ? "allow" : "ask" } as { status: "ask" | "deny" | "allow" };
+    const nativeEffect = event.effect === "deny" ? "deny" : event.effect === "allow" ? "allow" : "ask";
+    const output = { status: nativeEffect } as { status: "ask" | "deny" | "allow" };
     await hooks["permission.ask"]?.({ permission: String(event.action ?? ""), patterns: array(event.resources).map(String),
       ...(typeof event.sessionID === "string" ? { sessionID: event.sessionID } : {}) }, output);
     // Saved alias allows and legacy hooks cannot upgrade an original configured ask/deny.
-    event.effect = original === "deny" || output.status === "deny" ? "deny" : original ?? output.status;
+    const effects = [nativeEffect, original, output.status];
+    event.effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow";
   });
 }
 

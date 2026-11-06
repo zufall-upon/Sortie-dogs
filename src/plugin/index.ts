@@ -9085,29 +9085,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     recoverUnitEvidence,
     validateMissionFabric: async (root, candidate, signal) => {
-      const { runContainedValidation } = await import("../core/worktree-commit-artifact.js");
-      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), goal = snapshot.state;
-      if (!goal.goal_id || goal.phase !== "active" || goal.outstanding_reservations.length) throw new Error("mission-fabric-unsettled-goal");
-      const request: ValidationBudgetRequest = { run_id: goal.goal_id,
-        operation_id: `${candidate.runID}:fabric:${goalFingerprint([candidate.tree, candidate.command]).slice(7)}`,
-        source_snapshot: candidate.tree, candidate: candidate.tree, command: [candidate.command],
-        environment: validationEnvironment(candidate.directory), scope: "canonical", owner: "coordinator",
-        expected_evidence: ["combined-independent-candidate"], marginal_value: { unmet_criteria: [],
-          risk_hypothesis: "Independent unit patches may interact after integration" }, reason: "acceptance" };
-      const key = validationEvidenceKey(request);
-      const saved = snapshot.records.find(({ event }) => event.kind === "validation.settled" && event.evidence_key === key &&
-        event.outcome === "passed" && event.exit_code === 0);
-      if (saved) return { ok: true, command: [candidate.command], exit_code: 0,
-        fingerprint: goalFingerprint(saved.event).slice(7), error: null };
-      const reservation = await ledger.reserveValidation(request, Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1));
-      if (reservation.decision !== "ALLOW" || !reservation.reservation_id) throw new Error(`mission-fabric-validation:${reservation.reason}`);
-      const started = Date.now();
-      const result = await runContainedValidation({ cwd: candidate.directory,
-        executable: process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh",
-        args: process.platform === "win32" ? ["/d", "/s", "/c", candidate.command] : ["-c", candidate.command], timeout_ms: 600_000 }, signal);
-      await ledger.settleValidation(reservation.reservation_id, request, signal?.aborted ? "cancelled" : result.ok ? "passed" : "failed", result.exit_code, Date.now() - started);
-      return result;
+      signal?.throwIfAborted();
+      return (await import("./mission-fabric-validation.js")).requireFabricValidation(await goalLedger(root), candidate);
     },
+    reserveMissionFabricValidation: async (root, candidate, actor, callID) =>
+      (await import("./mission-fabric-validation.js")).reserveFabricValidation(await goalLedger(root), candidate, actor, callID),
+    settleMissionFabricValidation: async (root, candidate, actor, callID, outcome, exit, duration) =>
+      (await import("./mission-fabric-validation.js")).settleFabricValidation(await goalLedger(root), candidate, actor, callID, outcome, exit, duration),
     completionReadiness: async root => {
       const { state, records } = await (await goalLedger(root)).readGoal();
       return goalCompletionReadiness(state, records.flatMap(({ event }) =>

@@ -36,6 +36,7 @@ import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
 import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
 import { ProjectMemory, projectMemoryFile, type MemoryChange } from "../core/project-memory.js";
+import { MissionFabricValidationRequired } from "../core/mission-fabric.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -315,6 +316,30 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       }
       return { role: canonicalAgent(profile, agent), ...(parent === undefined ? {} : { parent }) };
+    }
+    async function settleNativeFabricCheck(root: string, actor: string, callID: string, args: Record<string, unknown>,
+      output: { status?: unknown; metadata?: unknown }): Promise<boolean> {
+      const metadata = record(output.metadata) ? output.metadata : {};
+      if (metadata.status === "running") return false;
+      return operators.settleFabricValidation(root, actor, callID, async (candidate, startedAt, fresh) => {
+        const exact = args.command === candidate.command && args.background !== true &&
+          resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === resolve(candidate.directory);
+        const exit = typeof metadata.exit === "number" && Number.isSafeInteger(metadata.exit) ? metadata.exit : null;
+        const outcome = output.status === "cancelled" ? "cancelled" : output.status !== "completed" || !fresh || !exact || exit === null
+          ? "interrupted" : exit === 0 ? "passed" : "failed";
+        await control!.settleMissionFabricValidation(root, candidate, actor, callID, outcome, exit, Date.now() - startedAt);
+      });
+    }
+    async function reconcileNativeFabricCheck(root: string, run: OperatorState): Promise<void> {
+      const call = run.fabric?.nativeCall, candidate = run.fabric?.pendingValidation;
+      if (!call || !candidate) return;
+      const terminal = (await messages(call.actor)).flatMap(message => Array.isArray(message.parts) ? message.parts : [])
+        .filter(record).find(part => part.type === "tool" && ["bash", "shell"].includes(String(part.tool)) &&
+          part.callID === call.callID && record(part.state) && record(part.state.input) &&
+          part.state.input.command === candidate.command && ["completed", "error"].includes(String(part.state.status)) &&
+          (!record(part.state.metadata) || part.state.metadata.status !== "running"));
+      if (terminal && record(terminal.state)) await settleNativeFabricCheck(root, call.actor, call.callID,
+        terminal.state.input as Record<string, unknown>, terminal.state);
     }
     async function rootFor(id: string, depth = 0): Promise<string | undefined> {
       if (depth > 3 || retired.has(id)) return undefined;
@@ -3282,6 +3307,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Join the existing native Reviewer. Its current call and prompt remain authoritative; no replacement, revalidation or new conversation." });
           await control!.currentBudget(root, { reconcileUsage: false });
           const run = await operators.required(root);
+          await reconcileNativeFabricCheck(root, run);
           const currentMission = await missions.required(root);
           for (const unit of run.units) {
             if (!unit.childSessionID) continue;
@@ -3300,7 +3326,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
           if (run.fabric) {
             if (!readiness.ready) throw new Error("mission-fabric-awaits-current-unit-proof");
-            await operators.integrateFabric(root, (request, signal) => control!.validateMissionFabric(root, request, signal), context.signal);
+            try {
+              await operators.integrateFabric(root, (request, signal) => control!.validateMissionFabric(root, request, signal), context.signal);
+            } catch (error) {
+              if (!(error instanceof MissionFabricValidationRequired)) throw error;
+              return JSON.stringify({ status: "awaiting-native-validation", run_id: run.runID,
+                native_tool: "shell", input: { command: error.request.command, workdir: error.request.directory,
+                  timeout: 600_000, background: false },
+                next_action: "Run this exact shell input through the normal native tool, respecting its existing permissions. Then call review_mission again; unchanged successful checks are reused. Do not use a plugin executor, change permissions or report an unexecuted check as passed." });
+            }
           }
           const correction = mission.corrections?.find(item => item.runID === run.runID);
           if (correction?.selfRecheck?.unresolvedFindings.length) throw new Error("mission-review-known-findings-require-correction");
@@ -3889,6 +3923,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         }
         const args = record(output.args) ? output.args : {};
+        if (!writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && typeof args.command === "string" &&
+            args.background !== true && await operators.admitFabricValidation(root, request.sessionID, request.callID,
+              args.command, resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."),
+              candidate => control!.reserveMissionFabricValidation(root, candidate, request.sessionID, request.callID))) return;
         if (who.role === "dog-reviewer" && !writer && ["bash", "shell", "powershell", "pwsh"].includes(request.tool.toLowerCase()) &&
             extractWritePaths(request.tool, args, input.directory).paths.length) throw new Error("mission-reviewer-readonly");
         const repairAccess = writer ? await operators.repairValidationAccess(root, request.sessionID) : null;
@@ -4206,6 +4244,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!id) return;
         const beforeWork = cachedWorkProgress(input.directory, id);
         const args = record(request.args) ? request.args : {};
+        if (["bash", "shell"].includes(request.tool.toLowerCase()) && request.callID) {
+          const parent = (await identity(id)).parent;
+          const root = await rootFor(id) ?? (parent ? await rootFor(parent) : undefined);
+          if (root && await settleNativeFabricCheck(root, id, request.callID, args, output)) return;
+        }
         const successful = output.status !== "error" && output.status !== "cancelled";
         const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
         const changed = successful ? extractWritePaths(request.tool, args, input.directory).paths.map(relativePath) : [];
