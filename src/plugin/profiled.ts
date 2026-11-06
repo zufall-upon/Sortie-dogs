@@ -4534,6 +4534,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           "SORTIE_LIVE_STATE_WITHDRAWN retires the listed blocks; earlier scope, tool lists and receipts are historical, not current authority. " +
           "It does not replace original requirements, native tool outcomes or formal evidence; author self-recheck is not independent approval.");
         const mission = await missions.read(root), run = await operators.read(root);
+        // Consultation admission can arm the core one-shot default before a Mission has
+        // planned any unit. Its durable lifecycle, not consultation/Worker counts, owns
+        // completion. Retire even a previously generated block via the existing live-state projection.
+        if (mission && !["completed", "cancelled"].includes(mission.phase)) {
+          output.system = output.system.filter(item => item !== "SORTIE_FAST_LANE_TERMINAL" &&
+            !item.startsWith("SORTIE_FAST_LANE_TERMINAL\n"));
+        }
         const inline = mission?.corrections?.find(item => item.runID === run?.runID && item.author === request.sessionID &&
           item.inlineReview && ["running", "ready"].includes(item.status) && !item.selfRecheck);
         if (inline && run) {
