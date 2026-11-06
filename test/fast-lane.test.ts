@@ -396,6 +396,25 @@ test("typed evidence fields reject duplicates, case changes, and unbracketed ris
   }
 });
 
+test("Advisor accepts a new question with the same trigger and child without resetting duplicate controls", () => {
+  const lane = new FastLaneController();
+  lane.beginTurn("root", false);
+  const first = { subagent_type: "dog-advisor", task_id: "same-advisor", prompt:
+    "strategy_trigger: material-uncertainty\nCandidate: fixture\nQuestion: What should be inspected after the build setup failed?" };
+  const next = { ...first, prompt:
+    "strategy_trigger: material-uncertainty\nCandidate: fixture\nQuestion: After the corrected build passed, a new runtime observation disagrees with the checker. Which explanation is supported?" };
+  lane.beforeTool("root", "task", first);
+  lane.beforeTool("root", "task", next);
+  for (const request of [first, next]) {
+    expectDenial(() => lane.beforeTool("root", "task", request), "CONSULTATION_RETRY_INVALID");
+    const retry = { ...request, prompt: `${request.prompt}\nfallback_retry: true` };
+    expectDenial(() => lane.beforeTool("root", "task", retry), "CONSULTATION_RETRY_UNAUTHORIZED");
+    lane.beforeTool("root", "task", retry, { consultationFallbackAuthorized: true });
+    expectDenial(() => lane.beforeTool("root", "task", retry, { consultationFallbackAuthorized: true }), "ADVISOR_LIMIT");
+  }
+  expectDenial(() => lane.beforeTool("root", "task", { ...next, prompt: "Question without a strategy trigger" }), "ADVISOR_TRIGGER_REQUIRED");
+});
+
 test("advisor requires a strategy trigger while plugin-owned compaction bypasses fast-lane", () => {
   const lane = new FastLaneController();
   lane.beginTurn("root", false);

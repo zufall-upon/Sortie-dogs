@@ -629,7 +629,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.ok(reviewer.content.length >= 350, "dog-reviewer needs a substantive risk-gated role");
     assert.match(
       advisor.content,
-      /only one bounded Strategy request from dog-coordinator[\s\S]+one candidate and one focused\s+question[\s\S]+Do not request raw logs or full source files[\s\S]+options and one recommendation only to dog-coordinator/i,
+      /each host-admitted Strategy request from dog-coordinator[\s\S]+one bounded consultation for one\s+candidate and one focused question[\s\S]+Do not request raw logs or full source files[\s\S]+options and one recommendation only to dog-coordinator/i,
     );
     assert.match(advisor.content, /Reject every SourceReview request[\s\S]+SourceReview is\s+dog-reviewer-only work/i);
     assert.doesNotMatch(advisor.content, /Accept[^.]*SourceReview/i);
