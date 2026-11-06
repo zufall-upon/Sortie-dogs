@@ -8,7 +8,7 @@ function request(goalID: string, candidate: MissionFabricValidation, operation: 
   return { run_id: goalID, operation_id: operation, source_snapshot: candidate.tree, candidate: candidate.tree,
     command: [candidate.command], environment: { platform: process.platform, arch: process.arch, runtime: process.version,
       directory: candidate.directory, toolchain: "native-shell-v1" }, scope: "canonical", owner: "coordinator",
-    expected_evidence: ["combined-independent-candidate"], marginal_value: { unmet_criteria: [],
+    expected_evidence: ["combined-independent-candidate", `fabric:${candidate.runID}`], marginal_value: { unmet_criteria: [],
       risk_hypothesis: "Independent unit patches may interact after integration" }, reason: "acceptance" };
 }
 const operation = (actor: string, callID: string) => `fabric-native:${actor}:${callID}`;
@@ -24,6 +24,8 @@ export async function requireFabricValidation(ledger: RunFlightLedger, candidate
   if (saved?.kind === "validation.settled") {
     if (saved.outcome === "passed" && saved.exit_code === 0) return { ok: true, command: [candidate.command], exit_code: 0,
       fingerprint: goalFingerprint(saved).slice(7), error: null };
+    if (saved.outcome === "interrupted" && !records.some(({ event }) => event.kind === "validation.admission" &&
+        event.evidence_key === key && event.reopen !== undefined)) throw new MissionFabricValidationRequired(candidate, saved.operation_id);
     throw Error(`mission-fabric-native-validation-${saved.outcome}: exit=${saved.exit_code ?? "unknown"}; retain candidate and inspect the native shell result before retry`);
   }
   throw new MissionFabricValidationRequired(candidate);
@@ -32,8 +34,14 @@ export async function requireFabricValidation(ledger: RunFlightLedger, candidate
 export async function reserveFabricValidation(ledger: RunFlightLedger, candidate: MissionFabricValidation, actor: string, callID: string): Promise<void> {
   const { state: goal } = await ledger.readGoal();
   if (!goal.goal_id || goal.phase !== "active" || goal.outstanding_reservations.length) throw Error("mission-fabric-unsettled-goal");
-  const decision = await ledger.reserveValidation(request(goal.goal_id, candidate, operation(actor, callID)),
-    Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1));
+  const validation = request(goal.goal_id, candidate, operation(actor, callID));
+  // This only reopens ledger admission. The explicit shell call still passes through
+  // native permission enforcement and cannot produce evidence until its real exit.
+  const decision = await ledger.reserveInterruptedValidationRetry(validation,
+    Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1), {
+      authority: "mission-fabric-native-validation-retry", operator_run_id: candidate.runID, actor_session_id: actor,
+      goal_fingerprint: goal.acceptance_fingerprint!, evidence_key: validationEvidenceKey(validation),
+    });
   if (decision.decision !== "ALLOW") throw Error(`mission-fabric-native-validation:${decision.reason}; reuse or reconcile the existing native result`);
 }
 

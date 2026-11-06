@@ -34,7 +34,7 @@ export interface MissionFabricValidation {
 }
 
 export class MissionFabricValidationRequired extends Error {
-  constructor(readonly request: MissionFabricValidation) {
+  constructor(readonly request: MissionFabricValidation, readonly retryOf?: string) {
     super("mission-fabric-native-validation-required");
   }
 }

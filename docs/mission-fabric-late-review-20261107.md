@@ -28,6 +28,27 @@ findings were retrieved. All four findings are valid against the integrated base
 No finding was classified as a false positive. CI success on #340 did not resolve
 these findings; the corrections and their specific evidence do.
 
+## Follow-up review on #341
+
+Both already-triggered reviews completed before integration. Two P2 findings were
+valid against `dbb9533a715e21529e154535ef2ba612b1fb7b02`:
+
+- `4494426638`: an interrupted combined check could not be retried after native
+  permission rejection. The existing one-time interrupted-validation reopen now
+  accepts a Fabric-specific host binding (Goal/run, native actor and exact evidence
+  key), without fabricating an Operator repair unit. Review returns the original
+  shell input with the interrupted call reference; a requested retry still passes
+  native permissions. Earlier consumption/settlement remains, and the new attempt
+  receives a separate reservation. In-flight, cancelled, changed-candidate and
+  second-reopen cases remain rejected; successful evidence is reused.
+- `4494426654`: the retained V1 named factory's after-hook lacks V2's `status`.
+  A normal V1 after-hook with a numeric exit now supplies completion evidence.
+  Missing exit and explicit error/cancellation still cannot produce PASS.
+
+The designated architecture consultation supported both fixes and specifically
+required a real Fabric authorization branch instead of a fictitious repair unit.
+The additional recovery paths are exercised with model-free regressions.
+
 ## Validation
 
 - `npm run test:targeted -- test/mission-fabric.test.ts test/worktree-lifecycle.test.ts test/v2-plugin.test.ts test/fast-lane.test.ts`:
@@ -35,10 +56,19 @@ these findings; the corrections and their specific evidence do.
 - Coverage includes native allow/deny/ask/cancel, all native/legacy effect pairs,
   changed-candidate rejection, cold reload and lost after-hook recovery, concurrent
   inventory ownership, sequential retries after two failures, and diff prefixes.
-- `npm run test:full`: exit 0, 425.032 seconds including build.
+- Original correction tree: `npm run test:full`, exit 0, 425.032 seconds including build.
+- Follow-up regressions cover deny/ask → interrupted settlement → cold retry →
+  native allow → successful Review, refusal on retry, exhausted budget, stale
+  authority, in-flight duplication and the existing one-reopen limit. The raw V1
+  positive/missing-exit/cancellation selection passed in 4.368 seconds after fixing
+  the fixture's shell-name mapping. The final integrated-candidate full-suite result
+  is retained in `late-review-followup-full.json` and PR #341.
 
 ## Installed-package native CLI
 
+- This native smoke covers the original correction tree `dbb9533a715e21529e154535ef2ba612b1fb7b02`;
+  the subsequent interrupted-retry/V1 fixes use the related and full-suite evidence
+  above rather than another paid repetition of the unchanged native allow path.
 - Command: `node _testenv/investigations/20261106-vision-v2/fabric-pilot.mjs --mission --native-checks --attempt=late-review-mission --candidate=late-review-candidate.json`.
 - Fixed package SHA-256:
   `313a7a6280f458b21dba8445fae2cfade7756a785a6543cd989f00b20aa15a22`.

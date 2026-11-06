@@ -325,7 +325,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const exact = args.command === candidate.command && args.background !== true &&
           resolve(input.directory, typeof args.workdir === "string" ? args.workdir : ".") === resolve(candidate.directory);
         const exit = typeof metadata.exit === "number" && Number.isSafeInteger(metadata.exit) ? metadata.exit : null;
-        const outcome = output.status === "cancelled" ? "cancelled" : output.status !== "completed" || !fresh || !exact || exit === null
+        // V1 after-hooks have no status; their exit metadata is completion evidence.
+        // Explicit non-completion from either host contract always wins over exit 0.
+        const statuses = [output.status, metadata.status].filter(status => status !== undefined);
+        const outcome = statuses.includes("cancelled") ? "cancelled" : statuses.some(status => status !== "completed") || !fresh || !exact || exit === null
           ? "interrupted" : exit === 0 ? "passed" : "failed";
         await control!.settleMissionFabricValidation(root, candidate, actor, callID, outcome, exit, Date.now() - startedAt);
       });
@@ -3333,7 +3336,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               return JSON.stringify({ status: "awaiting-native-validation", run_id: run.runID,
                 native_tool: "shell", input: { command: error.request.command, workdir: error.request.directory,
                   timeout: 600_000, background: false },
-                next_action: "Run this exact shell input through the normal native tool, respecting its existing permissions. Then call review_mission again; unchanged successful checks are reused. Do not use a plugin executor, change permissions or report an unexecuted check as passed." });
+                ...(error.retryOf ? { retry_of: error.retryOf } : {}),
+                next_action: (error.retryOf ? "The prior call was interrupted. Address its native permission or execution cause before requesting the one existing interrupted-validation retry. " : "") +
+                  "Run this exact shell input through the normal native tool, respecting its existing permissions. Then call review_mission again; unchanged successful checks are reused. Do not use a plugin executor, change permissions or report an unexecuted check as passed." });
             }
           }
           const correction = mission.corrections?.find(item => item.runID === run.runID);

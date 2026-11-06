@@ -576,6 +576,39 @@ test("one operator-authorized repair retry reopens only interrupted evidence and
     first.reservation_id);
 });
 
+test("native Fabric retry retains interrupted spend, exact authority and the existing one-reopen limit", async () => {
+  const { ledger } = await accepted("fabric-native-reopen", 4);
+  const request = { run_id: "goal-fabric-native-reopen", operation_id: "fabric-native:coordinator:first",
+    source_snapshot: "source", candidate: "candidate", command: ["node check"], scope: "canonical" as const,
+    environment: { platform: "linux", arch: "x64", runtime: "node-22", directory: "/candidate", toolchain: "native-shell-v1" },
+    owner: "coordinator" as const, expected_evidence: ["fabric:operator-run"],
+    marginal_value: { unmet_criteria: [], risk_hypothesis: "combined check" }, reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 4);
+  await ledger.settleValidation(first.reservation_id!, request, "interrupted", null, 0);
+  const authorization = { authority: "mission-fabric-native-validation-retry" as const, operator_run_id: "operator-run",
+    actor_session_id: "coordinator", goal_fingerprint: acceptance, evidence_key: first.evidence_key! };
+  const retryRequest = { ...request, operation_id: "fabric-native:coordinator:retry" };
+  for (const changed of [{ goal_fingerprint: goalFingerprint("stale") }, { actor_session_id: "unrelated" },
+    { operator_run_id: "other-run" }, { evidence_key: goalFingerprint("other-candidate") }]) {
+    assert.equal((await ledger.reserveInterruptedValidationRetry(retryRequest, 4, { ...authorization, ...changed })).decision, "DENY");
+  }
+  assert.equal((await ledger.reserveInterruptedValidationRetry(retryRequest, 1, authorization)).reason, "budget-exhausted");
+  const retry = await ledger.reserveInterruptedValidationRetry(retryRequest, 4, authorization);
+  assert.equal(retry.decision, "ALLOW");
+  assert.equal(retry.consumed, 2);
+  assert.equal(retry.evidence_key, first.evidence_key);
+  assert.equal((await ledger.reserveInterruptedValidationRetry({ ...retryRequest, operation_id: "fabric-native:coordinator:duplicate" },
+    4, authorization)).decision, "DENY");
+  await ledger.settleValidation(retry.reservation_id!, retryRequest, "interrupted", null, 0);
+  assert.equal((await ledger.reserveInterruptedValidationRetry({ ...retryRequest, operation_id: "fabric-native:coordinator:third" },
+    4, authorization)).decision, "DENY");
+  const snapshot = await ledger.readGoal();
+  assert.equal(snapshot.state.validation_budget.consumed, 2);
+  assert.equal(snapshot.state.validation_budget.evidence_keys.length, 0);
+  assert.equal(snapshot.state.validation_budget.reservations.length, 0);
+  assert.equal(snapshot.records.filter(({ event }) => event.kind === "validation.settled" && event.outcome === "interrupted").length, 2);
+});
+
 for (const outcome of ["passed", "cancelled"] as const) test(`operator retry cannot reopen ${outcome} evidence`, async () => {
   const { ledger } = await accepted(`validation-no-reopen-${outcome}`, 4);
   const request = { run_id: `goal-validation-no-reopen-${outcome}`, operation_id: "first", source_snapshot: "source",

@@ -722,7 +722,8 @@ test("V2 adapter retains Docker codemode command/result as native observation wi
 });
 
 for (const { legacy, commit, cancel, fabric, permission } of [
-  ...["allow", "deny", "ask", "cancel"].map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
+  ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
+    .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
@@ -746,6 +747,14 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
       const hooks = await SortieDogsV010Plugin(input, options);
       const after = hooks["tool.execute.after"];
       hooks["tool.execute.after"] = async (request, output) => {
+        if (permission?.startsWith("v1") && request.sessionID === "coordinator" && ["bash", "shell"].includes(request.tool)) {
+          delete output.status;
+          if (permission === "v1-no-exit") delete output.metadata?.exit;
+          if (permission === "v1-cancelled") output.metadata = { ...output.metadata, status: "cancelled" };
+          assert.equal(output.status, undefined, "exercise the raw V1 after-hook contract");
+          await after?.({ ...request, tool: "bash" }, output);
+          return;
+        }
         if (projectionRace && request.tool === "read" && request.nativeReadHash) {
           const race = projectionRace; projectionRace = undefined;
           await writeFile(race.path, race.source);
@@ -859,12 +868,14 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
         assert.equal(pending.native_tool, "shell");
         assert.equal(pending.input.command, `node check.mjs ${child}`);
         await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/, "Review preparation cannot run or apply checks itself");
-        const check = await before("coordinator", "shell", pending.input);
-        const effect = permission === "cancel" ? "allow" : permission;
+        let check = await before("coordinator", "shell", pending.input);
+        const recovering = ["deny-retry", "ask-retry", "retry-denied"].includes(permission!);
+        const effect = recovering && child === "second" ? "allow" : permission?.startsWith("ask") ? "ask"
+          : permission?.startsWith("deny") || permission === "retry-denied" ? "deny" : "allow";
         const permissionEvent = { sessionID: "coordinator", action: "shell", resources: [pending.input.command], effect };
         await fixture.permissionHooks.get("evaluate")!(permissionEvent);
         assert.equal(permissionEvent.effect, effect, "existing native ask/deny is never upgraded");
-        if (permission !== "allow") {
+        if (effect !== "allow" || permission === "cancel") {
           if (permission === "cancel") await tool("root", "cancel_operator", { reason: "Cancel pending combined validation" });
           const failed = { ...check, status: "error", error: { message: "Native permission rejected or pending ask cancelled" } };
           await fixture.toolHooks.get("execute.after")!(failed);
@@ -873,19 +884,52 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
           assert.equal(state.fabric!.phase, "validating");
           if (permission === "cancel") assert.equal(state.phase, "cancelled");
           assert.equal(state.dispatched, 2);
-          if (permission !== "cancel") await assert.rejects(tool("coordinator", "review_mission", reviewInput), /native-validation-interrupted/);
+          if (permission !== "cancel") {
+            const retry = await tool("coordinator", "review_mission", reviewInput);
+            assert.equal(retry.status, "awaiting-native-validation");
+            assert.equal(retry.retry_of, `fabric-native:coordinator:${check.id}`);
+            assert.deepEqual(retry.input, pending.input);
+          }
           const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
             `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
           assert.equal(ledger.state.validation_budget.reservations.length, 0);
           const settled = ledger.records.filter(({ event }) => event.kind === "validation.settled").at(-1)!.event as any;
           assert.equal(settled.exit_code, null);
           await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/);
-          return;
+          if (!recovering) return;
+          const consumed = ledger.state.validation_budget.consumed;
+          cleanup?.(); await start();
+          check = await before("coordinator", "shell", pending.input);
+          const permitted = { sessionID: "coordinator", action: "shell", resources: [pending.input.command],
+            effect: permission === "retry-denied" ? "deny" : "allow" };
+          await fixture.permissionHooks.get("evaluate")!(permitted);
+          assert.equal(permitted.effect, permission === "retry-denied" ? "deny" : "allow");
+          const retryLedger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+          assert.equal(retryLedger.state.validation_budget.consumed, consumed + 1);
+          assert.equal(retryLedger.state.validation_budget.reservations.length, 1);
+          await assert.rejects(before("coordinator", "shell", pending.input), /not-ready/);
+          if (permission === "retry-denied") {
+            await fixture.toolHooks.get("execute.after")!({ ...check, status: "error", error: { message: "Native denial retained" } });
+            await assert.rejects(tool("coordinator", "review_mission", reviewInput), /native-validation-interrupted/);
+            await assert.rejects(before("coordinator", "shell", pending.input), /duplicate-evidence/);
+            await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/);
+            return;
+          }
         }
         await exec(process.execPath, ["check.mjs", child], { cwd: pending.input.workdir });
         cleanup?.(); await start();
-        loseNextAfter = child === "first";
+        loseNextAfter = child === "first" && !permission?.startsWith("v1");
         await after(check, "PASS", { exit: 0 });
+        if (["v1-no-exit", "v1-cancelled"].includes(permission!)) {
+          const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+          const settled = ledger.records.filter(({ event }) => event.kind === "validation.settled").at(-1)!.event as any;
+          assert.equal(settled.outcome, permission === "v1-no-exit" ? "interrupted" : "cancelled");
+          assert.equal(ledger.state.validation_budget.reservations.length, 0);
+          await assert.rejects(readFile(join(directory, "first.txt")), /ENOENT/);
+          return;
+        }
       }
       const review = await tool("coordinator", "review_mission", reviewInput);
       assert.ok(review.task, JSON.stringify(review));
@@ -895,6 +939,10 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
       assert.equal(final.fabric!.phase, "applied");
       assert.ok(final.fabric!.checks.every(check => check.authority === "native-shell-v1"));
       assert.equal(final.dispatched, 2);
+      const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+        `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+      assert.equal(ledger.state.validation_budget.consumed, permission?.endsWith("-retry") ? 5 : 4);
+      assert.equal(ledger.state.validation_budget.reservations.length, 0);
       return;
     }
     if (commit) {

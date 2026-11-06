@@ -141,10 +141,17 @@ export interface GoalValidationRetryAuthorization {
   readonly goal_fingerprint: string;
   readonly repair_fingerprint: string;
 }
-export interface GoalValidationReopen extends GoalValidationRetryAuthorization {
+export interface GoalNativeValidationRetryAuthorization {
+  readonly authority: "mission-fabric-native-validation-retry";
+  readonly operator_run_id: string;
+  readonly actor_session_id: string;
+  readonly goal_fingerprint: string;
+  readonly evidence_key: string;
+}
+export type GoalValidationReopen = (GoalValidationRetryAuthorization | GoalNativeValidationRetryAuthorization) & {
   readonly prior_reservation_id: string;
   readonly prior_operation_id: string;
-}
+};
 interface GoalAcceptanceEventBase extends GoalEventBase {
       readonly goal_id: string; readonly revision: 1;
       readonly scope_epoch: 1; readonly acceptance_fingerprint: string; readonly origin_user_message_id: string;
@@ -612,10 +619,15 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
         const reopen = event.reopen;
         const prior = reopen === undefined ? undefined : validationAdmissions.get(reopen.prior_reservation_id);
         const settlement = reopen === undefined ? undefined : validationSettlements.get(reopen.prior_reservation_id);
-        const validReopen = reopen !== undefined && reopen.authority === "operator-repair-validation-retry" &&
-          text(reopen.operator_run_id) && text(reopen.unit_id) && Number.isSafeInteger(reopen.operator_generation) &&
-          reopen.operator_generation > 0 && /^[a-f0-9]{64}$/u.test(reopen.plan_hash) && HASH.test(reopen.control_hash) &&
-          reopen.goal_fingerprint === state.acceptance_fingerprint && HASH.test(reopen.repair_fingerprint) &&
+        const validAuthority = reopen?.authority === "mission-fabric-native-validation-retry"
+          ? text(reopen.actor_session_id) && reopen.evidence_key === event.evidence_key &&
+            event.operation_id.startsWith(`fabric-native:${reopen.actor_session_id}:`) &&
+            reopen.prior_operation_id.startsWith("fabric-native:")
+          : reopen?.authority === "operator-repair-validation-retry" && text(reopen.unit_id) &&
+            Number.isSafeInteger(reopen.operator_generation) && reopen.operator_generation > 0 &&
+            /^[a-f0-9]{64}$/u.test(reopen.plan_hash) && HASH.test(reopen.control_hash) && HASH.test(reopen.repair_fingerprint);
+        const validReopen = reopen !== undefined && validAuthority && text(reopen.operator_run_id) &&
+          reopen.goal_fingerprint === state.acceptance_fingerprint &&
           prior?.decision === "ALLOW" && prior.evidence_key === event.evidence_key && prior.operation_id === reopen.prior_operation_id &&
           settlement?.operation_id === reopen.prior_operation_id && settlement.evidence_key === event.evidence_key &&
           settlement.outcome === "interrupted" && event.operation_id !== reopen.prior_operation_id &&

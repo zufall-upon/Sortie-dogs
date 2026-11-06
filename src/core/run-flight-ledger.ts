@@ -12,7 +12,7 @@ import type { TerminalRescueAcceptedBase } from "./terminal-rescue-policy.js";
 import { validationEvidenceState, type ValidationBudgetRequest, type ValidationBudgetDecision, type ValidationOutcome, type ValidationScope } from "./validation-budget.js";
 import { GOAL_BOUND_SCHEMA_VERSION, GoalBoundError, reduceGoalFlight, goalFingerprint, validGoalEvidence,
   type GoalEvidence, type GoalFlightEvent, type GoalFlightEventRecord, type GoalFlightState,
-  type GoalValidationRetryAuthorization } from "./goal-bound.js";
+  type GoalValidationRetryAuthorization, type GoalNativeValidationRetryAuthorization } from "./goal-bound.js";
 
 export const RUN_FLIGHT_LEDGER_SCHEMA_VERSION = "0.1" as const;
 export const MAX_RUN_FLIGHT_EVENTS = 2048;
@@ -1051,9 +1051,9 @@ export class RunFlightLedger {
     return { ...decision, reservation_id };
   }
 
-  /** Internal operator retry path for interruptions; ordinary failed exits use reserveValidation. */
+  /** Host-authorized one-time retry for interruptions; ordinary failed exits use reserveValidation. */
   async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
-    authorization: GoalValidationRetryAuthorization,
+    authorization: GoalValidationRetryAuthorization | GoalNativeValidationRetryAuthorization,
     skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
     if (!this.#goalMode) throw new RunFlightLedgerError("invalid", "Interrupted validation retry requires a goal ledger.");
     const { decideValidationBudget, validationEvidenceKey } = await import("./validation-budget.js");
@@ -1065,9 +1065,16 @@ export class RunFlightLedger {
     const prior = admissions.at(-1)?.event;
     const settlement = prior?.kind === "validation.admission" ? snapshot.records.find(({ event }) =>
       event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
+    const native = authorization.authority === "mission-fabric-native-validation-retry";
+    const binding = native ? request.environment.toolchain === "native-shell-v1" && request.owner === "coordinator" &&
+      request.scope === "canonical" && authorization.evidence_key === evidenceKey &&
+      request.expected_evidence.includes(`fabric:${authorization.operator_run_id}`) &&
+      request.operation_id.startsWith(`fabric-native:${authorization.actor_session_id}:`) &&
+      prior?.kind === "validation.admission" && prior.operation_id.startsWith("fabric-native:")
+      : request.expected_evidence.includes(`unit:${authorization.unit_id}`);
     const bound = snapshot.state.goal_id !== null && request.run_id === snapshot.state.goal_id &&
       authorization.goal_fingerprint === snapshot.state.acceptance_fingerprint &&
-      request.expected_evidence.includes(`unit:${authorization.unit_id}`);
+      binding;
     if (!bound || alreadyReopened || prior?.kind !== "validation.admission" || settlement?.kind !== "validation.settled" ||
         settlement.operation_id !== prior.operation_id || settlement.evidence_key !== evidenceKey || settlement.outcome !== "interrupted") {
       return this.reserveValidation(request, limit, skipReconciliation);
