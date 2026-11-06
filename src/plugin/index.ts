@@ -7225,6 +7225,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (fastLane.terminalInstructionRequired(transformInput.sessionID)) {
         transformOutput.system = [...(transformOutput.system ?? []),
           "SORTIE_FAST_LANE_TERMINAL\nThis is a normal single-unit lane. " +
+          "This plugin default is not evidence that the user requested a one-unit limit. " +
           "Dispatch at most the one allowed worker, perform any required risk-based review or coordinator-owned finalization, " +
           "then return the terminal report and stop. Do not call a compaction capability or emit a continuation marker."];
       }
