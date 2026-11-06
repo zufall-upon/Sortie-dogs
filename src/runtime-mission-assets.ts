@@ -1,6 +1,6 @@
 import { profileAgent, type RuntimeProfile } from "./core/runtime-profile.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
-import { SCOUT_EVIDENCE_CODES } from "./core/scout-contract.ts";
+import { scoutDiscoveryPolicy } from "./runtime-scout-policy.ts";
 
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
@@ -191,6 +191,8 @@ Do not restart a release, cancel live work or take over implementation just to e
 Ordinary implementation decisions remain with the author; no per-Task approval or decision-record ritual.
 
 ${MISSION_DEPENDENCY_WORKFLOW}
+
+${scoutDiscoveryPolicy(profileAgent(profile, "dog-scout"))}
 
 1. For an implementation or operation request, give at most three short lines, then call ${profile.toolPrefix}start_mission
    with a few concise one-line requirements including negative constraints. The host saves the original
@@ -707,10 +709,7 @@ ${VALIDATION_WORKFLOW}
 
 ${OPERATION_GUIDE}
 
-Scout is optional for one precise missing fact. Its prompt includes missing_evidence_code:
-${SCOUT_EVIDENCE_CODES.join(" | ")}, an exact project_root and at most four known_paths.
-Scout cannot investigate external resources, session history or arbitrary artifacts. Read those directly
-with existing parent/Worker host permissions; do not route through a doomed Scout or add a mandatory researcher.
+${scoutDiscoveryPolicy(profileAgent(profile, "dog-scout"))}
 Advisor is optional for one material decision; its Task starts with a standalone line
 \`strategy_trigger: material-uncertainty\` (or one of ${STRATEGY_TRIGGERS.join(" | ")}).
 Put the question on the next line, never after the trigger, even in Japanese. If admission rejects

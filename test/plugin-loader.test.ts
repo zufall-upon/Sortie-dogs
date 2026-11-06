@@ -580,8 +580,6 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       "webfetch",
       "task",
       "question",
-      "glob",
-      "grep",
       "edit",
       "list",
       "write",
@@ -591,26 +589,28 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       assert.match(scout.content, new RegExp(`^  ${tool}: deny$`, "m"));
       assert.match(scout.content, new RegExp(`^  ${tool}: false$`, "m"));
     }
-    assert.match(scout.content, /permission:\r?\n(?:  [a-z]+: deny\r?\n){10}tools:/);
-    assert.match(scout.content, /tools:\r?\n(?:  [a-z]+: false\r?\n){10}---/);
+    for (const tool of ["glob", "grep"]) {
+      assert.match(scout.content, new RegExp(`^  ${tool}: allow$`, "m"));
+      assert.match(scout.content, new RegExp(`^  ${tool}: true$`, "m"));
+    }
     assert.doesNotMatch(scout.content, /^  read: (?:deny|false)$/im);
     assert.match(
       scout.content,
-      /one concrete missing_evidence_code: manifest, validation, or owner-risk[\s\S]+known_paths list of at most four paths[\s\S]+Use Read only[\s\S]+at most 120 lines[\s\S]+no more than one read per supplied path[\s\S]+Do not resolve a second key, explore, invoke another tool, retry/i,
+      /concrete discovery question with missing_evidence_code: manifest, validation, or owner-risk[\s\S]+known_paths[\s\S]+as seeds, not a complete[\s\S]+Use Read, Glob and Grep[\s\S]+relevant callers, implementation and[\s\S]+tests[\s\S]+no fixed four-path, 120-line or one-read-per-path limit/i,
     );
     // A scout resolving supplied paths against the session directory wastes the whole fan-out when
     // the session sits above the candidate repository.
     assert.match(
       scout.content,
-      /explicit absolute project_root[\s\S]+Resolve only that evidence key from those paths under project_root; never resolve a path against the\s+session directory/i,
+      /explicit absolute\s+project_root[\s\S]+Resolve paths against project_root, never a possibly unrelated session directory/i,
     );
     assert.match(
       scout.content,
-      /When project_root is missing, or a supplied path does not resolve under it, or a resolved path is\s+unreadable, report that dispatch defect as the facts for the requested key and name the exact paths/i,
+      /When project_root is missing or a path is unreadable, report the exact defect and uncertainty[\s\S]+rather than[\s\S]+claiming facts from unread source/i,
     );
     assert.match(
       scout.content,
-      /exactly one concise JSON object of at most 800 characters with exactly these keys:\s+missing_evidence_code, facts, evidence_paths, risks[\s\S]+no Markdown, code fence, commentary, or raw log/i,
+      /exactly one concise JSON object with exactly these existing keys:\s+missing_evidence_code, facts, evidence_paths, risks[\s\S]+no Markdown, code fence, commentary, or raw log/i,
     );
     assert.ok(scout.content.length >= 350, "dog-scout needs a substantive bounded role");
     assert.match(
@@ -677,7 +677,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(initialHandoff[1], /validation:\s*\{ level: full, command: <exact canonical command>, diagnostics: \[<zero or one exact predeclared command>\] \}/);
     assert.match(initialHandoff[1], /validation_attempts:\s*\{ canonical: 0, diagnostic: 0 \}/);
     assert.match(initialHandoff[1], /known_facts:/);
-    assert.match(initialHandoff[1], /known_paths:\s*\[<up to 4 exact paths>\]/);
+    assert.match(initialHandoff[1], /known_paths:\s*\[<relevant seed paths or search areas>\]/);
     assert.match(initialHandoff[1], /relevant_constraints:/);
     assert.match(
       initialHandoff[1],
@@ -744,7 +744,7 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
     assert.match(scoutSkip[1], /dispatch:\s*as needed before or after worker; no per-turn count or timing ceiling/);
     assert.match(scoutSkip[1], /prompt_field:\s*missing_evidence_code: <allowed gap>/);
     assert.match(scoutSkip[1], /unresolved_action:\s*changed evidence -> bounded Scout \| user-only decision -> question \| proven blocker/);
-    assert.match(scoutSkip[1], /known_paths:\s*worker read boundary even without Scout read/);
+    assert.match(scoutSkip[1], /known_paths:\s*discovery starting points; native permissions and actual Worker contract remain authoritative/);
     assert.match(scoutSkip[1], /action:\s*route directly to dog-worker/);
 
     const artifactFastPath = coordinator.content.match(
@@ -782,15 +782,15 @@ test("packed package exposes plugin and versioned runtime assets", async () => {
       /SCOUT_FANOUT_FIXTURE\r?\n([\s\S]+?)\r?\nEND_SCOUT_FANOUT_FIXTURE/,
     );
     assert.ok(scoutFanout, "coordinator needs bounded Scout routing without an arbitrary turn cap");
-    assert.match(scoutFanout[1], /decision:\s*exceptional; one concrete evidence key blocks safe worker dispatch/);
-    assert.match(scoutFanout[1], /dispatch_guard:\s*exact unresolved gap \+ no unchanged duplicate/);
-    assert.match(scoutFanout[1], /dispatch:\s*one bounded dog-scout call per concrete gap; later new gaps allowed/);
-    assert.match(scoutFanout[1], /role:\s*resolve only missing_evidence_code/);
+    assert.match(scoutFanout[1], /decision:\s*early independent repository questions can reduce sequential investigation/);
+    assert.match(scoutFanout[1], /dispatch_guard:\s*concrete useful questions \+ no unchanged duplicate/);
+    assert.match(scoutFanout[1], /dispatch:\s*1\.\.3 useful questions in the same parallel foreground round; no mandatory three or per-turn quota/);
+    assert.match(scoutFanout[1], /role:\s*one discovery question classified by missing_evidence_code/);
     // Scouts inherit no project context, so the dispatch must carry the same root as the worker.
     assert.match(scoutFanout[1], /project_root:\s*<absolute project root; same value as the worker digest>/);
     assert.match(
       scoutFanout[1],
-      /known_paths:\s*at most 4 supplied paths, each resolvable under project_root/,
+      /known_paths:\s*seed files or search areas; follow relevant callers\/tests with Read\/Glob\/Grep/,
     );
     assert.match(scoutFanout[1], /prompt defect -> corrected dispatch \| user-controlled gap -> question \| external failure -> blocker/);
     assert.match(scoutFanout[1], /resolved -> next dog-worker \| new gap -> bounded Scout \| user decision \| blocker/);

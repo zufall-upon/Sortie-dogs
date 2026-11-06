@@ -956,3 +956,94 @@ test("optional mission consultations record bounded use and skip reasons with na
     assert.equal(status.phase, "running", "optional consultations do not block or accept the mission");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const actor of ["root", "coordinator"] as const) test(`early parallel Scout discoveries survive the Mission handoff: ${actor}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-discovery-"));
+  try {
+    await mkdir(join(directory, "src"));
+    await mkdir(join(directory, "test"));
+    await writeFile(join(directory, "src/caller.mjs"), "// existing source\n".repeat(159) + "export const publicCaller = value => String(value);\n");
+    await writeFile(join(directory, "test/caller.test.mjs"), "import assert from 'node:assert/strict'; import { publicCaller } from '../src/caller.mjs'; assert.equal(publicCaller(3), '3');\n");
+    const gaps = ["manifest", "validation", "owner-risk"];
+    const identities: Record<string, Record<string, unknown>> = {
+      root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+      ...Object.fromEntries(gaps.map(gap => [`scout-${gap}`, { agent: "dog-scout-v010", parentID: actor,
+        model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" }, outcome: "succeeded" }])),
+    };
+    const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      messages: async () => ({ data: [] }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+    } } } as never);
+    const hooks = await create();
+    const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-request`,
+      agent: identities[id]!.agent as string }, { message: { id: `${id}-request`, agent: identities[id]!.agent,
+        model: { providerID: "openai", modelID: id.startsWith("scout-") ? "gpt-6-luna-fast" : "gpt-6.1-sol" } },
+      parts: [{ type: "text", text }] });
+    await chat("root", "Locate the public caller, its meaningful check and adjacent risk before implementing; reuse the discoveries.");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute(
+      { requirements: ["Find the caller, validation and relevant risk without changing source"] }, { sessionID: "root" }));
+    if (actor === "coordinator") {
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { args: structuredClone(started.task) });
+      await chat("coordinator", started.task.prompt);
+    }
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root");
+    const ledgerPath = join(directory, ".sortie-dogs-v010/run-flight", `${createHash("sha256").update("v010\0root").digest("hex")}.json`);
+    const budget = await RunFlightLedger.readGoalFile(ledgerPath);
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "invalid-gap" }, {
+      args: { subagent_type: "dog-scout-v010", prompt: "Explore everything" },
+    }), /SCOUT_GAP_REQUIRED/u);
+    // Admit independent questions together, not three sequential Scout/result turns.
+    await Promise.all(gaps.map(gap => hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: `call-${gap}` }, {
+      args: { subagent_type: "dog-scout-v010", description: `Find ${gap}`, prompt:
+        `missing_evidence_code: ${gap}\nproject_root: ${directory}\nknown_paths: ["src"]\nQuestion: Find the ${gap} evidence in relevant callers and tests.`,
+      },
+    })));
+    assert.deepEqual((await missions.required("root")).consultations?.map(item => item.trigger).sort(), gaps.slice().sort());
+    const result = (gap: string) => JSON.stringify({ missing_evidence_code: gap, facts: "Public caller handles the input at src/caller.mjs:160.",
+      evidence_paths: ["src/caller.mjs:160", "test/caller.test.mjs:1"], risks: gap === "owner-risk" ? "One adjacent error case remains unverified." : "none observed" });
+    await Promise.all(gaps.map(async gap => {
+      await chat(`scout-${gap}`, `missing_evidence_code: ${gap}\nproject_root: ${directory}\nknown_paths: ["src"]`);
+      for (const [tool, args] of [["glob", { pattern: "**/*caller*", path: directory }],
+        ["grep", { pattern: "publicCaller", path: directory }],
+        ["read", { filePath: join(directory, "src/caller.mjs"), offset: 150, limit: 40 }]] as const) {
+        await hooks["tool.execute.before"]!({ tool, sessionID: `scout-${gap}`, callID: `${gap}-${tool}` }, { args: { ...args } });
+      }
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: actor, callID: `call-${gap}` },
+        { output: result(gap), metadata: { sessionId: `scout-${gap}` } });
+    }));
+    const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    assert.equal(status.consultations.length, 3);
+    for (const item of status.consultations) {
+      assert.equal(item.role, "scout");
+      assert.equal(item.outcome, "completed");
+      assert.equal(item.observedModel, "openai/gpt-6-luna-fast");
+      assert.equal(item.observedVariant, "max");
+      assert.equal(item.result, result(item.trigger), "preserve exact source pointers and unresolved risk, not a guessed PASS");
+    }
+    const after = await missions.required("root");
+    const { consultations: _beforeConsultations, ...beforeState } = before;
+    const { consultations: _afterConsultations, ...afterState } = after;
+    assert.deepEqual(afterState, beforeState, "discovery changes no requirements, ownership or lifecycle");
+    assert.equal(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).read("root"), undefined, "no preparation/Worker unit is required");
+    assert.deepEqual(await RunFlightLedger.readGoalFile(ledgerPath), budget, "Scout admission does not reset/spend Worker budget or generate acceptance");
+    // A fresh plugin reads the same retained results without redispatching a Scout.
+    const restored = await create();
+    const reloaded = JSON.parse(await restored.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    assert.deepEqual(reloaded.consultations, status.consultations);
+    const context = status.consultations.map((item: { result: string }) => item.result).join("\n");
+    await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Check the discovered public caller", objective:
+      "Reuse Scout's src/caller.mjs:160 discovery; check the public result and retain its unverified adjacent case.",
+      read: ["src/caller.mjs", "test/caller.test.mjs"], write: [], validation: ["node --test test/caller.test.mjs"] }],
+      handoff_context: context }, { sessionID: actor });
+    const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+    const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
+    for (const gap of gaps) assert.ok(JSON.stringify(handoff.ext["sortie-dogs/mission-context"]).includes(result(gap).replaceAll('"', '\\"')),
+      `the existing Worker handoff carries ${gap} facts and unresolved risks`);
+    assert.match(handoff.task.objective, /src\/caller\.mjs:160/u);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

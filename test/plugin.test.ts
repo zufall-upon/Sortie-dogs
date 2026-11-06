@@ -1629,10 +1629,10 @@ test("runtime contract requires interactive continuation and deterministic recov
   );
   assert.ok(scoutFanout);
   for (const contract of [
-    "decision: exceptional; one concrete evidence key blocks safe worker dispatch",
-    "dispatch_guard: exact unresolved gap + no unchanged duplicate",
-    "dispatch: one bounded dog-scout call per concrete gap; later new gaps allowed",
-    "role: resolve only missing_evidence_code",
+    "decision: early independent repository questions can reduce sequential investigation",
+    "dispatch_guard: concrete useful questions + no unchanged duplicate",
+    "dispatch: 1..3 useful questions in the same parallel foreground round; no mandatory three or per-turn quota",
+    "role: one discovery question classified by missing_evidence_code",
     "invalid: prompt defect -> corrected dispatch | user-controlled gap -> question | external failure -> blocker",
     "next_route: resolved -> next dog-worker | new gap -> bounded Scout | user decision | blocker",
   ]) assert.ok(scoutFanout[1].includes(contract), contract);

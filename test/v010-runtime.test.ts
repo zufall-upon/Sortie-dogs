@@ -677,7 +677,14 @@ test("preview primary continues approved sequential scope and uses interactive q
   assert.match(coordinator, /without Operator approval/);
   assert.match(coordinator, /preserves every requirement, failed-check history and cumulative budget/);
   assert.match(coordinator, /missing_evidence_code:/);
-  assert.match(coordinator, /at most four known_paths/);
+  for (const parent of [primary, coordinator]) {
+    assert.match(parent, /do not wait until missing evidence blocks a handoff/u);
+    assert.match(parent, /two or three independent[\s\S]+same tool round, in parallel and foreground/u);
+    assert.match(parent, /One useful question needs one Scout\. Use zero when existing evidence fixes the work\/check/u);
+    assert.match(parent, /known_paths or repository search areas as starting points, not an exhaustive read allowlist/u);
+    assert.match(parent, /next Worker objective and\s+handoff context/u);
+    assert.doesNotMatch(parent, /at most four known_paths|Scout is optional for one precise missing fact/u);
+  }
   assert.match(coordinator, /High-risk changes require/);
   assert.match(coordinator, /Unit progress is displayed automatically without\nwaking Operator/);
 });

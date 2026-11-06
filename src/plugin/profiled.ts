@@ -3882,9 +3882,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const mission = await missions.read(root);
         const missionCoordinator = who.role === "dog-operator" && mission?.coordinator === request.sessionID &&
           !["cancelled", "completed"].includes(mission.phase);
-        const fastReviewer = who.role === "dog-coordinator" && request.sessionID === root && mission?.coordinator === null &&
-          mission?.runID !== null && !["cancelled", "completed"].includes(mission?.phase ?? "cancelled") &&
-          request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-reviewer");
+        const fastConsultation = who.role === "dog-coordinator" && request.sessionID === root && mission?.coordinator === null &&
+          !["cancelled", "completed"].includes(mission.phase) && request.tool === "task" &&
+          (args.subagent_type === profileAgent(profile, "dog-scout") ||
+            (mission.runID !== null && args.subagent_type === profileAgent(profile, "dog-reviewer")));
         if (missionCoordinator && request.tool !== "task" && !direct) {
           // Coordinator retains native implementation authority. Declare executor=self
           // when formal checks must be attached to a unit; no role-specific edit denial.
@@ -3909,7 +3910,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const currentRun = await operators.read(root);
         const correctionTask = request.tool === "task" && consultRole === "dog-reviewer" && currentRun?.units.some(unit =>
           unit.status === "pending" && unit.reviewerCorrection && args.task_id === unit.reviewerCorrection.author);
-        if (!correctionTask && (missionCoordinator || fastReviewer) && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
+        if (!correctionTask && (missionCoordinator || fastConsultation) && request.tool === "task" && ["dog-scout", "dog-reviewer", "dog-advisor"].includes(consultRole ?? "")) {
           let reviewIdentity = consultRole === "dog-reviewer" ? missionReviewIdentity(mission) : undefined;
           if (consultRole === "dog-reviewer") {
             const reconciled = await reconcileReview(root, mission);
