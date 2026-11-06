@@ -442,7 +442,7 @@ export class FastLaneController {
       const gap = lineValue(prompt, "missing_evidence_code");
       if (gap === undefined || !GAP_CODES.has(gap)) {
         const error = new FastLaneDeniedError("SCOUT_GAP_REQUIRED");
-        error.message += `; required: missing_evidence_code: <${SCOUT_EVIDENCE_CODES.join(" | ")}>; identify one concrete gap, not general exploration`;
+        error.message += `; required: missing_evidence_code: <${SCOUT_EVIDENCE_CODES.join(" | ")}>; identify one concrete discovery question or gap, not a general repository survey`;
         throw error;
       }
       state.scoutDispatches += 1;

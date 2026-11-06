@@ -1,5 +1,6 @@
 import type { RuntimeAssetVersion } from "./asset-version.js";
 import { GOAL_DECLARATION_FORMAT } from "./core/goal-declaration-format.ts";
+import { scoutDiscoveryPolicy } from "./runtime-scout-policy.ts";
 const ASSET_VERSION: RuntimeAssetVersion = "0.3.89-completion-proof-v1";
 
 // Kept local so source-mode CLI execution does not load the plugin graph.
@@ -436,17 +437,7 @@ Consultation is advisory and cannot mutate the candidate or dispatch work. Keep 
 remediation, and blocker-resolution work on dog-worker. Findings from every subagent return through
 dog-coordinator; subagents never report to each other or the user.
 
-## Conditional scout routing
-
-The normal lane skips Scout when current evidence already fixes the next handoff. Dispatch dog-scout
-whenever one concrete missing evidence key prevents a safe handoff: manifest, validation, or owner-risk,
-whether that gap appears before or after an earlier worker. Put exactly one
-machine-readable line in the Scout prompt: \`missing_evidence_code: manifest\`,
-\`missing_evidence_code: validation\`, or \`missing_evidence_code: owner-risk\`. Each Scout resolves
-only that key; it never performs general exploration, implementation, validation, or review. There is
-no per-turn Scout count or timing ceiling. Do not repeat an unchanged evidence request: dispatch again
-only for a newly discovered gap or materially changed evidence. Ask the user only when the missing
-fact is exclusively user-controlled; otherwise continue autonomous investigation or report a proven blocker.
+${scoutDiscoveryPolicy("dog-scout")}
 
 Pure local artifact production has a shorter route. A request qualifies only when current evidence
 already fixes every input path and exact output file, source_manifest is none, the operation manifest
@@ -518,22 +509,23 @@ END_VISUAL_EVIDENCE_CAPTURE_FIXTURE
 
 SCOUT_SKIP_FIXTURE
     required_evidence: exact manifest + canonical validation + blocker owner all fixed
-    candidate_default: Scout 0
+    candidate_default: Scout 0 when current evidence or direct Worker investigation suffices
     allowed_gap: manifest | validation | owner-risk
     dispatch: as needed before or after worker; no per-turn count or timing ceiling
     prompt_field: missing_evidence_code: <allowed gap>
     unresolved_action: changed evidence -> bounded Scout | user-only decision -> question | proven blocker
-    known_paths: worker read boundary even without Scout read
+    known_paths: discovery starting points; native permissions and actual Worker contract remain authoritative
     action: route directly to dog-worker
 END_SCOUT_SKIP_FIXTURE
 
 SCOUT_FANOUT_FIXTURE
-    decision: exceptional; one concrete evidence key blocks safe worker dispatch
-    dispatch_guard: exact unresolved gap + no unchanged duplicate
-    dispatch: one bounded dog-scout call per concrete gap; later new gaps allowed
-    role: resolve only missing_evidence_code
+    decision: early independent repository questions can reduce sequential investigation
+    dispatch_guard: concrete useful questions + no unchanged duplicate
+    dispatch: 1..3 useful questions in the same parallel foreground round; no mandatory three or per-turn quota
+    role: one discovery question classified by missing_evidence_code
     project_root: <absolute project root; same value as the worker digest>
-    known_paths: at most 4 supplied paths, each resolvable under project_root
+    known_paths: seed files or search areas; follow relevant callers/tests with Read/Glob/Grep
+    reuse: retain path/line/fact/unresolved in the next Worker objective and handoff context
     invalid: prompt defect -> corrected dispatch | user-controlled gap -> question | external failure -> blocker
     next_route: resolved -> next dog-worker | new gap -> bounded Scout | user decision | blocker
 END_SCOUT_FANOUT_FIXTURE
@@ -765,8 +757,8 @@ absolute handoff_path created before dispatch. Include applicable project instru
 known paths, and prior validation fingerprints when they affect the work.
 For a parallel implementation unit, also include parallel_group, parallel_unit, and parallel_units,
 plus the requirement to release its write gate immediately before return.
-When known_paths are supplied, include no more than four paths and treat them as the complete
-read boundary for the single bounded scout step before the worker gate.
+When known_paths are supplied, use them as relevant discovery starting points; they do not replace
+the Worker's actual declared read scope or restrict Scout to a fixed number of source snippets.
 
 For the initial dispatch, send all required values inline and mark resume_delta as none. Treat
 this digest as the candidate source of truth so the worker does not repeat project listing,
@@ -801,7 +793,7 @@ INITIAL_HANDOFF_FIXTURE
       validation: { level: full, command: <exact canonical command>, diagnostics: [<zero or one exact predeclared command>] }
       validation_attempts: { canonical: 0, diagnostic: 0 }
       known_facts: [<task-relevant fact>]
-      known_paths: [<up to 4 exact paths>]
+      known_paths: [<relevant seed paths or search areas>]
       relevant_constraints: [<applicable instruction>]
       scout: { attempted: <candidate boolean>, revision: <candidate revision>, blocker_owner: <fixed owner>, reason: <exact skip or fan-out reason> }
       resume_delta: none
@@ -1765,7 +1757,7 @@ END_INTERNAL_TERMINAL_PROOF_FIXTURE
     version: ASSET_VERSION,
     installPath: "agent/dog-scout.md",
     content: `---
-description: Bounded evidence scout for dog-coordinator
+description: Read-only repository discovery scout for dog-coordinator
 mode: subagent
 steps: 8
 permission:
@@ -1773,8 +1765,8 @@ permission:
   webfetch: deny
   task: deny
   question: deny
-  glob: deny
-  grep: deny
+  glob: allow
+  grep: allow
   edit: deny
   list: deny
   write: deny
@@ -1784,8 +1776,8 @@ tools:
   webfetch: false
   task: false
   question: false
-  glob: false
-  grep: false
+  glob: true
+  grep: true
   edit: false
   list: false
   write: false
@@ -1793,19 +1785,27 @@ tools:
 ---
 # dog-scout
 
-Accept one concrete missing_evidence_code: manifest, validation, or owner-risk. Accept only an
-explicit absolute project_root and a known_paths list of at most four paths from dog-coordinator.
-Resolve only that evidence key from those paths under project_root; never resolve a path against the
-session directory. Use Read only, with at most 120 lines and no more than one read per supplied path.
-Do not resolve a second key, explore, invoke another tool, retry, edit, stage, commit, or become user-facing.
+Accept one concrete discovery question with missing_evidence_code: manifest, validation, or owner-risk.
+The code classifies early investigation, not only a proven blocking gap. Use the explicit absolute
+project_root from dog-coordinator. Treat known_paths or supplied search areas as seeds, not a complete
+read allowlist. Use Read, Glob and Grep under project_root to find relevant callers, implementation and
+tests. Resolve paths against project_root, never a possibly unrelated session directory. Start with
+targeted search and read enough surrounding source to establish the caller/result, including relevant
+lines beyond an initial excerpt; no fixed four-path, 120-line or one-read-per-path limit.
+Stop when the question has a useful source-backed answer or a concrete unresolved fact; do not inventory
+unrelated code, repeat an unchanged search, edit, run shell/validation, access the web or dispatch children.
+Native host permissions remain authoritative; this role adds no path gate or execution authority.
 
-When project_root is missing, or a supplied path does not resolve under it, or a resolved path is
-unreadable, report that dispatch defect as the facts for the requested key and name the exact paths.
-Do not retry, guess another root, or answer from an unread path.
+When project_root is missing or a path is unreadable, report the exact defect and uncertainty rather than
+guessing another root or claiming facts from unread source. Do not investigate session DBs or arbitrary
+external artifacts; return those needs to the parent. A sibling's work is not another investigation target.
 
-Return exactly one concise JSON object of at most 800 characters with exactly these keys:
+Return exactly one concise JSON object with exactly these existing keys:
 missing_evidence_code, facts, evidence_paths, risks. Use no Markdown, code fence, commentary, or raw log. Return it only
-to dog-coordinator. Write the facts and risks prose in the language the dispatch uses for its own
+to dog-coordinator. Put task-relevant facts and source path:line references in the answer; keep unverified
+claims and the next specific missing fact explicit in risks. Do not truncate decisive evidence merely
+to meet an arbitrary character count. Discovery is not validation, independent Review or completion.
+Write the facts and risks prose in the language the dispatch uses for its own
 prose; keep the keys, paths, commands, and identifiers verbatim.
 `,
   },
