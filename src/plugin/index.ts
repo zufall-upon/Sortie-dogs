@@ -8824,16 +8824,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     registerDirectValidation: async (root, actor, criterionID, command, registeredAt) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
-      if (!direct || direct.root !== root || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, direct.taskID, actor, command)) {
+      let taskID = direct?.root === root ? direct.taskID : undefined;
+      if (!direct && await input.runtimeBridge?.ownsReviewerCorrection?.(actor)) {
+        const correctionTask = sessionTaskIDs.get(actor);
+        const callID = correctionTask && await input.runtimeBridge?.missionDispatchCall?.(root, actor, correctionTask);
+        if (correctionTask && callID && await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(root, callID, correctionTask)) taskID = correctionTask;
+      }
+      if (!taskID || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, taskID, actor, command)) {
         throw new Error("mission-validation-registration-owner-mismatch");
       }
       const ledger = await goalLedger(root), state = (await ledger.readGoal()).state;
-      const reservation = state.outstanding_reservations.find(item => item.unit_id === direct.taskID && item.session_id === root);
+      const reservation = state.outstanding_reservations.find(item => item.unit_id === taskID && item.session_id === root);
       if (!reservation || state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
       const prior = state.validation_registrations?.[criterionID];
-      if (prior?.unit_id === direct.taskID && prior.command === command && prior.registered_at === registeredAt) return;
+      if (prior?.unit_id === taskID && prior.command === command && prior.registered_at === registeredAt) return;
       await ledger.appendGoal({ kind: "goal.validation-registered", at: new Date().toISOString(), goal_id: state.goal_id,
-        reservation_id: reservation.reservation_id, unit_id: direct.taskID, criterion_id: criterionID, command, registered_at: registeredAt });
+        reservation_id: reservation.reservation_id, unit_id: taskID, criterion_id: criterionID, command, registered_at: registeredAt });
     },
     activateDirectUnit: (root, actor, prompt, handoffPath) => serializeChatTransition(actor, async () => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);

@@ -61,21 +61,31 @@ for (const cold of [false, true]) test(`Reviewer repairs an expected-nonzero che
   } finally { await f.dispose(); }
 });
 
-for (const cold of [false, true]) test(`Reviewer replaces the terminal recipe and settles its native evidence: ${cold ? "cold" : "live"}`, async () => {
+for (const resumed of [false, true]) for (const cold of [false, true]) test(`Reviewer replaces the terminal recipe and settles its native evidence: ${resumed ? "resumed" : "inline"} ${cold ? "cold" : "live"}`, async () => {
   const f = await fixture();
   try {
     const A = "node required-test.mjs", B = "node check.mjs", C = "node --check check.mjs";
     const E = 'node -e "if(require(\'node:fs\').readFileSync(\'result.txt\', \'utf8\').trim() !== \'ready\') process.exit(1)"';
-    const started = await initial(f, { keepReviewOpen: true, validation: [A, B] });
-    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    const started = await initial(f, { keepReviewOpen: !resumed, validation: [A, B] });
+    let dispatch = started.dispatch;
+    if (resumed) {
+      const prepared = await f.tool("root", "repair_review");
+      dispatch = await f.before("root", "subagent", { ...f.task(prepared.task), ...(cold ? { background: true } : {}) });
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    } else await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
     await f.edit("author", "ready");
     await f.shell("author", A);
     const before = await f.run(), retained = before.units[0]!.reviewerCorrection!.checks![0]!;
     const corrected = await f.tool("author", "repair_review", {
       validation: [A, C, E], reason: "Replace the terminal recipe with a ready-output assertion." });
     assert.equal(corrected.status, "correction-registration-corrected");
-    if (cold) await f.start();
-    await f.shell("author", C); await f.shell("author", B);
+    await f.shell("author", B);
+    if (cold) {
+      if (resumed) await f.after(dispatch, "Native Job running", { sessionID: "author", status: "running" });
+      await f.start();
+      if (resumed) await f.bind("author"); // Existing resumed-Task cold binding recovery.
+    }
+    await f.shell("author", C);
     assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation",
       "the removed terminal recipe cannot substitute for the new native check");
     await f.shell("author", E);
@@ -84,15 +94,24 @@ for (const cold of [false, true]) test(`Reviewer replaces the terminal recipe an
     assert.equal(checked.runID, before.runID);
     assert.deepEqual(checked.units[0]!.reviewerCorrection!.checks![0], retained);
     assert.equal(checked.units[0]!.reviewerCorrection!.checks!.length, 3);
-    assert.deepEqual(checked.units[0]!.directExecution!.checks, [], "native correction receipts retain their actual owner");
+    assert.deepEqual(checked.units[0]!.directExecution?.checks, resumed ? undefined : [], "native correction receipts retain their actual owner");
     const finished = await f.tool("author", "finish_direct_unit");
     assert.equal(finished.status, "correction-validated", JSON.stringify(finished));
+    if (resumed) {
+      if (cold) {
+        f.terminal("author", inlineReport());
+        await f.tool("root", "operator_status");
+      } else await f.finish(dispatch, "author", inlineReport());
+      const mission = await f.missions.required("root");
+      assert.equal(mission.review!.verdict, "self-rechecked");
+      assert.equal(mission.review!.selfRecheck!.callID, dispatch.id);
+    }
     const unit = (await f.run()).units[0]!;
     assert.equal(unit.status, "succeeded");
     assert(unit.evidence.some(evidence => evidence.execution.command[0] === E));
     assert(!unit.evidence.some(evidence => evidence.execution.command[0] === B));
     assert.equal((await f.ledger()).state.consumed_units, 2);
-    if (cold) return; // Reload covers durable finish; the live branch retains the native dispatch join.
+    if (resumed || cold) return; // Inline reload covers durable finish; its live branch retains the native dispatch join.
     const returned = JSON.parse(await f.finish(started.dispatch, "author", inlineReport()));
     assert.equal(returned.status, "review-correction-recorded", JSON.stringify(returned));
     assert.equal(returned.independent, false);

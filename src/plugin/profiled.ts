@@ -2225,19 +2225,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       skipMissionConsultation = `${profile.toolPrefix}skip_mission_consultation`,
       extendMissionBudget = `${profile.toolPrefix}extend_mission_budget`;
     const startDirectUnit = `${profile.toolPrefix}start_direct_unit`, finishDirectUnit = `${profile.toolPrefix}finish_direct_unit`;
-    async function syncDirectValidation(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
+    async function syncValidationRegistration(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
       if (!direct.unit.validationRegistration && !direct.unit.reviewerCorrection?.validationRegisteredAt) return;
       const last = unitValidation(direct.unit).at(-1)!;
-      await control!.registerDirectValidation(direct.root, direct.unit.directExecution!.actor, direct.unit.unit.id, last,
+      await control!.registerDirectValidation(direct.root, direct.unit.reviewerCorrection?.author ?? direct.unit.directExecution!.actor, direct.unit.unit.id, last,
         direct.unit.reviewerCorrection?.validationRegisteredAt?.[last] ??
-          direct.unit.directExecution!.validationRegisteredAt?.[last] ?? direct.unit.directExecution!.startedAt);
+          direct.unit.directExecution?.validationRegisteredAt?.[last] ?? direct.unit.directExecution?.startedAt ??
+          direct.unit.reviewerCorrection?.admittedAt ?? direct.run.createdAt);
     }
     async function activateDirect(actor: string) {
       const direct = await directExecution(actor);
       if (direct) {
         // Recover a crash between durable registration and its goal-ledger projection
         // before admitting another native check or selecting finish evidence.
-        await syncDirectValidation(direct);
+        await syncValidationRegistration(direct);
         await control!.activateDirectUnit(direct.root, actor, direct.unit.task.prompt, direct.unit.handoffPath);
       }
       return direct;
@@ -2301,7 +2302,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const direct = await directExecution(actor);
       if (direct) {
         await control!.assertDirectUnitQuiescent(actor);
-        await syncDirectValidation(direct);
+        await syncValidationRegistration(direct);
         const history = await reviewMessages(actor, direct.unit.directExecution!.startedAt, true);
         const calls = new Map<string, Record<string, unknown>>();
         for (const message of history) if (record(message.info) && message.info.sessionID === actor && Array.isArray(message.parts)) {
@@ -3192,8 +3193,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              const corrected = await operators.correctReviewerValidationRegistration(root, context.sessionID, run.runID,
                (validation as string[]).map(missionValidationCommand), directories as Record<string, string> | undefined);
              const current = corrected.units.find(unit => unit.reviewerCorrection?.author === context.sessionID)!;
-             const direct = await directExecution(context.sessionID);
-             if (direct) await syncDirectValidation(direct);
+             const execution = await directExecution(context.sessionID) ?? await reviewerCorrection(context.sessionID);
+             if (execution) await syncValidationRegistration(execution);
              return JSON.stringify({ status: "correction-registration-corrected", run_id: corrected.runID,
                unit_id: current.unit.id, validation: current.unit.validation, validation_cwd: current.unit.validation_cwd,
                 next_action: `Continue this SAME native Task and original requirements. Run only changed or actually stale checks; retain unchanged successful checks with the same inputs and cwd. Then ${finishDirectUnit} and explicit SELF_RECHECKED. No new Task or reservation.` });
@@ -3920,6 +3921,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const taskID = /^task_id: (.+)$/mu.exec(correction.unit.task.prompt)?.[1];
           if (!taskID || !correction.unit.callID) throw new Error("mission-review-correction-grant-stale");
           await control!.restoreReviewerCorrectionChild(root, request.sessionID, correction.unit.callID, taskID);
+          if (!direct) await syncValidationRegistration(correction);
         }
         if (who.role === "dog-reviewer" && !writer && ["edit", "write", "patch", "apply_patch"].includes(request.tool.toLowerCase())) {
           throw new Error("mission-reviewer-readonly");
