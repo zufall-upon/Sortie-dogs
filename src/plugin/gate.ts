@@ -190,6 +190,32 @@ function operands(tokens: readonly string[]): string[] {
   return result.filter(Boolean);
 }
 
+function mkdirOperands(tokens: readonly string[]): { paths: string[]; parents: boolean } {
+  const paths: string[] = [];
+  let endOptions = false;
+  let parents = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (/^(?:\d*>>?|>\||[|&])(?:.*)?$/u.test(token)) break;
+    if (!endOptions) {
+      if (token === "--") { endOptions = true; continue; }
+      if (token === "--mode") { index += 1; continue; }
+      if (token.startsWith("--mode=")) continue;
+      if (token === "--parents") { parents = true; continue; }
+      // -m consumes the remainder of its short-option group, or the next token.
+      const short = /^-([pvZ]*)(?:m(.*))?$/u.exec(token);
+      if (short && token !== "-") {
+        parents ||= short[1].includes("p");
+        if (short[2] === "") index += 1;
+        continue;
+      }
+      if (token.startsWith("-") && token !== "-") continue;
+    }
+    paths.push(token.replace(/[|&;]+$/u, ""));
+  }
+  return { paths: paths.filter(Boolean), parents };
+}
+
 function unwrapEnvironmentCommand(tokens: readonly string[]): readonly string[] {
   const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   if (executable !== "env") return tokens;
@@ -572,7 +598,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       (["export", "unset", "declare", "typeset", "readonly"].includes(executable) &&
         tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
       /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
-    const commandOperands = operands(tokens);
+    const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
+    const commandOperands = mkdirOptions?.paths ?? operands(tokens);
     if (powershell && syntax.activeBrace) {
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
       applies = true;
@@ -584,7 +611,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         entryPaths.push(...commandOperands.flatMap((path, i) => /[\\/]$/u.test(path) ? [] : [paths.length + i]));
       }
       paths.push(...commandOperands);
-      if (executable === "mkdir" && tokens.some((token) => token === "-p" || token === "--parents")) {
+      if (executable === "mkdir" && (mkdirOptions?.parents ?? tokens.some((token) => token === "-p" || token === "--parents"))) {
         createdDirectories.push(...commandOperands);
       }
     } else if (LAST_OPERAND_COMMANDS.has(executable)) {
