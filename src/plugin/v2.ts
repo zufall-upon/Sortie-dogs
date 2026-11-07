@@ -228,14 +228,15 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
     // Job still runs. A tool error is not process termination; keep it unproven.
     if (state.status === "error" && metadata.status === undefined) metadata.status = "unknown";
     if (!["running", "pending", "unknown"].includes(String(metadata.status)) ||
-        typeof input?.command !== "string" || typeof time?.end !== "number") continue;
-    const launchEnd = time.end;
+        typeof input?.command !== "string" || typeof time?.start !== "number") continue;
+    // A short Job can finish before its launch result/error is persisted.
+    const launchStart = time.start;
     const terminals = native.filter(value => record(value) && value.type === "synthetic" &&
       (value.sessionID === undefined || value.sessionID === id) && record(value.metadata) &&
       value.metadata.source === "shell" && value.metadata.shellID === metadata.shellID &&
       (value.metadata.jobID === undefined || value.metadata.jobID === metadata.shellID) &&
       value.metadata.state === "completed" && value.description === input.command &&
-      record(value.time) && typeof value.time.created === "number" && value.time.created >= launchEnd);
+      record(value.time) && typeof value.time.created === "number" && value.time.created >= launchStart);
     if (terminals.length === 1) {
       // Only lifecycle projection: do not manufacture foreground validation exits/times.
       metadata.status = "completed";

@@ -12,7 +12,7 @@ cleanな既存checkout、MIT、Node 22.22.1、npm 10.9.4、既存node_modulesを
 後者まで無視して再登録を永久拒否するのは不具合。
 
 - V2履歴adapterで、同じshell ID（job IDがあればそれも一致）、command、
-  launch終端以後の時刻を持つ一意なnative通知だけを照合し、投影上のstatusを完了へする。
+  invocation開始以後の時刻を持つ一意なnative通知だけを照合し、投影上のstatusを完了へする。
   proseの終了宣言、別ID/command/Session、古い通知、重複通知は解放根拠にしない。
 - 通知のexitやprocess終了時刻をforeground検証へ移植しない。
   process終端はquiescenceであり、検査成功・成果完成・Mission受入ではない。
@@ -53,6 +53,27 @@ V2投影ではこの状態を `unknown` とし、同じ一意なnative完了通�
 正確な完了通知後だけ同Missionの正規経路へ回復することを確認する。
 これは同Reviewerによる指摘修正と著者self-recheckであり、修正後の独立PASSではない。
 
+Medium: correction admissionが過去の `mission.reviewScope.read/write` を現行unitへ
+unionし、既に訂正した推定入力（今回の `scripts/**`）と不要な書込scopeを復活させていた。
+Review履歴は保持するが、correctionの検証入力・書込推定は現在のunit宣言を引き継ぐ。
+既存 `mission-binding-recovery` の公開経路へ、旧scopeに無関係な範囲外symlinkが
+残っていても現行inputでnative checkを正式結合できる回帰を追加。
+修正前は旧入力が復活して失敗（exit 1）。必要な追加編集は既存のscope拡張で扱い、
+過去scopeをそのまま現在の実行authorityにしない。
+このrepo修正は既に稼働中のcontrolや既存admissionを直接書き換えるものではない。
+
+## 既存PRコメントの時刻競合
+
+PR #350 のコメント `4501671059`（P2）は有効。短いJobはlaunch toolの結果や
+error snapshot保存より先に終了通知を残せる。従来のlaunch終了時刻を下限にすると、
+正確な通知まで拒否し、`running` / `unknown` のまま正規回復できない。
+下限だけinvocation開始へ変更し、shell/job/session/command・一意性の照合は維持する。
+既存adapter testは通常／中断launchの両方で開始時刻と開始〜終了の間の通知を確認し、
+開始より前・別ID・別Session・重複通知の拒否を維持する。
+既存公開replan/handoffのhot/cold fixtureも同じ時刻順へ変更。
+修正前の限定6件はすべて失敗（exit 1、0.574秒）し、原因を再現した。
+修正後の実結果は下記正規commandとPR本文・native Mission記録に残す。
+
 ## 回帰確認
 
 既存 `test/v2-plugin.test.ts` にnative通知照合と、after-hook喪失＋中断patch＋
@@ -84,6 +105,12 @@ installed bytesを比較する。稼働中制御source/authorityの直接patch�
 同versionのローカル修正版とregistry版はhashで区別する。npm公開は今回対象外。
 既に稼働中のprocessが新コードを読んだかはinstalled bytesと別に確認し、
 未反映なら正直に再読込待ちと記録する。共有serviceを勝手に停止しない。
+
+今回の最終候補はglobal適用しない。現installedとの既知差分には、今回のscope修正とは
+異なるnativeWorker検査収集、検証登録同期、completionReadinessのhotfixも含まれる。
+それらを消す上書きや無関係な全移植はしない。旧版の正確な復元tgz・hash・復元commandを
+`_testenv/control-recovery-20261107/` に保全し、最終候補も別directoryへ固定する。
+今回のglobal installは0回。既存processへの修正反映も主張しない。
 
 この修正はVDMの中断済み開発を完了させるものではない。
 VDM製品source・dirty・失敗・原画像・未受領状態と、消費済みroot1/Send1/interrupt1/15分枠を保持。

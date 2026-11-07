@@ -721,10 +721,11 @@ test("V2 adapter retains Docker codemode command/result as native observation wi
   } finally { cleanup?.(); }
 });
 
-test("V2 durable shell completion reconciles stale launch metadata only for the exact native invocation", async () => {
+for (const interrupted of [false, true]) test(`V2 durable shell completion reconciles stale launch metadata only for the exact native invocation${interrupted ? " after interrupted launch" : ""}`, async () => {
   const fixture = contextFixture(), command = "node check.mjs";
   const launch = { id: "background-call", type: "tool", name: "shell", time: { created: 100, ran: 101, completed: 110 },
-    state: { status: "completed", input: { command, background: true }, metadata: { status: "running", shellID: "sh_exact" } } };
+    state: { status: interrupted ? "error" : "completed", input: { command, background: true }, metadata: { ...(interrupted ? {} : { status: "running" }), shellID: "sh_exact" } } };
+  const unproven = interrupted ? "unknown" : "running";
   fixture.history.push({ id: "background-message", type: "assistant", content: [launch] });
   const terminal = { id: "native-shell-end", type: "synthetic", description: command, time: { created: 200 },
     metadata: { source: "shell", shellID: "sh_exact", jobID: "sh_exact", state: "completed", exit: 7 },
@@ -734,26 +735,30 @@ test("V2 durable shell completion reconciles stale launch metadata only for the 
   try {
     const read = async () => (await client.session.messages({ path: { id: "root" } })).data
       .find((m: any) => m.info.id === "background-message").parts[0];
-    assert.equal((await read()).state.metadata.status, "running");
+    assert.equal((await read()).state.metadata.status, unproven);
     for (const changed of [
       { metadata: { ...terminal.metadata, source: "subagent" } },
       { metadata: { ...terminal.metadata, shellID: "sh_other" } },
       { metadata: { ...terminal.metadata, jobID: "sh_other" } },
       { metadata: { ...terminal.metadata, state: "running" } },
-      { description: "node other.mjs" }, { time: { created: 109 } }, { type: "user" }, { sessionID: "other" },
+      { description: "node other.mjs" }, { time: { created: 100 } }, { type: "user" }, { sessionID: "other" },
     ]) {
       fixture.history.push({ ...terminal, ...changed });
-      assert.equal((await read()).state.metadata.status, "running", JSON.stringify(changed));
+      assert.equal((await read()).state.metadata.status, unproven, JSON.stringify(changed));
       fixture.history.pop();
     }
     fixture.history.push(terminal, structuredClone(terminal));
-    assert.equal((await read()).state.metadata.status, "running", "ambiguous duplicate records do not release a writer");
+    assert.equal((await read()).state.metadata.status, unproven, "ambiguous duplicate records do not release a writer");
     fixture.history.pop();
     const ended = await read();
     assert.equal(ended.state.metadata.status, "completed", "nonzero process exit still proves quiescence, not success");
     assert.equal(ended.state.metadata.exit, undefined, "no foreground validation exit is invented");
     assert.deepEqual(ended.state.time, { start: 101, end: 110 }, "launch time is not rewritten as process completion");
-    assert.equal(launch.state.metadata.status, "running", "durable native source is never edited");
+    assert.equal(launch.state.metadata.status, interrupted ? undefined : "running", "durable native source is never edited");
+    for (const created of [101, 105]) {
+      fixture.history[fixture.history.length - 1] = { ...terminal, time: { created } };
+      assert.equal((await read()).state.metadata.status, "completed", "a short job can finish before its launch tool ends");
+    }
     assert.equal(observedMissionValidation([command], "root", (await client.session.messages({ path: { id: "root" } })).data).attempts[0]!.exit_code,
       null, "background lifecycle completion supplies no successful formal validation exit");
   } finally { cleanup?.(); }
@@ -1028,7 +1033,9 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
         assert.match(waiting.status, /terminal-unreconciled:tool_dispatch_active_or_unproven|direct-handoff-awaits-tools/);
         assert.equal((await readRun()).runID, originalRun.runID, "cold recovery cannot replace an unproven shell writer");
       }
-      history.coordinator!.push({ id: "shell-terminal", type: "synthetic", description: "node --version", time: { created: Date.now() },
+      const nativeShell = history.coordinator!.flatMap(message => message.content as any[] ?? []).find(part => part.id === shell.id);
+      nativeShell.time.completed = nativeShell.time.ran + 10;
+      history.coordinator!.push({ id: "shell-terminal", type: "synthetic", description: "node --version", time: { created: nativeShell.time.ran + 1 },
         metadata: { source: "shell", shellID: "sh_retained", jobID: "sh_retained", state: "completed", exit: 1 }, text: "Native shell ended" });
       const recovered = await request();
       if (interruptedLaunch) {

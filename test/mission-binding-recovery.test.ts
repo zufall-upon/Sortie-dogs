@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -12,6 +12,28 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
+
+test("Reviewer correction validation inherits current unit inputs without resurrecting retired review scope", async () => {
+  const { fixture, initial } = await import("./helpers/reviewer-correction-fixture.ts");
+  const f = await fixture(), external = await mkdtemp(resolve("_testenv/retired-review-input-"));
+  try {
+    const prior = await initial(f, { keepReviewOpen: true });
+    await writeFile(join(external, "old.mjs"), "// unrelated historical input\n");
+    await mkdir(join(f.directory, "retired"));
+    await symlink(join(external, "old.mjs"), join(f.directory, "retired", "old.mjs"));
+    // Model a saved earlier estimate already replaced by the current, validated unit declaration.
+    await f.missions.update("root", mission => { mission.reviewScope = {
+      read: [...prior.run.units[0]!.unit.read, "retired/**"], write: [...prior.run.units[0]!.unit.write, "retired-output/**"],
+    }; });
+    await f.tool("author", "repair_review", { findings: "Medium: result.txt must contain ready, not wrong." });
+    const current = await f.run();
+    assert.deepEqual(current.units[0]!.unit.read, prior.run.units[0]!.unit.read);
+    assert.deepEqual(current.units[0]!.unit.write, prior.run.units[0]!.unit.write);
+    assert.ok((await f.missions.required("root")).reviewScope!.read.includes("retired/**"), "historical Review context is retained, not reused as current validation authority");
+    await f.shell("author", "node check.mjs");
+    assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks?.[0]?.fresh, true, "current native check binds despite the unrelated retired symlink");
+  } finally { await f.dispose(); await rm(external, { recursive: true, force: true }); }
+});
 
 for (const actor of ["root", "coordinator"]) for (const interruption of ["none", "accepted", "binding"]) test(`queued Mission after terminal: ${actor} ${interruption}`, async t => {
   await mkdir(resolve("_testenv"), { recursive: true });
