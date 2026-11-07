@@ -8903,7 +8903,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       releaseSessionEnforcement(actor);
     },
     assertDirectUnitQuiescent: async actor => {
-      if (activeSessions.get(actor)?.inFlightCalls.size) throw new Error("mission-direct-tools-running");
+      if (activeSessions.get(actor)?.inFlightCalls.size && await reconcileInFlightTools(actor)) throw new Error("mission-direct-tools-running");
       if (bindingOperations.has(actor)) throw new Error("mission-direct-binding-in-flight");
     },
     failDirectUnit: async (root, actor) => {

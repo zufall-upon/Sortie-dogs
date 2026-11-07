@@ -3373,6 +3373,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               (selectedReviewer ?? retainedReviewer) !== undefined && !missionReviewIndependent(mission, selectedReviewer ?? retainedReviewer));
             const reviewerID = selectedReviewer ?? (selfRecheck ? correction?.author ?? retainedReviewer : !secondReview && mission.review?.child &&
               missionReviewIndependent(mission, mission.review.child) && await ownedReviewer(root, mission, mission.review.child) ? mission.review.child : undefined);
+            if (selfRecheck && !reviewerID) return JSON.stringify({ status: "mission-initial-self-recheck-unavailable",
+              next_action: "Initial controller/Worker authors do not have a native Reviewer self-recheck invocation. No review or acceptance was recorded. Use mode=independent for required quality review; for genuinely low-risk work use risk_tags=[] without self-recheck to record the ordinary skip. If the user disallows another agent and material risk remains, report that review limitation, not independent PASS. Existing Reviewer correction authors can reuse their own context for self-recheck." });
             if (selfRecheck && (!reviewerID || missionReviewIndependent(mission, reviewerID)) ||
                 !selfRecheck && reviewerID && !missionReviewIndependent(mission, reviewerID)) throw new Error("mission-review-selected-author-mode-mismatch");
             const selectedDisposition = (!independentRequested || mission.review?.mode === "independent") &&
