@@ -2052,13 +2052,18 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       // replaced the dispatch. Never attach that old receipt to the new owner.
       if (execution.correction.nativeWorker && await input.runtimeBridge?.missionDispatchCall?.(execution.root,
           execution.sessionID, execution.correction.taskID) !== execution.correction.dispatchCallID) return;
+      const reusedEvidenceIDs = outcome === "skip" && execution.reusedEvidence?.length
+        ? execution.reusedEvidence.map(entry => entry.evidence_id) : undefined;
       await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
         dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
         command: execution.correction.commands, ...(execution.correction.nativeWorker ? { nativeCommand: execution.command[0]! } : {}),
         directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
         binding: proofFresh && validationBinding && validatedSource ? validationBinding : execution.binding,
         source: observed?.source ?? execution.source, candidate: observed?.candidate ?? execution.candidate,
-        fresh: proofFresh && outcome === "pass",
+        // A valid cached proof is still reusable evidence, not a failed native check.
+        // Keep the skip outcome and original proof IDs; live binding checks still apply.
+        fresh: proofFresh && (outcome === "pass" || reusedEvidenceIDs !== undefined),
+        ...(reusedEvidenceIDs ? { reusedEvidenceIDs } : {}),
         ...(generated ? { generatedInputs: execution.validationInputs } : {}),
       });
     }

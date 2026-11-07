@@ -946,6 +946,7 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       const check = registration.checks.find(item => item.callID === match.callID);
       return check && { occurrence: match.occurrence, call_id: check.callID, declared_command: check.command[match.member],
         directory: check.directory, exit: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
+        ...(check.reusedEvidenceIDs ? { reused_evidence_ids: check.reusedEvidenceIDs } : {}),
         details_ref: { path: path ?? operators.statePath(state.rootSessionID), unit_id: unit.unit.id,
           field: "units[].validationRegistration.checks" } };
     }).filter(Boolean);

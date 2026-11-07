@@ -46,6 +46,8 @@ export interface ReviewerCorrectionCheck {
   readonly source: string;
   readonly candidate: string;
   readonly fresh: boolean;
+  /** Original proof reused by this registration; the native notice is not a new check run. */
+  readonly reusedEvidenceIDs?: readonly string[];
   /** A command that actually generated/formatted declared outputs retains its stable input digest. */
   readonly generatedInputs?: string;
 }
