@@ -941,6 +941,14 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
   const validation = (state: OperatorState, path: string | null, historical: boolean) => state.units.flatMap(unit => {
     const anchor = historical ? acceptedAnchor(unit) : undefined;
     if (historical && (!anchor || unit.status !== "succeeded")) return [];
+    const registration = unit.validationRegistration;
+    const requiredChecks = unit.directHandoffs?.length ? undefined : registration?.matched?.map(match => {
+      const check = registration.checks.find(item => item.callID === match.callID);
+      return check && { occurrence: match.occurrence, call_id: check.callID, declared_command: check.command[match.member],
+        directory: check.directory, exit: check.exitCode, started_at: check.startedAt, ended_at: check.endedAt,
+        details_ref: { path: path ?? operators.statePath(state.rootSessionID), unit_id: unit.unit.id,
+          field: "units[].validationRegistration.checks" } };
+    }).filter(Boolean);
     return (unit.evidence ?? []).map(proof => ({ run_id: state.runID, unit_id: unit.unit.id,
       task_id: unit.task.prompt.match(/^task_id: (.+)$/mu)?.[1] ?? null,
       worker_session_id: unit.directExecution ? null : unit.childSessionID,
@@ -957,6 +965,8 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
         unit_id: unit.unit.id, evidence_id: proof.evidence_id,
         omitted: "protected_binding path arrays, project root and environment remain in this exact persisted evidence record" },
       proof_scope: proof.proof_scope,
+      ...(requiredChecks?.length ? { required_checks: requiredChecks,
+        validation_basis: "The terminal criterion is an anchor; requested-full requires all listed bound native checks, not this command alone." } : {}),
       applicability: historical ? "historical-reference; current applicability not established by this projection"
         : "current-run record; consult completion readiness for current protected identity" }));
   });

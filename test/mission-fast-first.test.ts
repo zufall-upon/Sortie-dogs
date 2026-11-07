@@ -28,6 +28,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     await writeFile(join(directory, "public-contract.md"), "Public output is ready followed by a newline.\n");
     if (verdict === "PASS") await writeFile(join(directory, "build.mjs"),
       'import { writeFileSync } from "node:fs";\nwriteFileSync("result.txt", "ready\\n");\n');
+    let buildStarted = 0, validationStarted = 0;
     if (verdict === "PASS") {
       await writeFile(join(directory, "untouched.txt"), "unchanged\n");
       await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
@@ -138,31 +139,37 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).requests.map(item => item.id), ["request"], "frozen contract cannot adopt free text as a changed requirement");
     }
     if (verdict === "PASS") {
-      for (const [callID, command] of [["branch", "git switch -c same-worker-delivery"], ["scratch", "printf generated > scratch.tmp"], ["cleanup", "rm scratch.tmp"]]) {
+      // The entire root is a declared input. Prepare the expected output before
+      // the formal build so that it does not mutate a declared input mid-check.
+      for (const [callID, command] of [["branch", "git switch -c same-worker-delivery"], ["scratch", "printf generated > scratch.tmp"],
+        ["cleanup", "rm scratch.tmp"], ["prepare", "printf 'ready\\n' > result.txt"]]) {
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { args: { command } });
         const result = await exec("bash", ["-lc", command!], { cwd: directory });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: callID! }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
       }
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "build" },
         { args: { command: "node build.mjs" } });
+      buildStarted = Date.now();
       await exec(process.execPath, ["build.mjs"], { cwd: directory });
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "build" },
         { output: "built", metadata: { exit: 0, status: "completed" } });
       history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
+        callID: "build",
         state: { status: "completed", input: { command: "node build.mjs" }, metadata: { exit: 0 } },
-        time: { ran: 1000, completed: 1100 } }] });
+        time: { ran: buildStarted, completed: Date.now() } }] });
     } else await writeFile(join(directory, "result.txt"), "ready\n");
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validation" },
       { args: { command: "node check.mjs" } });
+    validationStarted = Date.now();
     await exec(process.execPath, ["check.mjs"], { cwd: directory });
     const liveCheck: { output: string; metadata: Record<string, unknown> } = { output: "PASS", metadata: { exit: 0, status: "completed" } };
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validation", args: { command: "node check.mjs" } }, liveCheck);
     assert.ok(Number((liveCheck.metadata.work_quantity as { n: number }).n) > 0);
     assert.equal(liveCheck.output, "PASS", "progress must not alter actual command stdout");
     assert.match(String(liveCheck.metadata.work_quantity_display), /全体作業量 \d+%（概算）/);
-    if (verdict === "PASS") history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash",
+    history.worker!.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "validation",
       state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: 0 } },
-      time: { ran: 1200, completed: 1300 } }] });
+      time: { ran: validationStarted, completed: Date.now() } }] });
     if (verdict === 'PASS') {
       // Ordinary requested delivery stays in the validated Worker, with no .git/** write scope or prior Review.
       const command = 'git add result.txt && git commit -m "Create result"', callID = 'git-add-commit';
@@ -184,7 +191,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
     assert.equal(returned.worker_report, "Validated result", "native Worker answer stays visible in the return projection");
     assert.equal(returned.view, "progress");
     assert.equal(returned.mission_id, mission.id);
-    assert.equal(returned.completed_units, 1);
+    assert.equal(returned.completed_units, 1, JSON.stringify((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration));
     assert.match(returned.next_action, /review_mission/);
     assert.equal(returned.requirements, undefined, "return does not repeat the already-delivered Mission contract");
     assert.equal(returned.units, undefined, "full snapshots are not serialized into each native Worker return");
@@ -227,7 +234,7 @@ for (const verdict of ["PASS", "FINDINGS", "EVIDENCE_GAPS"] as const) test(`Fast
       const native = JSON.parse(/^observed_validation: (.+)$/mu.exec(reviewPrompt)?.[1] ?? "null");
       assert.ok(native, "the stored native Reviewer prompt must include the build/test observation");
       assert.deepEqual(native?.[0]?.attempts?.map((item: { command: string; exit_code: number; started_ms: number }) =>
-        [item.command, item.exit_code, item.started_ms]), [["node build.mjs", 0, 1000], ["node check.mjs", 0, 1200]],
+        [item.command, item.exit_code, item.started_ms]), [["node build.mjs", 0, buildStarted], ["node check.mjs", 0, validationStarted]],
         "the Reviewer sees the native build→test order");
       const accepted = JSON.parse(/^validation: (.+)$/mu.exec(reviewPrompt)?.[1] ?? "null");
       assert.ok(accepted?.[0]?.evidence?.length > 0);

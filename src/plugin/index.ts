@@ -502,7 +502,7 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
-  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[] };
+  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
   exitCode?: number | null;
   outcome?: "pass" | "fail" | "skip" | "cancel";
@@ -1843,8 +1843,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (dockerTool && dockerRequest === undefined) return;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
-    const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true ||
-      await input.runtimeBridge?.ownsValidationRegistration?.(toolInput.sessionID) === true;
+    const reviewerCorrection = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    const registered = await input.runtimeBridge?.ownsValidationRegistration?.(toolInput.sessionID) === true;
+    const correcting = !!direct || reviewerCorrection || registered;
     const directory = dockerRequest?.cwd ?? resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
     // A check is proof only in its registered cwd. Snapshot the same admitted source
     // recipe at actual native start; never retrofit it to older external-cwd history.
@@ -1854,12 +1855,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
         toolInput.sessionID, members, directory) === false) return;
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
-    const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
+    const requiredExecution = !!direct || reviewerCorrection || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
       authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
     const dispatchCallID = authorization.dispatchCallID ?? (requiredExecution
       ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
     const correction = correcting && dispatchCallID && members
-      ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
+      ? { taskID: authorization.taskID, dispatchCallID, commands: members,
+        ...(registered && !direct && !reviewerCorrection ? { nativeWorker: true } : {}) } : undefined;
     const admittedSnapshot = dockerRequest
       ? await protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd).catch(() => undefined)
       : await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
@@ -2046,9 +2048,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh: proofFresh });
     if (execution.correction) {
+      // A delayed shell terminal may arrive after contract repair has already
+      // replaced the dispatch. Never attach that old receipt to the new owner.
+      if (execution.correction.nativeWorker && await input.runtimeBridge?.missionDispatchCall?.(execution.root,
+          execution.sessionID, execution.correction.taskID) !== execution.correction.dispatchCallID) return;
       await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
         dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
-        command: execution.correction.commands, directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+        command: execution.correction.commands, ...(execution.correction.nativeWorker ? { nativeCommand: execution.command[0]! } : {}),
+        directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
         binding: proofFresh && validationBinding && validatedSource ? validationBinding : execution.binding,
         source: observed?.source ?? execution.source, candidate: observed?.candidate ?? execution.candidate,
         fresh: proofFresh && outcome === "pass",
@@ -2986,6 +2993,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
       evidence: settlementEvidence, resultClass,
+      ...(validated && correctionChecks?.matched ? { validationMatches: correctionChecks.matched } : {}),
       ...(directEvidence ? {} : { nativeOutcome: terminalFailed || interrupted ? "failed" as const : "completed" as const }),
       ...(correctionChecks?.failure ? { failure: correctionChecks.failure } : resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,

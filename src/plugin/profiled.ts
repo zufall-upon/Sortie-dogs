@@ -26,7 +26,7 @@ import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
 import { cachedWorkProgress, forgetWorkSession, observeActorWork, workRootForActor } from "../core/work-quantity-observations.js";
 import { serializeOperatorStatus } from "./operator-status-output.js";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
-   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, directHandoffValidationChecks, validationDirectoryMatches } from "./mission-review.js";
+   observedMissionValidation, observedMissionValidationSummary, missionReviewValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh, directHandoffValidationChecks, validationCheckFresh, validationDirectoryMatches } from "./mission-review.js";
 import { missionLocations, missionLocationPacket } from "./mission-location.js";
 import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
@@ -520,9 +520,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const root = await rootFor(id);
       if (!root) return undefined;
       const mission = await missions.read(root), run = await operators.read(root);
-      if (!mission || !run || mission.runID !== run.runID || run.phase !== "running" ||
+      if (!run || run.phase !== "running" || mission?.runID === run.runID &&
           ["completed", "cancelled"].includes(mission.phase)) return undefined;
-      const unit = run.units.find(item => item.status === "running" && item.childSessionID === id && item.validationRegistration);
+      const unit = run.units.find(item => item.status === "running" && item.childSessionID === id && item.validationRegistration && !item.repairValidation);
       return unit ? { root, mission, run, unit } : undefined;
     }
     async function remainingRegisteredValidation(root: string, unit: OperatorState["units"][number]) {
@@ -679,7 +679,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const run = await operators.read(root);
         const unit = run?.units.find(item => item.status === "running" && item.childSessionID === child &&
           /^task_id: (.+)$/mu.exec(item.task.prompt)?.[1] === taskID);
-        return !!unit && commands.some(command => unitValidation(unit).filter(item => normalizeCommand(item) === command).length > 1);
+        return !!unit && commands.some(command => unitValidation(unit).filter(item => normalizeCommand(item) === command).length > 1 ||
+          unit.validationRegistration?.checks.some(check => check.exitCode === 0 && check.command.includes(command)));
       },
       ownsMissionDispatch: async (root, callID, taskID) => {
         const mission = await missions.read(root), state = await operators.read(root);
@@ -726,12 +727,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!correction) return undefined;
         const unit = correction.unit;
         const directories = unitValidationCwd(unit);
-        const admittedAt = unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? correction.run.createdAt;
+        const admittedAt = unit.reviewerCorrection?.admittedAt ?? unit.directExecution?.startedAt ?? unit.validationRegistration?.startedAt ?? correction.run.createdAt;
+        const nativeWorker = !unit.reviewerCorrection && !unit.directExecution && !!unit.validationRegistration?.startedAt;
         const validation = await remainingRegisteredValidation(correction.root, unit);
-        const progress = reviewerCorrectionValidation(validation, child, await reviewMessages(child, admittedAt),
+        const progress = reviewerCorrectionValidation(validation, child, nativeWorker ? [] : await reviewMessages(child, admittedAt),
           Date.parse(admittedAt),
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? unit.validationRegistration?.checks ?? [], input.directory, directories,
-          unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt);
+          unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt, nativeWorker);
         // Progress is relative to the remaining suffix; native matching uses the
         // full declaration so a retry of an inherited occurrence is captured too.
         const members = canonicalObservedValidationMembers(command, unitValidation(unit),
@@ -749,18 +751,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       },
       reviewerCorrectionValidation: async (root, callID, child, startedAt) => {
         const run = await operators.read(root);
-        const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child &&
-          (item.reviewerCorrection?.author === child || item.directExecution?.actor === child || item.validationRegistration));
+        // Managed fabric Workers settle through the separate fabric validation path.
+        if (run?.fabric) return undefined;
+        const unit = run?.units.find(item => item.callID === callID && item.childSessionID === child);
         if (!unit) return undefined;
         // Compaction removes earlier tools from session.context, not from native history.
         // Reuse the admission-window reader; saved checks still require their live input binding.
         try {
           const validation = await remainingRegisteredValidation(root, unit);
           if (!validation.length && unitValidation(unit).length) return { ready: true, matched: [] };
-          return await reviewerCorrectionValidationFresh(validation, child, await reviewMessages(child, new Date(startedAt).toISOString()),
+          const nativeWorker = !unit.reviewerCorrection && !unit.directExecution && !!unit.validationRegistration?.startedAt;
+          return await reviewerCorrectionValidationFresh(validation, child, nativeWorker ? [] : await reviewMessages(child, new Date(startedAt).toISOString()),
           startedAt,
           unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? unit.validationRegistration?.checks ?? [], input.directory,
-          unitValidationCwd(unit), unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt); }
+          unitValidationCwd(unit), unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt, nativeWorker); }
         catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
       },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
@@ -1657,6 +1661,38 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         return JSON.stringify(result);
       } };
+    async function operatorCompletionReadiness(root: string, state: OperatorState) {
+      const readiness = await control!.completionReadiness(root);
+      const blockers: import("./goal-completion.js").CompletionBlocker[] = [...readiness.blockers];
+      for (const unit of state.units) {
+        const registration = unit.validationRegistration;
+        // Direct handoffs retain their own separately validated native segments.
+        if (unit.status !== "succeeded" || !registration?.startedAt || unit.directExecution || unit.repairValidationAttempts > 0 ||
+            unit.reviewerCorrection || unit.directHandoffs?.length) continue;
+        let matched = registration.matched;
+        if (!matched && unit.childSessionID && unit.callID) {
+          const restored = await runtimeBridge.reviewerCorrectionValidation!(root, unit.callID, unit.childSessionID,
+            Date.parse(registration.startedAt));
+          if (restored?.ready) matched = restored.matched;
+        }
+        const validation = unitValidation(unit).map(normalizeCommand);
+        if (!matched || matched.length !== validation.length || matched.some((item, occurrence) =>
+            item.occurrence !== occurrence || !registration.checks.some(check => check.callID === item.callID &&
+              check.childSessionID === unit.childSessionID && check.dispatchCallID === unit.callID && check.exitCode === 0 && check.fresh &&
+              check.command[item.member] === validation[occurrence]))) {
+          blockers.push({ reason: "missing-evidence", criterion_id: unit.unit.id,
+            next_action: "Recover the actual ordered declared validation checks for this Worker, or rerun the missing checks on the current candidate; the terminal check alone is not full proof." });
+          continue;
+        }
+        for (const callID of new Set(matched.map(item => item.callID))) {
+          const check = registration.checks.find(item => item.callID === callID)!;
+          if (!await validationCheckFresh(check.binding.project_root, check)) blockers.push({ reason: "source-changed",
+            criterion_id: unit.unit.id, source_paths: check.binding.source_paths, candidate_paths: check.binding.candidate_paths,
+            next_action: `The saved input binding for ${check.command.join(" && ")} changed or is unavailable. Revalidate the affected declared check on the current candidate before Review and acceptance.` });
+        }
+      }
+      return { ready: blockers.length === 0, blockers };
+    }
     async function operatorPacket(state: import("../core/operator-runtime.js").OperatorState) {
       const packet = operators.packet(state) as Record<string, unknown>;
       const budget = await control!.currentBudget(state.rootSessionID);
@@ -1669,7 +1705,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : `Use these host counters, not the model-authored goal_budget_units estimate. Continue the same-goal remediation in this turn within unchanged acceptance and approved scope; normal time, cost, validation and dispatch gates still apply. ${packet.next_action}`;
         packet.next_action = `${counters} ${action}`;
       }
-      const completion = state.phase === "awaiting-acceptance" ? await control!.completionReadiness(state.rootSessionID) : undefined;
+      const completion = state.phase === "awaiting-acceptance" ? await operatorCompletionReadiness(state.rootSessionID, state) : undefined;
       return { ...packet, budget, ...(completion ? { completion,
         ...(!completion.ready ? { next_action: completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
     }
@@ -1728,7 +1764,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const budget = await control!.currentBudget(root!);
           const run = await operators.read(root!);
           mission = await reconcileMissionExecution(root!, mission, run);
-          const completion = run?.phase === "awaiting-acceptance" ? await control!.completionReadiness(root!) : undefined;
+          const completion = run?.phase === "awaiting-acceptance" ? await operatorCompletionReadiness(root!, run) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
            const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
@@ -1883,6 +1919,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (state.phase === "awaiting-acceptance") {
           await relinkRegisteredGoal(context.sessionID, state, declarationFingerprint);
           await control!.assertActiveGoal(context.sessionID, declarationFingerprint);
+          const completion = await operatorCompletionReadiness(context.sessionID, state);
+          if (!completion.ready) return JSON.stringify({ status: "awaiting-evidence", run_id: state.runID,
+            acceptance_fingerprint: state.acceptanceFingerprint, receipt: null, completion,
+            next_action: completion.blockers.map(item => item.next_action).join("\n") });
         }
         const result = await control!.completeRoot(context.sessionID, declarationFingerprint);
         if (result.receipt) await operators.terminal(context.sessionID, result.receipt);
@@ -2002,6 +2042,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               child.parent !== (state.units.length > 1 ? delegate : context.sessionID)) throw new Error("operator-resume-unit-not-recoverable");
           await finishedSession(unit.childSessionID);
           try {
+            if (unit.validationRegistration && unit.callID) {
+              const checks = await runtimeBridge.reviewerCorrectionValidation!(context.sessionID, unit.callID,
+                unit.childSessionID, Date.parse(unit.validationRegistration.startedAt ?? state.createdAt));
+              if (!checks?.ready) throw new Error(`operator-recovery-proof-unavailable-or-stale:${checks?.reason ?? "validation-unavailable"}`);
+            }
             recovered.set(unit.unit.id, await control!.recoverUnitEvidence(context.sessionID, { unitID: taskID,
               childSessionID: unit.childSessionID, manifestPath: unit.manifestPath, manifestHash: unit.hashes[1]!, goalFingerprint,
               ...(unit.fabricRoot ? { projectRoot: unit.fabricRoot } : {}) }));
@@ -2226,7 +2271,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       extendMissionBudget = `${profile.toolPrefix}extend_mission_budget`;
     const startDirectUnit = `${profile.toolPrefix}start_direct_unit`, finishDirectUnit = `${profile.toolPrefix}finish_direct_unit`;
     async function syncValidationRegistration(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
-      if (!direct.unit.validationRegistration && !direct.unit.reviewerCorrection?.validationRegisteredAt) return;
+      if ((!direct.unit.validationRegistration || direct.unit.validationRegistration.startedAt) &&
+          !direct.unit.reviewerCorrection?.validationRegisteredAt) return;
       const last = unitValidation(direct.unit).at(-1)!;
       await control!.registerDirectValidation(direct.root, direct.unit.reviewerCorrection?.author ?? direct.unit.directExecution!.actor, direct.unit.unit.id, last,
         direct.unit.reviewerCorrection?.validationRegisteredAt?.[last] ??
@@ -3327,8 +3373,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            await assertCorrectionValidation(run);
           // A source fingerprint alone would let a fresh Reviewer assess an edit against an old
           // Worker's successful check. Reuse the completion snapshot instead of adding a check run.
-          const readiness = await control!.completionReadiness(root);
-          if (readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")) {
+          const readiness = await operatorCompletionReadiness(root, run);
+          if (readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed" || item.reason === "missing-evidence")) {
             throw new Error("mission-review-awaits-current-validation: revalidate the changed candidate in the same mission before Review");
           }
           if (run.fabric) {
@@ -4018,9 +4064,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // The candidate can change after review_mission prepares the Task but before the
             // native Reviewer starts. Do not spend a Review on an obsolete validation/snapshot.
             const run = await operators.required(root);
-            const readiness = await control!.completionReadiness(root);
+            const readiness = await operatorCompletionReadiness(root, run);
             if (run.phase !== "awaiting-acceptance" || review.runID !== run.runID ||
-                readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")) {
+                readiness.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed" || item.reason === "missing-evidence")) {
               throw new Error("mission-review-awaits-current-validation: prepare a fresh Review after formal validation of the current candidate");
             }
             if (review.source !== (await missionReviewSource(input.directory, run, review.evidence,

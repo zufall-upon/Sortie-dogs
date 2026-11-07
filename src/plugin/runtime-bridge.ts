@@ -13,6 +13,7 @@ export interface SerialDispatchSettlement {
   readonly evidence: readonly GoalEvidence[];
   readonly resultClass: string;
   readonly failure?: { readonly command: readonly string[]; readonly outcome: "fail"; readonly exitCode: number | null };
+  readonly validationMatches?: readonly { readonly callID: string; readonly member: number; readonly occurrence: number }[];
   readonly nativeOutcome?: "completed" | "failed";
 }
 
@@ -34,6 +35,8 @@ export interface ReviewerCorrectionCheck {
   readonly childSessionID: string;
   readonly callID: string;
   readonly command: readonly string[];
+  /** Exact native input captured by the Worker shell hook, before canonical member matching. */
+  readonly nativeCommand?: string;
   /** Observed at native start. Legacy checks have only Location-based applicability. */
   readonly directory?: string;
   readonly startedAt: string;
