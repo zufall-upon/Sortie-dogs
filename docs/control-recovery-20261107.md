@@ -36,6 +36,23 @@ invocationではない。既存機構を一般的な自己承認へ拡張しな�
 追加agent禁止かつ実質riskありなら、その制限を未検証として報告する。
 既存Reviewer修正著者のself-recheckと独立PASSの区別は不変更。
 
+## 独立Reviewで確認した中断起動の補正
+
+Major: shellの起動toolが中断されると、`state.status=error` とprogressの
+`metadata.shellID` だけが残り、独立background Jobはまだ実行中の場合がある。
+`metadata.status` の欠落を静止と誤認すると、replan/handoffで旧processと新writerが重なる。
+V2投影ではこの状態を `unknown` とし、同じ一意なnative完了通知がある場合だけ完了へする。
+通常のpatch/error、foregroundの検証exit、native保存履歴は変更しない。
+
+根拠はOpenCode V2 2.2.2の `packages/core/src/tool/plugin/shell.ts`
+（shell.create → progress({shellID}) → Job.start/background → launch結果）と
+`packages/core/src/session/runner/publish-llm-event.ts` のfailureSnapshot。
+中断時のprogress保存はprocess終端の証明ではない。
+既存の公開replan/handoff fixtureで、after-hook喪失＋error/shellIDのみを追加。
+修正前は2件とも拒否されず失敗（exit 1）。修正後は通知なしのhot/cold継続を拒否し、
+正確な完了通知後だけ同Missionの正規経路へ回復することを確認する。
+これは同Reviewerによる指摘修正と著者self-recheckであり、修正後の独立PASSではない。
+
 ## 回帰確認
 
 既存 `test/v2-plugin.test.ts` にnative通知照合と、after-hook喪失＋中断patch＋

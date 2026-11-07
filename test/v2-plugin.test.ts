@@ -759,14 +759,15 @@ test("V2 durable shell completion reconciles stale launch metadata only for the 
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery } of [
-   ...["replan", "handoff"].map(directRecovery => ({ legacy: false, commit: false, cancel: false, directRecovery })),
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch } of [
+  ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
+    ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -1010,15 +1011,30 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}` : fabric ? `p
       loseNextAfter = true; await after(patch, "Tool execution interrupted");
       ((history.coordinator!.at(-1)!.content as any[])[0].state).status = "error";
       const shell = await before("coordinator", "shell", { command: "node --version", workdir: directory, background: true });
-      loseNextAfter = true; await after(shell, "Background launched", { status: "running", shellID: "sh_retained" });
+      loseNextAfter = true; await after(shell, "Background launched", { shellID: "sh_retained", ...(interruptedLaunch ? {} : { status: "running" }) });
+      if (interruptedLaunch) {
+        // Native interruption snapshots progress({shellID}) before the independent Job returns its launch result.
+        const state = (history.coordinator!.at(-1)!.content as any[])[0].state;
+        state.status = "error"; state.error = { type: "aborted", message: "Tool execution interrupted" };
+      }
       const request = () => tool("coordinator", "plan_units", directRecovery === "handoff"
         ? { executor: "worker", handoff_context: "Continue this same result after the interrupted command." }
         : { executor: "self", units: [{ ...unit, objective: "Finish the existing ready result directly" }], reason: "Retain result, correct the method" });
       await assert.rejects(request(), /mission-direct-tools-running/);
       assert.equal((await readRun()).units[0]!.status, "running");
+      if (interruptedLaunch) {
+        cleanup?.(); await start();
+        const waiting = await request();
+        assert.match(waiting.status, /terminal-unreconciled:tool_dispatch_active_or_unproven|direct-handoff-awaits-tools/);
+        assert.equal((await readRun()).runID, originalRun.runID, "cold recovery cannot replace an unproven shell writer");
+      }
       history.coordinator!.push({ id: "shell-terminal", type: "synthetic", description: "node --version", time: { created: Date.now() },
         metadata: { source: "shell", shellID: "sh_retained", jobID: "sh_retained", state: "completed", exit: 1 }, text: "Native shell ended" });
       const recovered = await request();
+      if (interruptedLaunch) {
+        const native = history.coordinator!.flatMap(message => message.content as any[] ?? []).find(part => part.id === shell.id);
+        assert.equal(native.state.metadata.status, undefined, "recovery only projects lifecycle; native progress stays unchanged");
+      }
       if (directRecovery === "replan") assert.equal(recovered.status, "direct-unit-running", JSON.stringify(recovered));
       const current = await readRun();
       assert.deepEqual(current.acceptance, originalRun.acceptance);

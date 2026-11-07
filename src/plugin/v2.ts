@@ -223,7 +223,11 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
         !["completed", "error"].includes(String(part.state.status))) continue;
     const state = part.state, metadata = record(state.metadata) ? state.metadata : undefined;
     const input = record(state.input) ? state.input : undefined, time = record(state.time) ? state.time : undefined;
-    if (!metadata || typeof metadata.shellID !== "string" || !["running", "pending", "unknown"].includes(String(metadata.status)) ||
+    if (!metadata || typeof metadata.shellID !== "string") continue;
+    // An interrupted launch can retain only progress({shellID}) while its independent
+    // Job still runs. A tool error is not process termination; keep it unproven.
+    if (state.status === "error" && metadata.status === undefined) metadata.status = "unknown";
+    if (!["running", "pending", "unknown"].includes(String(metadata.status)) ||
         typeof input?.command !== "string" || typeof time?.end !== "number") continue;
     const launchEnd = time.end;
     const terminals = native.filter(value => record(value) && value.type === "synthetic" &&
