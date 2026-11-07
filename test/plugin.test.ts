@@ -10494,6 +10494,62 @@ test("git commit checks the native workdir clone and preserves scoped index and 
   }));
 });
 
+test("git commit reconciles symlinked project and external clone roots including prospective adds", async () => {
+  await withProject("git-alias", async directory => {
+    const repository = join(directory, "real"), alias = join(directory, "alias");
+    await mkdir(repository);
+    await symlink(repository, alias, process.platform === "win32" ? "junction" : "dir");
+    await execFileAsync("git", ["init", repository]);
+    for (const name of ["allowed.txt", "added.txt", "outside.txt"]) await writeFile(join(repository, name), name);
+    await execFileAsync("git", ["-C", repository, "add", "allowed.txt"]);
+    const request = { tool: "shell", sessionID: "alias", callID: "commit" };
+    for (const external of [false, true]) {
+      const gate = await createWriteGate(await createProjectPaths(external ? directory : alias),
+        operationManifest(external ? [join(alias, "allowed.txt"), join(alias, "added.txt")] : ["allowed.txt", "added.txt"]), alias);
+      const check = (command: string) => gate.check(request, { args: { command } }, { investigativeShell: true });
+      await check("git commit -m candidate");
+      await check("git add -- added.txt && git commit -m candidate");
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m prohibited" } }, {
+        investigativeShell: true, assertWritePaths: async paths => {
+          assert(paths.includes(join(alias, "allowed.txt")), "caller prohibitions retain the authorized alias spelling");
+          throw new Error("alias caller prohibition");
+        },
+      }), /alias caller prohibition/);
+      await execFileAsync("git", ["-C", repository, "add", "outside.txt"]);
+      await assert.rejects(check("git commit -m outside"), /cached/);
+      await execFileAsync("git", ["-C", repository, "rm", "--cached", "outside.txt"]);
+    }
+    assert.equal((await execFileAsync("git", ["-C", repository, "diff", "--cached", "--name-only", "-z"])).stdout, "allowed.txt\0");
+  });
+});
+
+test("git commit authorizes staged symlink entries without granting writes to their targets", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-link-entry", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "target.txt"), "target");
+    const request = { tool: "shell", sessionID: "link-entry", callID: "commit" };
+    for (const [name, target] of [["link", "target.txt"], ["dangling", "missing.txt"]]) {
+      await symlink(target, join(directory, name));
+      await execFileAsync("git", ["-C", directory, "add", name]);
+      for (const scope of [[name], [join(directory, name)]]) {
+        const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+        await gate.check(request, { args: { command: "git commit -m entry" } }, { investigativeShell: true });
+        await gate.check(request, { args: { command: `git add -- ${name} && git commit -m entry` } }, { investigativeShell: true });
+        await assert.rejects(gate.checkPath(name), /Write denied/, "index-entry authority does not allow target writes");
+        await assert.rejects(gate.check(request, { args: { command: "git commit -m forbidden" } }, {
+          investigativeShell: true, assertWritePaths: async paths => {
+            assert.deepEqual(paths, [join(directory, name)]); throw new Error("link caller prohibition");
+          },
+        }), /link caller prohibition/);
+      }
+      const denied = await createWriteGate(await createProjectPaths(directory), operationManifest(["target.txt"]));
+      await assert.rejects(denied.check(request, { args: { command: "git commit -m other" } }, { investigativeShell: true }), /cached/);
+      assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout, `${name}\0`);
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", name]);
+    }
+  });
+});
+
 test("git commit rejects command-level repository overrides in native shell mode", async () => {
   await withProject("git-commit-context", async directory => {
     await execFileAsync("git", ["init", directory]);

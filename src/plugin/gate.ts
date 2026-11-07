@@ -730,6 +730,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       const selected = exactGitAddPaths(tokens);
       if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
       else {
+        entryPaths.push(...selected.map((_, index) => paths.length + index));
         paths.push(...selected);
         gitAdds.push(...selected);
       }
@@ -1383,6 +1384,20 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
+  // Git stages/commits directory entries, not writes through the final symlink.
+  // Canonicalize ancestors only so workspace aliases agree with Git's physical root.
+  const canonicalEntryPath = async (path: string): Promise<string> => {
+    const parent = dirname(path);
+    const entry = resolve(await canonicalPotentialPath(parent), basename(path));
+    return await isCaseInsensitivePath(parent) ? entry.toLowerCase() : entry;
+  };
+  const gitEntryScopes = await Promise.all([
+    ...[...exactWritable].map(path => ({ path: project.absolute(path), directory: false })),
+    ...externalFiles.map(({ path }) => ({ path, directory: false })),
+    ...writableDirectories.map(({ path, realPath }) => ({ path: project.absolute(path), directory: true, realPath })),
+    ...externalDirectories.map(({ path, realPath }) => ({ path, directory: true, realPath })),
+  ].map(async scope => ({ ...scope, canonical: "realPath" in scope && typeof scope.realPath === "string"
+    ? await canonicalPotentialPath(scope.realPath) : await canonicalEntryPath(scope.path) })));
   const checkCachedSet = async (directory: string, adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
     let repository: string;
@@ -1403,23 +1418,33 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
     }
     let cached: Set<string>;
+    const callerPaths = new Set<string>();
     try {
       cached = new Set(stdout.split("\0").filter(Boolean).map(path => resolve(repository, normalizeRelativePath(path))));
       // Native shell runs the whole command after this preflight. Explicit earlier add paths
       // contribute to its prospective index; later adds and other write destinations do not.
       for (const path of adds) {
-        const absolute = resolve(directory, path);
+        const absolute = await canonicalEntryPath(resolve(directory, path));
         normalizeRelativePath(relative(repository, absolute));
         cached.add(absolute);
       }
-      for (const path of cached) await checkPath(path);
+      for (const path of cached) {
+        const canonical = await canonicalEntryPath(path);
+        const scopes = gitEntryScopes.filter(scope => scope.directory
+          ? isWithin(scope.canonical, canonical) : scope.canonical === canonical);
+        if (scopes.length === 0) throw new WriteDeniedError("manifest-scope", path);
+        callerPaths.add(path);
+        // Retain both physical and authorized alias spellings for caller prohibitions.
+        for (const scope of scopes) callerPaths.add(scope.directory
+          ? resolve(scope.path, relative(scope.canonical, canonical)) : scope.path);
+      }
     } catch (error) {
       throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
     }
     if (cached.size === 0) throw new WriteDeniedError("manifest-scope", "<cached>");
     // Write scope is permission, not a requirement to stage unchanged or removed scratch outputs.
     // Preserve existing staged paths and caller prohibitions in the prospective union.
-    await assertWritePaths?.([...cached]);
+    await assertWritePaths?.([...callerPaths]);
   };
   return {
     checkPath,
