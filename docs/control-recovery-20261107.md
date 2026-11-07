@@ -74,6 +74,12 @@ error snapshot保存より先に終了通知を残せる。従来のlaunch終了
 修正前の限定6件はすべて失敗（exit 1、0.574秒）し、原因を再現した。
 修正後の実結果は下記正規commandとPR本文・native Mission記録に残す。
 
+commit後の通常pushはremote先行のため `non-fast-forward` で拒否された。
+到来した `d87265a`（同じP2/scope修正）と `1b7c1ee`（0.16.15準備）を
+force pushせず通常mergeで保持した。version/marker変更で入力が変わるため
+正式検査は統合候補で更新する。先行release準備の保持は公開実行の許可・結果ではない。
+今回の操作ではtag/GitHub Release/npm公開を行わない。
+
 ## 回帰確認
 
 既存 `test/v2-plugin.test.ts` にnative通知照合と、after-hook喪失＋中断patch＋
