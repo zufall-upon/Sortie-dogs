@@ -131,7 +131,7 @@ const fixture = JSON.parse(
   await readFile(new URL("./fixtures/plugin-cases.json", import.meta.url), "utf8"),
 ) as PluginFixture;
 const cases = new Map(fixture.cases.map((candidate) => [candidate.name, candidate]));
-const testEnvironment = fileURLToPath(new URL("../_testenv/", import.meta.url));
+const testEnvironment = fileURLToPath(new URL("../_testenv/git-cwd-gate-regression/", import.meta.url));
 const testEnvironmentReady = mkdir(testEnvironment, { recursive: true });
 process.env.XDG_CONFIG_HOME = join(testEnvironment, "plugin-default-xdg");
 assert.equal(configRoot(), join(testEnvironment, "plugin-default-xdg", "opencode"));
@@ -10437,6 +10437,270 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
       "manifest-scope",
     );
   });
+});
+
+test("git commit checks the native workdir clone and preserves scoped index and caller prohibitions", async () => {
+  await withProject("git-commit-location", async directory => withProject("git-commit-working-clone", async clone => {
+    for (const root of [directory, clone]) await execFileAsync("git", ["init", root]);
+    await writeFile(join(directory, "unrelated.txt"), "unrelated ASR work");
+    await execFileAsync("git", ["-C", directory, "add", "unrelated.txt"]);
+    await mkdir(join(clone, "src"));
+    const allowed = join(clone, "src/allowed.txt"), added = join(clone, "src/added.txt");
+    await writeFile(allowed, "candidate");
+    await writeFile(added, "prospective addition");
+    await writeFile(join(clone, "outside.txt"), "not authorized");
+    await execFileAsync("git", ["-C", clone, "add", "src/allowed.txt"]);
+    const manifest = operationManifest([allowed, added]);
+    const gate = await createWriteGate(await createProjectPaths(directory), manifest);
+    const request = { tool: "shell", sessionID: "native-clone", callID: "commit" };
+    const check = (command: string, workdir = clone) => gate.check(request, { args: { command, workdir } }, { investigativeShell: true });
+    const index = async (root: string) => (await execFileAsync("git", ["-C", root, "diff", "--cached", "--name-only", "-z"])).stdout;
+    const originalIndex = await index(clone), unrelatedIndex = await index(directory);
+    for (const workdir of [clone, relative(directory, clone), join(clone, "src")]) {
+      const checked: string[][] = [];
+      await gate.check(request, { args: { command: "git commit -m candidate", workdir } }, {
+        investigativeShell: true, assertWritePaths: async paths => { checked.push([...paths]); },
+      });
+      assert.deepEqual(checked, [[allowed]], "caller checks receive concrete paths from the actual repository");
+    }
+    // Native Location, not the manifest root, is also the shell's implicit cwd.
+    const locationGate = await createWriteGate(await createProjectPaths(directory), manifest, clone);
+    await locationGate.check(request, { args: { command: "git commit -m candidate" } }, { investigativeShell: true });
+    await check("git add -- src/added.txt && git commit -m candidate");
+    await assert.rejects(gate.check(request, { args: { command: "git commit -m prohibited", workdir: clone } }, {
+      investigativeShell: true, assertWritePaths: async paths => {
+        assert.deepEqual(paths, [allowed]); throw new Error("caller prohibition");
+      },
+    }), /caller prohibition/);
+    await assert.rejects(check("git commit -m wrong-clone", directory), /cached/);
+    await execFileAsync("git", ["-C", clone, "add", "outside.txt"]);
+    await assert.rejects(check("git commit -m outside"), /cached/);
+    await assert.rejects(check("git add -- src/added.txt && git commit -m outside"), /cached/);
+    await assert.rejects(check("git commit -m hidden", join(clone, "src")), /cached/,
+      "subdirectory cwd cannot hide a staged sibling even with diff.relative enabled");
+    await execFileAsync("git", ["-C", clone, "config", "diff.relative", "true"]);
+    await assert.rejects(check("git commit -m hidden", join(clone, "src")), /cached/);
+    await execFileAsync("git", ["-C", clone, "rm", "--cached", "outside.txt"]);
+    assert.equal(await index(clone), originalIndex, "preflight never stages, unstages or commits candidate files");
+    assert.equal(await index(directory), unrelatedIndex, "unrelated Location index remains intact");
+    await execFileAsync("git", ["-C", clone, "config", "user.name", "test"]);
+    await execFileAsync("git", ["-C", clone, "config", "user.email", "test@example.invalid"]);
+    await execFileAsync("git", ["-C", clone, "config", "commit.gpgsign", "false"]);
+    await check("git commit -m candidate");
+    await execFileAsync("git", ["commit", "-m", "candidate"], { cwd: clone });
+    assert.equal((await execFileAsync("git", ["-C", clone, "show", "--format=", "--name-only", "HEAD"])).stdout.trim(), "src/allowed.txt");
+    assert.equal(await index(clone), "");
+    assert.equal(await index(directory), unrelatedIndex, "actual clone commit cannot consume the Location index");
+  }));
+});
+
+test("git commit reconciles symlinked project and external clone roots including prospective adds", async () => {
+  await withProject("git-alias", async directory => {
+    const repository = join(directory, "real"), alias = join(directory, "alias");
+    await mkdir(repository);
+    await symlink(repository, alias, process.platform === "win32" ? "junction" : "dir");
+    await execFileAsync("git", ["init", repository]);
+    for (const name of ["allowed.txt", "added.txt", "outside.txt"]) await writeFile(join(repository, name), name);
+    await execFileAsync("git", ["-C", repository, "add", "allowed.txt"]);
+    const request = { tool: "shell", sessionID: "alias", callID: "commit" };
+    for (const external of [false, true]) {
+      const gate = await createWriteGate(await createProjectPaths(external ? directory : alias),
+        operationManifest(external ? [join(alias, "allowed.txt"), join(alias, "added.txt")] : ["allowed.txt", "added.txt"]), alias);
+      const check = (command: string) => gate.check(request, { args: { command } }, { investigativeShell: true });
+      await check("git commit -m candidate");
+      await check("git add -- added.txt && git commit -m candidate");
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m prohibited" } }, {
+        investigativeShell: true, assertWritePaths: async paths => {
+          assert(paths.includes(join(alias, "allowed.txt")), "caller prohibitions retain the authorized alias spelling");
+          throw new Error("alias caller prohibition");
+        },
+      }), /alias caller prohibition/);
+      await execFileAsync("git", ["-C", repository, "add", "outside.txt"]);
+      await assert.rejects(check("git commit -m outside"), /cached/);
+      await execFileAsync("git", ["-C", repository, "rm", "--cached", "outside.txt"]);
+    }
+    assert.equal((await execFileAsync("git", ["-C", repository, "diff", "--cached", "--name-only", "-z"])).stdout, "allowed.txt\0");
+  });
+});
+
+test("git commit authorizes staged symlink entries without granting writes to their targets", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-link-entry", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "target.txt"), "target");
+    const request = { tool: "shell", sessionID: "link-entry", callID: "commit" };
+    for (const [name, target] of [["link", "target.txt"], ["dangling", "missing.txt"]]) {
+      await symlink(target, join(directory, name));
+      await execFileAsync("git", ["-C", directory, "add", name]);
+      for (const scope of [[name], [join(directory, name)]]) {
+        const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+        await gate.check(request, { args: { command: "git commit -m entry" } }, { investigativeShell: true });
+        await gate.check(request, { args: { command: `git add -- ${name} && git commit -m entry` } }, { investigativeShell: true });
+        await assert.rejects(gate.checkPath(name), /Write denied/, "index-entry authority does not allow target writes");
+        await assert.rejects(gate.check(request, { args: { command: "git commit -m forbidden" } }, {
+          investigativeShell: true, assertWritePaths: async paths => {
+            assert.deepEqual(paths, [join(directory, name)]); throw new Error("link caller prohibition");
+          },
+        }), /link caller prohibition/);
+      }
+      const denied = await createWriteGate(await createProjectPaths(directory), operationManifest(["target.txt"]));
+      await assert.rejects(denied.check(request, { args: { command: "git commit -m other" } }, { investigativeShell: true }), /cached/);
+      assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout, `${name}\0`);
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", name]);
+    }
+  });
+});
+
+test("git commit preserves missing directory scope components", async () => {
+  await withProject("git-missing-directory-scope", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "outside.txt"), "outside");
+    await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    const request = { tool: "shell", sessionID: "missing-scope", callID: "commit" };
+    for (const scope of [["future/**"], [`${join(directory, "future")}/**`]]) {
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m outside" } }, { investigativeShell: true }), /cached/);
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", "outside.txt"]);
+      await mkdir(join(directory, "future"));
+      await writeFile(join(directory, "future/allowed.txt"), "allowed");
+      await execFileAsync("git", ["-C", directory, "add", "future/allowed.txt"]);
+      await gate.check(request, { args: { command: "git commit -m future" } }, { investigativeShell: true });
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", "future/allowed.txt"]);
+      await rm(join(directory, "future"), { recursive: true });
+      await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    }
+  });
+});
+
+test("git commit uses indexed ancestry independently of working-tree directory symlinks", async () => {
+  await withProject("git-indexed-ancestry", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, "outside"));
+    await mkdir(join(directory, "allowed"));
+    await writeFile(join(directory, "outside/secret.txt"), "indexed outside");
+    await writeFile(join(directory, "allowed/secret.txt"), "working-tree target");
+    await execFileAsync("git", ["-C", directory, "add", "outside/secret.txt"]);
+    await rm(join(directory, "outside"), { recursive: true });
+    await symlink(join(directory, "allowed"), join(directory, "outside"), process.platform === "win32" ? "junction" : "dir");
+    const request = { tool: "shell", sessionID: "indexed-ancestry", callID: "commit" };
+    for (const scope of [["allowed/**"], [`${join(directory, "allowed")}/**`]]) {
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m unrelated" } }, { investigativeShell: true }), /cached/);
+    }
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["outside/secret.txt"]));
+    await gate.check(request, { args: { command: "git commit -m actual-entry" } }, { investigativeShell: true });
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "outside/secret.txt\0", "authorization preserves the original index pathname");
+    await execFileAsync("git", ["-C", directory, "rm", "--cached", "--force", "outside/secret.txt"]);
+    const nativeAliasGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["outside/secret.txt"]));
+    await assert.rejects(nativeAliasGate.check(request, { args: {
+      command: "git add -- secret.txt && git commit -m prospective", workdir: join(directory, "outside"),
+    } }, { investigativeShell: true }), /cached/, "relative add uses physical native cwd, not the indexed alias pathname");
+    await execFileAsync("git", ["add", "secret.txt"], { cwd: join(directory, "outside") });
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "allowed/secret.txt\0", "real Git confirms the prospective entry selected by native cwd");
+  });
+});
+
+test("git commit rejects command-level repository overrides in native shell mode", async () => {
+  await withProject("git-commit-context", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "allowed.txt"), "candidate");
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    for (const command of [
+      "cd elsewhere && git commit -m other", "pushd elsewhere && git commit -m other",
+      "git -C elsewhere commit -m other", "git --git-dir=elsewhere commit -m other",
+      "env GIT_INDEX_FILE=elsewhere git commit -m other", "export GIT_DIR=elsewhere && git commit -m other",
+      "env --unset=GIT_DIR git commit -m other", "GIT_DIR=elsewhere git commit -m other",
+      "git commit --all -m other", "git commit -m other -- allowed.txt",
+    ]) await assert.rejects(gate.check({ tool: "shell", sessionID: "context", callID: command },
+      { args: { command } }, { investigativeShell: true }), /Write denied/, command);
+  });
+});
+
+test("git native context rejects environment declaration changes before consuming another index", async () => {
+  await withProject("git-native-context-index", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "allowed.txt"), "candidate");
+    await writeFile(join(directory, "outside.txt"), "not authorized");
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const alternateIndex = join(directory, ".git", "review-alternate-index");
+    const alternateEnvironment = { ...process.env, GIT_INDEX_FILE: alternateIndex };
+    await execFileAsync("git", ["-C", directory, "add", "outside.txt"], { env: alternateEnvironment });
+    const index = async (env?: NodeJS.ProcessEnv) => (await execFileAsync("git",
+      ["-C", directory, "diff", "--cached", "--name-only", "-z"], { env })).stdout;
+    const current = await index(), alternate = await index(alternateEnvironment);
+    assert.equal(current, "allowed.txt\0");
+    assert.equal(alternate, "outside.txt\0");
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    for (const context of [
+      `export SAFE=1 GIT_INDEX_FILE="${alternateIndex}"`,
+      `export SAFE=1 GIT_DIR="${join(directory, ".git")}"`,
+      `declare -x SAFE=1 GIT_INDEX_FILE="${alternateIndex}"`,
+      `typeset -x SAFE=1 GIT_INDEX_FILE="${alternateIndex}"`,
+      `readonly GIT_INDEX_FILE="${alternateIndex}"`,
+      "unset SAFE GIT_INDEX_FILE",
+    ]) await assert.rejects(gate.check({ tool: "shell", sessionID: "native-context", callID: context },
+      { args: { command: `${context} && git commit -m candidate` } }, { investigativeShell: true }), /Write denied/, context);
+    await gate.check({ tool: "shell", sessionID: "native-context", callID: "unrelated-export" },
+      { args: { command: "export SAFE=1 && git commit -m candidate" } }, { investigativeShell: true });
+    assert.equal(await index(), current, "rejection preserves the native index");
+    assert.equal(await index(alternateEnvironment), alternate, "rejection preserves the alternate index");
+  });
+});
+
+test("git native executable family retains cached checks, caller prohibitions and unsupported-form rejection", async () => {
+  await withProject("git-native-executable-family", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    const allowed = join(directory, "allowed.txt");
+    await writeFile(allowed, "candidate");
+    await writeFile(join(directory, "outside.txt"), "not authorized");
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    const request = { tool: "shell", sessionID: "native-executable", callID: "commit" };
+    const executables = ["git", "git.exe", '"C:/Program Files/Git/cmd/git.exe"'];
+    for (const executable of executables) {
+      const checked: string[][] = [];
+      await gate.check(request, { args: { command: `${executable} commit -m candidate` } }, {
+        investigativeShell: true, assertWritePaths: async paths => { checked.push([...paths]); },
+      });
+      assert.deepEqual(checked, [[allowed]], executable);
+      await assert.rejects(gate.check(request, { args: { command: `${executable} commit -m prohibited` } }, {
+        investigativeShell: true, assertWritePaths: async () => { throw new Error("native family caller prohibition"); },
+      }), /native family caller prohibition/, executable);
+      for (const command of ["commit --all -m other", "-C elsewhere commit -m other", "--git-dir=elsewhere commit -m other"]) {
+        await assert.rejects(gate.check(request, { args: { command: `${executable} ${command}` } },
+          { investigativeShell: true }), /Write denied/, `${executable} ${command}`);
+      }
+    }
+    await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    for (const executable of executables) await assert.rejects(gate.check(request,
+      { args: { command: `${executable} commit -m outside` } }, { investigativeShell: true }), /cached/, executable);
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "allowed.txt\0outside.txt\0", "all preflights preserve staged files");
+  });
+});
+
+test("git native Location resolves implicit earlier adds independently of the manifest root", async () => {
+  await withProject("git-native-location-root", async directory => withProject("git-native-location-clone", async clone => {
+    await execFileAsync("git", ["init", clone]);
+    await mkdir(join(clone, "src"));
+    const allowed = join(clone, "src/allowed.txt"), added = join(clone, "src/added.txt");
+    await writeFile(allowed, "candidate");
+    await writeFile(added, "explicit addition");
+    await execFileAsync("git", ["-C", clone, "add", "src/allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest([allowed, added]), clone);
+    for (const investigativeShell of [false, true]) {
+      const checked: string[][] = [];
+      await gate.check({ tool: "shell", sessionID: "native-location", callID: "implicit-add" },
+        { args: { command: "git add -- src/added.txt && git commit -m candidate" } }, {
+          investigativeShell, assertWritePaths: async paths => { checked.push([...paths]); },
+        });
+      assert.deepEqual(checked, [[allowed, added]], "caller sees actual cached and prospective Location paths");
+    }
+    assert.equal((await execFileAsync("git", ["-C", clone, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "src/allowed.txt\0", "prospective preflight does not stage its earlier add");
+  }));
 });
 
 isolated("git add then commit preflights earlier explicit paths with the existing index without staging", async () => {
