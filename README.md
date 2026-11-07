@@ -1,7 +1,7 @@
 # Sortie-dogs
 
 <p align="center">
-  <img src="docs/assets/sortie-dogs-logo.png" alt="Sortie-dogs logo" width="640">
+  <img src="docs/assets/sortie-dogs-logo.jpg" alt="Sortie-dogs logo" width="640">
 </p>
 
 **An adaptive execution harness for OpenCode and Codex: preserve the goal,
@@ -30,7 +30,7 @@ evidence-backed result, not more agents for their own sake.
 > implemented; Codex Missions have completed implementation, validation, correction and acceptance.
 > [Host-specific execution boundaries](docs/codex.md#native-permissions-and-approval) remain explicit.
 
-![Sortie-dogs coordinating a bounded implementation workflow](https://raw.githubusercontent.com/zufall-upon/Sortie-dogs/main/docs/assets/sortie-workflow.gif)
+![Sortie-dogs coordinating a bounded implementation workflow](docs/assets/sortie-workflow.png)
 
 ## Why Sortie
 
