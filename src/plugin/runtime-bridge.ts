@@ -105,6 +105,7 @@ export interface RuntimeBridge {
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
     matched?: readonly { callID: string; member: number; occurrence: number }[];
+    next_action?: string;
   } | undefined>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
   recoverMissionDispatch?(rootSessionID: string, taskID: string): Promise<{

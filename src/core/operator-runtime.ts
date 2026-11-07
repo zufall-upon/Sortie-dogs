@@ -513,8 +513,12 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
   return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
     const prior = state.units[index]?.unit;
     if (!prior || prior.id !== unitID || next.id !== unitID) return next;
-    const { validation_cwd: _cwd, ...rest } = next;
-    return { ...rest, validation: prior.validation, ...(prior.validation_cwd ? { validation_cwd: prior.validation_cwd } : {}) };
+    // Preserve the frozen property order even when the proposal omits cwd:
+    // appending it after acceptance_indices changes JSON identity by itself.
+    const restored = { ...prior, ...next, validation: prior.validation };
+    if (prior.validation_cwd) restored.validation_cwd = prior.validation_cwd;
+    else delete restored.validation_cwd;
+    return restored;
   }) }));
 }
 

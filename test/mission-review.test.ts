@@ -249,6 +249,9 @@ test("generated read input needs a new ordered sequence, not relabelled PASS or 
     assert.equal(checks[1].exitCode, 0);
     assert.equal(checks[1].fresh, false, "native success and unchanged validation inputs are separate outcomes");
     assert.match(compare().reason!, /binding-unavailable/);
+    assert.match(compare().next_action!, /declared read inputs changed or became unavailable/);
+    assert.match(compare().next_action!, /owning controller can use plan_units/);
+    assert.match(compare().next_action!, /Do not exclude genuine inputs/);
     assert.notEqual((await refreshProtectedSnapshot(root, checks[0].binding))?.source, checks[0].source,
       "the preceding reproduction also pinned the generated output's absent state");
     for (const command of commands.slice(1)) await capture(command);

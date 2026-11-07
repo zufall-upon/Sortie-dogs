@@ -170,7 +170,7 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
     matched?: readonly { callID: string; member: number; occurrence: number }[];
-    nextOccurrence?: number;
+    nextOccurrence?: number; next_action?: string;
   } {
   const declared = validation.map(normalizeCommand);
   if (!Number.isFinite(notBefore)) return { ready: false, reason: "mission-review-correction-validation-admission-unavailable" };
@@ -336,7 +336,17 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
   for (const item of complete) {
     const command = declared[item.occurrence]!;
     if (bindingUnavailable(item)) {
-      return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}` };
+      const check = checks?.find(check => check.callID === item.callID && check.childSessionID === child);
+      return { ready: false, reason: `mission-review-correction-validation-binding-unavailable:${command}`,
+        ...(check?.exitCode === 0 && check.fresh === false && check.generatedInputs !== undefined ? {
+          next_action: "The command exited 0, but its declared read inputs changed or became unavailable during execution. " +
+            "Do not blindly rerun the same check or split build again: retained per-run logs inside a declared read directory can cause this on every run. " +
+            "Inspect the actual read/write scopes and command outputs. Prepare real generated inputs before validation; " +
+            "if output-only logs were included in an estimated read scope, the owning controller can use plan_units with a concrete reason " +
+            "to replan the SAME Mission with true source/fixture/binary inputs still in read and per-run outputs in write. " +
+            "Keep acceptance, source, old manifests, failed checks and cumulative spend; run affected checks under the corrected declaration. " +
+            "Do not exclude genuine inputs, edit the ledger or relabel this exit-zero check as fresh."
+        } : {}) };
     }
   }
   return { ready: true, matched: complete, nextOccurrence: matched.length % declared.length };

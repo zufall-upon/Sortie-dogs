@@ -26,7 +26,7 @@ const exec = promisify(execFile);
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -35,7 +35,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
   const registeredSuffix = mode.startsWith("handoff-registration-chain") || mode.startsWith("handoff-registration-suffix");
   const oldChain = mode.startsWith("handoff-registration-chain");
   const missingMiddle = mode === "handoff-registration-chain-missing";
-  const external = ["external-cwd", "registration"].includes(mode);
+  const external = ["external-cwd", "registration", "registration-with-cwd"].includes(mode);
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
   const externalDirectory = external ? await mkdtemp(join(tmpdir(), "mission-direct-external-")) : undefined;
@@ -65,6 +65,17 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       syncBuiltinESMExports();
     }
     await writeFile(join(directory, "check.mjs"), `import {readFileSync} from "node:fs";\nif (process.argv.includes("--expected-eight") || readFileSync(${JSON.stringify(resultPath)},"utf8") !== "fixed\\n") process.exit(1);\n`);
+    if (mode === "generated-read-output") {
+      await mkdir(join(directory, "reports"));
+      // A real child leaves a new diagnostic log on every invocation, even when
+      // the prepared source and command are unchanged. Splitting build cannot fix
+      // an estimated read scope that also contains these retained outputs.
+      await writeFile(join(directory, "emit.mjs"), `import {writeFileSync} from 'node:fs';
+writeFileSync('reports/run-' + process.hrtime.bigint() + '.json', JSON.stringify({ok:true}));\n`);
+      await writeFile(join(directory, "check.mjs"), (await readFile(join(directory, "check.mjs"), "utf8")) + `
+import {spawnSync} from 'node:child_process';
+if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) process.exit(2);\n`);
+    }
     if (incomplete && !retry) await writeFile(join(directory, "check.mjs"), "process.exit(4);\n");
     if (externalDirectory) await writeFile(join(externalDirectory, "check.mjs"), await readFile(join(directory, "check.mjs")));
     const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
@@ -114,11 +125,11 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       await prompt(actor, task.args.prompt);
     }
     const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
-      read: ["check.mjs", ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
+      read: ["check.mjs", ...(mode === "generated-read-output" ? ["emit.mjs", "reports/**"] : []), ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
       validation: registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
         : [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
-      ...(mode === "external-cwd" ? { validation_cwd: { "node check.mjs": externalDirectory! } } : {}) };
+      ...(mode === "external-cwd" || mode === "registration-with-cwd" ? { validation_cwd: { "node check.mjs": mode === "external-cwd" ? externalDirectory! : directory } } : {}) };
     const multi = mode.includes("pending") || mode === "recovery-normal-succeeded";
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration,
       ...(multi ? [{ ...declaration, title: "Second planned result", objective: "Validate the second planned result",
@@ -213,6 +224,44 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: author, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
       return exit;
     };
+    if (mode === "generated-read-output") {
+      await write("fixed\n");
+      const missionID = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id;
+      const firstManifest = before.units[0]!.manifestPath;
+      const refused = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        assert.equal(await check(), 0, "the unchanged native command and its child really succeed");
+        const result = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
+        assert.equal(result.status, "direct-unit-awaits-validation");
+        assert.match(result.reason, /validation-binding-unavailable/);
+        assert.match(result.next_action, /declared read inputs changed or became unavailable/);
+        assert.match(result.next_action, /plan_units/);
+        assert.match(result.next_action, /Do not blindly rerun/);
+        refused.push(result);
+      }
+      const failedChecks = JSON.stringify((await readRun()).units[0]!.directExecution!.checks);
+      const manifestBytes = firstManifest ? await readFile(resolve(directory, firstManifest), "utf8") : undefined;
+      const recovered = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self",
+        reason: "Retained per-run logs are outputs, not prepared validation inputs; preserve source and acceptance",
+        units: [{ ...declaration, read: ["check.mjs", "emit.mjs"] }] }, { sessionID: actor }));
+      assert.equal(recovered.status, "direct-unit-running", JSON.stringify(recovered));
+      const replacement = await readRun();
+      assert.notEqual(replacement.runID, before.runID, "scope repair admits new evidence, never relabels the old checks");
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, missionID);
+      assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "fixed\n");
+      assert.equal(await check(), 0, "the SAME command still creates another new child-process log");
+      const finished = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor }));
+      assert.equal((await readRun()).units[0]!.status, "succeeded", JSON.stringify(finished));
+      assert.equal((await readRun()).units[0]!.directExecution!.checks[0]!.fresh, true);
+      if (firstManifest) assert.equal(await readFile(resolve(directory, firstManifest), "utf8"), manifestBytes);
+      const lineage = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).acceptanceHistory(await readRun(), [before.runID]);
+      assert.equal(lineage.status, "available", JSON.stringify(lineage));
+      const archived = lineage.runs.find(item => item.state.runID === before.runID)!.state;
+      assert.equal(JSON.stringify(archived.units[0].directExecution.checks), failedChecks);
+      assert(archived.units[0].directExecution.checks.every((item: {fresh:boolean}) => !item.fresh));
+      assert(refused.every(item => item.status === "direct-unit-awaits-validation"));
+      return;
+    }
     if (mode.startsWith("handoff-")) {
       const registeredHandoff = mode.startsWith("handoff-registration");
       let effectiveValidation = declaration.validation;
@@ -664,7 +713,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       hooks = await create();
       checkCommand = "node check.mjs";
     }
-    if (mode === "registration") {
+    if (mode === "registration" || mode === "registration-with-cwd") {
       assert.equal(await check(), 0);
       const old = await readRun(), budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
       assert.equal(old.units[0]!.directExecution!.checks.length, 0, "external diagnostic has no retroactive formal binding");
@@ -692,7 +741,21 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
       assert.deepEqual((await readRun()).units[0]!.directExecution!.validationRegisteredAt, kept.units[0]!.directExecution!.validationRegisteredAt,
         "identical registration is idempotent");
       assert.equal((await register(declaration)).status, "direct-unit-registration-corrected", "returning to original cwd is still an in-place correction");
-      assert.deepEqual((await readRun()).units[0]!.directExecution!.validationCwd, {});
+      assert.deepEqual((await readRun()).units[0]!.directExecution!.validationCwd, declaration.validation_cwd ?? {});
+      if (mode === "registration-with-cwd") {
+        const { validation_cwd: _cwd, ...withoutCwd } = declaration;
+        assert.equal((await register(withoutCwd)).status, "direct-unit-registration-corrected", "explicit cwd can be omitted without changing the frozen contract");
+        assert.deepEqual((await readRun()).units[0]!.directExecution!.validationCwd, {});
+        assert.equal((await register(declaration)).status, "direct-unit-registration-corrected", "explicit cwd can be restored after omission");
+        const restored = await readRun();
+        assert.deepEqual(restored.units[0]!.directExecution!.validationCwd, declaration.validation_cwd);
+        assert.equal(restored.runID, old.runID);
+        assert.equal(restored.units[0]!.callID, old.units[0]!.callID);
+        assert.equal(restored.units[0]!.directExecution!.startedAt, old.units[0]!.directExecution!.startedAt);
+        assert.deepEqual(restored.units[0]!.unit, old.units[0]!.unit);
+        assert.deepEqual(restored.units[0]!.hashes, old.units[0]!.hashes);
+        assert.deepEqual(restored.units[0]!.directExecution!.checks, old.units[0]!.directExecution!.checks, "registration never relabels the old diagnostic");
+      }
       assert.equal((await register(corrected)).status, "direct-unit-registration-corrected");
       assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
       hooks = await create();
