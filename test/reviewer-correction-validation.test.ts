@@ -61,6 +61,44 @@ for (const cold of [false, true]) test(`Reviewer repairs an expected-nonzero che
   } finally { await f.dispose(); }
 });
 
+for (const cold of [false, true]) test(`Reviewer replaces the terminal recipe and settles its native evidence: ${cold ? "cold" : "live"}`, async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs", C = "node --check check.mjs";
+    const E = 'node -e "if(require(\'node:fs\').readFileSync(\'result.txt\', \'utf8\').trim() !== \'ready\') process.exit(1)"';
+    const started = await initial(f, { keepReviewOpen: true, validation: [A, B] });
+    await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.edit("author", "ready");
+    await f.shell("author", A);
+    const before = await f.run(), retained = before.units[0]!.reviewerCorrection!.checks![0]!;
+    const corrected = await f.tool("author", "repair_review", {
+      validation: [A, C, E], reason: "Replace the terminal recipe with a ready-output assertion." });
+    assert.equal(corrected.status, "correction-registration-corrected");
+    if (cold) await f.start();
+    await f.shell("author", C); await f.shell("author", B);
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-validation",
+      "the removed terminal recipe cannot substitute for the new native check");
+    await f.shell("author", E);
+    await f.shell("author", "git add -- result.txt && git commit -m terminal-correction");
+    const checked = await f.run();
+    assert.equal(checked.runID, before.runID);
+    assert.deepEqual(checked.units[0]!.reviewerCorrection!.checks![0], retained);
+    assert.equal(checked.units[0]!.reviewerCorrection!.checks!.length, 3);
+    assert.deepEqual(checked.units[0]!.directExecution!.checks, [], "native correction receipts retain their actual owner");
+    const finished = await f.tool("author", "finish_direct_unit");
+    assert.equal(finished.status, "correction-validated", JSON.stringify(finished));
+    const unit = (await f.run()).units[0]!;
+    assert.equal(unit.status, "succeeded");
+    assert(unit.evidence.some(evidence => evidence.execution.command[0] === E));
+    assert(!unit.evidence.some(evidence => evidence.execution.command[0] === B));
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+    if (cold) return; // Reload covers durable finish; the live branch retains the native dispatch join.
+    const returned = JSON.parse(await f.finish(started.dispatch, "author", inlineReport()));
+    assert.equal(returned.status, "review-correction-recorded", JSON.stringify(returned));
+    assert.equal(returned.independent, false);
+  } finally { await f.dispose(); }
+});
+
 for (const cold of [false, true]) test(`Reviewer recipe cwd repair retains the unchanged later check: ${cold ? "cold" : "live"}`, async () => {
   const f = await fixture();
   try {
