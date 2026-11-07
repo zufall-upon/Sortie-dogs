@@ -73,7 +73,8 @@ test("correction execution permits focused tests/formatter/generator; formal pro
     assert.ok((await f.run()).units[0]!.reviewerCorrection!.writeUnion.includes("outside.txt"));
     await f.after(output, "Literal output reconciled without executing or creating formal evidence", { exit: 0 });
     assert.equal((await f.run()).units[0]!.reviewerCorrection!.checks, undefined);
-    await assert.rejects(f.before("author", "shell", { command: "printf x > ../outside.txt" }), /repository-relative path without traversal/);
+    await assert.rejects(f.before("author", "shell", { command: "printf x > ../outside.txt" }),
+      { name: "WriteDeniedError", reason: "project-boundary" });
     await f.shell("author", "git add -- result.txt"); await f.shell("author", "git commit -m diagnostics-then-formal");
     await f.shell("author", "node required-test.mjs"); await f.shell("author", "node check.mjs");
     await f.finish(dispatch, "author", inlineReport());
