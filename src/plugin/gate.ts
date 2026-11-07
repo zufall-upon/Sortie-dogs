@@ -468,7 +468,7 @@ function scanShellSyntax(source: string, dialect: ShellDialect): ShellSyntax {
     if (character === "`") {
       unsafeExpansion = true;
       if (dialect === "powershell") index += 1;
-    } else if (((character === "$" || character === "<") && source[index + 1] === "(") ||
+    } else if (((character === "$" || character === "<" || dialect === "posix" && character === ">") && source[index + 1] === "(") ||
                (character === "$" && source[index + 1] === "{")) {
       unsafeExpansion = true;
     } else if (character === "{" || character === "}") {
@@ -588,8 +588,11 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       unresolvedExpansion = true;
       // Native investigative shells still cannot execute an opaque Git mutation.
       const expandedTokens = words(source);
+      // A substitution's internal separator can put the subcommand in another segment.
+      const identityConfig = expandedTokens.some((token, index) => token === "-c" &&
+        /^user\.(?:name|email)=/iu.test(expandedTokens[index + 1] ?? ""));
       if (expandedTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token)) &&
-        expandedTokens.some(token => token === "add" || token === "commit")) gitAmbiguous = true;
+        (identityConfig || expandedTokens.some(token => token === "add" || token === "commit"))) gitAmbiguous = true;
       issue ??= commandIssue(source, "active-expansion", "remove substitution and run a direct literal command");
       continue;
     }

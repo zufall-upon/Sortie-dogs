@@ -10592,6 +10592,49 @@ test("git identity commit rejects arbitrary config, repository overrides and exp
   });
 });
 
+test("git identity commit rejects Bash process substitutions including internal separators", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-identity-process-substitution", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await execFileAsync("git", ["-C", directory, "config", "commit.gpgsign", "false"]);
+    await writeFile(join(directory, "allowed.txt"), "candidate");
+    await writeFile(join(directory, "identity-process-probe"), "#!/bin/sh\nprintf unexpected > identity-side-effect\n", { mode: 0o700 });
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const identity = "git -c user.name=test -c user.email=test@example.invalid";
+    const marker = join(directory, "identity-side-effect");
+    // Establish the shell/Git oracle independently: this value really executes a process.
+    const attack = `${identity} -c user.name=>(./identity-process-probe) commit -m candidate`;
+    await execFileAsync("/bin/bash", ["-c", `${attack}; status=$?; wait; exit "$status"`], { cwd: directory });
+    assert.equal(await readFile(marker, "utf8"), "unexpected");
+    await rm(marker);
+    await writeFile(join(directory, "allowed.txt"), "next candidate");
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    const index = async () => (await execFileAsync("git", ["-C", directory, "ls-files", "--stage", "-z"])).stdout;
+    const originalIndex = await index();
+    for (const key of ["user.name", "user.email"]) {
+      for (const substitution of [">(./identity-process-probe)", "<(./identity-process-probe)",
+        ">(./identity-process-probe;true)", "<(./identity-process-probe;true)"]) {
+        const command = `${identity} -c ${key}=${substitution} commit -m candidate`;
+        for (const tool of ["bash", "shell"]) {
+          for (const investigativeShell of [false, true]) await assert.rejects(gate.check(
+            { tool, sessionID: "identity-process", callID: command }, { args: { command } },
+            { investigativeShell }), /Write denied/, command);
+          assert.equal(extractWritePaths(tool, { command }).gitAmbiguous, true, command);
+          assert.equal(isKnownReadOnlyTool(tool, { command }), false, command);
+        }
+      }
+      for (const quote of ["'", '"']) {
+        const command = `${identity} -c ${quote}${key}=>(./identity-process-probe)${quote} commit -m candidate`;
+        assert.equal(extractWritePaths("bash", { command }).ambiguous, false, "quoted substitution is literal data");
+        for (const investigativeShell of [false, true]) await gate.check(
+          { tool: "bash", sessionID: "identity-literal", callID: command }, { args: { command } }, { investigativeShell });
+      }
+    }
+    assert.equal(await index(), originalIndex, "preflights preserve all staged blobs");
+    assert.equal(await stat(marker).catch(() => undefined), undefined, "preflights never execute the out-of-scope process");
+  });
+});
+
 test("git commit reconciles symlinked project and external clone roots including prospective adds", async () => {
   await withProject("git-alias", async directory => {
     const repository = join(directory, "real"), alias = join(directory, "alias");
