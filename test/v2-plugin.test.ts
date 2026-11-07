@@ -821,7 +821,9 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
         get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
-      } });
+      }, message: { list: async ({ sessionID, order }) => ({
+        data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {},
+      }) } });
   };
   const prompt = async (sessionID: string, text: string) => {
     const messageID = `msg_${++counter}`;

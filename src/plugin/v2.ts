@@ -229,7 +229,6 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
     if (state.status === "error" && metadata.status === undefined) metadata.status = "unknown";
     if (!["running", "pending", "unknown"].includes(String(metadata.status)) ||
         typeof input?.command !== "string" || typeof time?.start !== "number") continue;
-    // A short Job can finish before its launch result/error is persisted.
     const launchStart = time.start;
     const terminals = native.filter(value => record(value) && value.type === "synthetic" &&
       (value.sessionID === undefined || value.sessionID === id) && record(value.metadata) &&

@@ -112,11 +112,25 @@ installed bytesを比較する。稼働中制御source/authorityの直接patch�
 既に稼働中のprocessが新コードを読んだかはinstalled bytesと別に確認し、
 未反映なら正直に再読込待ちと記録する。共有serviceを勝手に停止しない。
 
-今回の最終候補はglobal適用しない。現installedとの既知差分には、今回のscope修正とは
-異なるnativeWorker検査収集、検証登録同期、completionReadinessのhotfixも含まれる。
-それらを消す上書きや無関係な全移植はしない。旧版の正確な復元tgz・hash・復元commandを
-`_testenv/control-recovery-20261107/` に保全し、最終候補も別directoryへ固定する。
-今回のglobal installは0回。既存processへの修正反映も主張しない。
+### main統合と既存global成果の再利用
+
+旧候補 `24d67d0` はmainの #349 hotfixを含まず、当時はglobal上書きを見送った。
+これは正常なmain追従の禁止ではない。正本 `0540160` を通常mergeし、nativeWorker検査収集・
+登録同期・completionReadinessと既存test fixtureを保持する。runtime sourceはmainと同一にし、
+中断launchの開始時刻一致・終了前・終了後の追加境界testと、この記録を回帰補完PRへ残す。
+
+選択packageはmain `0540160da10b47c4fd30399c39f9830740393eb9` の既存検証済み
+`_testenv/releases/0.16.15/sortie-dogs-0.16.15.tgz`。
+SHA-256は `792c947e200c437a09843fbaf9f6b7cdebcb59cc89a195ad99d878dd87b8bd11`。
+新しいarchiveは作らない。同じhashの既存preflight成功（provider requestなし）を再利用し、
+最終checkoutとnpm globalの2prefix、OpenCode用packageの全payloadを現在bytesで照合する。
+全一致なら既に適用済みの外部成果として再利用し、install/initを繰り返さない。
+必要な再適用が生じた場合のみ直前の現在0.16.15を正確に保全し、通常手順で行う。
+古い0.16.14原版の復元物を現在版のrollbackへ流用しない。
+
+稼働中processのloaded identityはinstalled bytesと別。共有serviceを停止せず、
+未反映なら再読込未確認と明記する。今回の通常検査・実照合・必要Reviewの最終結果は
+native Mission記録と後続PRへ残す。VDMの既存model overrideやauthorityは変更しない。
 
 この修正はVDMの中断済み開発を完了させるものではない。
 VDM製品source・dirty・失敗・原画像・未受領状態と、消費済みroot1/Send1/interrupt1/15分枠を保持。

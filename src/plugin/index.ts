@@ -502,7 +502,7 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
-  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[] };
+  readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
   exitCode?: number | null;
   outcome?: "pass" | "fail" | "skip" | "cancel";
@@ -1843,8 +1843,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (dockerTool && dockerRequest === undefined) return;
     const rawCommand = args !== undefined && typeof args.command === "string" ? normalizeCommand(args.command) : undefined;
     if (rawCommand === undefined || rawCommand.length === 0) return;
-    const correcting = !!direct || await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true ||
-      await input.runtimeBridge?.ownsValidationRegistration?.(toolInput.sessionID) === true;
+    const reviewerCorrection = await input.runtimeBridge?.ownsReviewerCorrection?.(toolInput.sessionID) === true;
+    const registered = await input.runtimeBridge?.ownsValidationRegistration?.(toolInput.sessionID) === true;
+    const correcting = !!direct || reviewerCorrection || registered;
     const directory = dockerRequest?.cwd ?? resolve(input.directory, typeof args?.workdir === "string" ? args.workdir : ".");
     // A check is proof only in its registered cwd. Snapshot the same admitted source
     // recipe at actual native start; never retrofit it to older external-cwd history.
@@ -1854,12 +1855,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
         toolInput.sessionID, members, directory) === false) return;
     if (!authorization.validationCommands.has(rawCommand) && (!correcting || !members)) return;
-    const requiredExecution = correcting || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
+    const requiredExecution = !!direct || reviewerCorrection || members !== undefined && await input.runtimeBridge?.requiresValidationExecution?.(
       authorization.rootSessionID, authorization.taskID, toolInput.sessionID, members) === true;
     const dispatchCallID = authorization.dispatchCallID ?? (requiredExecution
       ? await input.runtimeBridge?.missionDispatchCall?.(authorization.rootSessionID, toolInput.sessionID, authorization.taskID) : undefined);
     const correction = correcting && dispatchCallID && members
-      ? { taskID: authorization.taskID, dispatchCallID, commands: members } : undefined;
+      ? { taskID: authorization.taskID, dispatchCallID, commands: members,
+        ...(registered && !direct && !reviewerCorrection ? { nativeWorker: true } : {}) } : undefined;
     const admittedSnapshot = dockerRequest
       ? await protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd).catch(() => undefined)
       : await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
@@ -2046,12 +2048,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh: proofFresh });
     if (execution.correction) {
+      // A delayed shell terminal may arrive after contract repair has already
+      // replaced the dispatch. Never attach that old receipt to the new owner.
+      if (execution.correction.nativeWorker && await input.runtimeBridge?.missionDispatchCall?.(execution.root,
+          execution.sessionID, execution.correction.taskID) !== execution.correction.dispatchCallID) return;
+      const reusedEvidenceIDs = outcome === "skip" && execution.reusedEvidence?.length
+        ? execution.reusedEvidence.map(entry => entry.evidence_id) : undefined;
       await input.runtimeBridge?.recordReviewerCorrectionCheck?.(execution.root, execution.correction.taskID, {
         dispatchCallID: execution.correction.dispatchCallID, childSessionID: execution.sessionID, callID: execution.callID,
-        command: execution.correction.commands, directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
+        command: execution.correction.commands, ...(execution.correction.nativeWorker ? { nativeCommand: execution.command[0]! } : {}),
+        directory: execution.directory, startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
         binding: proofFresh && validationBinding && validatedSource ? validationBinding : execution.binding,
         source: observed?.source ?? execution.source, candidate: observed?.candidate ?? execution.candidate,
-        fresh: proofFresh && outcome === "pass",
+        // A valid cached proof is still reusable evidence, not a failed native check.
+        // Keep the skip outcome and original proof IDs; live binding checks still apply.
+        fresh: proofFresh && (outcome === "pass" || reusedEvidenceIDs !== undefined),
+        ...(reusedEvidenceIDs ? { reusedEvidenceIDs } : {}),
         ...(generated ? { generatedInputs: execution.validationInputs } : {}),
       });
     }
@@ -2986,6 +2998,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(childSessionID === undefined ? {} : { childSessionID }),
       disposition: validated ? "succeeded" : interrupted ? "cancelled" : "failed",
       evidence: settlementEvidence, resultClass,
+      ...(validated && correctionChecks?.matched ? { validationMatches: correctionChecks.matched } : {}),
       ...(directEvidence ? {} : { nativeOutcome: terminalFailed || interrupted ? "failed" as const : "completed" as const }),
       ...(correctionChecks?.failure ? { failure: correctionChecks.failure } : resultClass === "acceptance" && failedAcceptanceExecution !== undefined ? { failure: {
         command: failedAcceptanceExecution.command.slice(0, 8), outcome: "fail" as const,
@@ -8824,16 +8837,22 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     registerDirectValidation: async (root, actor, criterionID, command, registeredAt) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
-      if (!direct || direct.root !== root || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, direct.taskID, actor, command)) {
+      let taskID = direct?.root === root ? direct.taskID : undefined;
+      if (!direct && await input.runtimeBridge?.ownsReviewerCorrection?.(actor)) {
+        const correctionTask = sessionTaskIDs.get(actor);
+        const callID = correctionTask && await input.runtimeBridge?.missionDispatchCall?.(root, actor, correctionTask);
+        if (correctionTask && callID && await input.runtimeBridge?.ownsReviewerCorrectionDispatch?.(root, callID, correctionTask)) taskID = correctionTask;
+      }
+      if (!taskID || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, taskID, actor, command)) {
         throw new Error("mission-validation-registration-owner-mismatch");
       }
       const ledger = await goalLedger(root), state = (await ledger.readGoal()).state;
-      const reservation = state.outstanding_reservations.find(item => item.unit_id === direct.taskID && item.session_id === root);
+      const reservation = state.outstanding_reservations.find(item => item.unit_id === taskID && item.session_id === root);
       if (!reservation || state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
       const prior = state.validation_registrations?.[criterionID];
-      if (prior?.unit_id === direct.taskID && prior.command === command && prior.registered_at === registeredAt) return;
+      if (prior?.unit_id === taskID && prior.command === command && prior.registered_at === registeredAt) return;
       await ledger.appendGoal({ kind: "goal.validation-registered", at: new Date().toISOString(), goal_id: state.goal_id,
-        reservation_id: reservation.reservation_id, unit_id: direct.taskID, criterion_id: criterionID, command, registered_at: registeredAt });
+        reservation_id: reservation.reservation_id, unit_id: taskID, criterion_id: criterionID, command, registered_at: registeredAt });
     },
     activateDirectUnit: (root, actor, prompt, handoffPath) => serializeChatTransition(actor, async () => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);

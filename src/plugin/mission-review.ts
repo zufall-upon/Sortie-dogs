@@ -167,7 +167,7 @@ export function observedMissionValidation(validation: readonly string[], childSe
 /** All inherited checks must have fresh real successful outcomes in this correction admission. */
 export function reviewerCorrectionValidation(validation: readonly string[], child: string,
   history: readonly Record<string, unknown>[], notBefore: number, checks?: readonly ReviewerCorrectionCheck[], directory?: string,
-  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>): {
+  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>, nativeWorkerChecks = false): {
     ready: boolean; reason?: string; failure?: { command: readonly string[]; outcome: "fail"; exitCode: number | null };
     matched?: readonly { callID: string; member: number; occurrence: number }[];
     nextOccurrence?: number; next_action?: string;
@@ -222,6 +222,16 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
         directory: typeof part.state.input.workdir === "string" ? part.state.input.workdir : undefined,
         exit, started: timing.started, completed: timing.completed });
     }
+  }
+  if (nativeWorkerChecks) for (const check of checks ?? []) {
+    const started = Date.parse(check.startedAt), completed = Date.parse(check.endedAt);
+    if (check.childSessionID !== child || !check.nativeCommand || seen.has(check.callID) || !Number.isFinite(started) ||
+        !Number.isFinite(completed) || started < notBefore || completed < started) continue;
+    seen.add(check.callID);
+    const workspace = check.binding.docker_workspace;
+    attempts.push({ callID: check.callID, command: check.nativeCommand, directory: check.directory,
+      ...(workspace ? { dockerWorkspace: { container_id: workspace.container_id, cwd: workspace.cwd } } : {}),
+      exit: check.exitCode, started, completed });
   }
   const matched: { callID: string; member: number; occurrence: number }[] = [];
   const checkDirectoryMatches = (check: ReviewerCorrectionCheck, attempt: (typeof attempts)[number], command: string): boolean => {
@@ -353,18 +363,21 @@ export function reviewerCorrectionValidation(validation: readonly string[], chil
 }
 
 /** Refresh each actual run's saved recipe; never attach today's snapshot to historical native logs. */
+export async function validationCheckFresh(projectRoot: string, check: ReviewerCorrectionCheck): Promise<boolean> {
+  const current = await refreshProtectedSnapshot(projectRoot, check.binding).catch(() => undefined);
+  return !!(check.generatedInputs !== undefined
+    ? current && await validationInputSnapshot(projectRoot, check.binding).catch(() => undefined) === check.generatedInputs
+    : current?.source === check.source && current?.candidate === check.candidate);
+}
+
 export async function reviewerCorrectionValidationFresh(validation: readonly string[], child: string,
   history: readonly Record<string, unknown>[], notBefore: number, checks: readonly ReviewerCorrectionCheck[], projectRoot: string,
-  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>) {
-  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks, projectRoot, directories, registeredAt);
+  directories?: Readonly<Record<string, string>>, registeredAt?: Readonly<Record<string, string>>, nativeWorkerChecks = false) {
+  const checked = reviewerCorrectionValidation(validation, child, history, notBefore, checks, projectRoot, directories, registeredAt, nativeWorkerChecks);
   if (!checked.ready) return checked;
   for (const callID of new Set(checked.matched?.map(item => item.callID))) {
     const check = checks.find(item => item.callID === callID)!;
-    const current = await refreshProtectedSnapshot(projectRoot, check.binding).catch(() => undefined);
-    const fresh = check.generatedInputs !== undefined
-      ? current && await validationInputSnapshot(projectRoot, check.binding).catch(() => undefined) === check.generatedInputs
-      : current?.source === check.source && current?.candidate === check.candidate;
-    if (!fresh) return { ready: false, reason: `mission-review-correction-validation-stale:${check.command.join(" && ")}` };
+    if (!await validationCheckFresh(projectRoot, check)) return { ready: false, reason: `mission-review-correction-validation-stale:${check.command.join(" && ")}` };
   }
   return checked;
 }
