@@ -391,8 +391,19 @@ function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
   return paths;
 }
 
+function gitCommitArguments(tokens: readonly string[]): readonly string[] | undefined {
+  let index = 1;
+  // Only invocation-local identity settings preserve the native repository/index context.
+  // Do not normalize arbitrary -c, --config-env or repository-selection options.
+  while (tokens[index] === "-c") {
+    if (!/^user\.(?:name|email)=[^\0\r\n$`]+$/iu.test(tokens[index + 1] ?? "")) return undefined;
+    index += 2;
+  }
+  return tokens[index]?.toLowerCase() === "commit" ? tokens.slice(index + 1) : undefined;
+}
+
 function isSafeGitCommit(tokens: readonly string[]): boolean {
-  for (let index = 2; index < tokens.length; index += 1) {
+  for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === "-a" || token === "--all" || token === "--amend") return false;
     if (token === "-m" || token === "--message") {
@@ -457,7 +468,7 @@ function scanShellSyntax(source: string, dialect: ShellDialect): ShellSyntax {
     if (character === "`") {
       unsafeExpansion = true;
       if (dialect === "powershell") index += 1;
-    } else if (((character === "$" || character === "<") && source[index + 1] === "(") ||
+    } else if (((character === "$" || character === "<" || dialect === "posix" && character === ">") && source[index + 1] === "(") ||
                (character === "$" && source[index + 1] === "{")) {
       unsafeExpansion = true;
     } else if (character === "{" || character === "}") {
@@ -575,6 +586,13 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       applies = true;
       ambiguous = true;
       unresolvedExpansion = true;
+      // Native investigative shells still cannot execute an opaque Git mutation.
+      const expandedTokens = words(source);
+      // A substitution's internal separator can put the subcommand in another segment.
+      const identityConfig = expandedTokens.some((token, index) => token === "-c" &&
+        /^user\.(?:name|email)=/iu.test(expandedTokens[index + 1] ?? ""));
+      if (expandedTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token)) &&
+        (identityConfig || expandedTokens.some(token => token === "add" || token === "commit"))) gitAmbiguous = true;
       issue ??= commandIssue(source, "active-expansion", "remove substitution and run a direct literal command");
       continue;
     }
@@ -591,6 +609,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
+    const commitArguments = executable === "git" ? gitCommitArguments(tokens) : undefined;
     // A commit preflight observes the native cwd/index, not a command-local replacement.
     // Keep opaque formatters usable, but never infer a repository after cd or GIT_* overrides.
     if (["cd", "chdir", "pushd", "popd", "set-location", "sl", "push-location", "pop-location"].includes(executable) ||
@@ -761,10 +780,10 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         paths.push(...selected);
         gitAdds.push(...selected);
       }
-    } else if (executable === "git" && tokens[1]?.toLowerCase() === "commit") {
+    } else if (commitArguments !== undefined) {
       applies = true;
       gitMutation = true;
-      if (isSafeGitCommit(tokens)) {
+      if (isSafeGitCommit(commitArguments)) {
         gitCommit = true;
         gitCommitAdds.push(gitAdds);
         gitAdds = [];
@@ -1507,8 +1526,8 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (!extracted.applies) return;
       // Unknown program internals are native execution policy, NOT a proof of output scope.
       // Still check every known destination (redirect/copy/etc.) and the existing Git boundary.
-      if (nativeImplementationShell ? extracted.gitAmbiguous :
-          extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit)) {
+      if (extracted.gitAmbiguous || !nativeImplementationShell &&
+          (extracted.ambiguous || (extracted.paths.length === 0 && !extracted.gitCommit))) {
         if (extracted.issue !== undefined) {
           throw new WriteDeniedError("unclassified-command", issuePath(extracted.issue));
         }
