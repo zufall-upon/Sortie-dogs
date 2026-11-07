@@ -141,8 +141,9 @@ interface UnitState {
     validationRegisteredAt?: Readonly<Record<string, string>> };
   evidence: readonly GoalEvidence[];
   /** Effective check registration, separate from the immutable admitted contract. */
-  validationRegistration?: { validation: readonly string[]; cwd: Readonly<Record<string, string>>;
-    registeredAt: Readonly<Record<string, string>>; checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[] };
+  validationRegistration?: { validation: readonly string[]; cwd: Readonly<Record<string, string>>; startedAt?: string;
+    registeredAt: Readonly<Record<string, string>>; checks: import("../plugin/runtime-bridge.js").ReviewerCorrectionCheck[];
+    matched?: readonly { readonly callID: string; readonly member: number; readonly occurrence: number }[] };
   /** Implementation in the existing controller session, without a native child Task. */
   directExecution?: {
     actor: string;
@@ -1799,7 +1800,16 @@ export class OperatorRuntime {
       }
       unit.repairValidation.candidate_fingerprint = candidate;
       unit.repairValidationAttempts++;
-    } else state.dispatched++;
+    } else {
+      state.dispatched++;
+      if (!state.fabric && !unit.reviewerCorrection) {
+        // Ordinary Workers need the same bound native-check capture as direct and
+        // Reviewer authors. Keep a repaired registration, but never carry an old
+        // Worker's check receipts into a new admission.
+        unit.validationRegistration = { validation: unitValidation(unit), cwd: unitValidationCwd(unit) ?? {},
+          registeredAt: unit.validationRegistration?.registeredAt ?? {}, startedAt: new Date().toISOString(), checks: [] };
+      }
+    }
     unit.status = "running";
     unit.callID = callID;
     if (unit.reviewerCorrection) unit.reviewerCorrection.admittedAt = new Date().toISOString();
@@ -2089,6 +2099,9 @@ export class OperatorRuntime {
     unit.childSessionID = result.childSessionID ?? unit.childSessionID;
     unit.evidence = result.evidence;
     unit.resultClass = result.resultClass;
+    if (unit.validationRegistration && result.disposition === "succeeded" && result.validationMatches) {
+      unit.validationRegistration.matched = structuredClone(result.validationMatches);
+    }
     if (result.failure !== undefined) (unit as UnitState & { failure?: SerialDispatchSettlement["failure"] }).failure = result.failure;
     else delete unit.failure;
     unit.status = result.disposition;

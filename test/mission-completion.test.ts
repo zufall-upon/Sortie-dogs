@@ -266,11 +266,15 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
         { output: failed.stdout, metadata: { exit: failed.code, status: "completed" } });
     }
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID: "validate" }, { args: { command: "node check.mjs" } });
+    const validationStarted = Date.now();
     const checked = await exec(process.execPath, ["check.mjs"], { cwd: root }).catch(error => {
       if (mode !== "failed-result-validation") throw error;
       assert.equal(error.code, 1);
       return { stdout: error.stdout };
     });
+    (nativeHistory.worker ??= []).push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "validate",
+      state: { status: "completed", input: { command: "node check.mjs" }, metadata: { exit: mode === "failed-result-validation" ? 1 : 0 },
+        time: { start: validationStarted, end: Date.now() } } }] });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID: "validate" },
       { output: checked.stdout, metadata: { exit: mode === "failed-result-validation" ? 1 : 0, status: "completed" } });
     identities.worker!.outcome = "succeeded";

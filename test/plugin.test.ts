@@ -67,6 +67,9 @@ import {
   STEP_CONTINUE_PREFIX,
 } from "../dist/plugin/continuation.js";
 import { createProjectPaths, createWriteGate, extractWritePaths, isGitMutation, isKnownReadOnlyTool } from "../dist/plugin/gate.js";
+import { reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
+import type { ReviewerCorrectionCheck } from "../dist/plugin/runtime-bridge.js";
+import { STABLE_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { validateManifest } from "../dist/core/validate-manifest.js";
 import {
   validateHandoffSchema,
@@ -4972,12 +4975,21 @@ test("worker requested-full validation fails closed without manufacturing canoni
   });
 });
 
-test("serial settled-pass reuse replaces only the duplicate call and reconciles existing goal evidence", async () => {
+for (const registered of [false, true]) test(`serial settled-pass reuse reconciles existing goal evidence: registered=${registered}`, async () => {
   await withProject("goal-validation-settled-pass-reuse", async (directory) => {
     const command = "node --test candidate.test.mjs";
+    const taskID = "reuse-unit", child = "reuse-child", manifest = "reuse-unit.json";
+    const checks: ReviewerCorrectionCheck[] = [];
+    let captureRegistration = false;
     await writeFile(join(directory, "candidate.txt"), "candidate\n");
     await writeFile(join(directory, "candidate.test.mjs"), "// expensive validation fixture\n");
-    const hooks = await SortieDogsPlugin({ directory, client: { session: {
+    const hooks = await SortieDogsPlugin({ directory, ...(registered ? { runtimeBridge: {
+      profile: STABLE_RUNTIME_PROFILE, assetVersion: RUNTIME_ASSET_VERSION,
+      ownsValidationRegistration: async () => captureRegistration,
+      reviewerCorrectionValidationMembers: async () => [command],
+      missionDispatchCall: async () => taskID,
+      recordReviewerCorrectionCheck: async (_root: string, _task: string, check: ReviewerCorrectionCheck) => { checks.push(check); },
+    } } : {}), client: { session: {
       get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
         ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
       messages: async () => ({ data: [] }),
@@ -4986,7 +4998,6 @@ test("serial settled-pass reuse replaces only the duplicate call and reconciles 
       message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-5.6-terra" } },
       parts: [{ type: "text", text: "implement the accepted task" }],
     });
-    const taskID = "reuse-unit", child = "reuse-child", manifest = "reuse-unit.json";
     const handoff = join(directory, "handoff.reuse-unit.json");
     await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
       task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
@@ -5011,12 +5022,24 @@ test("serial settled-pass reuse replaces only the duplicate call and reconciles 
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "first-check" }, { args: { command } });
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
       { output: "passed", metadata: { exit: 0 } });
+    captureRegistration = registered;
     const duplicate = { args: { command } };
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "duplicate-check" }, duplicate);
     assert.notEqual(duplicate.args.command, command);
     assert.match(duplicate.args.command, /SORTIE_VALIDATION_REUSED/u);
     await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "duplicate-check", args: duplicate.args },
       { output: "SORTIE_VALIDATION_REUSED", metadata: { exit: 0 } });
+    if (registered) {
+      const result = await reviewerCorrectionValidationFresh([command], child, [], 0, checks, directory, undefined, undefined, true);
+      assert.equal(result.ready, true, JSON.stringify(result));
+      assert.deepEqual(result.matched?.map(item => item.callID), ["duplicate-check"]);
+      assert.equal(checks.length, 1);
+      assert.ok(checks[0]!.reusedEvidenceIDs?.length, "reuse links original proof; the notice is not a new execution");
+      await writeFile(join(directory, "candidate.txt"), "changed after reuse\n");
+      assert.equal((await reviewerCorrectionValidationFresh([command], child, [], 0, checks, directory, undefined, undefined, true)).ready,
+        false, "cached proof does not bypass current binding checks");
+      await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    }
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: taskID },
       { output: "<task_result>settled pass reused</task_result>", metadata: { sessionId: child } });
 
