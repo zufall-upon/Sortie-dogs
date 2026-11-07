@@ -53,6 +53,20 @@ V2投影ではこの状態を `unknown` とし、同じ一意なnative完了通�
 正確な完了通知後だけ同Missionの正規経路へ回復することを確認する。
 これは同Reviewerによる指摘修正と著者self-recheckであり、修正後の独立PASSではない。
 
+Medium: correction admissionが過去の `mission.reviewScope.read/write` を現行unitへ
+unionし、既に訂正した推定入力（今回の `scripts/**`）と不要な書込scopeを復活させていた。
+Review履歴は保持するが、correctionの検証入力・書込推定は現在のunit宣言を引き継ぐ。
+既存 `mission-binding-recovery` の公開経路へ、旧scopeに無関係な範囲外symlinkが
+残っていても現行inputでnative checkを正式結合できる回帰を追加。
+修正前は旧入力が復活して失敗（exit 1）。必要な追加編集は既存のscope拡張で扱い、
+過去scopeをそのまま現在の実行authorityにしない。
+このrepo修正は既に稼働中のcontrolや既存admissionを直接書き換えるものではない。
+
+P2: background processの完了通知は起動toolの完了保存より先に到着し得る。
+一意なshell/job ID・command一致を保ったまま、時刻境界をtool終端から実呼出し開始へ変更。
+開始前通知は拒否し、開始とtool終端の間に到着した通知でhot/coldのreplan/handoffを回復する。
+foreground検証exitやnative履歴は変更しない。
+
 ## 回帰確認
 
 既存 `test/v2-plugin.test.ts` にnative通知照合と、after-hook喪失＋中断patch＋
