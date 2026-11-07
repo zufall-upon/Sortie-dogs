@@ -516,6 +516,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   const gitCommitAdds: string[][] = [];
   let gitMutation = false;
   let gitAmbiguous = false;
+  let gitContextChanged = false;
   let unresolvedExpansion = false;
   let remoteMutation = false;
   const createdDirectories: string[] = [];
@@ -552,16 +553,25 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       continue;
     }
     if (powershell) {
+      if (/^\$env:GIT_[A-Za-z0-9_]+\s*=/iu.test(source)) gitContextChanged = true;
       const stripped = source.replace(/^\$[A-Za-z_][A-Za-z0-9_:]*\s*=\s*/u, "");
       assignment = stripped !== source;
       source = stripped;
       if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
-    let tokens = unwrapEnvironmentCommand(words(source));
+    const rawTokens = words(source);
+    let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
-    const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase();
+    const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
+    // A commit preflight observes the native cwd/index, not a command-local replacement.
+    // Keep opaque formatters usable, but never infer a repository after cd or GIT_* overrides.
+    if (["cd", "chdir", "pushd", "popd", "set-location", "sl", "push-location", "pop-location"].includes(executable) ||
+      rawTokens.slice(0, rawTokens.length - tokens.length).some(token => /^(?:--unset=)?GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token)) ||
+      (["export", "unset", "declare", "typeset", "readonly"].includes(executable) &&
+        tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
+      /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
     const commandOperands = operands(tokens);
     if (powershell && syntax.activeBrace) {
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
@@ -769,6 +779,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
       applies = true;
       ambiguous = true;
+      if ((executable === "git" || rawTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token))) &&
+        tokens.slice(1).some(token => token === "add" || token === "commit")) gitAmbiguous = true;
       issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }
   }
@@ -782,7 +794,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     ...(gitCommit ? { gitCommit: true } : {}),
     ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
-    ...(gitAmbiguous || gitMutation && unresolvedExpansion ? { gitAmbiguous: true } : {}),
+    ...(gitAmbiguous || gitMutation && (unresolvedExpansion || gitContextChanged) ? { gitAmbiguous: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
     ...(issue ? { issue } : {}),
   };
@@ -833,10 +845,10 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
     const extracted = shellPaths(command, powershell);
     const destinations = [...paths, ...extracted.paths];
-    // Native ShellTool resolves an explicit workdir against Location, then relative
-    // outputs against that cwd. Do not authorize a same-named path at the project root.
-    const workdir = toolDirectory !== undefined && isRecord(args) && typeof args.workdir === "string"
-      ? resolve(toolDirectory, args.workdir) : undefined;
+    // Native ShellTool defaults to Location, resolves an explicit workdir against it,
+    // then resolves outputs against that cwd, never an unrelated manifest root.
+    const workdir = toolDirectory === undefined ? undefined : resolve(toolDirectory,
+      isRecord(args) && typeof args.workdir === "string" ? args.workdir : ".");
     const rebase = (path: string): string => {
       if (workdir === undefined) return path;
       let normalized: ReturnType<typeof normalizeManifestPath>;
@@ -1371,15 +1383,19 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
-  const checkCachedSet = async (adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
+  const checkCachedSet = async (directory: string, adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
+    let repository: string;
     try {
+      const top = await execFileAsync("git", ["-C", directory, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true });
+      repository = top.stdout.replace(/\r?\n$/u, "");
+      if (!isAbsolute(repository)) throw new Error("Git worktree root must be absolute");
       ({ stdout } = await execFileAsync(
         "git",
         [
-          "-C", project.root,
+          "-C", repository,
           "-c", "core.quotePath=false",
-          "diff", "--cached", "--name-only", "--no-renames", "--relative", "-z", "--",
+          "diff", "--cached", "--name-only", "--no-renames", "--no-relative", "-z", "--",
         ],
         { encoding: "utf8", windowsHide: true },
       ));
@@ -1388,20 +1404,22 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     let cached: Set<string>;
     try {
-      cached = new Set(stdout.split("\0").filter(Boolean).map(normalizeRelativePath));
+      cached = new Set(stdout.split("\0").filter(Boolean).map(path => resolve(repository, normalizeRelativePath(path))));
       // Native shell runs the whole command after this preflight. Explicit earlier add paths
       // contribute to its prospective index; later adds and other write destinations do not.
-      for (const path of adds) cached.add(await project.toRelativePath(path));
+      for (const path of adds) {
+        const absolute = resolve(directory, path);
+        normalizeRelativePath(relative(repository, absolute));
+        cached.add(absolute);
+      }
+      for (const path of cached) await checkPath(path);
     } catch (error) {
       throw new WriteDeniedError("manifest-scope", "<cached>", { cause: error });
     }
     if (cached.size === 0) throw new WriteDeniedError("manifest-scope", "<cached>");
-    for (const path of cached) {
-      if (!await isWritable(path)) throw new WriteDeniedError("manifest-scope", "<cached>");
-    }
     // Write scope is permission, not a requirement to stage unchanged or removed scratch outputs.
     // Preserve existing staged paths and caller prohibitions in the prospective union.
-    await assertWritePaths?.([...cached].map(path => resolve(project.root, path)));
+    await assertWritePaths?.([...cached]);
   };
   return {
     checkPath,
@@ -1449,7 +1467,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         }
       }
       if (extracted.gitCommit) {
-        for (const adds of extracted.gitCommitAdds ?? [[]]) await checkCachedSet(adds, options?.assertWritePaths);
+        const directory = isRecord(output.args) && typeof output.args.workdir === "string"
+          ? resolve(toolDirectory, output.args.workdir) : toolDirectory;
+        for (const adds of extracted.gitCommitAdds ?? [[]]) await checkCachedSet(directory, adds, options?.assertWritePaths);
       }
     },
   };
