@@ -2348,8 +2348,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            if (!direct) throw new Error("mission-direct-unit-not-running");
            const checks = await runtimeBridge.reviewerCorrectionValidation!(root, direct.unit.callID!, context.sessionID,
              Date.parse(direct.unit.directExecution?.startedAt ?? direct.unit.reviewerCorrection!.admittedAt ?? direct.run.createdAt));
-          if (!checks?.ready) return JSON.stringify({ status: "direct-unit-awaits-validation", ...checks,
-            next_action: "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
+           if (!checks?.ready) return JSON.stringify({ status: "direct-unit-awaits-validation", ...checks,
+             next_action: checks?.next_action ?? "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
            // A resumed correction Task settles at its native terminal, not at this
            // advisory completion call. Inline/direct execution uses its existing finish path.
            if (direct.unit.directExecution) {
