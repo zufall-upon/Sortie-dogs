@@ -12,7 +12,7 @@ cleanな既存checkout、MIT、Node 22.22.1、npm 10.9.4、既存node_modulesを
 後者まで無視して再登録を永久拒否するのは不具合。
 
 - V2履歴adapterで、同じshell ID（job IDがあればそれも一致）、command、
-  launch終端以後の時刻を持つ一意なnative通知だけを照合し、投影上のstatusを完了へする。
+  invocation開始以後の時刻を持つ一意なnative通知だけを照合し、投影上のstatusを完了へする。
   proseの終了宣言、別ID/command/Session、古い通知、重複通知は解放根拠にしない。
 - 通知のexitやprocess終了時刻をforeground検証へ移植しない。
   process終端はquiescenceであり、検査成功・成果完成・Mission受入ではない。
@@ -62,10 +62,23 @@ Review履歴は保持するが、correctionの検証入力・書込推定は現�
 過去scopeをそのまま現在の実行authorityにしない。
 このrepo修正は既に稼働中のcontrolや既存admissionを直接書き換えるものではない。
 
-P2: background processの完了通知は起動toolの完了保存より先に到着し得る。
-一意なshell/job ID・command一致を保ったまま、時刻境界をtool終端から実呼出し開始へ変更。
-開始前通知は拒否し、開始とtool終端の間に到着した通知でhot/coldのreplan/handoffを回復する。
-foreground検証exitやnative履歴は変更しない。
+## 既存PRコメントの時刻競合
+
+PR #350 のコメント `4501671059`（P2）は有効。短いJobはlaunch toolの結果や
+error snapshot保存より先に終了通知を残せる。従来のlaunch終了時刻を下限にすると、
+正確な通知まで拒否し、`running` / `unknown` のまま正規回復できない。
+下限だけinvocation開始へ変更し、shell/job/session/command・一意性の照合は維持する。
+既存adapter testは通常／中断launchの両方で開始時刻と開始〜終了の間の通知を確認し、
+開始より前・別ID・別Session・重複通知の拒否を維持する。
+既存公開replan/handoffのhot/cold fixtureも同じ時刻順へ変更。
+修正前の限定6件はすべて失敗（exit 1、0.574秒）し、原因を再現した。
+修正後の実結果は下記正規commandとPR本文・native Mission記録に残す。
+
+commit後の通常pushはremote先行のため `non-fast-forward` で拒否された。
+到来した `d87265a`（同じP2/scope修正）と `1b7c1ee`（0.16.15準備）を
+force pushせず通常mergeで保持した。version/marker変更で入力が変わるため
+正式検査は統合候補で更新する。先行release準備の保持は公開実行の許可・結果ではない。
+今回の操作ではtag/GitHub Release/npm公開を行わない。
 
 ## 回帰確認
 
@@ -98,6 +111,26 @@ installed bytesを比較する。稼働中制御source/authorityの直接patch�
 同versionのローカル修正版とregistry版はhashで区別する。npm公開は今回対象外。
 既に稼働中のprocessが新コードを読んだかはinstalled bytesと別に確認し、
 未反映なら正直に再読込待ちと記録する。共有serviceを勝手に停止しない。
+
+### main統合と既存global成果の再利用
+
+旧候補 `24d67d0` はmainの #349 hotfixを含まず、当時はglobal上書きを見送った。
+これは正常なmain追従の禁止ではない。正本 `0540160` を通常mergeし、nativeWorker検査収集・
+登録同期・completionReadinessと既存test fixtureを保持する。runtime sourceはmainと同一にし、
+中断launchの開始時刻一致・終了前・終了後の追加境界testと、この記録を回帰補完PRへ残す。
+
+選択packageはmain `0540160da10b47c4fd30399c39f9830740393eb9` の既存検証済み
+`_testenv/releases/0.16.15/sortie-dogs-0.16.15.tgz`。
+SHA-256は `792c947e200c437a09843fbaf9f6b7cdebcb59cc89a195ad99d878dd87b8bd11`。
+新しいarchiveは作らない。同じhashの既存preflight成功（provider requestなし）を再利用し、
+最終checkoutとnpm globalの2prefix、OpenCode用packageの全payloadを現在bytesで照合する。
+全一致なら既に適用済みの外部成果として再利用し、install/initを繰り返さない。
+必要な再適用が生じた場合のみ直前の現在0.16.15を正確に保全し、通常手順で行う。
+古い0.16.14原版の復元物を現在版のrollbackへ流用しない。
+
+稼働中processのloaded identityはinstalled bytesと別。共有serviceを停止せず、
+未反映なら再読込未確認と明記する。今回の通常検査・実照合・必要Reviewの最終結果は
+native Mission記録と後続PRへ残す。VDMの既存model overrideやauthorityは変更しない。
 
 この修正はVDMの中断済み開発を完了させるものではない。
 VDM製品source・dirty・失敗・原画像・未受領状態と、消費済みroot1/Send1/interrupt1/15分枠を保持。
