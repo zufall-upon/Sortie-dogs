@@ -66,7 +66,7 @@ import {
   ROLLOVER_MARKER,
   STEP_CONTINUE_PREFIX,
 } from "../dist/plugin/continuation.js";
-import { createProjectPaths, createWriteGate, extractWritePaths } from "../dist/plugin/gate.js";
+import { createProjectPaths, createWriteGate, extractWritePaths, isGitMutation, isKnownReadOnlyTool } from "../dist/plugin/gate.js";
 import { validateManifest } from "../dist/core/validate-manifest.js";
 import {
   validateHandoffSchema,
@@ -10492,6 +10492,104 @@ test("git commit checks the native workdir clone and preserves scoped index and 
     assert.equal(await index(clone), "");
     assert.equal(await index(directory), unrelatedIndex, "actual clone commit cannot consume the Location index");
   }));
+});
+
+test("git identity commit follows public classification and native whole-index checks before real execution", async () => {
+  await withProject("git-identity-location", async directory => withProject("git-identity-clone", async clone => {
+    for (const root of [directory, clone]) await execFileAsync("git", ["init", root]);
+    await writeFile(join(directory, "unrelated.txt"), "unrelated work");
+    await execFileAsync("git", ["-C", directory, "add", "unrelated.txt"]);
+    await mkdir(join(clone, "src"));
+    const allowed = join(clone, "src/allowed.txt"), added = join(clone, "src/added.txt");
+    await writeFile(allowed, "candidate");
+    await writeFile(added, "prospective addition");
+    await writeFile(join(clone, "outside.txt"), "not authorized");
+    await execFileAsync("git", ["-C", clone, "add", "src/allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest([allowed, added]), clone);
+    const command = 'git -c user.name=tksooba -c user.email=t.obtks39u.ob@gmail.com commit -m "Prepare release sources in isolated candidate runs"';
+    const index = async (root: string) => (await execFileAsync("git", ["-C", root, "ls-files", "--stage", "-z"])).stdout;
+    const originalIndex = await index(clone), unrelatedIndex = await index(directory);
+    const check = (command: string, investigativeShell: boolean, workdir?: string) => gate.check(
+      { tool: "shell", sessionID: "identity", callID: command }, { args: { command, ...(workdir ? { workdir } : {}) } },
+      { investigativeShell });
+    for (const tool of ["shell", "bash", "powershell"]) {
+      const extracted = extractWritePaths(tool, { command });
+      assert.equal(extracted.ambiguous, false, tool);
+      assert.equal(extracted.gitCommit, true, tool);
+      assert.equal(extracted.gitMutation, true, tool);
+      assert.equal(extracted.gitAmbiguous, undefined, tool);
+      assert.equal(isGitMutation(tool, { command }), true, "parallel caller must still see a Git mutation");
+      assert.equal(isKnownReadOnlyTool(tool, { command }), false, "identity options do not make commit read-only");
+    }
+    for (const investigativeShell of [false, true]) {
+      for (const workdir of [undefined, clone, join(clone, "src")]) {
+        const checked: string[][] = [];
+        await gate.check({ tool: "shell", sessionID: "identity", callID: "scoped" }, {
+          args: { command, ...(workdir ? { workdir } : {}) },
+        }, { investigativeShell, assertWritePaths: async paths => { checked.push([...paths]); } });
+        assert.deepEqual(checked, [[allowed]]);
+      }
+      await check(`git add -- src/added.txt && ${command}`, investigativeShell);
+      await check('git -c "user.name=Sortie Identity" commit -m candidate', investigativeShell);
+      await check('git -c user.email=sortie@example.invalid commit -m candidate', investigativeShell);
+      for (const executable of ["git.exe", '"C:/Program Files/Git/cmd/git.exe"']) {
+        await check(command.replace(/^git/u, executable), investigativeShell);
+      }
+      await assert.rejects(gate.check({ tool: "shell", sessionID: "identity", callID: "caller" }, {
+        args: { command },
+      }, { investigativeShell, assertWritePaths: async () => { throw new Error("identity caller prohibition"); } }), /identity caller prohibition/);
+      await assert.rejects(check(command, investigativeShell, directory), /cached/);
+    }
+    assert.equal(await index(clone), originalIndex, "all preflights leave the actual staged blobs unchanged");
+    await execFileAsync("git", ["-C", clone, "add", "outside.txt"]);
+    const outsideIndex = await index(clone);
+    for (const investigativeShell of [false, true]) {
+      await assert.rejects(check(command, investigativeShell, join(clone, "src")), /cached/);
+      await assert.rejects(check(`git add -- src/added.txt && ${command}`, investigativeShell), /cached/);
+    }
+    assert.equal(await index(clone), outsideIndex, "scope rejection preserves every staged blob");
+    await execFileAsync("git", ["-C", clone, "rm", "--cached", "outside.txt"]);
+    await check(command, true);
+    await execFileAsync(command, { cwd: clone, shell: true });
+    assert.equal((await execFileAsync("git", ["-C", clone, "show", "-s", "--format=%an <%ae>%n%cn <%ce>"])).stdout.trim(),
+      "tksooba <t.obtks39u.ob@gmail.com>\ntksooba <t.obtks39u.ob@gmail.com>");
+    assert.equal((await execFileAsync("git", ["-C", clone, "show", "--format=", "--name-only", "HEAD"])).stdout.trim(), "src/allowed.txt");
+    assert.equal((await execFileAsync("git", ["-C", clone, "diff", "--cached", "--name-only"])).stdout, "");
+    assert.equal(await index(directory), unrelatedIndex, "real execution never consumes the Location index");
+  }));
+});
+
+test("git identity commit rejects arbitrary config, repository overrides and expansion without changing the index", async () => {
+  await withProject("git-identity-rejections", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "allowed.txt"), "candidate");
+    await execFileAsync("git", ["-C", directory, "add", "allowed.txt"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    const index = async () => (await execFileAsync("git", ["-C", directory, "ls-files", "--stage", "-z"])).stdout;
+    const originalIndex = await index();
+    const identity = "git -c user.name=test -c user.email=test@example.invalid";
+    for (const command of [
+      ...["core.hooksPath=elsewhere", "core.sshCommand=other", "core.editor=other", "alias.commit=!other", "include.path=other"].map(
+        config => `${identity} -c ${config} commit -m other`),
+      `${identity} -C elsewhere commit -m other`, `${identity} --git-dir=elsewhere commit -m other`,
+      `${identity} --work-tree=elsewhere commit -m other`, `${identity} --config-env=user.name=NAME commit -m other`,
+      "git -c user.name commit -m other", "git -c user.name= commit -m other",
+      "git -cuser.name=test commit -m other",
+      `${identity} add -- allowed.txt`, `${identity} commit --all -m other`, `${identity} commit --amend -m other`,
+      `${identity} commit -m other -- allowed.txt`,
+      `env GIT_INDEX_FILE=elsewhere ${identity} commit -m other`,
+      `export GIT_DIR=elsewhere && ${identity} commit -m other`,
+      `cd elsewhere && ${identity} commit -m other`,
+      'git -c user.name="$(id)" commit -m other', 'git -c user.name=${NAME} commit -m other',
+      'git -c user.name=$NAME commit -m other', 'git -c user.name=`id` commit -m other',
+    ]) {
+      assert.equal(extractWritePaths("shell", { command }).gitAmbiguous, true, command);
+      for (const investigativeShell of [false, true]) await assert.rejects(gate.check(
+        { tool: "shell", sessionID: "identity-reject", callID: command }, { args: { command } },
+        { investigativeShell }), /Write denied/, command);
+    }
+    assert.equal(await index(), originalIndex, "rejections neither stage nor consume indexed blobs");
+  });
 });
 
 test("git commit reconciles symlinked project and external clone roots including prospective adds", async () => {
