@@ -1087,6 +1087,15 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
     assert.equal(mission.attempts?.[0]?.kind, "direct_execution");
     assert.equal(mission.attempts?.[0]?.terminal, undefined, "active parent is not a native child terminal");
     await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);
+    if (mode === "correction") {
+      const initial = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"],
+        mode: "self-recheck" }, { sessionID: actor }));
+      assert.equal(initial.status, "mission-initial-self-recheck-unavailable");
+      assert.match(initial.next_action, /mode=independent/);
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), mission,
+        "initial self-recheck cannot manufacture a Reviewer, review disposition or acceptance");
+      await assert.rejects(hooks.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }), /mission-review/);
+    }
     const review = JSON.parse(await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"] }, { sessionID: actor }));
     const task = { args: structuredClone(review.task) };
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: actor, callID: "review-call" }, task);

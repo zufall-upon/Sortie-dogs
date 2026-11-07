@@ -211,10 +211,37 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
       : context.session.context({ sessionID: id }),
   ]);
   const agent = record(info) ? string(info.agent) : undefined;
-  return array(history).flatMap(value => {
+  const native = array(history);
+  const converted = native.flatMap(value => {
     const converted = legacyMessage(value, id, agent);
     return converted === undefined ? [] : [converted];
   });
+  // V2 retains the launch tool's metadata.status=running after the process ends.
+  // Its durable shell notification, not launch completion or prose, proves quiescence.
+  for (const message of converted) for (const part of array(message.parts)) {
+    if (!record(part) || part.tool !== "bash" || !record(part.state) ||
+        !["completed", "error"].includes(String(part.state.status))) continue;
+    const state = part.state, metadata = record(state.metadata) ? state.metadata : undefined;
+    const input = record(state.input) ? state.input : undefined, time = record(state.time) ? state.time : undefined;
+    if (!metadata || typeof metadata.shellID !== "string") continue;
+    // An interrupted launch can retain only progress({shellID}) while its independent
+    // Job still runs. A tool error is not process termination; keep it unproven.
+    if (state.status === "error" && metadata.status === undefined) metadata.status = "unknown";
+    if (!["running", "pending", "unknown"].includes(String(metadata.status)) ||
+        typeof input?.command !== "string" || typeof time?.start !== "number") continue;
+    const launchStart = time.start;
+    const terminals = native.filter(value => record(value) && value.type === "synthetic" &&
+      (value.sessionID === undefined || value.sessionID === id) && record(value.metadata) &&
+      value.metadata.source === "shell" && value.metadata.shellID === metadata.shellID &&
+      (value.metadata.jobID === undefined || value.metadata.jobID === metadata.shellID) &&
+      value.metadata.state === "completed" && value.description === input.command &&
+      record(value.time) && typeof value.time.created === "number" && value.time.created >= launchStart);
+    if (terminals.length === 1) {
+      // Only lifecycle projection: do not manufacture foreground validation exits/times.
+      metadata.status = "completed";
+    }
+  }
+  return converted;
 }
 
 async function nativePages(fetch: (cursor?: string) => Promise<unknown>, notBefore?: number): Promise<unknown[]> {

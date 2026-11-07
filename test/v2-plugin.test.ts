@@ -721,13 +721,53 @@ test("V2 adapter retains Docker codemode command/result as native observation wi
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission } of [
+test("V2 durable shell completion reconciles stale launch metadata only for the exact native invocation", async () => {
+  const fixture = contextFixture(), command = "node check.mjs";
+  const launch = { id: "background-call", type: "tool", name: "shell", time: { created: 100, ran: 101, completed: 110 },
+    state: { status: "completed", input: { command, background: true }, metadata: { status: "running", shellID: "sh_exact" } } };
+  fixture.history.push({ id: "background-message", type: "assistant", content: [launch] });
+  const terminal = { id: "native-shell-end", type: "synthetic", description: command, time: { created: 105 },
+    metadata: { source: "shell", shellID: "sh_exact", jobID: "sh_exact", state: "completed", exit: 7 },
+    text: "Process failed; this text is not terminal authority." };
+  let client: any;
+  const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
+  try {
+    const read = async () => (await client.session.messages({ path: { id: "root" } })).data
+      .find((m: any) => m.info.id === "background-message").parts[0];
+    assert.equal((await read()).state.metadata.status, "running");
+    for (const changed of [
+      { metadata: { ...terminal.metadata, source: "subagent" } },
+      { metadata: { ...terminal.metadata, shellID: "sh_other" } },
+      { metadata: { ...terminal.metadata, jobID: "sh_other" } },
+      { metadata: { ...terminal.metadata, state: "running" } },
+      { description: "node other.mjs" }, { time: { created: 100 } }, { type: "user" }, { sessionID: "other" },
+    ]) {
+      fixture.history.push({ ...terminal, ...changed });
+      assert.equal((await read()).state.metadata.status, "running", JSON.stringify(changed));
+      fixture.history.pop();
+    }
+    fixture.history.push(terminal, structuredClone(terminal));
+    assert.equal((await read()).state.metadata.status, "running", "ambiguous duplicate records do not release a writer");
+    fixture.history.pop();
+    const ended = await read();
+    assert.equal(ended.state.metadata.status, "completed", "nonzero process exit still proves quiescence, not success");
+    assert.equal(ended.state.metadata.exit, undefined, "no foreground validation exit is invented");
+    assert.deepEqual(ended.state.time, { start: 101, end: 110 }, "launch time is not rewritten as process completion");
+    assert.equal(launch.state.metadata.status, "running", "durable native source is never edited");
+    assert.equal(observedMissionValidation([command], "root", (await client.session.messages({ path: { id: "root" } })).data).attempts[0]!.exit_code,
+      null, "background lifecycle completion supplies no successful formal validation exit");
+  } finally { cleanup?.(); }
+});
+
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch } of [
+  ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
+    ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -763,6 +803,8 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
       };
       return hooks;
     }).setup({ ...fixture.context, location: { directory },
+      ...(directRecovery ? { message: { list: async ({ sessionID }: { sessionID: string }) =>
+        ({ data: history[sessionID] ?? [], cursor: {} }) } } : {}),
       ...(fabric ? { agent: { ...fixture.context.agent, get: async () => ({ model: {
         providerID: "openai", id: "gpt-6-luna-fast", variant: "max",
       } }) } } : {}),
@@ -960,6 +1002,55 @@ test(`V2 ${fabric ? `parallel native validation ${permission}` : cancel ? "cance
     const mission = await tool("root", "start_mission", { requirements: [original] });
     let dispatch = await before("root", "subagent", nativeTask(mission.task));
     await prompt("coordinator", String(dispatch.input.prompt));
+    if (directRecovery) {
+      const unit = { title: "Ready result", objective: "Create ready result", read: ["check.mjs"], write: ["result.txt"],
+        validation: ["node check.mjs ready"] };
+      const initial = await tool("coordinator", "plan_units", { executor: "self", units: [unit] });
+      assert.equal(initial.status, "direct-unit-running");
+      const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), originalRun = await readRun();
+      // The interrupted execution never delivered execute.after; only native history survives.
+      const patch = await before("coordinator", "patch", { patchText: "*** Begin Patch\n*** Add File: result.txt\n+ready\n*** End Patch" });
+      loseNextAfter = true; await after(patch, "Tool execution interrupted");
+      ((history.coordinator!.at(-1)!.content as any[])[0].state).status = "error";
+      const shell = await before("coordinator", "shell", { command: "node --version", workdir: directory, background: true });
+      loseNextAfter = true; await after(shell, "Background launched", { shellID: "sh_retained", ...(interruptedLaunch ? {} : { status: "running" }) });
+      const launch = (history.coordinator!.at(-1)!.content as any[])[0];
+      launch.time.completed = launch.time.ran + 100;
+      if (interruptedLaunch) {
+        // Native interruption snapshots progress({shellID}) before the independent Job returns its launch result.
+        const state = (history.coordinator!.at(-1)!.content as any[])[0].state;
+        state.status = "error"; state.error = { type: "aborted", message: "Tool execution interrupted" };
+      }
+      const request = () => tool("coordinator", "plan_units", directRecovery === "handoff"
+        ? { executor: "worker", handoff_context: "Continue this same result after the interrupted command." }
+        : { executor: "self", units: [{ ...unit, objective: "Finish the existing ready result directly" }], reason: "Retain result, correct the method" });
+      await assert.rejects(request(), /mission-direct-tools-running/);
+      assert.equal((await readRun()).units[0]!.status, "running");
+      if (interruptedLaunch) {
+        cleanup?.(); await start();
+        const waiting = await request();
+        assert.match(waiting.status, /terminal-unreconciled:tool_dispatch_active_or_unproven|direct-handoff-awaits-tools/);
+        assert.equal((await readRun()).runID, originalRun.runID, "cold recovery cannot replace an unproven shell writer");
+      }
+      history.coordinator!.push({ id: "shell-terminal", type: "synthetic", description: "node --version", time: { created: launch.time.ran + 1 },
+        metadata: { source: "shell", shellID: "sh_retained", jobID: "sh_retained", state: "completed", exit: 1 }, text: "Native shell ended" });
+      const recovered = await request();
+      if (interruptedLaunch) {
+        const native = history.coordinator!.flatMap(message => message.content as any[] ?? []).find(part => part.id === shell.id);
+        assert.equal(native.state.metadata.status, undefined, "recovery only projects lifecycle; native progress stays unchanged");
+      }
+      if (directRecovery === "replan") assert.equal(recovered.status, "direct-unit-running", JSON.stringify(recovered));
+      const current = await readRun();
+      assert.deepEqual(current.acceptance, originalRun.acceptance);
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, mission.mission_id);
+      assert.equal(current.units[0]!.evidence.length, 0, "quiescence never manufactures successful validation");
+      if (directRecovery === "handoff") {
+        assert.equal(current.runID, originalRun.runID);
+        assert.equal(current.units[0]!.directHandoffs?.length, 1, JSON.stringify({ recovered, current }));
+        assert.ok(recovered.task, "the normal Worker handoff, not a new Mission, owns the remaining result");
+      } else assert.notEqual(current.runID, originalRun.runID, JSON.stringify({ recovered, current }));
+      return;
+    }
     let firstRun: string | undefined;
     let budget: { max_units: number; consumed_units: number } | undefined;
     let retiredHandoff: string | undefined;
