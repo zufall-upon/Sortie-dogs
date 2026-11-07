@@ -10550,6 +10550,57 @@ test("git commit authorizes staged symlink entries without granting writes to th
   });
 });
 
+test("git commit preserves missing directory scope components", async () => {
+  await withProject("git-missing-directory-scope", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "outside.txt"), "outside");
+    await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    const request = { tool: "shell", sessionID: "missing-scope", callID: "commit" };
+    for (const scope of [["future/**"], [`${join(directory, "future")}/**`]]) {
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m outside" } }, { investigativeShell: true }), /cached/);
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", "outside.txt"]);
+      await mkdir(join(directory, "future"));
+      await writeFile(join(directory, "future/allowed.txt"), "allowed");
+      await execFileAsync("git", ["-C", directory, "add", "future/allowed.txt"]);
+      await gate.check(request, { args: { command: "git commit -m future" } }, { investigativeShell: true });
+      await execFileAsync("git", ["-C", directory, "rm", "--cached", "future/allowed.txt"]);
+      await rm(join(directory, "future"), { recursive: true });
+      await execFileAsync("git", ["-C", directory, "add", "outside.txt"]);
+    }
+  });
+});
+
+test("git commit uses indexed ancestry independently of working-tree directory symlinks", async () => {
+  await withProject("git-indexed-ancestry", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, "outside"));
+    await mkdir(join(directory, "allowed"));
+    await writeFile(join(directory, "outside/secret.txt"), "indexed outside");
+    await writeFile(join(directory, "allowed/secret.txt"), "working-tree target");
+    await execFileAsync("git", ["-C", directory, "add", "outside/secret.txt"]);
+    await rm(join(directory, "outside"), { recursive: true });
+    await symlink(join(directory, "allowed"), join(directory, "outside"), process.platform === "win32" ? "junction" : "dir");
+    const request = { tool: "shell", sessionID: "indexed-ancestry", callID: "commit" };
+    for (const scope of [["allowed/**"], [`${join(directory, "allowed")}/**`]]) {
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(scope));
+      await assert.rejects(gate.check(request, { args: { command: "git commit -m unrelated" } }, { investigativeShell: true }), /cached/);
+    }
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["outside/secret.txt"]));
+    await gate.check(request, { args: { command: "git commit -m actual-entry" } }, { investigativeShell: true });
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "outside/secret.txt\0", "authorization preserves the original index pathname");
+    await execFileAsync("git", ["-C", directory, "rm", "--cached", "--force", "outside/secret.txt"]);
+    const nativeAliasGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["outside/secret.txt"]));
+    await assert.rejects(nativeAliasGate.check(request, { args: {
+      command: "git add -- secret.txt && git commit -m prospective", workdir: join(directory, "outside"),
+    } }, { investigativeShell: true }), /cached/, "relative add uses physical native cwd, not the indexed alias pathname");
+    await execFileAsync("git", ["add", "secret.txt"], { cwd: join(directory, "outside") });
+    assert.equal((await execFileAsync("git", ["-C", directory, "diff", "--cached", "--name-only", "-z"])).stdout,
+      "allowed/secret.txt\0", "real Git confirms the prospective entry selected by native cwd");
+  });
+});
+
 test("git commit rejects command-level repository overrides in native shell mode", async () => {
   await withProject("git-commit-context", async directory => {
     await execFileAsync("git", ["init", directory]);

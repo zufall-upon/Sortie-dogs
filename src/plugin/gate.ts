@@ -865,7 +865,8 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
-      ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds.map(paths => paths.map(rebase)) } : {}),
+      // Preserve operand kind: Git resolves relative adds from the physical native cwd.
+      ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
       ...(extracted.gitAmbiguous ? { gitAmbiguous: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
@@ -1384,20 +1385,13 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
     if (!await isWritable(normalized)) throw new WriteDeniedError("manifest-scope", normalized);
   };
-  // Git stages/commits directory entries, not writes through the final symlink.
-  // Canonicalize ancestors only so workspace aliases agree with Git's physical root.
-  const canonicalEntryPath = async (path: string): Promise<string> => {
-    const parent = dirname(path);
-    const entry = resolve(await canonicalPotentialPath(parent), basename(path));
-    return await isCaseInsensitivePath(parent) ? entry.toLowerCase() : entry;
-  };
-  const gitEntryScopes = await Promise.all([
+  // Git scope is an index pathname, independent of mutable working-tree entries.
+  const gitEntryScopes = [
     ...[...exactWritable].map(path => ({ path: project.absolute(path), directory: false })),
     ...externalFiles.map(({ path }) => ({ path, directory: false })),
-    ...writableDirectories.map(({ path, realPath }) => ({ path: project.absolute(path), directory: true, realPath })),
-    ...externalDirectories.map(({ path, realPath }) => ({ path, directory: true, realPath })),
-  ].map(async scope => ({ ...scope, canonical: "realPath" in scope && typeof scope.realPath === "string"
-    ? await canonicalPotentialPath(scope.realPath) : await canonicalEntryPath(scope.path) })));
+    ...writableDirectories.map(({ path }) => ({ path: project.absolute(path), directory: true })),
+    ...externalDirectories.map(({ path }) => ({ path, directory: true })),
+  ];
   const checkCachedSet = async (directory: string, adds: readonly string[], assertWritePaths?: (paths: readonly string[]) => Promise<void>): Promise<void> => {
     let stdout: string;
     let repository: string;
@@ -1420,17 +1414,40 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     let cached: Set<string>;
     const callerPaths = new Set<string>();
     try {
+      const insensitive = await isCaseInsensitivePath(repository);
+      const key = (path: string): string => insensitive ? resolve(path).toLowerCase() : resolve(path);
+      const roots = await Promise.all([project.root, directory].map(async path => ({ path, physical: await realpath(path) })));
+      const indexPath = async (path: string, directoryScope = false): Promise<string> => {
+        if (isWithin(key(repository), key(path))) return key(path);
+        // Resolve a workspace-root alias only; never resolve index-relative ancestors.
+        let ancestor = directoryScope ? path : dirname(path);
+        while (true) {
+          try {
+            if (key(await realpath(ancestor)) === key(repository)) return key(resolve(repository, relative(ancestor, path)));
+          } catch (error) {
+            if (!isRecord(error) || !["ENOENT", "ENOTDIR"].includes(String(error.code))) throw error;
+          }
+          const parent = dirname(ancestor);
+          if (parent === ancestor) break;
+          ancestor = parent;
+        }
+        // A native/project Location can itself alias a repository subdirectory.
+        const root = roots.find(root => isWithin(key(root.path), key(path)) && isWithin(key(repository), key(root.physical)));
+        return key(root ? resolve(root.physical, relative(root.path, path)) : path);
+      };
+      const scopedEntries = await Promise.all(gitEntryScopes.map(async scope => ({ ...scope,
+        canonical: await indexPath(scope.path, scope.directory) })));
       cached = new Set(stdout.split("\0").filter(Boolean).map(path => resolve(repository, normalizeRelativePath(path))));
       // Native shell runs the whole command after this preflight. Explicit earlier add paths
       // contribute to its prospective index; later adds and other write destinations do not.
       for (const path of adds) {
-        const absolute = await canonicalEntryPath(resolve(directory, path));
+        const absolute = await indexPath(resolve(roots[1]!.physical, path));
         normalizeRelativePath(relative(repository, absolute));
         cached.add(absolute);
       }
       for (const path of cached) {
-        const canonical = await canonicalEntryPath(path);
-        const scopes = gitEntryScopes.filter(scope => scope.directory
+        const canonical = key(path);
+        const scopes = scopedEntries.filter(scope => scope.directory
           ? isWithin(scope.canonical, canonical) : scope.canonical === canonical);
         if (scopes.length === 0) throw new WriteDeniedError("manifest-scope", path);
         callerPaths.add(path);
