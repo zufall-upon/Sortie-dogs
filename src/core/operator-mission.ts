@@ -10,6 +10,7 @@ import { retainMissionContext, missionContextView, type MissionContinuity } from
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
 import { applyPendingWork, rememberWorkMission, rememberedWorkRun } from "./work-quantity-observations.js";
 import { appendPurposeDecision, purposeDecisionView, type PurposeDecision } from "./mission-purpose.js";
+import type { MissionGrip } from "./grip.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -198,6 +199,8 @@ export interface OperatorMission {
   continuity?: MissionContinuity;
   /** Optional bounded strategy observations; never requirements, proof or authority. */
   purposeDecisions?: PurposeDecision[];
+  /** Explicit native Grip question and held user direction; never new execution authority. */
+  grip?: MissionGrip;
   /** Operator recommendation from already-known context; not a requirement or execution lock. */
   preferredExecutor?: "coordinator" | "worker";
   /** Known unit facts passed to the Coordinator without pre-starting a Worker. */
@@ -510,6 +513,7 @@ export class OperatorMissionRuntime {
       catch { return { ...source, snapshot_available: false }; }
     }));
     return { original_requests: state.requests, requirements: state.requirements, prohibited_write: state.prohibitedWrite ?? [],
+      ...(state.grip?.pending ? { grip: state.grip } : {}),
       ...(state.preferredExecutor ? { preferred_executor: state.preferredExecutor } : {}),
       launch_conditions: state.launchConditions ?? [],
       conversation: sources.some(source => source.session_id === state.root && source.entries > 0 && !("snapshot_available" in source)) ? [] : state.context ?? [],
@@ -1038,6 +1042,12 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
   const workload = syncWorkQuantity(structuredClone(mission.workQuantity ?? planWorkQuantity(mission,
     run?.runID === mission.runID ? run.units.map(unit => unit.unit) : [], run)), mission, run);
   return { mission_id: mission.id, phase: mission.phase, coordinator_session_id: mission.coordinator,
+    ...(mission.grip?.pending && !["completed", "cancelled"].includes(mission.phase) ? { grip: {
+      status: "needs-user-direction", resume_header: mission.grip.pending.resumeHeader,
+      consultation_requested: mission.grip.pending.consultationRequested,
+      user_feedback: mission.grip.questions.filter(q => q.feedback !== undefined &&
+        (q.header === mission.grip!.pending!.resumeHeader || q.callID === mission.grip!.pending!.callID)).at(-1)?.feedback,
+      question: mission.grip.questions.find(q => q.callID === mission.grip!.pending!.callID && q.sessionID === mission.grip!.pending!.sessionID) } } : {}),
     ...(includeWorkQuantity ? { work_quantity: projectWorkQuantity(workload, mission.phase === "completed", mission.phase === "cancelled") } : {}),
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
@@ -1074,6 +1084,7 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
          ...(unit.dispatchDenial ? { dispatch_denial: unit.dispatchDenial } : {}) })) } : {}),
     ...(mission.preferredExecutor ? { preferred_executor: mission.preferredExecutor } : {}),
     next_action: mission.phase === "completed" ? "Mission completed. Report the accepted result and retained review gaps; no further dispatch or completion call is needed."
+      : mission.grip?.pending && mission.phase !== "cancelled" ? `User direction is held. ${mission.grip.pending.consultationRequested ? "Consult only the authorized recipient/scope, then " : "Preserve received feedback and "}use question header=${mission.grip.pending.resumeHeader} for the corresponding revised choice. Advice is not permission. Reads, status, cancellation and existing Worker settlement remain available.`
       : mission.phase === "submitted" && mission.submission?.status === "ready"
        ? "Operator: use acceptance_summary to compare the submitted candidate with the verbatim original requests and actual evidence, inspect concrete gaps only, then complete_mission if satisfied. Do not routinely search archives or reread all source. Historical PASS is not current PASS. Report remaining evidence gaps; they are not a review PASS."
       : run?.phase === "awaiting-acceptance" && mission.corrections?.some(item => item.runID === run.runID && item.status === "ready") && !reviewAccepted

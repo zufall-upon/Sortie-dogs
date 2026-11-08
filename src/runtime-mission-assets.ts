@@ -1,6 +1,7 @@
 import { profileAgent, type RuntimeProfile } from "./core/runtime-profile.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { scoutDiscoveryPolicy } from "./runtime-scout-policy.ts";
+import { GRIP_POLICY } from "./core/grip.js";
 
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";
@@ -365,6 +366,8 @@ ${MISSION_PRESENTATION}
 
 ${MISSION_PURPOSE}
 
+${GRIP_POLICY}
+
 Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
 Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
 Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
@@ -603,6 +606,8 @@ Do not reconstruct or prepend the absolute workspace path. Preserve explicitly r
 ${MISSION_PRESENTATION}
 
 ${MISSION_PURPOSE}
+
+${GRIP_POLICY}
 
 For release/benchmark work, retain the user's selected package/environment and record its receipt/hash.
 A local repack and a published tarball can have different hashes; that alone does not prohibit a requested
