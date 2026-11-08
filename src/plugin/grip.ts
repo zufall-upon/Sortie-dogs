@@ -16,7 +16,7 @@ const short = (text: string, limit: number) => Array.from(text).slice(0, limit).
 /** Explicit native questions only: no semantic inference, outgoing traffic or process cancellation. */
 export class MissionGripController {
   readonly missions: OperatorMissionRuntime;
-  private readonly failedWrites = new Set<string>();
+  private readonly failedWrites = new Map<string, string>();
   constructor(directory: string, readonly getSession: (id: string) => Promise<unknown>,
     readonly history: (id: string) => Promise<unknown[]>) {
     this.missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -63,7 +63,7 @@ export class MissionGripController {
     }
     if (!results.length) return mission;
     const updated = await this.missions.update(root, m => {
-      if (!m.grip) return;
+      if (m.id !== mission.id || !active(m) || !m.grip) return;
       for (const result of results) {
         const offered = m.grip.questions.find(q => q.callID === result.callID && q.sessionID === result.sessionID);
         if (offered) {
@@ -85,7 +85,7 @@ export class MissionGripController {
     const feedback = mission.grip!.questions.filter(q => q.feedback !== undefined &&
       (q.callID === pending.callID || q.header === pending.resumeHeader)).at(-1)?.feedback;
     return { status: "needs-user-direction", decision_call_id: pending.callID, resume_header: pending.resumeHeader,
-      ...(this.failedWrites.has(owner.root) ? { save_failed: true } : {}),
+      ...(this.failedWrites.get(owner.root) === mission.id ? { save_failed: true } : {}),
       consultation_requested: pending.consultationRequested,
       ...(feedback !== undefined ? { user_feedback: feedback, feedback_received_direction_still_held: true } : {}),
       original_requests: mission.requests, undecided: question,
@@ -124,6 +124,7 @@ export class MissionGripController {
           question: quote + q.question.replace(/\r?\n+/gu, "\n\n"), consultationLabel: label,
           options: [...options, { label, description: japanese ? "この方針を保留し、元の目的から考え直す" : "Hold this direction and reconsider the original goal" }] };
         await this.missions.update(owner.root, m => {
+          if (m.id !== mission.id || !active(m)) throw new Error("mission-grip-owner-changed: preserve the successor Mission; discard this stale question and use its current user direction");
           m.grip ??= { questions: [] };
           if (!m.grip.questions.some(q => q.callID === offered.callID && q.sessionID === offered.sessionID)) {
             // Keep the held decision and current offer across bounded history retention.
@@ -145,7 +146,7 @@ export class MissionGripController {
     const changesDirection = typeof event.tool === "string" && (
       /^(?:sortie_v010_(?:start_mission|plan_units|start_direct_unit|expand_unit|operator_next|complete_mission|complete_operator|submit_mission|review_mission|retry_mission_unit|rescue_mission_unit|repair_review)|edit|write|patch|apply_patch)$/u.test(event.tool) ||
       event.tool === "subagent" && !["dog-advisor-v010", "dog-scout-v010"].includes(String(input.agent)) || shell && !safeShell);
-    if (changesDirection && (pending || this.failedWrites.has(owner.root))) {
+    if (changesDirection && (pending || this.failedWrites.get(owner.root) === mission.id)) {
       throw new Error(`mission-grip-needs-user-direction: use ${pending?.resumeHeader ?? "the retained Grip decision"}; read/status/consultation/cancel and existing Worker settlement remain available`);
     }
   }
@@ -155,8 +156,11 @@ export class MissionGripController {
     if (!owner) return;
     const q = owner.mission.grip?.questions.find(q => q.callID === event.id && q.sessionID === event.sessionID);
     if (!q) return;
+    let applied = false;
     try {
       await this.missions.update(owner.root, m => {
+        if (m.id !== owner.mission.id || !active(m)) return;
+        applied = true;
         const offered = m.grip?.questions.find(q => q.callID === event.id && q.sessionID === event.sessionID);
         if (offered && m.grip) {
           const metadata = record(event.result) && record(event.result.metadata) ? event.result.metadata : {};
@@ -165,7 +169,8 @@ export class MissionGripController {
         }
       });
       this.failedWrites.delete(owner.root);
-    } catch (error) { this.failedWrites.add(owner.root); throw error; }
+    } catch (error) { this.failedWrites.set(owner.root, owner.mission.id); throw error; }
+    if (!applied) return;
     return this.pending(String(event.sessionID));
   }
 }

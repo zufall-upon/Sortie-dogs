@@ -132,3 +132,19 @@ test("a failed answer save never resumes the proposal; cancellation survives nat
     assert.equal((await f.controller.pending("root"))!.consultation_requested, true);
   } finally { await f.dispose(); }
 });
+
+test("a stale native before hook cannot attach the previous decision to a successor Mission", async () => {
+  const f = await fixture();
+  try {
+    const update = f.controller.missions.update.bind(f.controller.missions);
+    f.controller.missions.update = async (root, mutation) => {
+      await update(root, m => { m.id = "mission-successor"; m.requests = [{ id: "new-user", text: "New user direction" }]; });
+      return update(root, mutation);
+    };
+    await assert.rejects(f.controller.before(question("stale-before")), /mission-grip-owner-changed/);
+    const successor = await f.missions.required("root");
+    assert.equal(successor.id, "mission-successor");
+    assert.equal(successor.grip, undefined);
+    assert.deepEqual(successor.requests, [{ id: "new-user", text: "New user direction" }]);
+  } finally { await f.dispose(); }
+});
