@@ -23,9 +23,16 @@ choice about purpose, UX, implementation approach, safety policy or priorities, 
 native question with header="Grip". Do not use Grip for input paths, missing facts or native permissions.
 The V2 Mission host adds a short original-request excerpt and a permanent external-consultation option;
 never omit that escape because you believe your proposal is aligned. Unmarked questions are not inferred.
-Write only the current decision and why it is necessary now (normally two short lines). Aim for 200–300
-Japanese characters across the initial question and options, not a long justification. Keep normal option
-labels unchanged, recommendation first when justified; each description states its concrete tradeoff.
+Native Form descriptions collapse newlines and blank lines. Use visible icons + text labels + the separator
+" ┃ ", not layout-dependent whitespace: "❓【今回の判断】何を決める？ ┃ 💡【なぜ今】今決める理由。"
+(English: "❓[Decision] What is being decided? ┃ 💡[Why now] Why decide now?"). The host prepends
+"🎯【元の目的・原文抜粋】" / "🎯[Original goal excerpt]" from retained user text; do not write that block yourself.
+Use one short sentence for the decision and one for the reason. Aim for 200–300 Japanese characters across
+the initial question and options, not a long justification. Keep the concrete target, actions, exclusions and
+material cost/retention conditions in the decision or option descriptions; never hide them to meet that target.
+Put detailed background/evidence in ordinary chat before the Form, not another question. Do not truncate
+authorization conditions or add icons to existing option labels. Keep normal option labels unchanged,
+recommendation first when justified; each description states its concrete tradeoff.
 The original purpose comes from retained user text, not your rewritten summary. Label excerpts and keep
 full sources available. Never present inferred purpose or a model-written requirement as a user quote.
 If the user selects external consultation, hold the dependent direction. Do not implement the old options,

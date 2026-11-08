@@ -38,7 +38,7 @@ test("Grip augments only explicit active-Mission controller single choices, pres
     const original = structuredClone(multiple); await f.controller.before(multiple); assert.deepEqual(multiple, original);
     const q = question("current");
     await f.controller.before(q); await f.controller.before(q);
-    assert.match(q.input.questions[0]!.question, /^元の目的（原文抜粋）: 作業を速く・安く・楽に完了する。\n\n今回の判断/u);
+    assert.match(q.input.questions[0]!.question, /^🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。$/u);
     assert.deepEqual(q.input.questions[0]!.options.map(q => q.label), ["A", "B", "目的に戻って外部相談"]);
     assert.ok(q.input.questions[0]!.question.length + q.input.questions[0]!.options.map(q => q.label + q.description).join("").length < 300);
     const before = await f.missions.required("root");
@@ -46,6 +46,86 @@ test("Grip augments only explicit active-Mission controller single choices, pres
     assert.equal(await f.controller.pending("root"), undefined);
     assert.deepEqual((await f.missions.required("root")).requests, before.requests);
     assert.deepEqual((await f.missions.required("root")).requirements, before.requirements);
+  } finally { await f.dispose(); }
+});
+
+test("Grip sections remain distinct after native whitespace collapse without changing authorization conditions", async () => {
+  const f = await fixture();
+  try {
+    const q = question("inline-sections");
+    q.input.questions[0]!.question = "今回の判断：固定5件取得・既存キー限定供給・Private一時保存を許可する？\r\n\r\nなぜ今：実packageへ進むため。\n条件：本人がキー設定、保存1日、追加課金を確認できなければ保存しない。";
+    const options = structuredClone(q.input.questions[0]!.options);
+    await f.controller.before(q);
+    const formatted = q.input.questions[0]!.question;
+    assert.doesNotMatch(formatted, /[\r\n]/u);
+    assert.match(formatted.replace(/\s+/gu, " "), /🎯【元の目的・原文抜粋】.+ ┃ ❓【今回の判断】固定5件取得・既存キー限定供給・Private一時保存を許可する？ ┃ 💡【なぜ今】実packageへ進むため。 ┃ 条件：本人がキー設定、保存1日、追加課金を確認できなければ保存しない。/u);
+    assert.deepEqual(q.input.questions[0]!.options.slice(0, -1), options);
+    const saved = structuredClone(q);
+    await f.controller.before(q);
+    assert.deepEqual(q, saved);
+    assert.equal(formatted.split("🎯【元の目的・原文抜粋】").length, 2);
+  } finally { await f.dispose(); }
+});
+
+test("Grip formats explicit English headings and already decorated sections without duplicate decision labels", async () => {
+  const f = await fixture();
+  try {
+    await f.missions.update("root", m => { m.requests[0]!.text = "Keep the release reproducible and affordable."; });
+    for (const [index, raw] of [
+      "Decision: Allow download only?\r\nWhy now: The fixed inputs are missing.",
+      "❓[Decision] Allow download only? ┃ 💡[Why now] The fixed inputs are missing.",
+      "Allow download only?\nKeep publication and key supply excluded.",
+    ].entries()) {
+      const q = question(`english-${index}`);
+      q.input.questions[0]!.question = raw;
+      await f.controller.before(q);
+      const text = q.input.questions[0]!.question;
+      assert.match(text, /^🎯\[Original goal excerpt\] "Keep the release reproducible and affordable\." ┃ ❓\[Decision\]/u);
+      assert.equal(text.split("❓[Decision]").length, 2);
+      assert.doesNotMatch(text, /[\r\n]/u);
+      if (index < 2) assert.match(text, / ┃ 💡\[Why now\] The fixed inputs are missing\./u);
+      else assert.ok(text.endsWith("Keep publication and key supply excluded."));
+      await f.controller.after(answer(q, "A"));
+    }
+  } finally { await f.dispose(); }
+});
+
+test("saved legacy Grip offers retain their exact text and answer identity across new-format retries", async () => {
+  const f = await fixture();
+  try {
+    const q = question("legacy-question"), raw = structuredClone(q);
+    const legacy = { callID: q.id, sessionID: "root", header: "Grip",
+      question: "元の目的（原文抜粋）: 作業を速く・安く・楽に完了する。\n\n" + q.input.questions[0]!.question.replace(/\r?\n+/gu, "\n\n"),
+      consultationLabel: "目的に戻って外部相談",
+      options: [...q.input.questions[0]!.options, { label: "目的に戻って外部相談", description: "この方針を保留し、元の目的から考え直す" }] };
+    await f.missions.update("root", m => { m.grip = { questions: [legacy], pending: { callID: q.id,
+      sessionID: "root", consultationRequested: false, resumeHeader: "Grip:legacy" } }; });
+    await f.controller.before(q);
+    assert.equal(q.input.questions[0]!.question, legacy.question);
+    assert.deepEqual(q.input.questions[0]!.options, legacy.options);
+    await f.controller.before(raw);
+    assert.equal(raw.input.questions[0]!.question, legacy.question);
+    const pending = await f.controller.after(answer(q, legacy.consultationLabel));
+    assert.equal(pending!.consultation_requested, true);
+    const resume = question("new-format-revision", String(pending!.resume_header));
+    await f.controller.before(resume);
+    assert.match(resume.input.questions[0]!.question, /^🎯【元の目的・原文抜粋】/u);
+    await f.controller.after(answer(resume, "A"));
+    assert.equal(await f.controller.pending("root"), undefined);
+    assert.equal((await f.missions.required("root")).grip!.questions[0]!.question, legacy.question);
+  } finally { await f.dispose(); }
+});
+
+test("Grip preserves long decision text and negated conditions instead of enforcing a display-length cutoff", async () => {
+  const f = await fixture();
+  try {
+    const q = question("long-decision");
+    const decision = "対象・操作の具体的な条件。".repeat(40) + "追加課金が不明なら保存しない。";
+    q.input.questions[0]!.question = decision;
+    await f.controller.before(q);
+    assert.ok(q.input.questions[0]!.question.endsWith(decision));
+    assert.match(q.input.questions[0]!.question, / ┃ ❓【今回の判断】/u);
+    assert.deepEqual((await f.missions.required("root")).requests[0]!.text, "作業を速く・安く・楽に完了する。\n  原文の空白も保持。");
   } finally { await f.dispose(); }
 });
 
@@ -113,6 +193,9 @@ test("Grip policy is present on both Mission controllers, not Workers; no routin
   assert.ok(!runtimeAssets.find(a => a.name === "dog-worker-v010")!.content.includes(GRIP_POLICY));
   assert.match(GRIP_POLICY, /Do not create questions for routine implementation/);
   assert.match(GRIP_POLICY, /Advice|advice as permission/);
+  assert.match(GRIP_POLICY, /Native Form descriptions collapse newlines and blank lines/);
+  assert.match(GRIP_POLICY, /❓【今回の判断】.+ ┃ 💡【なぜ今】/u);
+  assert.match(GRIP_POLICY, /never hide them to meet that target/);
 });
 
 test("a failed answer save never resumes the proposal; cancellation survives native history failure", async () => {
