@@ -148,3 +148,46 @@ test("a stale native before hook cannot attach the previous decision to a succes
     assert.deepEqual(successor.requests, [{ id: "new-user", text: "New user direction" }]);
   } finally { await f.dispose(); }
 });
+
+test("distinct concurrent initial questions serialize admission before either native form opens", async () => {
+  const f = await fixture();
+  try {
+    const calls = [question("concurrent-a"), question("concurrent-b")];
+    const results = await Promise.allSettled(calls.map(q => f.controller.before(q)));
+    assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+    assert.equal(results.filter(r => r.status === "rejected").length, 1);
+    const admitted = calls[results.findIndex(r => r.status === "fulfilled")]!;
+    const state = await f.missions.required("root");
+    assert.equal(state.grip!.questions.length, 1);
+    assert.equal(state.grip!.pending!.callID, admitted.id);
+    await f.controller.after(answer(admitted, "目的に戻って外部相談"));
+    await assert.rejects(f.controller.before({ tool: "edit", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/);
+  } finally { await f.dispose(); }
+});
+
+test("a reused outer call ID rejects a revised Grip form instead of replaying an answered offer", async () => {
+  const f = await fixture();
+  try {
+    const original = question("outer-call"); await f.controller.before(original);
+    const pending = await f.controller.after(answer(original, "目的に戻って外部相談"));
+    await assert.rejects(f.controller.before(question("outer-call", String(pending!.resume_header))), /mission-grip-question-call-reused/);
+    assert.ok(await f.controller.pending("root"));
+    const fresh = question("fresh-native-call", String(pending!.resume_header)); await f.controller.before(fresh);
+    await f.controller.after(answer(fresh, "A")); assert.equal(await f.controller.pending("root"), undefined);
+  } finally { await f.dispose(); }
+});
+
+test("history failure reports unavailable recovery while observations, consultation and context state remain usable", async () => {
+  const f = await fixture();
+  try {
+    await f.controller.before(question("lost-answer-hook"));
+    const cold = new MissionGripController(f.missions.projectRoot, async () => ({ agent: "dog-operator" }),
+      async () => { throw new Error("native history offline"); });
+    for (const tool of ["read", "sortie_v010_operator_status", "sortie_v010_cancel_operator"])
+      await cold.before({ tool, sessionID: "root", input: {} });
+    await cold.before({ tool: "subagent", sessionID: "root", input: { agent: "dog-advisor-v010" } });
+    const pending = await cold.pending("root");
+    assert.equal((pending!.recovery as { status: string }).status, "unavailable");
+    await assert.rejects(cold.before({ tool: "edit", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/);
+  } finally { await f.dispose(); }
+});

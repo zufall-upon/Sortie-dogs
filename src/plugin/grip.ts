@@ -17,6 +17,7 @@ const short = (text: string, limit: number) => Array.from(text).slice(0, limit).
 export class MissionGripController {
   readonly missions: OperatorMissionRuntime;
   private readonly failedWrites = new Map<string, string>();
+  private readonly recoveryErrors = new Map<string, { missionID: string; reason: string }>();
   constructor(directory: string, readonly getSession: (id: string) => Promise<unknown>,
     readonly history: (id: string) => Promise<unknown[]>) {
     this.missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -47,6 +48,17 @@ export class MissionGripController {
         !state.pending.consultationRequested && offered.callID === state.pending.callID && offered.sessionID === state.pending.sessionID)) delete state.pending;
   }
   private async recover(root: string, mission: OperatorMission): Promise<OperatorMission> {
+    try {
+      const recovered = await this.recoverNativeAnswers(root, mission);
+      this.recoveryErrors.delete(root);
+      return recovered;
+    } catch (error) {
+      // A failed observation cannot erase the saved pause or disable its diagnosis/cancellation.
+      this.recoveryErrors.set(root, { missionID: mission.id, reason: String(error).slice(0, 500) });
+      return mission;
+    }
+  }
+  private async recoverNativeAnswers(root: string, mission: OperatorMission): Promise<OperatorMission> {
     const unanswered = mission.grip?.questions.filter(q => q.answered === undefined && !q.closed) ?? [];
     if (!unanswered.length) return mission;
     const histories = new Map<string, unknown[]>();
@@ -86,6 +98,8 @@ export class MissionGripController {
       (q.callID === pending.callID || q.header === pending.resumeHeader)).at(-1)?.feedback;
     return { status: "needs-user-direction", decision_call_id: pending.callID, resume_header: pending.resumeHeader,
       ...(this.failedWrites.get(owner.root) === mission.id ? { save_failed: true } : {}),
+      ...(this.recoveryErrors.get(owner.root)?.missionID === mission.id
+        ? { recovery: { status: "unavailable", reason: this.recoveryErrors.get(owner.root)!.reason } } : {}),
       consultation_requested: pending.consultationRequested,
       ...(feedback !== undefined ? { user_feedback: feedback, feedback_received_direction_still_held: true } : {}),
       original_requests: mission.requests, undecided: question,
@@ -109,23 +123,32 @@ export class MissionGripController {
       if (record(q) && typeof header === "string" && (header === "Grip" || header === mission.grip?.pending?.resumeHeader) && q.multiple !== true &&
           typeof q.question === "string" && Array.isArray(q.options) && q.options.length > 0 &&
           q.options.every(option => record(option) && typeof option.label === "string" && typeof option.description === "string")) {
-        if (mission.grip?.pending && header !== mission.grip.pending.resumeHeader &&
-            (event.id !== mission.grip.pending.callID || id !== mission.grip.pending.sessionID)) {
-          throw new Error(`mission-grip-question-already-pending: use ${mission.grip.pending.resumeHeader} for the held direction; ordinary input questions remain unchanged`);
-        }
         const japanese = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(mission.requests[0]?.text ?? q.question);
         const label = japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice";
         const previous = mission.grip?.questions.find(item => item.callID === event.id && item.sessionID === id);
         const original = mission.requests[0];
         const prefix = japanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): ";
         const quote = original ? `${prefix}${short(original.text.split(/\r?\n/u).filter(Boolean)[0] ?? original.text, 90)}\n\n` : "";
+        const rawQuestion = q.question, formattedQuestion = quote + rawQuestion.replace(/\r?\n+/gu, "\n\n");
         const options = q.options.filter(option => option.label !== label) as GripQuestion["options"];
-        const offered: GripQuestion = previous ?? { callID: event.id, sessionID: id, header: String(header),
-          question: quote + q.question.replace(/\r?\n+/gu, "\n\n"), consultationLabel: label,
+        let offered: GripQuestion = previous ?? { callID: event.id, sessionID: id, header: String(header),
+          question: formattedQuestion, consultationLabel: label,
           options: [...options, { label, description: japanese ? "この方針を保留し、元の目的から考え直す" : "Hold this direction and reconsider the original goal" }] };
         await this.missions.update(owner.root, m => {
           if (m.id !== mission.id || !active(m)) throw new Error("mission-grip-owner-changed: preserve the successor Mission; discard this stale question and use its current user direction");
           m.grip ??= { questions: [] };
+          if (m.grip.pending && header !== m.grip.pending.resumeHeader &&
+              (event.id !== m.grip.pending.callID || id !== m.grip.pending.sessionID)) {
+            throw new Error(`mission-grip-question-already-pending: use ${m.grip.pending.resumeHeader} for the held direction; ordinary input questions remain unchanged`);
+          }
+          const current = m.grip.questions.find(q => q.callID === event.id && q.sessionID === id);
+          if (current) {
+            if (current.header !== header || rawQuestion !== current.question && formattedQuestion !== current.question ||
+                JSON.stringify(options) !== JSON.stringify(current.options.filter(option => option.label !== current.consultationLabel))) {
+              throw new Error("mission-grip-question-call-reused: use a fresh native question call for the revised choice; the old form is not substituted");
+            }
+            offered = current;
+          }
           if (!m.grip.questions.some(q => q.callID === offered.callID && q.sessionID === offered.sessionID)) {
             // Keep the held decision and current offer across bounded history retention.
             m.grip.questions = m.grip.questions.filter(q => q.callID === m.grip!.pending?.callID || q.answered === undefined && !q.closed ||

@@ -875,6 +875,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     if (heldDirection) output.system.push(`SORTIE_GRIP_HELD_DIRECTION ${JSON.stringify({
       status: heldDirection.status, resume_header: heldDirection.resume_header, undecided: heldDirection.undecided,
       user_feedback: heldDirection.user_feedback, consultation_requested: heldDirection.consultation_requested,
+      recovery: heldDirection.recovery,
       next_action: heldDirection.next_action })}`);
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
