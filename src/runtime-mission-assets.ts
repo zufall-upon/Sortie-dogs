@@ -1,7 +1,7 @@
 import { profileAgent, type RuntimeProfile } from "./core/runtime-profile.ts";
 import { STRATEGY_TRIGGERS, SOURCE_REVIEW_RISK_TAGS } from "./core/consultation.ts";
 import { scoutDiscoveryPolicy } from "./runtime-scout-policy.ts";
-import { GRIP_POLICY } from "./core/grip.js";
+import { GRIP_POLICY } from "./core/grip.ts";
 
 /** Repository-local dependency environment shared by all units; excluded from reviewed and captured source. */
 export const TOOL_ENVIRONMENT = ".sortie-env";

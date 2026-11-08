@@ -23,3 +23,5 @@ After consultation, the corresponding revised question uses the exact `resume_he
 ## Verification boundaries
 
 Local regression covers fixed-choice insertion, source retention, short example payload, non-applicable inputs, save failure, missed-hook recovery, reload, stale/unrelated answers, corresponding resume, cancellation and the real V2 adapter before/after/context hook transport. A separate zero-inference probe renders the augmented payload through the real V2 native Form UI; it is not evidence of model instruction adherence, full Mission completion or performance improvement. No release/global apply is implied.
+
+For Code Mode, OpenCode v2.2.2's `packages/core/src/tool.ts` passes each inner tool through `beforeExecute` before its executor; `packages/core/src/codemode/tool.ts` preserves the outer session/call context. The V2 adapter regression exercises that callback shape, rejects inner shell/planning before execution and permits inner reads. This is a pinned-source contract plus adapter regression, not an execution of the Code Mode interpreter or a new sandbox claim.

@@ -224,6 +224,17 @@ test("V2 native Grip hooks retain direction through context reload and preserve 
     await fixture.sessionHooks.get("context")!(modelContext);
     assert.match(JSON.stringify(modelContext.system), /SORTIE_GRIP_HELD_DIRECTION/u);
     await assert.rejects(before({ tool: "sortie_v010_plan_units", id: "forbidden-plan", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/u);
+    // V2.2.2 Tool.snapshot's CodeModeTool.create callback runs beforeExecute for EACH
+    // inner tool, using the outer context/session/call ID. Do not exempt that ID here.
+    await before({ tool: "execute", id: "outer-code-mode", sessionID: "root", input: { code: "return await tools.shell(input)" } });
+    let executed = 0;
+    const inner = async (tool: string, input: Record<string, unknown>) => {
+      await before({ tool, id: "outer-code-mode", sessionID: "root", input }); executed++;
+    };
+    await assert.rejects(inner("shell", { command: "printf changed > result.txt" }), /mission-grip-needs-user-direction/u);
+    await assert.rejects(inner("sortie_v010_plan_units", {}), /mission-grip-needs-user-direction/u);
+    assert.equal(executed, 0, "the normal inner tool executor is never reached");
+    await inner("read", { path: "result.txt" }); assert.equal(executed, 1);
     await before({ tool: "sortie_v010_cancel_operator", id: "cancel", sessionID: "root", input: {} });
     assert.ok((await missions.required("root")).grip?.pending);
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
