@@ -19,6 +19,7 @@ import { runtimeAssets as reviewerAssets } from "../runtime-assets-v010.js";
 import { MISSION_RESULT_HOLD_POLICY, MISSION_REFLECTION_WORKFLOW, LEGACY_MISSION_REFLECTION_WORKFLOW } from "../runtime-mission-assets.js";
 import agentToolRegistry from "./frontierharness-agent-tool-registry.json" with { type: "json" };
 import { canonicalAgent, V010_RUNTIME_PROFILE } from "../core/runtime-profile.js";
+import { MissionGripController } from "./grip.js";
 
 export const V010_AGENT_TOOL_REGISTRY = agentToolRegistry;
 
@@ -615,6 +616,8 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
 
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle,
   liveState: Map<string, unknown>): Promise<void> {
+  const grip = new MissionGripController(context.location.directory, id => context.session.get({ sessionID: id }),
+    id => legacyMessages(context, id));
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
@@ -723,6 +726,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   if (hooks["tool.execute.before"]) await context.tool.hook("execute.before", async event => {
+    await grip.before(event);
     await background.resume(String(event.sessionID ?? ""));
     if (event.tool === "subagent" && record(event.input) && event.input.agent === "dog-reviewer-v010" &&
         typeof event.input.sessionID === "string" && (!context.agent || !context.storage)) {
@@ -769,6 +773,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
   });
   await context.tool.hook("execute.after", async event => {
+    const heldDirection = await grip.after(event);
     const result = record(event.result) ? event.result : {};
     const mapped: JsonObject = { status: event.status, output: toolContentText(result.content), metadata: result.metadata ?? event.error };
     const resumedReviewer = event.tool === "subagent" && record(event.input) && (event.input.agent === "dog-reviewer-v010" || correctionAgent(event.input.agent))
@@ -782,6 +787,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     const view = event.tool === "read" && event.status === "completed"
       ? await nativeContractReadSnapshot(context.location.directory, event.input) : undefined;
     if (view !== undefined) mapped.output = view.output;
+    if (heldDirection) mapped.output = `${mapped.output ?? ""}\n\nSORTIE_GRIP_HANDOFF\n${JSON.stringify(heldDirection)}`;
     await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
       callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
       ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
@@ -865,6 +871,12 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await background.reconcile(String(event.sessionID ?? ""));
     if (Array.isArray(event.messages)) event.messages = await background.project(String(event.sessionID ?? ""), event.messages);
     const output = { system: [] as string[] };
+    const heldDirection = await grip.pending(String(event.sessionID ?? ""));
+    if (heldDirection) output.system.push(`SORTIE_GRIP_HELD_DIRECTION ${JSON.stringify({
+      status: heldDirection.status, resume_header: heldDirection.resume_header, undecided: heldDirection.undecided,
+      user_feedback: heldDirection.user_feedback, consultation_requested: heldDirection.consultation_requested,
+      recovery: heldDirection.recovery,
+      next_action: heldDirection.next_action })}`);
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
     if (reconciliation) (output.system ??= []).push(reconciliation);

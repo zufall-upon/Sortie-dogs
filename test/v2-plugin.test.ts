@@ -198,6 +198,48 @@ function contextFixture() {
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
 
+test("V2 native Grip hooks retain direction through context reload and preserve native question answer metadata", async () => {
+  const directory = await mkdtemp(resolve("_testenv/v2-grip-"));
+  let cleanup: (() => void) | void;
+  try {
+    const fixture = contextFixture(); fixture.context.location.directory = directory;
+    fixture.context.session.get = async () => ({ id: "root", agent: "dog-operator" });
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "user", text: "Keep this user purpose unchanged." });
+    await missions.start("root", ["Preserve direction"]);
+    const factory: OpenCodePlugin = async () => ({ "tool.execute.before": async () => {}, "tool.execute.after": async () => {},
+      "experimental.chat.system.transform": async () => {} });
+    cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+    const before = fixture.toolHooks.get("execute.before")!, after = fixture.toolHooks.get("execute.after")!;
+    const event = { tool: "question", id: "native-grip", sessionID: "root", agent: "dog-operator", input: {
+      questions: [{ header: "Grip", question: "Which user-facing approach?\nWhy now: the UX will change.",
+        options: [{ label: "A", description: "Small" }, { label: "B", description: "Broad" }] }] } };
+    await before(event);
+    assert.equal(event.input.questions[0]!.options.at(-1)!.label, "Revisit goal with outside advice");
+    const result = { ...event, status: "completed", result: { content: "native answer", metadata: { answers: [["Revisit goal with outside advice"]] } } };
+    await after(result);
+    assert.match(result.result.content, /SORTIE_GRIP_HANDOFF/u);
+    assert.deepEqual(result.result.metadata.answers, [["Revisit goal with outside advice"]]);
+    const modelContext = { sessionID: "root", agent: "dog-operator", system: [] as unknown[], tools: {}, messages: [] };
+    await fixture.sessionHooks.get("context")!(modelContext);
+    assert.match(JSON.stringify(modelContext.system), /SORTIE_GRIP_HELD_DIRECTION/u);
+    await assert.rejects(before({ tool: "sortie_v010_plan_units", id: "forbidden-plan", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/u);
+    // V2.2.2 Tool.snapshot's CodeModeTool.create callback runs beforeExecute for EACH
+    // inner tool, using the outer context/session/call ID. Do not exempt that ID here.
+    await before({ tool: "execute", id: "outer-code-mode", sessionID: "root", input: { code: "return await tools.shell(input)" } });
+    let executed = 0;
+    const inner = async (tool: string, input: Record<string, unknown>) => {
+      await before({ tool, id: "outer-code-mode", sessionID: "root", input }); executed++;
+    };
+    await assert.rejects(inner("shell", { command: "printf changed > result.txt" }), /mission-grip-needs-user-direction/u);
+    await assert.rejects(inner("sortie_v010_plan_units", {}), /mission-grip-needs-user-direction/u);
+    assert.equal(executed, 0, "the normal inner tool executor is never reached");
+    await inner("read", { path: "result.txt" }); assert.equal(executed, 1);
+    await before({ tool: "sortie_v010_cancel_operator", id: "cancel", sessionID: "root", input: {} });
+    assert.ok((await missions.required("root")).grip?.pending);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 legacy hooks can restrict native permission effects but cannot upgrade them", async () => {
   for (const native of ["allow", "ask", "deny"] as const) for (const legacy of ["allow", "ask", "deny"] as const) {
     const fixture = contextFixture();
