@@ -73,12 +73,13 @@ test("Worker acceptance observations use each saved admission and cwd, including
   const commands = ["node first.mjs", "node /fixture/second.mjs"], oldCwd = resolve(directory, "../old-checkout"), currentCwd = resolve(directory, "../current-checkout");
   const queries: any[] = [];
   let native: any[] = [];
-  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+  const createHooks = () => SortieDogsV010Plugin({ directory, client: { session: {
     get: async ({ path }: any) => ({ data: { id: path.id, agent: path.id === "root" ? "dog-operator" : "dogs-coordinator",
       ...(path.id === "root" ? {} : { parentID: "root" }) } }),
     reviewMessages: async ({ query }: any) => { queries.push(query); return { data: native }; },
     children: async () => ({ data: [] }),
   } } } as never);
+  const hooks = await createHooks();
   await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
     message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
     parts: [{ type: "text", text: "Run both checks in their registered checkout" }],
@@ -153,6 +154,43 @@ test("Worker acceptance observations use each saved admission and cwd, including
   assert.deepEqual(status.acceptance_summary.native_declared_validation.map((item: any) => item.observations),
     observations.map(item => item.observations), "status must carry each stored unit's actual binding to the native reader");
   assert.deepEqual(queries.map(query => query.notBefore), [new Date(3000).toISOString(), new Date(1000).toISOString()]);
+
+  const dockerCommand = "node /app/verify.mjs";
+  const dockerRun = { ...current, parentRunID: undefined, priorAcceptedUnits: [], units: [{ ...current.units[0]!,
+    unit: { ...current.units[0]!.unit, validation: [dockerCommand] }, validationRegistration: {
+      validation: [dockerCommand], cwd: { [dockerCommand]: "/app" }, startedAt: new Date(3000).toISOString(), registeredAt: {}, checks: [] } }] };
+  const docker = (tool: string, exit: number | null, ran: number) => ({ type: "tool", tool, time: { ran, completed: ran + 5 }, state: {
+    status: "completed", input: tool === "execute" ? { code: "return await tools.fh.docker_exec(...)" } : { command: dockerCommand },
+    output: `exit_code=${exit ?? "unknown"}\nresult\n`, metadata: tool === "execute"
+      ? { toolCalls: [{ tool: "fh.docker_exec", status: "completed", input: { command: dockerCommand } }] } : {} } });
+  native = [{ info: { role: "assistant", sessionID: "worker" }, parts: [
+    docker("execute", 7, 2900), part(dockerCommand, directory, 3100, 0), part(dockerCommand, "/app", 3110, 1),
+    ...["fh_docker_exec", "fh.docker_exec", "execute"].flatMap((tool, index) => [0, 7, null].map((exit, member) =>
+      docker(tool, exit, 3120 + (index * 3 + member) * 10))),
+  ] }];
+  await writeFile(operators.statePath("root"), JSON.stringify(dockerRun));
+  const dockerHooks = await createHooks();
+  await dockerHooks["chat.message"]!({ sessionID: "root", messageID: "resume", agent: "dog-operator" }, {
+    message: { id: "resume", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Inspect the existing native Docker outcomes without rerunning them" }],
+  });
+  const dockerStatus = JSON.parse(await dockerHooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "coordinator" }));
+  const diagnostics = dockerStatus.acceptance_summary.native_declared_validation[0].observations;
+  assert.deepEqual(diagnostics.commands.map((item: any) => [item.exit_code, item.directory, item.directory_status, item.observed_attempts]), [
+    [1, "/app", undefined, 1], [0, undefined, "unobserved", 3], [7, undefined, "unobserved", 3], [null, undefined, "unobserved", 3],
+  ], "status preserves unknown-cwd Docker exits, but excludes wrong known cwd and pre-admission calls");
+  assert.deepEqual(diagnostics.not_observed, []);
+  assert.deepEqual(dockerStatus.acceptance_summary.formal_validation, [], "unbound Docker diagnostics never create formal proof");
+  for (const execution of [
+    { directExecution: { actor: "worker", startedAt: new Date(3000).toISOString(), checks: [] } },
+    { reviewerCorrection: { author: "worker", reviewIdentity: "review", writeUnion: [], admittedAt: new Date(3000).toISOString() } },
+  ]) {
+    const boundRun = { ...dockerRun, units: [{ ...dockerRun.units[0]!, ...execution }] };
+    const bound = await missionAcceptanceSummary(mission, boundRun, operators, async (validation, child, notBefore, root, cwd, includeUnobserved) =>
+      observedMissionValidationSummary(validation, child!, async () => ({ data: native }), notBefore, root, cwd, includeUnobserved));
+    assert.deepEqual((bound.native_declared_validation as any[])[0].observations.commands.map((item: any) => [item.exit_code, item.directory]),
+      [[1, "/app"]], "direct and Reviewer diagnostics retain their existing explicit-cwd contract");
+  }
 }));
 
 test("compaction model views retain captured mission evidence references without copying snapshot paths", async () => fixture(async directory => {

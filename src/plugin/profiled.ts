@@ -263,13 +263,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return messages(id).catch(() => []);
     }
     async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number,
-      directory?: string, directories?: Readonly<Record<string, string>>) {
+      directory?: string, directories?: Readonly<Record<string, string>>, includeUnobservedDockerCwd?: boolean) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
       const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.[method] === "function"
         ? () => session(method, { path: { id: child }, query: { directory: input.directory,
           ...(notBefore === undefined ? {} : { notBefore: new Date(notBefore).toISOString() }) } }) : undefined, notBefore,
-        directory, directories);
+        directory, directories, includeUnobservedDockerCwd);
     }
     async function reviewMessages(id: string, notBefore?: string, requireAvailable = false): Promise<readonly Record<string, unknown>[]> {
       const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
@@ -3472,7 +3472,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) :
                     unit.validationRegistration?.startedAt === undefined ? undefined : Date.parse(unit.validationRegistration.startedAt),
                 unit.fabricRoot ?? input.directory,
-                unitValidationCwd(unit)),
+                unitValidationCwd(unit), !unit.directExecution && !unit.reviewerCorrection),
           })));
            const task = risk.length === 0 && !correction && !selfRecheck && !independentRequested ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),
             ...(reviewerID ? { task_id: reviewerID } : {}),

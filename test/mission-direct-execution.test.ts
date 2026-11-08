@@ -77,6 +77,11 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
     }
     history.push({ info: { role: "assistant", sessionID: "worker" }, parts: [
       part(commands[1]!, directory, Date.now() + 10, 0), part(commands[1]!, external, Date.now() + 20, 1),
+      ...["fh_docker_exec", "fh.docker_exec", "execute"].map((tool, index) => ({ type: "tool", tool,
+        time: { ran: Date.now() + 30 + index * 10, completed: Date.now() + 35 + index * 10 }, state: {
+          status: "completed", input: tool === "execute" ? { code: "return await tools.fh.docker_exec(...)" } : { command: commands[1] },
+          output: `exit_code=${[0, 7, "unknown"][index]}\nresult\n`, metadata: tool === "execute"
+            ? { toolCalls: [{ tool: "fh.docker_exec", status: "completed", input: { command: commands[1] } }] } : {} } })),
     ] });
     agents.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
@@ -88,7 +93,10 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
     const observation = JSON.parse(/^observed_validation: (.+)$/mu.exec(prompt)![1]!)[0];
     assert.deepEqual(observation.attempts.map((item: any) => [item.command, item.exit_code, item.directory]), [
       [commands[0], 0, undefined], [commands[1], 0, external], [commands[1], 1, external],
+      [commands[1], 0, undefined], [commands[1], 7, undefined], [commands[1], null, undefined],
     ], "old admission and wrong-cwd exit zero are excluded; real failure is not rewritten");
+    assert.deepEqual(observation.attempts.slice(-3).map((item: any) => item.directory_status), ["unobserved", "unobserved", "unobserved"],
+      "Reviewer diagnostics retain unknown-cwd Docker outcomes without inferring a registered cwd");
     assert.deepEqual(observation.not_observed, []);
     assert.deepEqual((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence,
       settled.units[0]!.evidence, "Reviewer display must not rewrite formal evidence");
