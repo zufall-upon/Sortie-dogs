@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
-import { parseOperatorPlan, unitValidation, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
+import { parseOperatorPlan, unitValidation, unitValidationCwd, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand, shellCommandBase, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
@@ -934,7 +934,8 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
 
 /** Compact provenance, not a new acceptance verdict or a substitute for original-request comparison. */
 export async function missionAcceptanceSummary(mission: OperatorMission, run: OperatorState | undefined,
-  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null, notBefore?: number) => Promise<unknown>): Promise<Record<string, unknown>> {
+  operators: OperatorRuntime, observe?: (validation: readonly string[], child: string | null, notBefore?: number,
+    directory?: string, directories?: Readonly<Record<string, string>>) => Promise<unknown>): Promise<Record<string, unknown>> {
   const current = run?.runID === mission.runID ? run : undefined;
   const history = current ? await operators.acceptanceHistory(current, [...new Set((mission.attempts ?? []).map(item => item.runID))])
     : { status: "unavailable", runs: [], reason: "current-mission-run-unavailable" };
@@ -995,9 +996,10 @@ export async function missionAcceptanceSummary(mission: OperatorMission, run: Op
       }
       try {
         if (!observe || !unit.childSessionID) throw new Error("native-worker-history-unavailable");
+        const admission = unit.directExecution?.startedAt ?? unit.reviewerCorrection?.admittedAt ??
+          (unit.reviewerCorrection ? item.state.createdAt : unit.validationRegistration?.startedAt);
         return { ...provenance, status: "available", observations: await observe(unitValidation(unit), unit.childSessionID,
-          unit.directExecution ? Date.parse(unit.directExecution.startedAt) :
-            unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? item.state.createdAt) : undefined) };
+          admission === undefined ? undefined : Date.parse(admission), unit.fabricRoot ?? operators.projectRoot, unitValidationCwd(unit)) };
       } catch (error) {
         return { ...provenance, status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
       }

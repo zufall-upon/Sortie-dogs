@@ -262,15 +262,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return messages(id).catch(() => []);
     }
-    async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number) {
+    async function acceptanceValidationObservation(validation: readonly string[], child: string | null, notBefore?: number,
+      directory?: string, directories?: Readonly<Record<string, string>>) {
       if (!child) throw new Error("native-worker-history-session-unavailable");
-      const direct = await directExecution(child) ?? await reviewerCorrection(child);
       const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
       return observedMissionValidationSummary(validation, child, typeof nativeSession?.[method] === "function"
         ? () => session(method, { path: { id: child }, query: { directory: input.directory,
           ...(notBefore === undefined ? {} : { notBefore: new Date(notBefore).toISOString() }) } }) : undefined, notBefore,
-        notBefore === undefined ? undefined : input.directory,
-        direct ? unitValidationCwd(direct.unit) : undefined);
+        directory, directories);
     }
     async function reviewMessages(id: string, notBefore?: string, requireAvailable = false): Promise<readonly Record<string, unknown>[]> {
       const method = typeof nativeSession?.reviewMessages === "function" ? "reviewMessages" : "messages";
@@ -3469,8 +3468,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             unit_id: unit.unit.id,
             ...observedMissionValidation(unitValidation(unit), unit.childSessionID,
                 unit.childSessionID ? await messages(unit.childSessionID).catch(() => []) : [],
-                unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) : undefined,
-                unit.reviewerCorrection || unit.directExecution ? input.directory : undefined,
+                unit.directExecution ? Date.parse(unit.directExecution.startedAt) :
+                  unit.reviewerCorrection ? Date.parse(unit.reviewerCorrection.admittedAt ?? run.createdAt) :
+                    unit.validationRegistration?.startedAt === undefined ? undefined : Date.parse(unit.validationRegistration.startedAt),
+                unit.fabricRoot ?? input.directory,
                 unitValidationCwd(unit)),
           })));
            const task = risk.length === 0 && !correction && !selfRecheck && !independentRequested ? null : { subagent_type: profileAgent(profile, "dog-reviewer"),

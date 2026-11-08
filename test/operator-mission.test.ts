@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { OperatorMissionRuntime, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
+import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -16,6 +16,7 @@ import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
+import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -66,6 +67,93 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+test("Worker acceptance observations use each saved admission and cwd, including historical units", async () => fixture(async directory => {
+  const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+  const commands = ["node first.mjs", "node /fixture/second.mjs"], oldCwd = resolve(directory, "../old-checkout"), currentCwd = resolve(directory, "../current-checkout");
+  const queries: any[] = [];
+  let native: any[] = [];
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: any) => ({ data: { id: path.id, agent: path.id === "root" ? "dog-operator" : "dogs-coordinator",
+      ...(path.id === "root" ? {} : { parentID: "root" }) } }),
+    reviewMessages: async ({ query }: any) => { queries.push(query); return { data: native }; },
+    children: async () => ({ data: [] }),
+  } } } as never);
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Run both checks in their registered checkout" }],
+  });
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Run both checks"] }, { sessionID: "root" });
+  const mission = await missions.required("root");
+  const old = await operators.prepareMission("root", missionPlan(mission, [{ title: "Verify", objective: "Run both checks",
+    read: [], write: [], validation: commands, validation_cwd: Object.fromEntries(commands.map(command => [command, oldCwd])) }], directory));
+  const oldUnit = old.units[0]!;
+  oldUnit.status = "succeeded"; oldUnit.childSessionID = "worker"; oldUnit.evidence = [];
+  oldUnit.validationRegistration = { validation: commands, cwd: Object.fromEntries(commands.map(command => [command, oldCwd])),
+    startedAt: new Date(1000).toISOString(), registeredAt: {}, checks: [] };
+  const archive = join(directory, V010_RUNTIME_PROFILE.stateDirectory, "operators",
+    `${createHash("sha256").update("root").digest("hex")}.json.${old.runID}.${old.sequence}.archive`);
+  await writeFile(archive, JSON.stringify(old));
+  const taskID = oldUnit.task.prompt.match(/^task_id: (.+)$/m)![1]!;
+  const current = { ...old, runID: "current-run", parentRunID: old.runID,
+    priorAcceptedUnits: [{ taskID, handoffPath: oldUnit.handoffPath, handoffHash: oldUnit.hashes[0]! }],
+    units: [{ ...oldUnit, status: "failed" as const, validationRegistration: { validation: commands,
+      cwd: Object.fromEntries(commands.map(command => [command, currentCwd])), startedAt: new Date(3000).toISOString(), registeredAt: {}, checks: [] } }] };
+  mission.runID = current.runID; mission.attempts = [{ runID: old.runID } as never, { runID: current.runID } as never];
+  const part = (command: string, workdir: string, ran: number, exit: number) => ({ type: "tool", tool: "shell",
+    time: { ran, completed: ran + 5 }, state: { status: "completed", input: { command, workdir }, metadata: { exit } } });
+  native = [{ info: { role: "assistant", sessionID: "worker" }, parts: [
+    part(commands[0]!, currentCwd, 900, 0), part(commands[0]!, oldCwd, 1100, 0), part(commands[1]!, directory, 1110, 0),
+    part(commands[0]!, currentCwd, 3100, 0), part(commands[1]!, directory, 3110, 0), part(commands[1]!, currentCwd, 3120, 1),
+  ] }];
+  const contexts: unknown[] = [];
+  const summary = await missionAcceptanceSummary(mission, current, operators, async (validation, child, notBefore, root, cwd) => {
+    contexts.push({ child, notBefore, root, cwd });
+    return observedMissionValidationSummary(validation, child!, async () => ({ data: native }), notBefore, root, cwd);
+  });
+  assert.deepEqual(contexts, [
+    { child: "worker", notBefore: 3000, root: directory, cwd: current.units[0]!.validationRegistration.cwd },
+    { child: "worker", notBefore: 1000, root: directory, cwd: oldUnit.validationRegistration.cwd },
+  ], "the old unit must not borrow the active owner's registration");
+  const observations = summary.native_declared_validation as any[];
+  assert.deepEqual(observations[0].observations.commands.map((item: any) => [item.command, item.exit_code, item.directory]),
+    [[commands[0], 0, currentCwd], [commands[1], 1, currentCwd]], "wrong cwd and old admission cannot hide the actual failure");
+  assert.deepEqual(observations[1].observations.commands.map((item: any) => [item.command, item.exit_code, item.directory]),
+    [[commands[0], 0, oldCwd]], "a registered external cwd is valid in its own historical unit");
+  assert.deepEqual(observations[1].observations.not_observed, [commands[1]]);
+  assert.deepEqual(summary.formal_validation, [], "native outcomes do not create or rewrite formal evidence");
+
+  const unstarted = { ...current, units: [{ ...current.units[0]!, childSessionID: null, status: "pending" as const }] };
+  const pending = await missionAcceptanceSummary(mission, unstarted, operators, async () => { throw new Error("must not read"); });
+  assert.equal((pending.native_declared_validation as any[])[0].status, "unavailable");
+  const legacy = { ...current, units: [{ ...current.units[0]!, validationRegistration: { ...current.units[0]!.validationRegistration, startedAt: undefined } }] };
+  const legacySummary = await missionAcceptanceSummary(mission, legacy, operators, async (validation, child, notBefore, root, cwd) => {
+    if (cwd?.[commands[0]!] === currentCwd) assert.equal(notBefore, undefined, "an absent legacy admission is not invented");
+    return observedMissionValidationSummary(validation, child!, async () => ({ data: native }), notBefore, root, cwd);
+  });
+  const legacyCurrent = (legacySummary.native_declared_validation as any[])[0].observations;
+  assert(legacyCurrent.commands.every((item: any) => item.directory === currentCwd), "cwd is enforced even without an admission timestamp");
+  for (const execution of [
+    { directExecution: { actor: "worker", startedAt: new Date(3000).toISOString(), checks: [] } },
+    { reviewerCorrection: { author: "worker", reviewIdentity: "review", writeUnion: [], admittedAt: new Date(3000).toISOString() } },
+  ]) {
+    const run = { ...current, units: [{ ...current.units[0]!, ...execution }] };
+    const result = await missionAcceptanceSummary(mission, run, operators, async (validation, child, notBefore, root, cwd) =>
+      observedMissionValidationSummary(validation, child!, async () => ({ data: native }), notBefore, root, cwd));
+    assert.deepEqual((result.native_declared_validation as any[])[0].observations, observations[0].observations,
+      "direct and Reviewer correction preserve the same registered cwd and admission semantics");
+  }
+
+  // Exercise the real status caller as well as the core projection; the two runs
+  // intentionally share a native session so an active-owner lookup is incorrect.
+  await writeFile(operators.statePath("root"), JSON.stringify(current));
+  await missions.update("root", item => { item.runID = current.runID; item.attempts = mission.attempts; item.coordinator = "coordinator"; item.phase = "running"; });
+  queries.length = 0;
+  const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "coordinator" }));
+  assert.deepEqual(status.acceptance_summary.native_declared_validation.map((item: any) => item.observations),
+    observations.map(item => item.observations), "status must carry each stored unit's actual binding to the native reader");
+  assert.deepEqual(queries.map(query => query.notBefore), [new Date(3000).toISOString(), new Date(1000).toISOString()]);
+}));
 
 test("compaction model views retain captured mission evidence references without copying snapshot paths", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
