@@ -191,3 +191,22 @@ test("history failure reports unavailable recovery while observations, consultat
     await assert.rejects(cold.before({ tool: "edit", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/);
   } finally { await f.dispose(); }
 });
+
+test("competing revised questions cannot leave a late consultation answer untracked", async () => {
+  const f = await fixture();
+  try {
+    const original = question("original-held"); await f.controller.before(original);
+    const pending = await f.controller.after(answer(original, "目的に戻って外部相談"));
+    const revisions = [question("revision-a", String(pending!.resume_header)), question("revision-b", String(pending!.resume_header))];
+    const results = await Promise.allSettled(revisions.map(q => f.controller.before(q)));
+    assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+    assert.equal(results.filter(r => r.status === "rejected").length, 1);
+    const admitted = revisions[results.findIndex(r => r.status === "fulfilled")]!;
+    const rejected = revisions[results.findIndex(r => r.status === "rejected")]!;
+    assert.equal((await f.missions.required("root")).grip!.questions.some(q => q.callID === rejected.id), false,
+      "the competing form never opens, rather than ignoring a user choice later");
+    await f.controller.after(answer(admitted, "A"));
+    assert.equal(await f.controller.pending("root"), undefined);
+    await f.controller.before({ tool: "edit", sessionID: "root", input: {} });
+  } finally { await f.dispose(); }
+});

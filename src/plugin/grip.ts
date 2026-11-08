@@ -141,6 +141,10 @@ export class MissionGripController {
               (event.id !== m.grip.pending.callID || id !== m.grip.pending.sessionID)) {
             throw new Error(`mission-grip-question-already-pending: use ${m.grip.pending.resumeHeader} for the held direction; ordinary input questions remain unchanged`);
           }
+          const open = m.grip.questions.find(q => q.answered === undefined && !q.closed);
+          if (open && (open.callID !== event.id || open.sessionID !== id)) {
+            throw new Error("mission-grip-question-already-pending: complete or dismiss the open Grip form, or recover its native terminal, before opening a competing revision; cancellation remains available");
+          }
           const current = m.grip.questions.find(q => q.callID === event.id && q.sessionID === id);
           if (current) {
             if (current.header !== header || rawQuestion !== current.question && formattedQuestion !== current.question ||
