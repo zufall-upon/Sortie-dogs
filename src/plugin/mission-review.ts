@@ -93,7 +93,8 @@ function dockerExecExitCode(state: Record<string, unknown>): number | null {
 
 /** Show native command outcomes to the Reviewer without turning non-criterion checks into acceptance evidence. */
 export function observedMissionValidation(validation: readonly string[], childSessionID: string | null,
-  history: readonly Record<string, unknown>[], notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): {
+  history: readonly Record<string, unknown>[], notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>,
+  includeUnobservedDockerCwd = false): {
     attempts: readonly { command: string; native_command?: string; directory?: string; directory_status?: "unobserved";
       observed_members?: readonly string[]; exit_code: number | null; started_ms: number | null; completed_ms: number | null }[];
     not_observed: readonly string[]; omitted_attempts: number;
@@ -145,7 +146,9 @@ export function observedMissionValidation(validation: readonly string[], childSe
   const attempts = rawAttempts.sort((a, b) => (a.started_ms ?? 0) - (b.started_ms ?? 0) || (a.completed_ms ?? 0) - (b.completed_ms ?? 0)).flatMap(attempt => {
     const exact = canonicalDeclaredValidationMembers(attempt.command, declared, occurrence);
     const members = exact ?? (attempt.exit_code === 0 ? canonicalObservedValidationMembers(attempt.command, declared, occurrence) : undefined);
-    const directoryMatches = attempt.directory_status === "unobserved" ? directory === undefined
+    // Ordinary Worker diagnostics historically retained cwd-less Docker exits as
+    // explicitly unbound observations. This opt-in never changes formal matching.
+    const directoryMatches = attempt.directory_status === "unobserved" ? directory === undefined || includeUnobservedDockerCwd && attempt.docker === true
       : validationDirectoryMatches(members ?? [], attempt.directory, directory, directories);
     if (!members || !directoryMatches) return [];
     if (attempt.exit_code !== 0) occurrence = 0;
@@ -398,13 +401,14 @@ export async function directHandoffValidationChecks(...args: Parameters<typeof r
 
 /** Summary-only native reader: unavailable API/error is not a successfully observed empty history. */
 export async function observedMissionValidationSummary(validation: readonly string[], childSessionID: string,
-  read?: () => Promise<unknown>, notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>): Promise<Record<string, unknown>> {
+  read?: () => Promise<unknown>, notBefore?: number, directory?: string, directories?: Readonly<Record<string, string>>,
+  includeUnobservedDockerCwd = false): Promise<Record<string, unknown>> {
   if (!read) throw new Error("native-worker-history-api-unavailable");
   const response = await read();
   if (record(response) && response.error !== undefined && response.error !== null) throw new Error("native-worker-history-api-error");
   const data = record(response) && "data" in response ? response.data : response;
   if (!Array.isArray(data)) throw new Error("native-worker-history-response-not-array");
-  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory, directories);
+  const observed = observedMissionValidation(validation, childSessionID, data.filter(record), notBefore, directory, directories, includeUnobservedDockerCwd);
   const grouped = new Map<string, { command: string; native_command?: string; directory?: string; directory_status?: "unobserved";
     exit_code: number | null; observed_attempts: number;
     latest_started_ms: number | null; latest_completed_ms: number | null }>();

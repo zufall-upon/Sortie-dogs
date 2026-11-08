@@ -24,6 +24,85 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
+test("Worker Reviewer prompt observes the registered cwd and current admission", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/worker-review-root-"));
+  const external = await mkdtemp(resolve("_testenv/worker-review-checkout-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "value.txt"), "first\n");
+    await writeFile(join(external, "value.txt"), "second\n");
+    for (const [location, name] of [[directory, "first"], [external, "second"]]) {
+      await writeFile(join(location!, `${name}.mjs`), `import assert from 'node:assert/strict'; import {readFileSync} from 'node:fs';\nassert.equal(readFileSync(new URL('./value.txt', import.meta.url), 'utf8'), ${JSON.stringify(`${name}\n`)});\n`);
+    }
+    const commands = ["node first.mjs", `node ${join(external, "second.mjs")}`];
+    const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" },
+    };
+    const history: any[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: any) => ({ data: { id: path.id, ...agents[path.id] } }),
+      children: async ({ path }: any) => ({ data: Object.entries(agents).filter(([, value]) => value.parentID === path.id)
+        .map(([id, value]) => ({ id, ...value })) }),
+      messages: async ({ path }: any) => ({ data: path.id === "worker" ? history : [] }),
+    } } } as never);
+    const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-prompt`, agent: agents[id]!.agent }, {
+      message: { id: `${id}-prompt`, agent: agents[id]!.agent, model: { providerID: "openai", modelID: "fixture" } },
+      parts: [{ type: "text", text }],
+    });
+    await chat("root", "Run both registered checks and request an independent review.");
+    await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Run both checks and review"] }, { sessionID: "root" });
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: "Verify", objective: "Run both checks",
+      read: ["first.mjs", "value.txt", join(external, "second.mjs"), join(external, "value.txt")], write: ["result.txt"], validation: commands,
+      validation_cwd: { [commands[1]!]: external } }] }, { sessionID: "root" }));
+    const task = { args: structuredClone(planned.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, task);
+    await chat("worker", task.args.prompt);
+    const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } },
+      { output: await readFile(unit.handoffPath, "utf8") });
+    await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath }, { sessionID: "worker" });
+    const admission = Date.parse(unit.validationRegistration!.startedAt!);
+    const part = (command: string, workdir: string, started: number, exit: number) => ({ type: "tool", tool: "bash",
+      time: { ran: started, completed: started + 1 }, state: { status: "completed", input: { command, workdir }, metadata: { exit } } });
+    history.push({ info: { role: "assistant", sessionID: "worker" }, parts: [part(commands[0]!, directory, admission - 100, 0)] });
+    for (const [index, command] of commands.entries()) {
+      const workdir = index === 0 ? directory : external, callID = `check-${index}`, args = { command, workdir };
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "worker", callID }, { args });
+      const started = Date.now();
+      await exec(process.execPath, [index === 0 ? "first.mjs" : join(external, "second.mjs")], { cwd: workdir });
+      history.push({ info: { role: "assistant", sessionID: "worker" }, parts: [part(command, workdir, started, 0)] });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID, args }, { output: "", metadata: { exit: 0, status: "completed" } });
+    }
+    history.push({ info: { role: "assistant", sessionID: "worker" }, parts: [
+      part(commands[1]!, directory, Date.now() + 10, 0), part(commands[1]!, external, Date.now() + 20, 1),
+      ...["fh_docker_exec", "fh.docker_exec", "execute"].map((tool, index) => ({ type: "tool", tool,
+        time: { ran: Date.now() + 30 + index * 10, completed: Date.now() + 35 + index * 10 }, state: {
+          status: "completed", input: tool === "execute" ? { code: "return await tools.fh.docker_exec(...)" } : { command: commands[1] },
+          output: `exit_code=${[0, 7, "unknown"][index]}\nresult\n`, metadata: tool === "execute"
+            ? { toolCalls: [{ tool: "fh.docker_exec", status: "completed", input: { command: commands[1] } }] } : {} } })),
+    ] });
+    agents.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" },
+      { output: "Checks completed", metadata: { sessionId: "worker" } });
+    const settled = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(settled.units[0]!.status, "succeeded", "real bound checks retain their existing acceptance contract");
+    await hooks.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"] }, { sessionID: "root" });
+    const prompt = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review!.task!.prompt;
+    const observation = JSON.parse(/^observed_validation: (.+)$/mu.exec(prompt)![1]!)[0];
+    assert.deepEqual(observation.attempts.map((item: any) => [item.command, item.exit_code, item.directory]), [
+      [commands[0], 0, undefined], [commands[1], 0, external], [commands[1], 1, external],
+      [commands[1], 0, undefined], [commands[1], 7, undefined], [commands[1], null, undefined],
+    ], "old admission and wrong-cwd exit zero are excluded; real failure is not rewritten");
+    assert.deepEqual(observation.attempts.slice(-3).map((item: any) => item.directory_status), ["unobserved", "unobserved", "unobserved"],
+      "Reviewer diagnostics retain unknown-cwd Docker outcomes without inferring a registered cwd");
+    assert.deepEqual(observation.not_observed, []);
+    assert.deepEqual((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.evidence,
+      settled.units[0]!.evidence, "Reviewer display must not rewrite formal evidence");
+  } finally { await rm(directory, { recursive: true, force: true }); await rm(external, { recursive: true, force: true }); }
+});
+
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
 for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
