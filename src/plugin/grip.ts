@@ -12,6 +12,18 @@ const controllers = new Set(["dog-operator", "dogs-coordinator"]);
 // import those ambiguous variants into a user-requested pause. Native read/search stay usable.
 const pausedShellReads = new Set(["pwd", "git status --short", "git status --short --branch"]);
 const short = (text: string, limit: number) => Array.from(text).slice(0, limit).join("") + (Array.from(text).length > limit ? "…" : "");
+const inlineGripQuestion = (question: string, japanese: boolean): string => {
+  const decision = japanese ? "❓【今回の判断】" : "❓[Decision] ";
+  const reason = japanese ? "💡【なぜ今】" : "💡[Why now] ";
+  // Native Form descriptions collapse whitespace. Keep visible boundaries instead of
+  // relying on blank lines; recognize only explicit headings, never infer or shorten conditions.
+  const sections = question.split(/\r\n|[\r\n\u2028\u2029]/u).map(line => line.trim()).filter(Boolean);
+  return sections.map((line, index) => {
+    const formatted = line.replace(/^(?:今回の判断|判断|Decision|Current decision)\s*[:：]\s*/u, decision)
+      .replace(/^(?:なぜ今[?？]?|理由|Why now[?？]?)\s*[:：]\s*/u, reason);
+    return index === 0 && !formatted.startsWith(decision) ? decision + formatted : formatted;
+  }).join(" ┃ ") || decision;
+};
 
 /** Explicit native questions only: no semantic inference, outgoing traffic or process cancellation. */
 export class MissionGripController {
@@ -127,9 +139,13 @@ export class MissionGripController {
         const label = japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice";
         const previous = mission.grip?.questions.find(item => item.callID === event.id && item.sessionID === id);
         const original = mission.requests[0];
-        const prefix = japanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): ";
-        const quote = original ? `${prefix}${short(original.text.split(/\r?\n/u).filter(Boolean)[0] ?? original.text, 90)}\n\n` : "";
-        const rawQuestion = q.question, formattedQuestion = quote + rawQuestion.replace(/\r?\n+/gu, "\n\n");
+        const excerpt = original ? short(original.text.split(/\r?\n/u).filter(Boolean)[0] ?? original.text, 90) : undefined;
+        const quote = excerpt === undefined ? "" : japanese
+          ? `🎯【元の目的・原文抜粋】「${excerpt}」 ┃ ` : `🎯[Original goal excerpt] "${excerpt}" ┃ `;
+        const rawQuestion = q.question, formattedQuestion = quote + inlineGripQuestion(rawQuestion, japanese);
+        // Retry compatibility only: never rewrite an already saved/open native offer.
+        const legacyQuote = excerpt === undefined ? "" : `${japanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): "}${excerpt}\n\n`;
+        const legacyFormattedQuestion = legacyQuote + rawQuestion.replace(/\r?\n+/gu, "\n\n");
         const options = q.options.filter(option => option.label !== label) as GripQuestion["options"];
         let offered: GripQuestion = previous ?? { callID: event.id, sessionID: id, header: String(header),
           question: formattedQuestion, consultationLabel: label,
@@ -147,7 +163,7 @@ export class MissionGripController {
           }
           const current = m.grip.questions.find(q => q.callID === event.id && q.sessionID === id);
           if (current) {
-            if (current.header !== header || rawQuestion !== current.question && formattedQuestion !== current.question ||
+            if (current.header !== header || rawQuestion !== current.question && formattedQuestion !== current.question && legacyFormattedQuestion !== current.question ||
                 JSON.stringify(options) !== JSON.stringify(current.options.filter(option => option.label !== current.consultationLabel))) {
               throw new Error("mission-grip-question-call-reused: use a fresh native question call for the revised choice; the old form is not substituted");
             }
