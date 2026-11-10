@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { collectRunMetrics, createSortieResult, formatRunMetrics, formatSortieResult, insertRunMetrics,
   insertSortieResult, isDoneTerminalText, replaceDoneTerminalStatus, replaceTerminalStatus, sanitizeTerminalReport,
-  terminalRunOutcome, createGoalReport, withSavedGoalReport } from "../dist/plugin/run-metrics.js";
+  terminalRunOutcome, createGoalReport, withSavedGoalReport, returnReportRange, compactReturnReportRange } from "../dist/plugin/run-metrics.js";
 import { evaluateRareAwards } from "../dist/core/rare-awards.js";
 import { goalFingerprint, type GoalTerminalReceipt, type GoalFlightEventRecord } from "../dist/core/goal-bound.js";
 import { summarizeCareer } from "../dist/plugin/sortie-career.js";
@@ -250,6 +250,10 @@ test("terminal cleanup preserves explanatory disclosures and code while removing
     "an Evidence heading inside an explanatory disclosure is user prose, not internal evidence");
   assert.equal(sanitizeTerminalReport(`Evidence: internal proof\n${nestedEvidenceExample}`), nestedEvidenceExample,
     "an earlier internal heading must not consume code owned by an explanatory disclosure");
+  const adjacentExample = "<details><summary>Explanation</summary>\nEvidence: illustrative example\n</details>\n" +
+    "```yaml\nmanifest: user-example.json\n```";
+  assert.equal(sanitizeTerminalReport(adjacentExample), adjacentExample,
+    "a protected disclosure must not own the following code fence even without a blank line");
   const cleaned = sanitizeTerminalReport(explanation + "\n\n<details><summary>Evidence: validation</summary>hidden</details>");
   assert.equal(cleaned, explanation);
 });
@@ -535,12 +539,33 @@ test("compact and legacy return panels extract and redisplay without consuming f
     const compact = formatSortieResult(result, { locale, next: "continue", missionReview: "self-rechecked" });
     assert.equal(returnReportPanel(`Before\n\n${legacy}\n\nAfter`), legacy);
     assert.equal(returnReportPanel(`Before\n\n${compact}\n\nAfter`), compact);
+    for (const prefix of ["Updated the `<details>` renderer", "Updated the ``<details> `literal` </details>`` renderer"]) {
+      assert.equal(returnReportPanel(`${prefix}\n\n${legacy}`), legacy);
+      const source = `status: DONE\n\n${prefix}\n\n${compact}\n\n**Next:** continue`;
+      for (const locate of [returnReportRange, compactReturnReportRange]) {
+        const range = locate(source);
+        assert.ok(range, "inline code tags must not hide the actual host panel");
+        assert.equal(source.slice(range.start, range.end), compact);
+      }
+      assert.equal(returnReportPanel(source), compact);
+      const inserted = insertSortieResult(source, result, "self-rechecked", undefined, locale);
+      assert.equal(returnReportPanel(inserted), compact, "inline code must not hide the caller's next action either");
+      assert.equal((inserted.match(/🐾 SORTIE DOGS — (?:帰還報告|Return Report)｜/gu) ?? []).length, 1);
+      assert.ok(inserted.includes(prefix));
+      assert.equal(insertSortieResult(inserted, result, "self-rechecked", undefined, locale), inserted);
+      const legacySource = `status: DONE\n\n${prefix}\n\n${legacy}\n\n**Next:** continue`;
+      const redisplayed = insertSortieResult(legacySource, result, "self-rechecked", undefined, locale);
+      assert.ok(redisplayed.includes(prefix), "legacy replacement must preserve inline code and the surrounding caller prose");
+      assert.equal(returnReportPanel(redisplayed), compact);
+      assert.equal(insertSortieResult(redisplayed, result, "self-rechecked", undefined, locale), redisplayed);
+    }
     for (const example of [legacy, compact]) {
       const quoted = `~~~~markdown\n${example}\n~~~~`;
-      const disclosed = `<details><summary>Example</summary>\n${example}\n</details>`;
+      const disclosed = `<details><summary>Example</summary>\nLiteral closing tag: \`</details>\`\n${example}\n</details>`;
       assert.equal(returnReportPanel(quoted), undefined);
       assert.equal(returnReportPanel(disclosed), undefined);
       assert.equal(sanitizeTerminalReport(quoted), quoted);
+      assert.equal(sanitizeTerminalReport(disclosed), disclosed, "inline closing tags must not truncate an explanatory disclosure");
       const source = `${quoted}\n\nstatus: DONE\n\n**Next:** continue`;
       const inserted = insertSortieResult(source, result, "self-rechecked", undefined, locale);
       assert.ok(inserted.includes(quoted));

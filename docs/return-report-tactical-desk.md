@@ -32,6 +32,32 @@ Coordinatorのnative shellで529 PASS、exit 0。build 8.830秒、test 23.782秒
 後続の本節追記は文書のみで、上記runtime/test入力は変更していない。
 `cmp old-inputs.json new-inputs.json` はexit 0。正規UI比較前の素材一致であり、表示PASSではない。
 
+### PR #361の指摘対応
+
+rootが先行候補 `5a19f56a50469cfdd26d47a68792114c724a3e72` をcommit/pushし、
+PR [#361](https://github.com/zufall-upon/Sortie-dogs/pull/361) を作成済み。先行headのCI成功は以下の修正の検証に転用しない。
+
+- [P2: インラインコードの開きタグ](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524576543)：有効。
+  ``Updated the `<details>` renderer`` の後にある実カードを構造深度の誤認で抽出できない。
+  対応するbacktickで囲まれたコードはタグ判定から除外し、元本文と位置を保持する。
+  共通する本文走査にも適用し、後続の次操作を失わない。単一・複数backtick、コード中の閉じタグ、
+  旧新形式・日英、実カード抽出と重複なし置換を既存回帰で確認する。
+- [P2: 説明枠直後のコード削除](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524576551)：有効。
+  説明details内の `Evidence: illustrative example` が、空行なしで続く外側YAML fenceの所有者と誤認される。
+  後続fenceの見出し探索では、既に保護した説明枠・コードの中身を参照しない。
+  両方の原文保持と、従来の外側internal Evidence削除を既存回帰で確認する。
+
+修正前の小さい回帰は2 FAIL（exit 1、0.198秒）。修正後は同じ2項目がPASS
+（build 8.755秒、test 0.223秒、exit 0）。本変更は抽出・本文保全のみで表示renderer出力は変更しない。
+通常・長文・中断の日英比較素材は再生成せず再利用する。正規UIの狭幅比較は依然未達で、
+rootが接続済みDesktopで直接観測を進める。pairing認証の迂回・認証情報転記は行わない。
+既存PRへの追加配送はrootで継続し、子で拒否済みGit形式を再試行しない。
+
+自己再確認では、インラインコードの開きタグと後続の旧カードを清掃処理が一括削除する残存経路も特定した。
+旧形式の置換で元の説明文を保持する回帰が修正前に失敗（exit 1）。清掃のブロック探索にも同じコードspanのmaskを使い、
+元文字列の位置・bytesから本文を組み立てる。旧新・日英の置換、引用・説明枠内のliteral閉じタグ、次操作と再表示の冪等性を保持する。
+表示renderer・ゲージ・計測・保存schemaは変更せず、比較素材は引き続き再利用する。
+
 既存のNode/npmとtoolingを再利用し、新依存・サービスを追加しない。
 公開済みv0.16.18、認証・設定・DB・profile・元checkoutは変更せず、install/publish/停止/再起動は行わない。
 以下の過去観測は当時の候補に対する記録であり、今回候補の検証済み表示を意味しない。

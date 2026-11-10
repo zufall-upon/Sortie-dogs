@@ -539,6 +539,25 @@ export function returnReportRange(text: string): { start: number; end: number } 
   return findReturnReportRange(text, true);
 }
 
+/** Hide matched inline code spans from tag scanning without changing offsets. */
+function withoutInlineCode(line: string): string {
+  const runs = [...line.matchAll(/`+/gu)];
+  let visible = "", cursor = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const opening = runs[i]!;
+    const escapes = /\\+$/u.exec(line.slice(0, opening.index))?.[0].length ?? 0;
+    if (escapes % 2 !== 0) continue;
+    let closing = i + 1;
+    while (closing < runs.length && runs[closing]![0].length !== opening[0].length) closing++;
+    if (closing === runs.length) continue;
+    const end = runs[closing]!.index + runs[closing]![0].length;
+    visible += line.slice(cursor, opening.index) + " ".repeat(end - opening.index);
+    cursor = end;
+    i = closing;
+  }
+  return visible + line.slice(cursor);
+}
+
 function findReturnReportRange(text: string, includeLegacy: boolean): { start: number; end: number } | undefined {
   const lines = text.split("\n");
   const offsets: number[] = [];
@@ -552,8 +571,9 @@ function findReturnReportRange(text: string, includeLegacy: boolean): { start: n
       if (close?.[0] === fence.character && close.length >= fence.length) fence = undefined;
       continue;
     }
+    const structure = withoutInlineCode(line);
     if (includeLegacy && disclosureDepth === 0) {
-      const details = /<details\b[^>]*>/iu.exec(line);
+      const details = /<details\b[^>]*>/iu.exec(structure);
       if (details !== null) {
         const start = offsets[i]! + details.index, tail = text.slice(start);
         if (/^<details\b[^>]*>\s*<summary><strong>🐾 SORTIE DOGS — (?:帰還報告|Return Report)(?=｜|<\/strong>)/u.test(tail)) {
@@ -562,8 +582,8 @@ function findReturnReportRange(text: string, includeLegacy: boolean): { start: n
         }
       }
     }
-    const opens = (line.match(/<details\b[^>]*>/giu) ?? []).length;
-    const closes = (line.match(/<\/details>/giu) ?? []).length;
+    const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
+    const closes = (structure.match(/<\/details>/giu) ?? []).length;
     const inside = disclosureDepth > 0 || opens > 0;
     disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
     if (inside) continue;
@@ -749,8 +769,9 @@ function topLevelLines(text: string): Array<{ index: number; line: string }> {
   let disclosureDepth = 0;
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
     if (fence === undefined) {
-      const opens = (line.match(/<details\b[^>]*>/giu) ?? []).length;
-      const closes = (line.match(/<\/details>/giu) ?? []).length;
+      const structure = withoutInlineCode(line);
+      const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
+      const closes = (structure.match(/<\/details>/giu) ?? []).length;
       const inside = disclosureDepth > 0 || opens > 0;
       disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
       if (inside) continue;
@@ -826,17 +847,25 @@ export function sanitizeTerminalReport(text: string): string {
   }
   const preserved: string[] = [];
   const keep = (block: string): string => `\0SORTIE_PROSE_${preserved.push(block) - 1}\0`;
+  // Scan structure with inline code masked, but always copy the original bytes.
+  const structure = text.split("\n").map(withoutInlineCode).join("\n");
+  let cleaned = "", cursor = 0;
   // Match whichever outer block comes first: disclosures protect their code,
   // and fenced examples protect any legacy card markup inside them.
-  let cleaned = text.replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$|<details\b[^>]*>[\s\S]*?<\/details>/gimu,
-      (block: string, fence: string | undefined, offset: number, source: string) => {
-        if (fence !== undefined) {
-          const preceding = source.slice(0, offset).trimEnd().split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
-          return /^[ \t]*(?:#{1,6}[ \t]*)?\**Evidence\**[ \t]*:/imu.test(preceding) ? "" : keep(block);
-        }
-        const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/iu.exec(block)?.[1]?.replace(/<[^>]*>/gu, "").trim() ?? "";
-        return /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*(?:帰還報告|Return Report))/iu.test(summary) ? "" : keep(block);
-    })
+  for (const match of structure.matchAll(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$|<details\b[^>]*>[\s\S]*?<\/details>/gimu)) {
+    const offset = match.index, block = text.slice(offset, offset + match[0].length);
+    cleaned += text.slice(cursor, offset);
+    cursor = offset + match[0].length;
+    if (match[1] !== undefined) {
+      // Ownership sees the already-protected prefix, never disclosure/code contents.
+      const preceding = cleaned.trimEnd().split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
+      cleaned += /^[ \t]*(?:#{1,6}[ \t]*)?\**Evidence\**[ \t]*:/imu.test(preceding) ? "" : keep(block);
+    } else {
+      const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/iu.exec(block)?.[1]?.replace(/<[^>]*>/gu, "").trim() ?? "";
+      cleaned += /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*(?:帰還報告|Return Report))/iu.test(summary) ? "" : keep(block);
+    }
+  }
+  cleaned = (cleaned + text.slice(cursor))
     .split(/\r?\n/u)
     .filter((line) => !/^\s*(?:(?:#{1,6}\s*)?\**Evidence\**\s*:|(?:TRUE_BLOCKER|goal_control|evidence_refs?|reason_code|raw|raw_status|manifest)\s*:)/iu.test(line))
     .join(newline);
