@@ -571,6 +571,31 @@ function findReturnReportRange(text: string, includeLegacy: boolean): { start: n
       if (close?.[0] === fence.character && close.length >= fence.length) fence = undefined;
       continue;
     }
+    // Fences remain code even inside a disclosure. Track them before HTML depth
+    // so a literal closing tag cannot expose an example or hide the next panel.
+    const opener = /^[ \t]*(`{3,}|~{3,})([^\r\n]*)$/u.exec(line);
+    if (opener !== null) {
+      const marker = opener[1]!;
+      if (disclosureDepth === 0 && marker[0] === "`" && opener[2] === "text" &&
+          /^🐾 SORTIE DOGS — (?:帰還報告|Return Report)｜/u.test(lines[i + 1] ?? "")) {
+        for (let j = i + 2; j < lines.length; j++) {
+          const close = /^(`{3,})[ \t]*\r?$/u.exec(lines[j]!)?.[1];
+          if (close === undefined || close.length < marker.length) continue;
+          let end = offsets[j]! + lines[j]!.replace(/\r$/u, "").length;
+          if (lines[j + 1]?.replace(/\r$/u, "") === "" && lines[j + 2]?.replace(/\r$/u, "") === "<details>" &&
+              /^<summary>📜 (?:詳細記録|Detailed record)<\/summary>\r?$/u.test(lines[j + 3] ?? "")) {
+            for (let k = j + 4; k < lines.length; k++) if (/^<\/details>\r?$/u.test(lines[k]!)) {
+              end = offsets[k]! + lines[k]!.replace(/\r$/u, "").length;
+              break;
+            }
+          }
+          return { start: offsets[i]!, end };
+        }
+        return undefined;
+      }
+      fence = { character: marker[0]!, length: marker.length };
+      continue;
+    }
     const structure = withoutInlineCode(line);
     if (includeLegacy && disclosureDepth === 0) {
       const details = /<details\b[^>]*>/iu.exec(structure);
@@ -584,30 +609,7 @@ function findReturnReportRange(text: string, includeLegacy: boolean): { start: n
     }
     const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
     const closes = (structure.match(/<\/details>/giu) ?? []).length;
-    const inside = disclosureDepth > 0 || opens > 0;
     disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
-    if (inside) continue;
-    const opener = /^[ \t]*(`{3,}|~{3,})([^\r\n]*)$/u.exec(line);
-    if (opener === null) continue;
-    const marker = opener[1]!;
-    if (marker[0] === "`" && opener[2] === "text" &&
-        /^🐾 SORTIE DOGS — (?:帰還報告|Return Report)｜/u.test(lines[i + 1] ?? "")) {
-      for (let j = i + 2; j < lines.length; j++) {
-        const close = /^(`{3,})[ \t]*\r?$/u.exec(lines[j]!)?.[1];
-        if (close === undefined || close.length < marker.length) continue;
-        let end = offsets[j]! + lines[j]!.replace(/\r$/u, "").length;
-        if (lines[j + 1]?.replace(/\r$/u, "") === "" && lines[j + 2]?.replace(/\r$/u, "") === "<details>" &&
-            /^<summary>📜 (?:詳細記録|Detailed record)<\/summary>\r?$/u.test(lines[j + 3] ?? "")) {
-          for (let k = j + 4; k < lines.length; k++) if (/^<\/details>\r?$/u.test(lines[k]!)) {
-            end = offsets[k]! + lines[k]!.replace(/\r$/u, "").length;
-            break;
-          }
-        }
-        return { start: offsets[i]!, end };
-      }
-      return undefined;
-    }
-    fence = { character: marker[0]!, length: marker.length };
   }
   return undefined;
 }
@@ -768,25 +770,22 @@ function topLevelLines(text: string): Array<{ index: number; line: string }> {
   let fence: { character: string; length: number } | undefined;
   let disclosureDepth = 0;
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
-    if (fence === undefined) {
-      const structure = withoutInlineCode(line);
-      const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
-      const closes = (structure.match(/<\/details>/giu) ?? []).length;
-      const inside = disclosureDepth > 0 || opens > 0;
-      disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
-      if (inside) continue;
+    if (fence !== undefined) {
+      const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+      continue;
     }
-    if (fence === undefined) {
-      const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
-      if (opener === undefined) {
-        if (!/^[ \t]*>/u.test(line)) lines.push({ index, line });
-        continue;
-      }
+    const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opener !== undefined) {
       fence = { character: opener[0]!, length: opener.length };
       continue;
     }
-    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
-    if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+    const structure = withoutInlineCode(line);
+    const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
+    const closes = (structure.match(/<\/details>/giu) ?? []).length;
+    const inside = disclosureDepth > 0 || opens > 0;
+    disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
+    if (!inside && !/^[ \t]*>/u.test(line)) lines.push({ index, line });
   }
   return lines;
 }
@@ -847,8 +846,24 @@ export function sanitizeTerminalReport(text: string): string {
   }
   const preserved: string[] = [];
   const keep = (block: string): string => `\0SORTIE_PROSE_${preserved.push(block) - 1}\0`;
-  // Scan structure with inline code masked, but always copy the original bytes.
-  const structure = text.split("\n").map(withoutInlineCode).join("\n");
+  // Mask code contents, including fences inside disclosures, but copy original bytes.
+  let fence: { character: string; length: number } | undefined;
+  const structure = text.split("\n").map(line => {
+    if (fence !== undefined) {
+      const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*\r?$/u.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) {
+        fence = undefined;
+        return line;
+      }
+      return line.replace(/[^\r]/g, " ");
+    }
+    const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opener !== undefined) {
+      fence = { character: opener[0]!, length: opener.length };
+      return line;
+    }
+    return withoutInlineCode(line);
+  }).join("\n");
   let cleaned = "", cursor = 0;
   // Match whichever outer block comes first: disclosures protect their code,
   // and fenced examples protect any legacy card markup inside them.

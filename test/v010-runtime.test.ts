@@ -30,7 +30,7 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { ProjectMemory, projectMemoryFile } from "../dist/core/project-memory.js";
-import { decoratePreviewHeadings, receiptBoundTerminalText } from "../dist/plugin/receipt-presentation.js";
+import { decoratePreviewHeadings, receiptBoundTerminalText, returnReportPanel } from "../dist/plugin/receipt-presentation.js";
 import { inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
   MAX_ACCEPTANCE_CRITERIA } from "../dist/core/acceptance-continuity.js";
 
@@ -4738,6 +4738,12 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
   for (const symbol of ["```text", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  const disclosure = "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>";
+  const contextual = await control!.renderReturnReport("root",
+    `${disclosure}\n\nstatus: DONE\n\n## 変更点\naccepted change\n\n## 次\ncontinue verification`, goalFingerprint(receipt));
+  assert.ok(contextual?.includes(disclosure), "the actual report renderer preserves the preceding fenced disclosure");
+  assert.match(returnReportPanel(contextual!)!, /➡️ NEXT\n\ncontinue verification/u,
+    "the real renderer-to-panel delivery path retains a panel after the fenced example");
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
   const priorLocale = process.env.SORTIE_REPORT_LOCALE;
   const reportsBefore = (await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported");

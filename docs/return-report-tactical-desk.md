@@ -23,8 +23,8 @@
 比較素材は `/home/user/_temp/Sortie-dogs/return-report-compact-20261110/`。
 同じ合成入力から旧新×日英×通常・長文・中断を出力し、入力JSONも保存した。
 合成費用・称号は実任務の実績ではない。論理カラムのチェックは実ブラウザのpixel幅検証を代替しない。
-現Coordinatorと実装Workerは `browser.disconnected` のため正規UI比較は未実施。
-root接続の正規UIで、通常・長文・中断の日英主表示、ゲージ、詳細開閉、狭幅の横溢れを比較する残件がある。
+At initial implementation time, the Coordinator/Worker browser was disconnected and the UI comparison was pending.
+The approved existing-conversation screenshot below now supplies the observed visual result; the earlier pending status is historical.
 
 関連検証は `PATH=/home/user/.local/bin:$PATH npm run test:targeted -- test/run-metrics.test.ts test/v010-runtime.test.ts test/v2-plugin.test.ts test/plugin.test.ts test/mission-completion.test.ts`。
 Coordinatorのnative shellで529 PASS、exit 0。build 8.830秒、test 23.782秒。
@@ -49,14 +49,71 @@ PR [#361](https://github.com/zufall-upon/Sortie-dogs/pull/361) を作成済み�
 
 修正前の小さい回帰は2 FAIL（exit 1、0.198秒）。修正後は同じ2項目がPASS
 （build 8.755秒、test 0.223秒、exit 0）。本変更は抽出・本文保全のみで表示renderer出力は変更しない。
-通常・長文・中断の日英比較素材は再生成せず再利用する。正規UIの狭幅比較は依然未達で、
-rootが接続済みDesktopで直接観測を進める。pairing認証の迂回・認証情報転記は行わない。
+通常・長文・中断の日英比較素材は再生成せず再利用する。この時点のUI未確認は、後述の実画像・利用者承認で更新した。
+pairing認証の迂回・認証情報転記は行わない。
 既存PRへの追加配送はrootで継続し、子で拒否済みGit形式を再試行しない。
 
 自己再確認では、インラインコードの開きタグと後続の旧カードを清掃処理が一括削除する残存経路も特定した。
 旧形式の置換で元の説明文を保持する回帰が修正前に失敗（exit 1）。清掃のブロック探索にも同じコードspanのmaskを使い、
 元文字列の位置・bytesから本文を組み立てる。旧新・日英の置換、引用・説明枠内のliteral閉じタグ、次操作と再表示の冪等性を保持する。
 表示renderer・ゲージ・計測・保存schemaは変更せず、比較素材は引き続き再利用する。
+
+### Approved UI comparison and its limits
+
+The root presented saved real `formatSortieResult` output in the existing OpenCode conversation:
+ordinary Japanese, long-name English and interrupted Japanese, explicitly labelled synthetic.
+Advisor `ses_e3a98840affeH1cdQIm3dWwzfJ` independently recommended this route instead of repeating
+unavailable authenticated-WebUI capture. Root adopted it without modifying authentication, DOM/CSS or the DB.
+The capture method was an implementation choice, not a change to the user's requested visual outcome.
+
+The user supplied image-only message `msg_1c56d0393001QdYC60ewg8CWF5`, attachment index 0.
+Original bytes are retained at `/home/user/_temp/Sortie-dogs/return-report-compact-20261110/user-ui-comparison.jpg`:
+JPEG, 949×1739 pixels, SHA-256 `6154fadf34a2c55cb630743681c76cec3a250cbf045ec8b7a14fb7a47edcafb8`.
+The original filename ended in `.png`; MIME and saved extension reflect the actual JPEG bytes.
+Root and this Coordinator directly inspected this corrected image. A previously misselected PNG is not the evidence.
+User approval `msg_1c56d270e001hKfIxTOQlZbCoL` was exactly: 「良いと思うよ」.
+The read-only retrieval receipt and scoped observations are retained in `ui-observation.json` beside the image.
+
+- Observed: compact, visible ordinary-Japanese and long-English frames, dense line spacing, icons,
+  complete ten-block gauges and 100.0% values, and interrupted header/self-check wording/unavailable fields.
+- Unknown: CSS viewport width and device-pixel ratio. Image dimensions are not a 634px viewport measurement.
+- The question overlay obscures interrupted pending/stop/next rows. Their contents are covered by source fixtures
+  and tests, not the screenshot. No claim of measured `scrollWidth`, all-state images, detail opening/copy behavior,
+  deployed runtime, or real Mission scores follows from this synthetic display.
+- Parser-only corrections do not change `formatSortieResult` output; the saved display and approval remain applicable.
+  No fresh login or repeated visual comparison is required solely for those corrections.
+
+### PR #361: fenced examples inside disclosures
+
+Root pushed the prior correction as `dc5c39ddc76ff0fc7f22c121a17c111c0640b4c8`.
+All four CI checks succeeded for that head; they do not establish the later correction's result.
+The earlier two P2 threads are fixed/outdated. The new
+[P2 discussion_r4524815681](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524815681) is **valid**:
+a fenced HTML literal `</details>` inside an explanatory disclosure caused the range scanner to lose fence state
+and hide the later legacy or compact panel. The public range/panel regression failed before the fix.
+
+Fence tracking now precedes disclosure-depth changes in both panel and terminal-prose scans, including fences
+inside disclosures. Fenced contents cannot change HTML depth or select a host panel. Cleanup masks fenced code
+contents while copying original bytes, preventing the same literal tag from truncating the preserved example.
+Existing tests cover legacy/compact, Japanese/English, backtick/tilde examples, next-action retention and idempotent
+redisplay, while retaining the inline-code and adjacent-YAML ownership cases.
+
+The focused baseline had one failing public regression and one passing real completion case (exit 1).
+An intermediate check caught the corresponding cleanup truncation; after batching that fix, all three focused
+checks passed (build 9.515s, test 1.172s, exit 0). The real core renderer-to-panel path and the actual profiled
+`complete_mission` tool-result transport are also exercised by the related suite. The completion case's review
+markup is normalized by production code; it is a caller guard, not a claim that this tool input alone reproduces
+the raw-prefix failure. Final related validation remains recorded by the native check receipts.
+
+Prior `SELF_RECHECKED` results remain author self-checks, not independent PASS. A null security-finding boolean
+is unknown, not a security PASS. No new review/publish/install/restart was triggered merely to collect evidence.
+Root continues the existing PR's final Git delivery through its successful standard route; child-denied identity
+wrappers are not retried. Only changed deliverables are staged.
+
+Preservation/cleanup: no new isolated environment, dependency installation, service or cache was introduced.
+Focused completion fixtures were removed by their existing `finally` cleanup; no `mission-completion-*` fixture
+directory remained at the observed check. Saved screenshots, input/output fixtures, native logs, installed tooling,
+old checkout, settings/authentication/DB/profiles and fixed release archives are retained, not treated as disposable.
 
 既存のNode/npmとtoolingを再利用し、新依存・サービスを追加しない。
 公開済みv0.16.18、認証・設定・DB・profile・元checkoutは変更せず、install/publish/停止/再起動は行わない。

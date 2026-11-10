@@ -560,6 +560,25 @@ test("compact and legacy return panels extract and redisplay without consuming f
       assert.equal(insertSortieResult(redisplayed, result, "self-rechecked", undefined, locale), redisplayed);
     }
     for (const example of [legacy, compact]) {
+      const disclosures = [
+        "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>",
+        `<details><summary>Panel example</summary>\n\n~~~~html\n</details>\n${example}\n~~~~\n\n</details>`,
+      ];
+      for (const disclosure of disclosures) {
+        assert.equal(returnReportPanel(disclosure), undefined, "a fenced panel inside a disclosure is only an example");
+        const source = `${disclosure}\n\nstatus: DONE\n\n${example}\n\n**Next:** continue`;
+        const range = returnReportRange(source);
+        assert.ok(range, "a literal closing tag in a fenced disclosure must not hide the later host panel");
+        assert.equal(source.slice(range.start, range.end), example);
+        assert.equal(returnReportPanel(source), example);
+        const compactRange = compactReturnReportRange(source);
+        assert.equal(compactRange === undefined ? undefined : source.slice(compactRange.start, compactRange.end),
+          example === compact ? compact : undefined);
+        const inserted = insertSortieResult(source, result, "self-rechecked", undefined, locale);
+        assert.ok(inserted.includes(disclosure), "the original fenced disclosure is preserved during redisplay");
+        assert.equal(returnReportPanel(inserted), compact, "the terminal caller's next action survives the fenced disclosure");
+        assert.equal(insertSortieResult(inserted, result, "self-rechecked", undefined, locale), inserted);
+      }
       const quoted = `~~~~markdown\n${example}\n~~~~`;
       const disclosed = `<details><summary>Example</summary>\nLiteral closing tag: \`</details>\`\n${example}\n</details>`;
       assert.equal(returnReportPanel(quoted), undefined);
