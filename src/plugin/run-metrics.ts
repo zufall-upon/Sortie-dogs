@@ -529,6 +529,119 @@ const reportLiteral = (text: string): string => {
     .replace(/^(\d+)([.)])(?=\s)/u, (_match, count: string, delimiter: string) => `${count}&#${delimiter.codePointAt(0)};`);
 };
 
+/** Locate a top-level compact host panel, not an example nested in another fence. */
+export function compactReturnReportRange(text: string): { start: number; end: number } | undefined {
+  return findReturnReportRange(text, false);
+}
+
+/** Both delivery formats exclude fenced examples and explanatory disclosures. */
+export function returnReportRange(text: string): { start: number; end: number } | undefined {
+  return findReturnReportRange(text, true);
+}
+
+/** Hide matched inline code spans from tag scanning without changing offsets. */
+function withoutInlineCode(line: string): string {
+  const runs = [...line.matchAll(/`+/gu)];
+  let visible = "", cursor = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const opening = runs[i]!;
+    const escapes = /\\+$/u.exec(line.slice(0, opening.index))?.[0].length ?? 0;
+    if (escapes % 2 !== 0) continue;
+    let closing = i + 1;
+    while (closing < runs.length && runs[closing]![0].length !== opening[0].length) closing++;
+    if (closing === runs.length) continue;
+    const end = runs[closing]!.index + runs[closing]![0].length;
+    visible += line.slice(cursor, opening.index) + " ".repeat(end - opening.index);
+    cursor = end;
+    i = closing;
+  }
+  return visible + line.slice(cursor);
+}
+
+function findReturnReportRange(text: string, includeLegacy: boolean): { start: number; end: number } | undefined {
+  const lines = text.split("\n");
+  const offsets: number[] = [];
+  let position = 0, disclosureDepth = 0;
+  let fence: { character: string; length: number } | undefined;
+  for (const line of lines) { offsets.push(position); position += line.length + 1; }
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.replace(/\r$/u, "");
+    if (fence !== undefined) {
+      const close = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+      if (close?.[0] === fence.character && close.length >= fence.length) fence = undefined;
+      continue;
+    }
+    // Fences remain code even inside a disclosure. Track them before HTML depth
+    // so a literal closing tag cannot expose an example or hide the next panel.
+    const opener = /^[ \t]*(`{3,}|~{3,})([^\r\n]*)$/u.exec(line);
+    if (opener !== null) {
+      const marker = opener[1]!;
+      if (disclosureDepth === 0 && marker[0] === "`" && opener[2] === "text" &&
+          /^🐾 SORTIE DOGS — (?:帰還報告|Return Report)｜/u.test(lines[i + 1] ?? "")) {
+        for (let j = i + 2; j < lines.length; j++) {
+          const close = /^(`{3,})[ \t]*\r?$/u.exec(lines[j]!)?.[1];
+          if (close === undefined || close.length < marker.length) continue;
+          let end = offsets[j]! + lines[j]!.replace(/\r$/u, "").length;
+          if (lines[j + 1]?.replace(/\r$/u, "") === "" && lines[j + 2]?.replace(/\r$/u, "") === "<details>" &&
+              /^<summary>📜 (?:詳細記録|Detailed record)<\/summary>\r?$/u.test(lines[j + 3] ?? "")) {
+            for (let k = j + 4; k < lines.length; k++) if (/^<\/details>\r?$/u.test(lines[k]!)) {
+              end = offsets[k]! + lines[k]!.replace(/\r$/u, "").length;
+              break;
+            }
+          }
+          return { start: offsets[i]!, end };
+        }
+        return undefined;
+      }
+      fence = { character: marker[0]!, length: marker.length };
+      continue;
+    }
+    const structure = withoutInlineCode(line);
+    if (includeLegacy && disclosureDepth === 0) {
+      const details = /<details\b[^>]*>/iu.exec(structure);
+      if (details !== null) {
+        const start = offsets[i]! + details.index, tail = text.slice(start);
+        if (/^<details\b[^>]*>\s*<summary><strong>🐾 SORTIE DOGS — (?:帰還報告|Return Report)(?=｜|<\/strong>)/u.test(tail)) {
+          const close = tail.indexOf("\n</details>");
+          if (close >= 0) return { start, end: start + close + "\n</details>".length };
+        }
+      }
+    }
+    const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
+    const closes = (structure.match(/<\/details>/giu) ?? []).length;
+    disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
+  }
+  return undefined;
+}
+
+const reportSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const reportGraphemes = (value: string) => [...reportSegmenter.segment(value)].map(part => part.segment);
+const reportColumns = (part: string) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}\uFF01-\uFF60]/u.test(part) ? 2 : 1;
+const reportPair = (first: string, second: string): string[] => {
+  const joined = `${first} · ${second}`;
+  return reportGraphemes(joined).reduce((sum, part) => sum + reportColumns(part), 0) <= 48 ? [joined] : [first, second];
+};
+
+// Break long display lines without cutting grapheme clusters. The full original
+// values remain in the detailed record; these are presentation-only line breaks.
+function wrapReportLine(line: string, width = 48): string[] {
+  let rest = reportGraphemes(line);
+  const output: string[] = [];
+  while (rest.length > 0) {
+    let used = 0, end = 0, boundary = 0;
+    while (end < rest.length && used + reportColumns(rest[end]!) <= width) {
+      used += reportColumns(rest[end]!);
+      if (/\s|[、。·]/u.test(rest[end]!)) boundary = end + 1;
+      end++;
+    }
+    if (end === rest.length) { output.push(rest.join("")); break; }
+    const split = boundary >= Math.floor(end / 2) ? boundary : Math.max(1, end);
+    output.push(rest.slice(0, split).join(""));
+    rest = rest.slice(split);
+  }
+  return output.length ? output : [""];
+}
+
 export function formatSortieResult(result: SortieResult, presentation: SortieResultPresentation = {}): string {
   const locale = resolveReportLocale(presentation.locale);
   const t = reportText(locale);
@@ -558,10 +671,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
   const tokenText = result.cost.total_tokens.availability === "unavailable" && measuredTokens !== undefined && measuredTokens > 0
     ? `${measuredTokens.toLocaleString(locale)} ${locale === "en" && measuredTokens === 1 ? "token" : "tokens"}${t("（観測分）", " (observed)")}`
     : metric(result.cost.total_tokens, (value) => `${value.toLocaleString(locale)} ${locale === "en" && value === 1 ? "token" : "tokens"}`);
-  const body = [
-    t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report"),
-    t("TACTICAL DESK / 作戦卓", "TACTICAL DESK / Operations"),
-    "────────────────────",
+  const detail = [
     result.result_id[0],
     "",
     `${color} ${achievement} — ${display(presentation.statusSummary)}`,
@@ -602,9 +712,47 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     ...(result.mission.status === "COMPLETED" ? ["", t("└─ 記録を閉じる。次の作戦へ。", "└─ Record closed. On to the next operation.")] : []),
     "",
     t("※使用量は最終応答生成前の計測", "※Usage measured before final response generation"),
-  ].filter(line => line !== "").map((line, index) => index === 1
-    ? `\`${line}\`` : reportLiteral(line.trim())).join("\n\n");
-  return `<details>\n<summary><strong>${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}</strong></summary>\n\n${body}\n\n</details>`;
+  ].filter(line => line !== "").map(line => reportLiteral(line.trim())).join("\n\n");
+
+  const modelLines = renderDebrief(result.debrief, locale);
+  const modelNames = [...(result.debrief?.mix ?? []).map(entry => entry.model.replace(/[\r\n\t]/gu, " ")),
+    t("その他", "Other"), t("未分類", "Unclassified")].sort((a, b) => b.length - a.length);
+  const modelRows = modelLines.filter(line => line.startsWith("🐕 ")).flatMap(line => {
+    const name = modelNames.find(value => line.startsWith(`🐕 ${value} `));
+    if (name === undefined) return [line];
+    const characters = reportGraphemes(name);
+    const shortName = characters.length > 32
+      ? `${characters.slice(0, 20).join("")}…${characters.slice(-8).join("")} [${modelNames.indexOf(name) + 1}]` : name;
+    return [`🐕 ${shortName}`, `  ${line.slice(3 + name.length + 1)}`];
+  });
+  const implementation = display(presentation.implementation);
+  const implementationChars = reportGraphemes(implementation);
+  const shortImplementation = implementationChars.length > 100
+    ? `${implementationChars.slice(0, 100).join("")}… ${t("（詳細記録）", "(see details)")}` : implementation;
+  const summary = [
+    `${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}`,
+    ...(presentation.statusSummary?.trim() ? [`📌 ${display(presentation.statusSummary)}`] : []),
+    `🔧 ${t("成果", "Result")}: ${shortImplementation}`,
+    `🛡 ${t("確認", "Validation")}: ${proof.validation} · ◔ ${criteria}`,
+    `🔍 Review: ${review}`,
+    ...(presentation.reviewNote ? [`${t("レビュー補足", "Review note")}: ${display(presentation.reviewNote)}`] : []),
+    ...renderDebriefTraits(result.debrief, result.mission.status === "COMPLETED", locale).map(line => `🏅 ${line.replace(/\s{2,}/gu, ": ")}`),
+    ...reportPair(`⏱ ${t("経過", "Elapsed")}: ${metric(result.speed.goal_wall_ms, duration)} ${t("（待機含む）", "(includes waiting)")}`,
+      `🪙 ${t("使用量", "Usage")}: ${tokenText}`),
+    `🪙 ${t("予測費用（概算）", "Estimated cost")}: ${estimatedCost}`,
+    `${t("host計上費用", "Host-recorded cost")}: ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : "unknown"} ${t("（請求総額ではない）", "(not the total bill)")}`,
+    ...modelLines.filter(line => line.startsWith(t("モデル内訳", "Model breakdown"))).map(line => line.replace(/\s{2,}/gu, ": ")),
+    ...modelRows,
+    ...(modelLines.some(line => line.includes("†host") || line.includes("†Some host"))
+      ? [t("†host費用0計上あり（無料とは限らない）", "†Host cost includes zero (not necessarily free)")] : []),
+    ...reportPair(`⏳ ${t("未実施", "Pending")}: ${presentation.pending?.trim() ? display(presentation.pending) : t("未確認", "Unconfirmed")}`,
+      `🛑 ${t("停止理由", "Stop")}: ${display(presentation.stopReason ?? result.mission.stop_reason)}`),
+    `➡️ ${t("次", "Next")}: ${display(presentation.next)}`,
+  ].flatMap(line => wrapReportLine(line));
+  const body = summary.join("\n");
+  const longestFence = [...body.matchAll(/`+/gu)].reduce((longest, match) => Math.max(longest, match[0].length), 2);
+  const fence = "`".repeat(longestFence + 1);
+  return `${fence}text\n${body}\n${fence}\n\n<details>\n<summary>📜 ${t("詳細記録", "Detailed record")}</summary>\n\n${detail}\n\n</details>`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {
@@ -622,24 +770,22 @@ function topLevelLines(text: string): Array<{ index: number; line: string }> {
   let fence: { character: string; length: number } | undefined;
   let disclosureDepth = 0;
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
-    if (fence === undefined) {
-      const opens = (line.match(/<details\b[^>]*>/giu) ?? []).length;
-      const closes = (line.match(/<\/details>/giu) ?? []).length;
-      const inside = disclosureDepth > 0 || opens > 0;
-      disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
-      if (inside) continue;
+    if (fence !== undefined) {
+      const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+      continue;
     }
-    if (fence === undefined) {
-      const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
-      if (opener === undefined) {
-        if (!/^[ \t]*>/u.test(line)) lines.push({ index, line });
-        continue;
-      }
+    const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opener !== undefined) {
       fence = { character: opener[0]!, length: opener.length };
       continue;
     }
-    const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u.exec(line)?.[1];
-    if (closer?.[0] === fence.character && closer.length >= fence.length) fence = undefined;
+    const structure = withoutInlineCode(line);
+    const opens = (structure.match(/<details\b[^>]*>/giu) ?? []).length;
+    const closes = (structure.match(/<\/details>/giu) ?? []).length;
+    const inside = disclosureDepth > 0 || opens > 0;
+    disclosureDepth = Math.max(0, disclosureDepth + opens - closes);
+    if (!inside && !/^[ \t]*>/u.test(line)) lines.push({ index, line });
   }
   return lines;
 }
@@ -693,22 +839,56 @@ export function replaceDoneTerminalStatus(text: string, replacement: string): st
 
 export function sanitizeTerminalReport(text: string): string {
   const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  let panel = compactReturnReportRange(text);
+  while (panel !== undefined) {
+    text = text.slice(0, panel.start) + text.slice(panel.end);
+    panel = compactReturnReportRange(text);
+  }
   const preserved: string[] = [];
   const keep = (block: string): string => `\0SORTIE_PROSE_${preserved.push(block) - 1}\0`;
-  return text.replace(/<details\b[^>]*>[\s\S]*?<\/details>/giu, block => {
+  // Mask code contents, including fences inside disclosures, but copy original bytes.
+  let fence: { character: string; length: number } | undefined;
+  const structure = text.split("\n").map(line => {
+    if (fence !== undefined) {
+      const closer = /^[ \t]*(`{3,}|~{3,})[ \t]*\r?$/u.exec(line)?.[1];
+      if (closer?.[0] === fence.character && closer.length >= fence.length) {
+        fence = undefined;
+        return line;
+      }
+      return line.replace(/[^\r]/g, " ");
+    }
+    const opener = /^[ \t]*(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (opener !== undefined) {
+      fence = { character: opener[0]!, length: opener.length };
+      return line;
+    }
+    return withoutInlineCode(line);
+  }).join("\n");
+  let cleaned = "", cursor = 0;
+  // Match whichever outer block comes first: disclosures protect their code,
+  // and fenced examples protect any legacy card markup inside them.
+  for (const match of structure.matchAll(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$|<details\b[^>]*>[\s\S]*?<\/details>/gimu)) {
+    const offset = match.index, block = text.slice(offset, offset + match[0].length);
+    cleaned += text.slice(cursor, offset);
+    cursor = offset + match[0].length;
+    if (match[1] !== undefined) {
+      // Ownership sees the already-protected prefix, never disclosure/code contents.
+      const preceding = cleaned.trimEnd().split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
+      cleaned += /^[ \t]*(?:#{1,6}[ \t]*)?\**Evidence\**[ \t]*:/imu.test(preceding) ? "" : keep(block);
+    } else {
       const summary = /<summary\b[^>]*>([\s\S]*?)<\/summary>/iu.exec(block)?.[1]?.replace(/<[^>]*>/gu, "").trim() ?? "";
-      return /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*(?:帰還報告|Return Report))/iu.test(summary) ? "" : keep(block);
-    })
-    .replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?^[ \t]*\1[ \t]*$/gimu,
-      (block: string, _fence: string, offset: number, source: string) => {
-        const preceding = source.slice(0, offset).trimEnd().split(/\r?\n\s*\r?\n/u).at(-1) ?? "";
-        return /^[ \t]*(?:#{1,6}[ \t]*)?\**Evidence\**[ \t]*:/imu.test(preceding) ? "" : keep(block);
-      })
+      cleaned += /^(?:Evidence\b|🐾\s*SORTIE DOGS\s*[—-]\s*(?:帰還報告|Return Report))/iu.test(summary) ? "" : keep(block);
+    }
+  }
+  cleaned = (cleaned + text.slice(cursor))
     .split(/\r?\n/u)
     .filter((line) => !/^\s*(?:(?:#{1,6}\s*)?\**Evidence\**\s*:|(?:TRUE_BLOCKER|goal_control|evidence_refs?|reason_code|raw|raw_status|manifest)\s*:)/iu.test(line))
-    .join(newline)
-    .replace(/\0SORTIE_PROSE_(\d+)\0/gu, (_token, index: string) => preserved[Number(index)]!)
-    .trimEnd();
+    .join(newline);
+  // Restore examples only after all internal-field cleanup has finished.
+  for (let index = preserved.length - 1; index >= 0; index--) {
+    cleaned = cleaned.replaceAll(`\0SORTIE_PROSE_${index}\0`, preserved[index]!);
+  }
+  return cleaned.trimEnd();
 }
 
 export function insertRunMetrics(text: string, metrics: RunMetrics): string {
@@ -755,7 +935,7 @@ export function insertSortieResult(text: string, result: SortieResult,
   while (cleaned[checkpoint.index + 1] === "") cleaned.splice(checkpoint.index + 1, 1);
   let card: string;
   try { card = formatSortieResult(result, presentation); }
-  catch { card = t("<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>\n\n**確認:** 表示集計を取得できません。任務結果は先頭の状態を参照。\n\n</details>", "<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report</strong></summary>\n\n**Note:** Display totals unavailable. See the leading status for the mission result.\n\n</details>"); }
+  catch { card = t("```text\n🐾 SORTIE DOGS — 帰還報告｜⚠️ 未計測\n確認: 表示集計を取得できません。\n任務結果は先頭の状態を参照。\n```", "```text\n🐾 SORTIE DOGS — Return Report｜⚠️ Unavailable\nDisplay totals unavailable.\nSee the leading status for the mission result.\n```"); }
   cleaned.splice(checkpoint.index + 1, 0, "", card, "");
   return cleaned.join(newline).trimEnd();
 }

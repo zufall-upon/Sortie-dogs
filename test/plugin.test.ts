@@ -1210,7 +1210,7 @@ test("generated coordinator keeps proof internal and renders concise Japanese te
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   assert.match(semantics[1], /interruption_marker: TRUE_INTERRUPTION: user: <condition> \| TRUE_INTERRUPTION: internal: <condition>/);
   assert.match(semantics[1], /continuation_not_interruption: local process defect \| step boundary \| continuation request \| recoverable limit/);
-  assert.match(coordinator.content, /plugin replaces that exact persisted card in place with measured Speed, Cost, and 達成 paragraphs/i);
+  assert.match(coordinator.content, /plugin replaces that exact persisted card in place with a compact visible text panel/i);
   assert.match(coordinator.content, /Do not estimate or fabricate them/i);
   assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
   assert.match(coordinator.content, /"version": "0\.8\.0"/);
@@ -4290,7 +4290,7 @@ test("a user-held INTERRUPTED report renders the debrief regardless of icon and 
     await hooks["experimental.text.complete"]!({ sessionID: "report-root", messageID: "report-2", partID: "part-2" }, report);
     assert.match(report.text, /帰還報告/u);
     assert.match(report.text, /INTERRUPTED/u);
-    assert.match(report.text, /<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告/u);
+    assert.match(report.text, /```text\n🐾 SORTIE DOGS — 帰還報告/u);
     assert.doesNotMatch(report.text, /Evidence|raw_status|manifest:/u);
     const previousLocale = process.env.SORTIE_REPORT_LOCALE;
     try {

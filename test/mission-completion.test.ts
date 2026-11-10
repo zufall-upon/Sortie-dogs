@@ -502,12 +502,14 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
       await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).update("root", mission => {
         mission.review!.verdict = "evidence-gaps";
         mission.review!.evidenceGapReviews = 1;
-        mission.review!.result = "EVIDENCE_GAPS\nThe decisive return line is not visible.";
+        mission.review!.result = "EVIDENCE_GAPS\nThe decisive return line is not visible.\n\n" +
+          "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>";
       });
     }
     const completed = JSON.parse(await cold.tool!.sortie_v010_complete_mission.execute({}, { sessionID: "root" }));
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
+    assert.equal(typeof completed.return_report, "string", "the real profiled completion transport must still deliver the host panel");
     assert.match(completed.return_report_instruction, /Append return_report verbatim once/u);
     assert.match(completed.return_report_instruction, /unknown values and caveats/u);
     const delivered = { text: `Result collected.\n\n${completed.return_report}` };

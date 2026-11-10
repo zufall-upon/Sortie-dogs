@@ -30,7 +30,7 @@ import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { ProjectMemory, projectMemoryFile } from "../dist/core/project-memory.js";
-import { decoratePreviewHeadings, receiptBoundTerminalText } from "../dist/plugin/receipt-presentation.js";
+import { decoratePreviewHeadings, receiptBoundTerminalText, returnReportPanel } from "../dist/plugin/receipt-presentation.js";
 import { inspectAcceptanceContinuity, MAX_ACCEPTANCE_CONTINUITY_BYTES,
   MAX_ACCEPTANCE_CRITERIA } from "../dist/core/acceptance-continuity.js";
 
@@ -2478,7 +2478,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
   const complete = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
     acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
-  assert.match(complete.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
+  assert.match(complete.return_report, /^```text\n🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
   assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
   assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
   assert.match(complete.return_report_instruction, /No host-side card will be appended/);
@@ -2490,7 +2490,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
     const english = JSON.parse(await cold.tool!.sortie_v010_complete_operator.execute({ run_id: prepared.run_id,
       acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
     assert.equal(english.status, "succeeded");
-    assert.match(english.return_report, /^<details>\n<summary><strong>🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
+    assert.match(english.return_report, /^```text\n🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
     assert.match(english.return_report, /➡️ NEXT\n\nNone/u);
     assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.match(english.return_report_instruction, /Append return_report verbatim once/);
@@ -4737,7 +4737,13 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const receipt = (await ledger.readGoal()).state.receipt!;
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
-  for (const symbol of ["TACTICAL DESK / 作戦卓", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  for (const symbol of ["```text", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  const disclosure = "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>";
+  const contextual = await control!.renderReturnReport("root",
+    `${disclosure}\n\nstatus: DONE\n\n## 変更点\naccepted change\n\n## 次\ncontinue verification`, goalFingerprint(receipt));
+  assert.ok(contextual?.includes(disclosure), "the actual report renderer preserves the preceding fenced disclosure");
+  assert.match(returnReportPanel(contextual!)!, /➡️ NEXT\n\ncontinue verification/u,
+    "the real renderer-to-panel delivery path retains a panel after the fenced example");
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
   const priorLocale = process.env.SORTIE_REPORT_LOCALE;
   const reportsBefore = (await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported");

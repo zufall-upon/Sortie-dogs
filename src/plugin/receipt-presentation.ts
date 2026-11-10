@@ -1,13 +1,10 @@
 import type { GoalTerminalReceipt } from "../core/goal-bound.js";
-import { terminalRunOutcome } from "./run-metrics.js";
+import { returnReportRange, terminalRunOutcome } from "./run-metrics.js";
 
 /** Extract only the host card, excluding the terminal prose that follows it. */
 export function returnReportPanel(rendered: string): string | undefined {
-  const summary = /<summary><strong>🐾 SORTIE DOGS — (?:帰還報告|Return Report)(?=｜|<\/strong>)/u.exec(rendered)?.index;
-  if (summary === undefined) return undefined;
-  const start = rendered.lastIndexOf("<details", summary);
-  const end = rendered.indexOf("\n</details>", summary);
-  return start < 0 || end < 0 ? undefined : rendered.slice(start, end + "\n</details>".length).trim();
+  const panel = returnReportRange(rendered);
+  return panel === undefined ? undefined : rendered.slice(panel.start, panel.end).trim();
 }
 
 type ModelObject = Record<string, unknown>;

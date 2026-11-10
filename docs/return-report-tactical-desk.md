@@ -2,12 +2,122 @@
 
 ## 採用範囲
 
-B案「作戦卓」を本体に、A案の短い見出し・細い区切り・余白を採用する。
-結果、今回の作戦称号、条件達成型記章、MISSION、COST / PACK、PACK RECORD、NEXTの順。
-既存の折畳み、モデル内訳、費用ゲージ、計測範囲、unknownを保持する。
+主表示は折り畳まない短い `text` コード枠。空行・重複見出し・桁揃えを省き、
+成果、検証・Review、称号・記章、時間・費用、モデル別ゲージ、未実施・停止理由・次操作を表示する。
+ゲージの精度と長さ、アイコン、実測値・unknown・概算・レビュー区分・未完了の意味は変えない。
+長い識別子、全文、累積戦歴、反復注記・称号根拠は任意展開の「詳細記録」に保持する。
 文字送り、音、点滅、常時演出や追加モデル呼出しは導入しない。
 狭い画面での厳密な桁揃えは要求せず、巨大なASCII枠や横長の表を避ける。
 正式完了時だけ小さな欄外文を置き、未完了・警告には混ぜない。
+
+### 常時表示の短縮枠（2026-11-10）
+
+画像付きChatGPT相談の採用案に基づく変更。過去の長文全量preの観測は、短縮枠の合否へ転用しない。
+日本語・英語で同じrendererを使い、長い表示行は48論理カラムを目安に書記素単位で改行する。
+長いモデル名と成果文の主表示のみ省略し、元の全文・IDは詳細記録に保持する。
+利用者由来のbacktickより長いfenceを選び、詳細記録は従来どおり文字参照と`wbr`で安全に表示する。
+旧details形式と新fence形式の抽出・再表示・履歴圧縮を両対応にし、保存schema・成功判定は変更しない。
+独立Reviewで説明用details内のEvidenceコード例の欠落と、先行する旧カード引用の誤抽出を再現した。
+外側ブロックを単位に本文を保護し、旧新カードの抽出でfence・説明用detailsを除外する回帰を既存テストに追加した。
+
+比較素材は `/home/user/_temp/Sortie-dogs/return-report-compact-20261110/`。
+同じ合成入力から旧新×日英×通常・長文・中断を出力し、入力JSONも保存した。
+合成費用・称号は実任務の実績ではない。論理カラムのチェックは実ブラウザのpixel幅検証を代替しない。
+At initial implementation time, the Coordinator/Worker browser was disconnected and the UI comparison was pending.
+The approved existing-conversation screenshot below now supplies the observed visual result; the earlier pending status is historical.
+
+関連検証は `PATH=/home/user/.local/bin:$PATH npm run test:targeted -- test/run-metrics.test.ts test/v010-runtime.test.ts test/v2-plugin.test.ts test/plugin.test.ts test/mission-completion.test.ts`。
+Coordinatorのnative shellで529 PASS、exit 0。build 8.830秒、test 23.782秒。
+旧登録commandとWorkerのPATH指定実行が一致せず正式記録が欠けたため、実recipeを登録し直して実行した。
+後続の本節追記は文書のみで、上記runtime/test入力は変更していない。
+`cmp old-inputs.json new-inputs.json` はexit 0。正規UI比較前の素材一致であり、表示PASSではない。
+
+### PR #361の指摘対応
+
+rootが先行候補 `5a19f56a50469cfdd26d47a68792114c724a3e72` をcommit/pushし、
+PR [#361](https://github.com/zufall-upon/Sortie-dogs/pull/361) を作成済み。先行headのCI成功は以下の修正の検証に転用しない。
+
+- [P2: インラインコードの開きタグ](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524576543)：有効。
+  ``Updated the `<details>` renderer`` の後にある実カードを構造深度の誤認で抽出できない。
+  対応するbacktickで囲まれたコードはタグ判定から除外し、元本文と位置を保持する。
+  共通する本文走査にも適用し、後続の次操作を失わない。単一・複数backtick、コード中の閉じタグ、
+  旧新形式・日英、実カード抽出と重複なし置換を既存回帰で確認する。
+- [P2: 説明枠直後のコード削除](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524576551)：有効。
+  説明details内の `Evidence: illustrative example` が、空行なしで続く外側YAML fenceの所有者と誤認される。
+  後続fenceの見出し探索では、既に保護した説明枠・コードの中身を参照しない。
+  両方の原文保持と、従来の外側internal Evidence削除を既存回帰で確認する。
+
+修正前の小さい回帰は2 FAIL（exit 1、0.198秒）。修正後は同じ2項目がPASS
+（build 8.755秒、test 0.223秒、exit 0）。本変更は抽出・本文保全のみで表示renderer出力は変更しない。
+通常・長文・中断の日英比較素材は再生成せず再利用する。この時点のUI未確認は、後述の実画像・利用者承認で更新した。
+pairing認証の迂回・認証情報転記は行わない。
+既存PRへの追加配送はrootで継続し、子で拒否済みGit形式を再試行しない。
+
+自己再確認では、インラインコードの開きタグと後続の旧カードを清掃処理が一括削除する残存経路も特定した。
+旧形式の置換で元の説明文を保持する回帰が修正前に失敗（exit 1）。清掃のブロック探索にも同じコードspanのmaskを使い、
+元文字列の位置・bytesから本文を組み立てる。旧新・日英の置換、引用・説明枠内のliteral閉じタグ、次操作と再表示の冪等性を保持する。
+表示renderer・ゲージ・計測・保存schemaは変更せず、比較素材は引き続き再利用する。
+
+### Approved UI comparison and its limits
+
+The root presented saved real `formatSortieResult` output in the existing OpenCode conversation:
+ordinary Japanese, long-name English and interrupted Japanese, explicitly labelled synthetic.
+Advisor `ses_e3a98840affeH1cdQIm3dWwzfJ` independently recommended this route instead of repeating
+unavailable authenticated-WebUI capture. Root adopted it without modifying authentication, DOM/CSS or the DB.
+The capture method was an implementation choice, not a change to the user's requested visual outcome.
+
+The user supplied image-only message `msg_1c56d0393001QdYC60ewg8CWF5`, attachment index 0.
+Original bytes are retained at `/home/user/_temp/Sortie-dogs/return-report-compact-20261110/user-ui-comparison.jpg`:
+JPEG, 949×1739 pixels, SHA-256 `6154fadf34a2c55cb630743681c76cec3a250cbf045ec8b7a14fb7a47edcafb8`.
+The original filename ended in `.png`; MIME and saved extension reflect the actual JPEG bytes.
+Root and this Coordinator directly inspected this corrected image. A previously misselected PNG is not the evidence.
+User approval `msg_1c56d270e001hKfIxTOQlZbCoL` was exactly: 「良いと思うよ」.
+The read-only retrieval receipt and scoped observations are retained in `ui-observation.json` beside the image.
+
+- Observed: compact, visible ordinary-Japanese and long-English frames, dense line spacing, icons,
+  complete ten-block gauges and 100.0% values, and interrupted header/self-check wording/unavailable fields.
+- Unknown: CSS viewport width and device-pixel ratio. Image dimensions are not a 634px viewport measurement.
+- The question overlay obscures interrupted pending/stop/next rows. Their contents are covered by source fixtures
+  and tests, not the screenshot. No claim of measured `scrollWidth`, all-state images, detail opening/copy behavior,
+  deployed runtime, or real Mission scores follows from this synthetic display.
+- Parser-only corrections do not change `formatSortieResult` output; the saved display and approval remain applicable.
+  No fresh login or repeated visual comparison is required solely for those corrections.
+
+### PR #361: fenced examples inside disclosures
+
+Root pushed the prior correction as `dc5c39ddc76ff0fc7f22c121a17c111c0640b4c8`.
+All four CI checks succeeded for that head; they do not establish the later correction's result.
+The earlier two P2 threads are fixed/outdated. The new
+[P2 discussion_r4524815681](https://github.com/zufall-upon/Sortie-dogs/pull/361#discussion_r4524815681) is **valid**:
+a fenced HTML literal `</details>` inside an explanatory disclosure caused the range scanner to lose fence state
+and hide the later legacy or compact panel. The public range/panel regression failed before the fix.
+
+Fence tracking now precedes disclosure-depth changes in both panel and terminal-prose scans, including fences
+inside disclosures. Fenced contents cannot change HTML depth or select a host panel. Cleanup masks fenced code
+contents while copying original bytes, preventing the same literal tag from truncating the preserved example.
+Existing tests cover legacy/compact, Japanese/English, backtick/tilde examples, next-action retention and idempotent
+redisplay, while retaining the inline-code and adjacent-YAML ownership cases.
+
+The focused baseline had one failing public regression and one passing real completion case (exit 1).
+An intermediate check caught the corresponding cleanup truncation; after batching that fix, all three focused
+checks passed (build 9.515s, test 1.172s, exit 0). The real core renderer-to-panel path and the actual profiled
+`complete_mission` tool-result transport are also exercised by the related suite. The completion case's review
+markup is normalized by production code; it is a caller guard, not a claim that this tool input alone reproduces
+the raw-prefix failure. Final related validation remains recorded by the native check receipts.
+
+Prior `SELF_RECHECKED` results remain author self-checks, not independent PASS. A null security-finding boolean
+is unknown, not a security PASS. No new review/publish/install/restart was triggered merely to collect evidence.
+Root continues the existing PR's final Git delivery through its successful standard route; child-denied identity
+wrappers are not retried. Only changed deliverables are staged.
+
+Preservation/cleanup: no new isolated environment, dependency installation, service or cache was introduced.
+Focused completion fixtures were removed by their existing `finally` cleanup; no `mission-completion-*` fixture
+directory remained at the observed check. Saved screenshots, input/output fixtures, native logs, installed tooling,
+old checkout, settings/authentication/DB/profiles and fixed release archives are retained, not treated as disposable.
+
+既存のNode/npmとtoolingを再利用し、新依存・サービスを追加しない。
+公開済みv0.16.18、認証・設定・DB・profile・元checkoutは変更せず、install/publish/停止/再起動は行わない。
+以下の過去観測は当時の候補に対する記録であり、今回候補の検証済み表示を意味しない。
 
 通常応答は開始⚑、発見◎、補足✎、障害[!]など意味に対応する短い見出しを使う。
 ↩は復帰を観測した後だけ。コード・機械状態・失敗理由を装飾で言い換えない。

@@ -1676,16 +1676,13 @@ return MUST begin with its conclusion: no plan, progress, assessment, Evidence h
 Use exactly one of DONE, INTERRUPTED, BLOCKED, or NEED_DECISION with one status emoji and a short
 Japanese conclusion. Then render Japanese 変更点, 確認結果, and 次 paragraphs without bullets or decorative
 emoji. After those paragraphs, always render one durable fallback card in the same assistant message:
-<details>
-<summary><strong>🐾 SORTIE DOGS — 帰還報告</strong></summary>
-
-**任務:** <same short conclusion>
-**確認:** <concise validation/review summary without internal identifiers>
-
-</details>
-The plugin replaces that exact persisted card in place with measured Speed, Cost, and 達成 paragraphs,
-one fixed icon per section, observed pack/model usage, validation/review, and evidence-backed traits.
-Its Markdown token bars and PACK RECORD summarize retained project goals, with coverage and team titles;
+\`\`\`text
+🐾 SORTIE DOGS — 帰還報告｜<same short conclusion>
+確認: <concise validation/review summary without internal identifiers>
+\`\`\`
+The plugin replaces that exact persisted card in place with a compact visible text panel and optional
+detailed record, including measured time, cost, validation/review, and evidence-backed traits.
+Its model gauges and PACK RECORD summarize retained project goals, with coverage and team titles;
 they never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
 Never write measured metrics, token bars, PACK RECORD, traits, or badges yourself. Do not estimate or fabricate them.
 Use 任務完了 for DONE, 中断帰還（未完了） for INTERRUPTED, 外部要因で待機（未完了） for BLOCKED,
