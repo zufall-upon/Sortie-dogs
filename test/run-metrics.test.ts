@@ -7,6 +7,7 @@ import { evaluateRareAwards } from "../dist/core/rare-awards.js";
 import { goalFingerprint, type GoalTerminalReceipt, type GoalFlightEventRecord } from "../dist/core/goal-bound.js";
 import { summarizeCareer } from "../dist/plugin/sortie-career.js";
 import { resolveReportLocale } from "../dist/plugin/report-locale.js";
+import { returnReportPanel } from "../dist/plugin/receipt-presentation.js";
 import { mkdir, writeFile } from "node:fs/promises";
 
 test("report locale redisplay regenerates host defaults without consuming cards or quoted examples as prose", () => {
@@ -92,11 +93,8 @@ test("rare saved receipt snapshots and bilingual renderer preserve counts, state
     for (const [index, locale] of ["ja", "en"].entries()) {
       const text = outputs[index]!;
       await writeFile(`${folder}/${name}.${locale}.md`, `<!-- SYNTHETIC fixture; actual formatSortieResult output; no real award -->\n${text}\n`);
-      assert.doesNotMatch(text, /~~~|<pre>/u, "long prose must use wrapping Markdown, not a fence");
-      const body = text.slice(text.indexOf("</summary>\n\n") + "</summary>\n\n".length, text.lastIndexOf("\n\n</details>"));
-      const escape = (s: string) => s.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
-      const paragraphs = body.split("\n\n").map(line => `<p>${line.startsWith("`TACTICAL DESK / ") ? `<code>${escape(line.slice(1, -1))}</code>` : line}</p>`).join("\n");
-      await writeFile(`${folder}/${name}.${locale}.html`, `<!doctype html><html lang="${locale}"><meta charset="utf-8"><title>Synthetic ${name} ${locale}</title><style>body{background:#171c1b;color:#ddd;font:14px sans-serif;max-width:598px}summary{cursor:pointer}</style><p>SYNTHETIC fixture — literal paragraph preview of emitted Markdown; not native WebUI evidence.</p><details open><summary>${escape(name)} / ${locale}</summary>${paragraphs}</details></html>`);
+      assert.match(text, /^```text\n🐾 SORTIE DOGS — /u);
+      assert.match(text, /\n```\n\n<details>\n<summary>📜 /u);
     }
     const source = "status: DONE — synthetic\n\n**Implementation:** fixture/model\n\n**Pending:** unverified\n\n**Next:** none";
     const en = insertSortieResult(source, result, "evidence-gaps", undefined, "en");
@@ -246,6 +244,12 @@ test("terminal cleanup preserves explanatory disclosures and code while removing
     "設計の理由を保持する。\n```yaml\nmanifest: example.json\n```\n</details>\n\n" +
     "使い方の例:\n```yaml\nmanifest: user-example.json\n```";
   assert.equal(sanitizeTerminalReport(explanation), explanation);
+  const nestedEvidenceExample = "<details><summary>詳しい説明</summary>\n\n" +
+    "Evidence: 公開出力の読み方\n```yaml\nmanifest: user-example.json\n```\n</details>";
+  assert.equal(sanitizeTerminalReport(nestedEvidenceExample), nestedEvidenceExample,
+    "an Evidence heading inside an explanatory disclosure is user prose, not internal evidence");
+  assert.equal(sanitizeTerminalReport(`Evidence: internal proof\n${nestedEvidenceExample}`), nestedEvidenceExample,
+    "an earlier internal heading must not consume code owned by an explanatory disclosure");
   const cleaned = sanitizeTerminalReport(explanation + "\n\n<details><summary>Evidence: validation</summary>hidden</details>");
   assert.equal(cleaned, explanation);
 });
@@ -378,8 +382,9 @@ test("builds a completed Sortie Result from the goal receipt, ledger, and host m
   assert.deepEqual(result.proof.criteria.availability === "available" ? result.proof.criteria.value : null,
     [{ criterion_id: "criterion-1", status: "PASS" }]);
   const inserted = insertSortieResult("status: DONE — complete\n\n**Validation:** PASS", result);
-  assert.ok(inserted.startsWith("status: DONE — complete\n\n<details>\n<summary><strong>🐾 SORTIE DOGS — 帰還報告｜🟢 完了</strong></summary>"));
-  assert.match(inserted, /🐾 SORTIE DOGS — 帰還報告\n\n`TACTICAL DESK \/ 作戦卓`\n\n─+\n\ngoal-result\n\n🟢 COMPLETED — complete/u);
+  assert.ok(inserted.startsWith("status: DONE — complete\n\n```text\n🐾 SORTIE DOGS — 帰還報告｜🟢 完了\n"));
+  assert.match(inserted, /📌 complete[\s\S]*\n```\n\n<details>\n<summary>📜 詳細記録<\/summary>\n\ngoal-result\n\n🟢 COMPLETED — complete/u);
+  assert.match(inserted, /🛡 確認: 未記録 · ◔ 1\/1/u);
   assert.match(inserted, /⚑ MISSION[\s\S]*経過\s+⏱ 4s ※待機含む[\s\S]*最終達成条件\s+◔ 1\/1/u);
   assert.match(inserted, /🔧 実装\n\n未取得[\s\S]*⏳ 未実施\n\n未確認（未実施なしを確認した意味ではありません）[\s\S]*➡️ NEXT\n\n未取得/u);
   assert.match(inserted, /✎ 称号・観測の根拠\n\n特別記章 — 保存判定未取得（授与未確認）\n\n特性の根拠未確認/u);
@@ -468,6 +473,11 @@ test("types unavailable Sortie Result metrics without synthetic estimates", () =
   const selfchecked = formatSortieResult(result, { missionReview: "self-rechecked" });
   assert.match(selfchecked, /自己再確認済み（修正著者・独立PASSではない）/);
   assert.doesNotMatch(selfchecked, /PASS（独立Reviewer）/);
+  const broken = { ...result, debrief: { ...result.debrief!,
+    estimatedCost: { usd: null as unknown as number, pricedRequests: 1, unpricedRequests: 0 } } };
+  const fallback = insertSortieResult("status: INTERRUPTED", broken);
+  assert.match(fallback, /```text\n🐾 SORTIE DOGS — 帰還報告｜⚠️ 未計測/u);
+  assert.equal(insertSortieResult(fallback, broken), fallback, "the visible error fallback is replaced idempotently");
 });
 
 test("uses real terminal presentation fields without letting fenced status text become a checkpoint", () => {
@@ -486,7 +496,7 @@ test("uses real terminal presentation fields without letting fenced status text 
   assert.equal(insertSortieResult(output, result), output);
 });
 
-test("narrow report keeps long identifiers and hostile Markdown literal without a pre or fence", () => {
+test("compact report keeps hostile Markdown fenced and long identifiers in the detailed record", () => {
   const id = `provider/model_${"x".repeat(160)}[v1]`;
   const receipt: GoalTerminalReceipt = { goal_id: id, terminal_revision: 1,
     acceptance_fingerprint: goalFingerprint(id), started_at: new Date(0).toISOString(),
@@ -497,14 +507,85 @@ test("narrow report keeps long identifiers and hostile Markdown literal without 
   const result = { ...base, debrief: { ...base.debrief!, mix: [{ model: id, tokens: 1, percent: 100 }] } };
   const decode = (text: string) => text.replace(/<wbr>/gu, "").replace(/&#(\d+);/gu, (_, value: string) => String.fromCodePoint(Number(value)));
   for (const locale of ["ja", "en"]) {
-    const output = formatSortieResult(result, { locale, implementation: hostile, pending: "1) not a list", next: "# not a heading", commit: id });
-    assert.doesNotMatch(output, /<script>|!\[|\[link\]|```|~~~|<pre>/u);
-    assert.equal((output.match(/<\/details>/gu) ?? []).length, 1);
-    assert.ok(output.includes("<wbr>"), "long IDs have layout-only break opportunities");
-    assert.ok(decode(output).includes(hostile), "literal user text is not deleted or translated");
-    assert.equal(decode(output).split(id).length - 1, 3, "goal, model and commit IDs retain every character");
-    assert.ok(output.includes("1&#41; not a list"));
-    assert.ok(output.includes("&#35; not a heading"));
-    assert.ok(output.includes(locale === "en" ? "1 token ↺" : "1 tokens ↺"));
+    const output = formatSortieResult(result, { locale, implementation: hostile, pending: "1) not a list", next: "# not a heading ``` ~~~", commit: id });
+    const opening = /^(`{3,})text\n/u.exec(output)?.[1];
+    assert.ok(opening && opening.length > 3, "the delimiter must outlast injected backticks");
+    const details = output.slice(output.indexOf("\n<details>"));
+    assert.doesNotMatch(details, /<script>|!\[|\[link\]|<pre>/u);
+    assert.equal((details.match(/<\/details>/gu) ?? []).length, 1);
+    assert.ok(details.includes("<wbr>"), "long IDs have layout-only break opportunities in the record");
+    assert.ok(decode(details).includes(hostile), "literal user text is not deleted or translated");
+    assert.equal(decode(details).split(id).length - 1, 3, "goal, model and commit IDs retain every character");
+    assert.ok(details.includes("1&#41; not a list"));
+    assert.ok(details.includes("&#35; not a heading"));
+    assert.ok(details.includes(locale === "en" ? "1 token ↺" : "1 tokens ↺"));
+    assert.equal(returnReportPanel(`Before\n\n${output}\n\nAfter`), output);
   }
+});
+
+test("compact and legacy return panels extract and redisplay without consuming fenced examples", () => {
+  const receipt: GoalTerminalReceipt = { goal_id: "panel-fixture", terminal_revision: 1,
+    acceptance_fingerprint: goalFingerprint("panel-fixture"), started_at: new Date(0).toISOString(),
+    ended_at: new Date(1000).toISOString(), status: "succeeded", stop_reason: "completed",
+    unit_ids: [], session_ids: [], evidence_refs: [], milestone_at: null };
+  const result = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  for (const locale of ["ja", "en"]) {
+    const heading = locale === "ja" ? "帰還報告" : "Return Report";
+    const legacy = `<details>\n<summary><strong>🐾 SORTIE DOGS — ${heading}</strong></summary>\n\nlegacy\n\n</details>`;
+    const compact = formatSortieResult(result, { locale, next: "continue", missionReview: "self-rechecked" });
+    assert.equal(returnReportPanel(`Before\n\n${legacy}\n\nAfter`), legacy);
+    assert.equal(returnReportPanel(`Before\n\n${compact}\n\nAfter`), compact);
+    for (const example of [legacy, compact]) {
+      const quoted = `~~~~markdown\n${example}\n~~~~`;
+      const disclosed = `<details><summary>Example</summary>\n${example}\n</details>`;
+      assert.equal(returnReportPanel(quoted), undefined);
+      assert.equal(returnReportPanel(disclosed), undefined);
+      assert.equal(sanitizeTerminalReport(quoted), quoted);
+      const source = `${quoted}\n\nstatus: DONE\n\n**Next:** continue`;
+      const inserted = insertSortieResult(source, result, "self-rechecked", undefined, locale);
+      assert.ok(inserted.includes(quoted));
+      assert.equal(returnReportPanel(inserted), compact, "the actual panel wins over an earlier quoted legacy or compact example");
+      assert.equal(insertSortieResult(inserted, result, "self-rechecked", undefined, locale), inserted);
+    }
+  }
+});
+
+test("compact primary report preserves measured gauges, partial cost and unfinished actions", () => {
+  const receipt: GoalTerminalReceipt = { goal_id: "synthetic-hidden-identifier", terminal_revision: 1,
+    acceptance_fingerprint: goalFingerprint("synthetic-hidden-identifier"), started_at: "unknown", ended_at: "unknown",
+    status: "stopped", stop_reason: "stop_budget", unit_ids: [], session_ids: [], evidence_refs: [], milestone_at: null };
+  const base = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, undefined);
+  const model = `provider/${"long-model-name-".repeat(10)}v1`;
+  const debrief = { ...base.debrief!, validation: "FAIL" as const, mixCoverage: { complete: false, observedTokens: 999 },
+    pack: [{ model, count: 1 }], estimatedCost: { usd: 0.1, pricedRequests: 1, unpricedRequests: 1 },
+    mix: [{ model, tokens: 999, percent: 100, hostCostZero: true,
+      estimatedCost: { usd: 0.1, pricedRequests: 1, unpricedRequests: 1, complete: false } }] };
+  const result = { ...base, debrief };
+  const before = JSON.stringify(result);
+  for (const locale of ["ja", "en"]) {
+    const output = formatSortieResult(result, { locale, missionReview: "self-rechecked", pending: "Windows validation not run",
+      stopReason: "budget exhausted", next: "resume verification" });
+    const [main, detail] = output.split("\n\n<details>\n");
+    assert.ok(main && detail);
+    assert.match(main, /🟡/u);
+    assert.match(main, /🔴 FAIL/u);
+    assert.match(main, locale === "ja" ? /自己再確認済み/u : /Author self-rechecked/u);
+    assert.match(main, /999 tokens/u);
+    assert.match(main, locale === "ja" ? /観測分/u : /observed/u);
+    assert.match(main, /\$0\.1000/u);
+    assert.match(main, locale === "ja" ? /一部未換算/u : /partly unpriced/u);
+    assert.match(main, /unknown/u);
+    assert.match(main.replace(/\s+/gu, " "), locale === "ja" ? /請求総額ではない/u : /not the total bill/u);
+    assert.match(main, /██████████/u);
+    assert.match(detail, /██████████/u);
+    assert.match(main, /Windows validation not run/u);
+    assert.match(main, /budget exhausted/u);
+    assert.match(main, /resume verification/u);
+    assert.doesNotMatch(main, /synthetic-hidden-identifier/u);
+    assert.ok(detail.replace(/<wbr>/gu, "").replace(/&#(\d+);/gu, (_, value: string) => String.fromCodePoint(Number(value))).includes(model));
+    const widths = main.split("\n").slice(1, -1).map(line => [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(line)]
+      .reduce((sum, item) => sum + (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}\uFF01-\uFF60]/u.test(item.segment) ? 2 : 1), 0));
+    assert.ok(widths.every(width => width <= 48), `logical columns: ${widths.join(",")}`);
+  }
+  assert.equal(JSON.stringify(result), before, "presentation does not mutate the saved result");
 });

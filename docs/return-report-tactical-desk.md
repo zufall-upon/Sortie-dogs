@@ -2,12 +2,39 @@
 
 ## 採用範囲
 
-B案「作戦卓」を本体に、A案の短い見出し・細い区切り・余白を採用する。
-結果、今回の作戦称号、条件達成型記章、MISSION、COST / PACK、PACK RECORD、NEXTの順。
-既存の折畳み、モデル内訳、費用ゲージ、計測範囲、unknownを保持する。
+主表示は折り畳まない短い `text` コード枠。空行・重複見出し・桁揃えを省き、
+成果、検証・Review、称号・記章、時間・費用、モデル別ゲージ、未実施・停止理由・次操作を表示する。
+ゲージの精度と長さ、アイコン、実測値・unknown・概算・レビュー区分・未完了の意味は変えない。
+長い識別子、全文、累積戦歴、反復注記・称号根拠は任意展開の「詳細記録」に保持する。
 文字送り、音、点滅、常時演出や追加モデル呼出しは導入しない。
 狭い画面での厳密な桁揃えは要求せず、巨大なASCII枠や横長の表を避ける。
 正式完了時だけ小さな欄外文を置き、未完了・警告には混ぜない。
+
+### 常時表示の短縮枠（2026-11-10）
+
+画像付きChatGPT相談の採用案に基づく変更。過去の長文全量preの観測は、短縮枠の合否へ転用しない。
+日本語・英語で同じrendererを使い、長い表示行は48論理カラムを目安に書記素単位で改行する。
+長いモデル名と成果文の主表示のみ省略し、元の全文・IDは詳細記録に保持する。
+利用者由来のbacktickより長いfenceを選び、詳細記録は従来どおり文字参照と`wbr`で安全に表示する。
+旧details形式と新fence形式の抽出・再表示・履歴圧縮を両対応にし、保存schema・成功判定は変更しない。
+独立Reviewで説明用details内のEvidenceコード例の欠落と、先行する旧カード引用の誤抽出を再現した。
+外側ブロックを単位に本文を保護し、旧新カードの抽出でfence・説明用detailsを除外する回帰を既存テストに追加した。
+
+比較素材は `/home/user/_temp/Sortie-dogs/return-report-compact-20261110/`。
+同じ合成入力から旧新×日英×通常・長文・中断を出力し、入力JSONも保存した。
+合成費用・称号は実任務の実績ではない。論理カラムのチェックは実ブラウザのpixel幅検証を代替しない。
+現Coordinatorと実装Workerは `browser.disconnected` のため正規UI比較は未実施。
+root接続の正規UIで、通常・長文・中断の日英主表示、ゲージ、詳細開閉、狭幅の横溢れを比較する残件がある。
+
+関連検証は `PATH=/home/user/.local/bin:$PATH npm run test:targeted -- test/run-metrics.test.ts test/v010-runtime.test.ts test/v2-plugin.test.ts test/plugin.test.ts test/mission-completion.test.ts`。
+Coordinatorのnative shellで529 PASS、exit 0。build 8.830秒、test 23.782秒。
+旧登録commandとWorkerのPATH指定実行が一致せず正式記録が欠けたため、実recipeを登録し直して実行した。
+後続の本節追記は文書のみで、上記runtime/test入力は変更していない。
+`cmp old-inputs.json new-inputs.json` はexit 0。正規UI比較前の素材一致であり、表示PASSではない。
+
+既存のNode/npmとtoolingを再利用し、新依存・サービスを追加しない。
+公開済みv0.16.18、認証・設定・DB・profile・元checkoutは変更せず、install/publish/停止/再起動は行わない。
+以下の過去観測は当時の候補に対する記録であり、今回候補の検証済み表示を意味しない。
 
 通常応答は開始⚑、発見◎、補足✎、障害[!]など意味に対応する短い見出しを使う。
 ↩は復帰を観測した後だけ。コード・機械状態・失敗理由を装飾で言い換えない。

@@ -644,9 +644,11 @@ test("Reviewer model tool order never changes other agents' native tool set or i
   } finally { cleanup?.(); }
 });
 
-for (const heading of ["帰還報告", "Return Report"]) test(`V2 final request retains the verbatim host return card (${heading}); only compaction omits it without mutating history`, async () => {
+for (const heading of ["帰還報告", "Return Report"]) for (const format of ["legacy", "compact"]) test(`V2 final request retains the verbatim host return card (${heading}, ${format}); only compaction omits it without mutating history`, async () => {
   const fixture = contextFixture();
-  const card = `<details>\n<summary><strong>🐾 SORTIE DOGS — ${heading}</strong></summary>\n\nfull host metrics\n\n</details>`;
+  const card = format === "legacy"
+    ? `<details>\n<summary><strong>🐾 SORTIE DOGS — ${heading}</strong></summary>\n\nfull host metrics\n\n</details>`
+    : `\`\`\`text\n🐾 SORTIE DOGS — ${heading}｜🟢 Complete\nfull host metrics\n\`\`\`\n\n<details>\n<summary>📜 ${heading === "帰還報告" ? "詳細記録" : "Detailed record"}</summary>\n\nrecord\n\n</details>`;
   const packet = { status: "succeeded", run_id: "run", acceptance_fingerprint: "sha256:accepted",
     receipt: { status: "succeeded", goal_id: "goal", evidence_refs: ["sha256:check"] },
     limitations: ["unknown usage"], return_report: card, return_report_instruction: "Append return_report verbatim once" };
