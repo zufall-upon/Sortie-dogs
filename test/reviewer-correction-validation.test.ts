@@ -61,7 +61,7 @@ for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a p
   } finally { await f.dispose(); }
 });
 
-for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", false], ["cancelled", false], ["cancelled", true]] as const) test(`Reviewer finish replays its durable ${disposition} settlement after a projection failure${changedRecipe ? " without admitting a new recipe" : ""}`, async t => {
+for (const cold of [false, true]) for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", false], ["cancelled", false], ["cancelled", true]] as const) test(`Reviewer finish replays its durable ${disposition} settlement after a projection failure${changedRecipe ? " without admitting a new recipe" : ""}: ${cold ? "cold" : "live"}`, async t => {
   const f = await fixture();
   try {
     const started = await initial(f, { keepReviewOpen: true });
@@ -91,22 +91,34 @@ for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", fal
     assert.equal(durable.state.outstanding_reservations.length, 0);
     assert.equal(durable.state.consumed_units, 2);
     assert.equal((await f.run()).units[0]!.status, "running", "only the durable settlement exists before retry");
+    if (cold) await f.start();
     if (changedRecipe) {
-      await assert.rejects(f.tool("author", "repair_review", { validation: ["node --check check.mjs"],
-        reason: "A changed recipe still needs this unit's live reservation." }), /mission-validation-registration-reservation-missing/u);
-      assert.deepEqual((await f.ledger()).records, durable.records, "a settled unit cannot create a new registration or reservation");
-      assert.equal((await f.run()).units[0]!.status, "running", "a rejected recipe is not validation or completion");
-      return;
+      for (const delta of [
+        { validation: ["node --check check.mjs"] },
+        { validation: ["node --check check.mjs", "node check.mjs"] },
+        { validation_cwd: { "node check.mjs": join(f.directory, ".cache") } },
+      ]) {
+        await assert.rejects(f.tool("author", "repair_review", { ...delta,
+          reason: "A changed recipe still needs this unit's live reservation." }), /mission-validation-registration-reservation-missing/u);
+        assert.deepEqual((await f.ledger()).records, durable.records, "a settled unit cannot create a new registration or reservation");
+        assert.deepEqual((await f.run()).units[0], unit, "a rejected recipe must not mutate validation, cwd, checks or registration times");
+      }
     }
     const result = await f.tool("author", "finish_direct_unit");
     const settled = (await f.run()).units[0]!;
     assert.equal(settled.status, disposition);
     assert.equal(settled.callID, unit.callID, "recovery keeps this same admission");
+    const receipt = durable.records.map(({ event }) => event).find(event => event.kind === "unit.settled" &&
+      event.unit_id === /^task_id: (.+)$/mu.exec(unit.task.prompt)![1])!;
+    assert.equal(receipt.kind, "unit.settled");
+    if (receipt.kind === "unit.settled") assert.deepEqual(settled.evidence, receipt.evidence, "replay retains the exact recorded proof");
     if (disposition === "succeeded") {
       assert.equal(result.status, "correction-validated");
       assert.ok(settled.evidence.length);
-      await f.finish(started.dispatch, "author", inlineReport());
-      assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+      if (!cold) {
+        await f.finish(started.dispatch, "author", inlineReport());
+        assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+      }
     } else {
       assert.equal(result.direct_settlement.disposition, disposition);
       assert.match(result.next_action, /not validated/u);
@@ -115,7 +127,36 @@ for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", fal
     }
     const after = await f.ledger();
     assert.deepEqual(after.records, durable.records, "replay never adds a registration, reservation, settlement or spend");
-    assert.equal(after.state.consumed_units, 2);
+    for (const field of ["consumed_units", "consumed_time_ms", "consumed_cost_usd", "outstanding_reservations", "validation_budget"] as const) {
+      assert.deepEqual(after.state[field], durable.state[field], `${field} is unchanged by replay`);
+    }
+  } finally { await f.dispose(); }
+});
+
+test("ordinary Direct retains finish replay after rejecting a settled unit's recipe change", async t => {
+  const f = await fixture();
+  try {
+    await f.prompt("root", "Produce ready output, validate and commit; retain the same unit after a registration failure.");
+    await f.tool("root", "start_mission", { requirements: ["Produce ready output, validate and commit"] });
+    const unit = { title: "Ready output", objective: "Produce ready output", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] };
+    await f.tool("root", "plan_units", { executor: "self", units: [unit] });
+    await f.edit("root", "ready");
+    await f.shell("root", "git add -- result.txt && git commit -m candidate");
+    await f.shell("root", "node check.mjs");
+    const fault = t.mock.method(OperatorRuntime.prototype, "settled", async () => { throw new Error("fixture ordinary projection failure"); });
+    try { await assert.rejects(f.tool("root", "finish_direct_unit"), /fixture ordinary projection failure/u); }
+    finally { fault.mock.restore(); }
+    const before = await f.run(), durable = await f.ledger();
+    await assert.rejects(f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation: ["node --check check.mjs"] }],
+      reason: "Correct the recipe in the same admission." }), /mission-validation-registration-reservation-missing/u);
+    assert.deepEqual((await f.run()).units[0], before.units[0], "ordinary registration rejection also leaves the original proof recipe intact");
+    await f.tool("root", "finish_direct_unit");
+    const settled = (await f.run()).units[0]!;
+    assert.equal(settled.status, "succeeded");
+    assert.equal(settled.callID, before.units[0]!.callID);
+    assert.ok(settled.evidence.length);
+    assert.deepEqual((await f.ledger()).records, durable.records, "ordinary finish replays without another reservation or spend");
   } finally { await f.dispose(); }
 });
 

@@ -8835,7 +8835,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionTaskIDs.set(child, taskID);
       activateSession(child);
     },
-    registerDirectValidation: async (root, actor, criterionID, command, registeredAt) => {
+    registerDirectValidation: async (root, actor, criterionID, command, registeredAt, requireLiveReservation = false) => {
       const direct = await input.runtimeBridge?.directMissionExecution?.(actor);
       let taskID = direct?.root === root ? direct.taskID : undefined;
       if (!direct && await input.runtimeBridge?.ownsReviewerCorrection?.(actor)) {
@@ -8849,6 +8849,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
       if (state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
       const reservation = state.outstanding_reservations.find(item => item.unit_id === taskID && item.session_id === root);
+      // Preflight the current owner before persisting a proposed recipe. The new
+      // registration follows after save; this check must not append the old recipe.
+      if (requireLiveReservation) {
+        if (!reservation) throw new Error("mission-validation-registration-reservation-missing");
+        return;
+      }
       const prior = state.validation_registrations?.[criterionID];
       // A durable settlement may precede its Operator projection. Reuse only the
       // exact current registration so finish can replay that receipt unchanged;
@@ -8879,9 +8885,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!goalReservations.has(direct.callID)) {
         const snapshot = await (await goalLedger(root)).readGoal();
         const origin = await input.runtimeBridge?.missionDispatchOrigin?.(root, direct.taskID, direct.callID);
-        if (origin) await reserveGoalDispatch(root, direct.callID, prompt);
+        const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: origin?.callID ?? direct.callID });
+        // A cold retry can recover after settlement but before Operator projection.
+        // Restore only this dispatch's receipt anchor; never reserve or charge it again.
+        if (snapshot.state.phase === "active" && snapshot.state.receipt === null && snapshot.records.some(({ event }) =>
+            event.kind === "unit.settled" && event.goal_id === snapshot.state.goal_id &&
+            event.unit_id === direct.taskID && event.reservation_id === reservationID)) {
+          goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(origin?.startedAt ?? direct.startedAt) });
+        } else if (origin) await reserveGoalDispatch(root, direct.callID, prompt);
         else {
-          const reservationID = goalFingerprint({ goal_id: snapshot.state.goal_id, unit_id: direct.taskID, call_id: direct.callID });
           if (snapshot.state.outstanding_reservations.some(item => item.reservation_id === reservationID)) {
             goalReservations.set(direct.callID, { root, reservationID, unitID: direct.taskID, started: Date.parse(direct.startedAt) });
           } else await reserveGoalDispatch(root, direct.callID, prompt);
