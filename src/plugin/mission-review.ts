@@ -667,12 +667,15 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     else local.push(scoped || ".");
   }
   const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
+  const untracked = new Set<string>(), currentFiles = new Set<string>();
+  const collected = new Set<string>();
+  const unreadableLocal = new Map<string, string>();
   // A Location may inherit an ancestor repository while its actual outputs live in a
   // nested repository/worktree. Resolve that boundary before asking the outer Git:
   // ls-files can return the whole ignored repository (or fail internally) for a narrow output.
   const rootLocal: string[] = [], nested = new Map<string, string[]>();
   for (const path of local) {
-    let current = resolve(directory), repository: string | undefined;
+    let current = resolve(directory), repository: string | undefined, deniedDirectory: string | undefined;
     for (const part of path.split("/")) {
       current = resolve(current, part);
       const info = await lstat(current).catch((error: NodeJS.ErrnoException) => {
@@ -682,21 +685,28 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       if (!info?.isDirectory()) break; // Missing files and symlink targets are not traversed.
       if (current === resolve(directory)) continue;
       const metadata = await lstat(join(current, ".git")).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "EACCES" || error.code === "EPERM") {
+          // Probing metadata searches the directory too. Preserve this boundary as
+          // uninspected, without traversing or widening a narrower declared output.
+          deniedDirectory = relative(directory, current).replaceAll("\\", "/");
+          unreadableLocal.set(deniedDirectory, error.code);
+          return undefined;
+        }
         if (error.code !== "ENOENT") throw error;
         return undefined;
       });
+      if (deniedDirectory !== undefined) break;
       if (metadata) repository = current; // Includes .git files and broken worktrees: Git must diagnose them.
     }
-    if (repository) nested.set(repository, [...(nested.get(repository) ?? []), relative(repository, resolve(directory, path)).replaceAll("\\", "/") || "."]);
+    if (deniedDirectory !== undefined) { collected.add(deniedDirectory); untracked.add(deniedDirectory); }
+    else if (repository) nested.set(repository, [...(nested.get(repository) ?? []), relative(repository, resolve(directory, path)).replaceAll("\\", "/") || "."]);
     else rootLocal.push(path);
   }
   const gitScopes = [...rootLocal, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   let names = "", ignored = "", repository = true, scopedDiff = "";
-  const untracked = new Set<string>(), currentFiles = new Set<string>();
-  const collected = new Set<string>();
-  const unreadableLocal = new Map<string, string>();
   const directoryChildren = async (absolute: string, path: string) => {
+    if (unreadableLocal.has(path)) return undefined;
     try {
       // A non-Git Mission inventories historical outputs in place. A denied cwd must
       // not become a Git spawn failure, nor may an executable Git failure be called

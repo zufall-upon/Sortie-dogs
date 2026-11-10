@@ -159,7 +159,7 @@ for (const crowded of [false, true]) test(`public broad external scope then narr
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
-for (const mode of [0o000, 0o111, 0o444]) test(`public review retains inaccessible historical local outputs after a narrow replan (${mode.toString(8)})`, async t => {
+for (const explicitPartial of [false, true]) for (const mode of [0o000, 0o111, 0o444]) test(`public review retains inaccessible historical local outputs after a narrow replan (${mode.toString(8)}${explicitPartial ? ", explicit denied scope" : ""})`, async t => {
   if (process.platform === "win32") return t.skip("POSIX directory permissions required");
   const root = await mkdtemp(join(tmpdir(), "review-local-permission-"));
   const runtime = join(root, "runtime"), partial = join(runtime, "downloads", "partial");
@@ -187,7 +187,8 @@ for (const mode of [0o000, 0o111, 0o444]) test(`public review retains inaccessib
     });
     await tool("start_mission", { requirements: ["Verify retained proof without changing historical runtime outputs"] });
     const unit = { title: "Proof", objective: "Verify retained proof", read: ["check.mjs", "proof.txt"], write: [], validation: ["node check.mjs"] };
-    await tool("plan_units", { executor: "worker", units: [{ ...unit, write: ["runtime/**"] }] });
+    const historicalWrites = ["runtime/**", ...(explicitPartial ? ["runtime/downloads/partial/**"] : [])];
+    await tool("plan_units", { executor: "worker", units: [{ ...unit, write: historicalWrites }] });
     await tool("plan_units", { executor: "self", units: [unit], reason: "Narrow proof keeps historical Review coverage" });
     const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
     const started = Date.now();
@@ -203,7 +204,7 @@ for (const mode of [0o000, 0o111, 0o444]) test(`public review retains inaccessib
     assert.ok(review.task, JSON.stringify(review));
     const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
     const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
-    assert.ok(mission.reviewScope?.write.includes("runtime/**"));
+    assert.deepEqual(mission.reviewScope?.write, historicalWrites);
     assert.deepEqual(run.units[0]!.unit.write, [], "historical scope does not widen the new author's grant");
     assert.equal(mission.review?.verdict, "pending", "prepared Review is not completed Review");
     assert.equal(mission.review?.mode, "independent");
