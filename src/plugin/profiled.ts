@@ -2273,8 +2273,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       extendMissionBudget = `${profile.toolPrefix}extend_mission_budget`;
     const startDirectUnit = `${profile.toolPrefix}start_direct_unit`, finishDirectUnit = `${profile.toolPrefix}finish_direct_unit`;
     async function syncValidationRegistration(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
-      if ((!direct.unit.validationRegistration || direct.unit.validationRegistration.startedAt) &&
-          !direct.unit.reviewerCorrection?.validationRegisteredAt) return;
+      if (!direct.unit.reviewerCorrection && (!direct.unit.validationRegistration || direct.unit.validationRegistration.startedAt)) return;
+      // Even an unchanged Reviewer recipe belongs to this admission, not the preceding
+      // unit's registration. The control validates its actor/command/reservation
+      // and idempotently records the current unit before accepting native checks.
       const last = unitValidation(direct.unit).at(-1)!;
       await control!.registerDirectValidation(direct.root, direct.unit.reviewerCorrection?.author ?? direct.unit.directExecution!.actor, direct.unit.unit.id, last,
         direct.unit.reviewerCorrection?.validationRegisteredAt?.[last] ??
@@ -2284,10 +2286,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function activateDirect(actor: string) {
       const direct = await directExecution(actor);
       if (direct) {
-        // Recover a crash between durable registration and its goal-ledger projection
-        // before admitting another native check or selecting finish evidence.
-        await syncValidationRegistration(direct);
         await control!.activateDirectUnit(direct.root, actor, direct.unit.task.prompt, direct.unit.handoffPath);
+        // Recover a crash between durable registration and its goal-ledger projection
+        // after binding this admission/reservation, before checks or finish evidence.
+        await syncValidationRegistration(direct);
       }
       return direct;
     }

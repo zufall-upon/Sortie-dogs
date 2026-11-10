@@ -4,9 +4,60 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { validGoalEvidence } from "../dist/core/goal-bound.js";
 import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import { reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 import { exec, type ObjectValue, fixture, initial, inlineReport, selfRecheck } from "./helpers/reviewer-correction-fixture.ts";
+
+for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a prior direct validation registration: ${resumed ? "native Task" : "inline"}`, async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs";
+    await f.prompt("root", "Produce ready output, validate, commit and independently review without weakening proof.");
+    await f.tool("root", "start_mission", { requirements: ["Output must be ready, validated, committed and independently reviewed"] });
+    const unit = { title: "Ready output", objective: "Produce ready output", read: ["check.mjs", "required-test.mjs"],
+      write: ["result.txt"], validation: [A, B] };
+    await f.tool("root", "plan_units", { executor: "self", units: [unit] });
+    await f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation_cwd: { [B]: f.directory } }],
+      reason: "Bind the exact public check cwd before executing it." });
+    await f.edit("root", "wrong");
+    await f.shell("root", "git add -- result.txt && git commit -m candidate");
+    await f.shell("root", A); await f.shell("root", B);
+    await f.tool("root", "finish_direct_unit");
+    const original = await f.run(), originalEvidence = original.units[0]!.evidence;
+    assert.equal(original.units[0]!.status, "succeeded");
+    const oldRegistration = (await f.ledger()).state.validation_registrations!["unit-1"]!;
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+    let dispatch = await f.before("root", "subagent", f.task(review.task));
+    await f.prompt("author", dispatch.input.prompt);
+    if (resumed) {
+      await f.finish(dispatch, "author", "FINDINGS\nMedium: result must be ready.");
+      const prepared = await f.tool("root", "repair_review");
+      dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    } else await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.edit("author", "ready");
+    const correction = await f.run(), currentTask = /^task_id: (.+)$/mu.exec(correction.units[0]!.task.prompt)![1]!;
+    const bound = await f.ledger(), registration = bound.state.validation_registrations!["unit-1"]!;
+    assert.notEqual(currentTask, oldRegistration.unit_id);
+    assert.equal(registration.unit_id, currentTask, "an unchanged recipe must not remain bound to the preceding unit");
+    assert.equal(registration.command, B);
+    assert.ok(originalEvidence.every(evidence => !validGoalEvidence(evidence, bound.state)), "old-unit successes cannot prove this correction");
+    const registrationCount = bound.records.filter(({ event }) => event.kind === "goal.validation-registered").length;
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    await f.shell("author", A); await f.shell("author", B);
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+    const returned = JSON.parse(await f.finish(dispatch, "author", inlineReport()));
+    const settled = await f.run();
+    assert.equal(settled.units[0]!.status, "succeeded", JSON.stringify(returned));
+    assert.ok(settled.units[0]!.evidence.some(evidence => evidence.execution.units.includes(currentTask) && validGoalEvidence(evidence, bound.state)));
+    assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    const ledger = await f.ledger();
+    assert.equal(ledger.records.filter(({ event }) => event.kind === "goal.validation-registered").length, registrationCount,
+      "repeated activation and finish keep the same native registration idempotent");
+    assert.equal(ledger.state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
 
 for (const cold of [false, true]) test(`Reviewer repairs an expected-nonzero check recipe in the same correction admission: ${cold ? "cold" : "live"}`, async () => {
   const f = await fixture();
