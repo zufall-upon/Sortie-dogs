@@ -8846,11 +8846,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!taskID || !await input.runtimeBridge?.ownsCanonicalValidation?.(root, taskID, actor, command)) {
         throw new Error("mission-validation-registration-owner-mismatch");
       }
-      const ledger = await goalLedger(root), state = (await ledger.readGoal()).state;
+      const ledger = await goalLedger(root), snapshot = await ledger.readGoal(), state = snapshot.state;
+      if (state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
       const reservation = state.outstanding_reservations.find(item => item.unit_id === taskID && item.session_id === root);
-      if (!reservation || state.phase !== "active" || !state.goal_id) throw new Error("mission-validation-registration-reservation-missing");
       const prior = state.validation_registrations?.[criterionID];
-      if (prior?.unit_id === taskID && prior.command === command && prior.registered_at === registeredAt) return;
+      // A durable settlement may precede its Operator projection. Reuse only the
+      // exact current registration so finish can replay that receipt unchanged;
+      // new or changed registrations still require the live reservation below.
+      if (prior?.unit_id === taskID && prior.command === command && prior.registered_at === registeredAt &&
+          (reservation || snapshot.records.some(({ event }) => event.kind === "unit.settled" &&
+            event.goal_id === state.goal_id && event.unit_id === taskID))) return;
+      if (!reservation) throw new Error("mission-validation-registration-reservation-missing");
       await ledger.appendGoal({ kind: "goal.validation-registered", at: new Date().toISOString(), goal_id: state.goal_id,
         reservation_id: reservation.reservation_id, unit_id: taskID, criterion_id: criterionID, command, registered_at: registeredAt });
     },

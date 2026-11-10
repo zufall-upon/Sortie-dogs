@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
-import { validGoalEvidence } from "../dist/core/goal-bound.js";
+import { goalFingerprint, validGoalEvidence } from "../dist/core/goal-bound.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import { reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 import { exec, type ObjectValue, fixture, initial, inlineReport, selfRecheck } from "./helpers/reviewer-correction-fixture.ts";
@@ -56,6 +58,64 @@ for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a p
     assert.equal(ledger.records.filter(({ event }) => event.kind === "goal.validation-registered").length, registrationCount,
       "repeated activation and finish keep the same native registration idempotent");
     assert.equal(ledger.state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", false], ["cancelled", false], ["cancelled", true]] as const) test(`Reviewer finish replays its durable ${disposition} settlement after a projection failure${changedRecipe ? " without admitting a new recipe" : ""}`, async t => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "Medium: output must be ready." });
+    await f.edit("author", "ready");
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    await f.shell("author", "node check.mjs");
+    const before = await f.run(), unit = before.units[0]!;
+    if (disposition === "succeeded") {
+      // The real finish saves its receipt before projecting the Operator state.
+      const fault = t.mock.method(OperatorRuntime.prototype, "settled", async () => { throw new Error("fixture settlement projection failure"); });
+      try { await assert.rejects(f.tool("author", "finish_direct_unit"), /fixture settlement projection failure/u); }
+      finally { fault.mock.restore(); }
+    } else {
+      // As in ordinary Direct's finish-cancelled case, retain the host's terminal
+      // disposition even though this actor's current native checks passed.
+      const key = createHash("sha256").update("v010\0root").digest("hex");
+      const ledger = await RunFlightLedger.openGoal(join(f.directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`));
+      const snapshot = await ledger.readGoal(), reservation = snapshot.state.outstanding_reservations[0]!, at = new Date().toISOString();
+      await ledger.appendGoal({ kind: "unit.settled", at, goal_id: snapshot.state.goal_id!, reservation_id: reservation.reservation_id,
+        receipt_id: goalFingerprint({ call_id: unit.callID, output: "Host-observed direct unit finished; controller session remains active." }),
+        unit_id: reservation.unit_id, disposition, result_class: disposition === "cancelled" ? "interrupted" : "process-defect",
+        evidence: [], progress_fingerprint: null, elapsed_ms: 12, cost_usd: 0.7,
+        native_session_id: "author", native_started_at: unit.directExecution!.startedAt });
+    }
+    const durable = await f.ledger();
+    assert.equal(durable.state.outstanding_reservations.length, 0);
+    assert.equal(durable.state.consumed_units, 2);
+    assert.equal((await f.run()).units[0]!.status, "running", "only the durable settlement exists before retry");
+    if (changedRecipe) {
+      await assert.rejects(f.tool("author", "repair_review", { validation: ["node --check check.mjs"],
+        reason: "A changed recipe still needs this unit's live reservation." }), /mission-validation-registration-reservation-missing/u);
+      assert.deepEqual((await f.ledger()).records, durable.records, "a settled unit cannot create a new registration or reservation");
+      assert.equal((await f.run()).units[0]!.status, "running", "a rejected recipe is not validation or completion");
+      return;
+    }
+    const result = await f.tool("author", "finish_direct_unit");
+    const settled = (await f.run()).units[0]!;
+    assert.equal(settled.status, disposition);
+    assert.equal(settled.callID, unit.callID, "recovery keeps this same admission");
+    if (disposition === "succeeded") {
+      assert.equal(result.status, "correction-validated");
+      assert.ok(settled.evidence.length);
+      await f.finish(started.dispatch, "author", inlineReport());
+      assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    } else {
+      assert.equal(result.direct_settlement.disposition, disposition);
+      assert.match(result.next_action, /not validated/u);
+      assert.equal(settled.evidence.length, 0, "successful checks never replace the recorded failure/cancellation");
+      assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    }
+    const after = await f.ledger();
+    assert.deepEqual(after.records, durable.records, "replay never adds a registration, reservation, settlement or spend");
+    assert.equal(after.state.consumed_units, 2);
   } finally { await f.dispose(); }
 });
 
