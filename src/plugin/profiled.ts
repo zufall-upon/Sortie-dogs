@@ -162,8 +162,11 @@ export async function terminalCancelledMissionChildren(profile: RuntimeProfile, 
   }
   for (const { id } of children) {
     const worker = await host.get(id), descendants = await host.children(id);
-    const roles = oldWorkers.includes(id) ? ["dog-worker", "dog-luna-worker"]
-      : ["dog-worker", "dog-luna-worker", "dog-reviewer", "dog-scout", "dog-advisor"];
+    const unit = previous.units.find(unit => !unit.directExecution && unit.childSessionID === id);
+    const roles = unit?.reviewerCorrection
+      ? unit.reviewerCorrection.author === id ? ["dog-reviewer"] : []
+      : oldWorkers.includes(id) ? ["dog-worker", "dog-luna-worker"]
+        : ["dog-worker", "dog-luna-worker", "dog-reviewer", "dog-scout", "dog-advisor"];
     if (!record(worker) || worker.id !== id || worker.parentID !== (coordinatorID ?? root) ||
         !roles.includes(canonicalAgent(profile, worker.agent as string) ?? "") ||
         !await closed(worker, id) || !Array.isArray(descendants) || descendants.length !== 0) {

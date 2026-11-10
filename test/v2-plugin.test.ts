@@ -2001,8 +2001,11 @@ test("V2 plugin without session.list proves terminal lineage through its owning 
   let client: any;
   const cleanup = await createSortieDogsV2Plugin(async input => { client = input.client; return {}; }).setup(fixture.context);
   try {
-    const proof = () => terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "ses_root",
-      { operatorSessionID: "ses_coordinator", units: [{ childSessionID: "ses_worker" }] } as never,
+    const proof = (reviewerCorrection = false) => terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "ses_root",
+      { operatorSessionID: "ses_coordinator", units: [{ childSessionID: "ses_worker" },
+        ...(reviewerCorrection ? [{ childSessionID: "ses_reviewer", reviewerCorrection: {
+          author: "ses_reviewer", reviewIdentity: "prior-review", writeUnion: ["src/**"],
+        } }] : [])] } as never,
       { reserved_units: 0 }, { get: async id => (await client.session.get({ path: { id } })).data,
         children: async id => (await client.session.children({ path: { id } })).data });
     assert.deepEqual(await proof(), ["ses_worker"]);
@@ -2010,8 +2013,9 @@ test("V2 plugin without session.list proves terminal lineage through its owning 
     assert.deepEqual(pages.map(url => url.searchParams.get("cursor")), [null, "page-2", "end"]);
     assert.equal(pages[0]!.searchParams.get("order"), "asc");
     assert.equal(pages[1]!.searchParams.get("order"), null);
+    assert.deepEqual(await proof(true), ["ses_worker", "ses_reviewer"], "a recorded correction retains its native Reviewer identity");
     sessions.ses_reviewer.outcome = "running";
-    await assert.rejects(proof(), /mission-superseded-worker-not-terminal/);
+    await assert.rejects(proof(true), /mission-superseded-worker-not-terminal/);
     host.repeated = true;
     await assert.rejects(proof(), /v2-history-cursor-repeated/);
     host.repeated = false; host.malformed = true;

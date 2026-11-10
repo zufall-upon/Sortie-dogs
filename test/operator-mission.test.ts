@@ -1106,22 +1106,55 @@ test("an explicit changed-version mission replaces a cancelled failed acceptance
   assert.deepEqual(archived.units[0].evidence, []);
 }));
 
-function terminalHistory() {
-  const previous = { operatorSessionID: "coordinator", units: [{ childSessionID: "worker" }] } as never;
+function terminalHistory(reviewerCorrection = false, rootDispatched = false) {
+  const correction = { author: "worker", reviewIdentity: "prior-review", writeUnion: ["src/**"] };
+  const previous = { operatorSessionID: rootDispatched ? null : "coordinator", units: [{ childSessionID: "worker",
+    ...(reviewerCorrection ? { reviewerCorrection: correction } : {}) }] } as never;
   const sessions: Record<string, { id: string; agent: string; parentID: string; outcome?: string }> = {
     coordinator: { id: "coordinator", agent: "dogs-coordinator", parentID: "root", outcome: "succeeded" },
-    worker: { id: "worker", agent: "dog-worker-v010", parentID: "coordinator", outcome: "succeeded" },
+    worker: { id: "worker", agent: reviewerCorrection ? "dog-reviewer-v010" : "dog-worker-v010",
+      parentID: rootDispatched ? "root" : "coordinator", outcome: "succeeded" },
     prior: { id: "prior", agent: "dog-worker-v010", parentID: "coordinator", outcome: "failed" },
     reviewer: { id: "reviewer", agent: "dog-reviewer-v010", parentID: "coordinator", outcome: "succeeded" },
     scout: { id: "scout", agent: "dog-scout-v010", parentID: "coordinator", outcome: "interrupted" },
   };
   const children: Record<string, { id: string }[]> = { coordinator: ["worker", "prior", "reviewer", "scout"].map(id => ({ id })) };
-  return { previous, sessions, children, host: { get: async (id: string) => sessions[id], children: async (id: string) => children[id] ?? [] } };
+  return { previous, correction, sessions, children, host: { get: async (id: string) => sessions[id], children: async (id: string) => children[id] ?? [] } };
 }
 
 test("terminal mission proof accepts completed workers and settled prior consultations", async () => {
   const f = terminalHistory();
   assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
+});
+
+test("terminal mission proof accepts a recorded Reviewer correction without inventing a successful outcome", async () => {
+  const f = terminalHistory(true);
+  for (const outcome of ["succeeded", "failed", "interrupted"]) {
+    f.sessions.worker!.outcome = outcome;
+    assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
+    assert.equal(f.sessions.worker!.outcome, outcome);
+  }
+  delete f.sessions.worker!.outcome;
+  assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 },
+    { ...f.host, stopped: async id => id === "worker" }), ["worker"]);
+  assert.equal(f.sessions.worker!.outcome, undefined);
+  f.sessions.worker!.outcome = "running";
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 },
+    { ...f.host, stopped: async () => true }), /worker-not-terminal/);
+});
+
+test("terminal mission proof keeps Worker and Reviewer correction roles bound to their recorded author", async () => {
+  const worker = terminalHistory();
+  worker.sessions.worker!.agent = "dog-reviewer-v010";
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", worker.previous, { reserved_units: 0 }, worker.host), /worker-not-terminal/);
+  const correction = terminalHistory(true);
+  for (const agent of ["dog-worker-v010", "dog-luna-worker-v010", "dog-scout-v010", "dog-advisor-v010"]) {
+    correction.sessions.worker!.agent = agent;
+    await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", correction.previous, { reserved_units: 0 }, correction.host), /worker-not-terminal/, agent);
+  }
+  correction.sessions.worker!.agent = "dog-reviewer-v010";
+  correction.correction.author = "foreign";
+  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", correction.previous, { reserved_units: 0 }, correction.host), /worker-not-terminal/);
 });
 
 test("cancelled child proof is separate from native outcomes and still requires exact lineage and released reservations", async () => {
@@ -1193,12 +1226,12 @@ test("operation completion requires every declared command's terminal result, no
   assert.equal(missionExecutionStatus(mission), "not-started", "empty declarations cannot vacuously count as complete");
 }));
 
-test("terminal proof for a root-dispatched Worker does not claim unrelated root sessions", async () => {
-  const f = terminalHistory();
-  f.sessions.worker!.parentID = "root";
-  delete f.sessions.coordinator!.outcome;
-  const previous = { operatorSessionID: null, units: [{ childSessionID: "worker" }] } as never;
-  assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", previous, { reserved_units: 0 }, f.host), ["worker"]);
+test("terminal proof for root-dispatched work does not claim unrelated root sessions", async () => {
+  for (const reviewerCorrection of [false, true]) {
+    const f = terminalHistory(reviewerCorrection, true);
+    delete f.sessions.coordinator!.outcome;
+    assert.deepEqual(await terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), ["worker"]);
+  }
 });
 
 test("terminal mission proof rejects active, missing and foreign native lineage", async () => {
@@ -1209,6 +1242,7 @@ test("terminal mission proof rejects active, missing and foreign native lineage"
     ["active Reviewer", f => { delete f.sessions.reviewer!.outcome; }],
     ["unknown outcome", f => { f.sessions.worker!.outcome = "idle"; }],
     ["foreign Coordinator", f => { f.sessions.coordinator!.parentID = "foreign"; }],
+    ["foreign unit child", f => { f.sessions.worker!.parentID = "foreign"; }],
     ["foreign child", f => { f.sessions.reviewer!.parentID = "foreign"; }],
     ["foreign role", f => { f.sessions.reviewer!.agent = "build"; }],
     ["wrong child identity", f => { f.sessions.worker!.id = "other"; }],
@@ -1216,11 +1250,14 @@ test("terminal mission proof rejects active, missing and foreign native lineage"
     ["missing listing", f => { f.children.coordinator = [{ id: "reviewer" }]; }],
     ["duplicate listing", f => { f.children.coordinator!.push({ id: "worker" }); }],
     ["unproven descendant", f => { f.children.reviewer = [{ id: "nested" }]; }],
+    ["unproven unit descendant", f => { f.children.worker = [{ id: "nested" }]; }],
   ];
-  for (const [name, change] of changes) {
-    const f = terminalHistory(); change(f);
-    await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), /mission-superseded-/, name);
+  for (const reviewerCorrection of [false, true]) {
+    for (const [name, change] of changes) {
+      const f = terminalHistory(reviewerCorrection); change(f);
+      await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 0 }, f.host), /mission-superseded-/, name);
+    }
+    const f = terminalHistory(reviewerCorrection);
+    await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 1 }, f.host), /reservations-pending/);
   }
-  const f = terminalHistory();
-  await assert.rejects(terminalCancelledMissionChildren(V010_RUNTIME_PROFILE, "root", f.previous, { reserved_units: 1 }, f.host), /reservations-pending/);
 });
