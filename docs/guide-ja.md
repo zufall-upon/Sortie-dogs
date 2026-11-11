@@ -20,10 +20,13 @@ Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。
 用途の適合条件と不向きな用途は[README](../README.md#when-to-use-sortie-dogs)、実績と制約は
 [測定結果](../README.md#measured-results)を参照。
 
-**現行release: [v0.16.18](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.18)**
-（[release notes](releases/v0.16.18.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**Release: [v0.16.19](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.19)**
+（[release notes](releases/v0.16.19.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-現行asset markerは`0.16.18-reviewer-terminal-validation-v1`。
+v0.16.19のasset markerは`0.16.19-review-finish-recovery-v1`。
+
+以下のnpm例は公開済みv0.16.18を指定する。v0.16.19のnpm公開は別途手動で行うため、
+公開前にv0.16.19を導入する場合はGitHub Releaseに添付された固定archiveを使用する。
 
 > **Beta:** 1.0に向けて安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -436,7 +439,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 
 ## Global利用
 
-Project-local導入を推奨。現行Mission assetをglobalで利用する場合:
+Project-local導入を推奨。公開済みnpm版をglobalで利用する場合:
 
 ```sh
 npm install --global sortie-dogs@0.16.18
@@ -472,7 +475,7 @@ npx --no-install sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-`0.16.18-reviewer-terminal-validation-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+v0.16.19の`0.16.19-review-finish-recovery-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、

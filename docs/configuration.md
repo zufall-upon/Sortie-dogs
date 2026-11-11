@@ -7,6 +7,9 @@ This page describes the OpenCode plugin route. Codex has its own entrypoints and
 these host settings. The default Mission runtime keeps the `v010` compatibility names; these do
 not mean the installed package is v0.10.
 
+The npm examples below use the published v0.16.18. The v0.16.19 npm publication is a separate
+manual step; until it is available, use the fixed archive attached to its GitHub Release for v0.16.19.
+
 ## Project installation
 
 Requirements: Node.js 22.6+, npm and OpenCode V2. In the target project:
@@ -178,7 +181,7 @@ The default Mission profile is serial; background responsiveness is not parallel
 
 ## Global availability
 
-Project-local installation is recommended. For global OpenCode Mission assets:
+Project-local installation is recommended. For the published npm version of the OpenCode Mission assets:
 
 ```sh
 npm install --global sortie-dogs@0.16.18
@@ -209,7 +212,7 @@ npx --no-install sortie-dogs init .
 
 `init` is idempotent, updates recognized Sortie-owned assets, records their version and preserves
 user settings. Unknown ownership or conflicting files stop the update. Align exact version pins
-and separate bridge dependencies. Marker `0.16.18-reviewer-terminal-validation-v1` identifies installed Mission
+and separate bridge dependencies. The v0.16.19 marker `0.16.19-review-finish-recovery-v1` identifies installed Mission
 assets, not proof that an already-running OpenCode process reloaded them.
 
 There is no supported uninstall command. Remove the dependency separately, then follow
