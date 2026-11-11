@@ -3,6 +3,7 @@ import type { MissionGrip, GripQuestion } from "../core/grip.js";
 import { OperatorMissionRuntime, type OperatorMission } from "../core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../core/runtime-profile.js";
 import { isKnownReadOnlyTool } from "./gate.js";
+import { currentMissionVision } from "../core/mission-vision.js";
 
 type ObjectValue = Record<string, unknown>;
 const record = (v: unknown): v is ObjectValue => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -15,13 +16,15 @@ const short = (text: string, limit: number) => Array.from(text).slice(0, limit).
 const inlineGripQuestion = (question: string, japanese: boolean): string => {
   const decision = japanese ? "❓【今回の判断】" : "❓[Decision] ";
   const reason = japanese ? "💡【なぜ今】" : "💡[Why now] ";
+  const relation = japanese ? "🔗【今回判断との関係・AI整理】" : "🔗[Relation to vision · AI interpretation] ";
   // Native Form descriptions collapse whitespace. Keep visible boundaries instead of
   // relying on blank lines; recognize only explicit headings, never infer or shorten conditions.
   const sections = question.split(/\r\n|[\r\n\u2028\u2029]/u).map(line => line.trim()).filter(Boolean);
   return sections.map((line, index) => {
     const formatted = line.replace(/^(?:今回の判断|判断|Decision|Current decision)\s*[:：]\s*/u, decision)
-      .replace(/^(?:なぜ今[?？]?|理由|Why now[?？]?)\s*[:：]\s*/u, reason);
-    return index === 0 && !formatted.startsWith(decision) ? decision + formatted : formatted;
+      .replace(/^(?:なぜ今[?？]?|理由|Why now[?？]?)\s*[:：]\s*/u, reason)
+      .replace(/^(?:今回判断との関係|今回の判断との関係|Relation to vision)\s*[:：]\s*/u, relation);
+    return index === 0 && ![decision, relation, reason].some(label => formatted.startsWith(label)) ? decision + formatted : formatted;
   }).join(" ┃ ") || decision;
 };
 
@@ -115,6 +118,7 @@ export class MissionGripController {
       consultation_requested: pending.consultationRequested,
       ...(feedback !== undefined ? { user_feedback: feedback, feedback_received_direction_still_held: true } : {}),
       original_requests: mission.requests, undecided: question,
+      vision: currentMissionVision(mission) ?? null,
       saved_observations: mission.execution?.observations ?? [],
       constraints: { declared_requirements: mission.requirements, prohibited_write: mission.prohibitedWrite ?? [] },
       external_delivery: "not-sent", next_action: pending.consultationRequested
@@ -135,20 +139,27 @@ export class MissionGripController {
       if (record(q) && typeof header === "string" && (header === "Grip" || header === mission.grip?.pending?.resumeHeader) && q.multiple !== true &&
           typeof q.question === "string" && Array.isArray(q.options) && q.options.length > 0 &&
           q.options.every(option => record(option) && typeof option.label === "string" && typeof option.description === "string")) {
-        const japanese = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(mission.requests[0]?.text ?? q.question);
-        const label = japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice";
         const previous = mission.grip?.questions.find(item => item.callID === event.id && item.sessionID === id);
+        // Follow the current question's language, not an earlier request's script.
+        const japanese = /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(q.question);
+        const label = previous?.consultationLabel ?? (japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice");
         const original = mission.requests[0];
         const excerpt = original ? short(original.text.split(/\r?\n/u).filter(Boolean)[0] ?? original.text, 90) : undefined;
-        const quote = excerpt === undefined ? "" : japanese
+        const oldQuote = excerpt === undefined ? "" : japanese
           ? `🎯【元の目的・原文抜粋】「${excerpt}」 ┃ ` : `🎯[Original goal excerpt] "${excerpt}" ┃ `;
-        const rawQuestion = q.question, formattedQuestion = quote + inlineGripQuestion(rawQuestion, japanese);
+        const vision = currentMissionVision(mission);
+        const summary = vision?.summary.replace(/\s+/gu, " ").trim();
+        const title = japanese ? `🎯【達成したい姿・AI整理${vision?.translated ? "／翻訳" : ""}】`
+          : `🎯[Desired outcome · AI synthesis${vision?.translated ? " / translated" : ""}] `;
+        const prefix = title + (summary ?? (japanese ? "未整理（根拠不足なら推測しない）" : "Not established (do not infer missing context)")) + " ┃ ";
+        const rawQuestion = q.question, formattedQuestion = prefix + inlineGripQuestion(rawQuestion, japanese);
+        const oldFormattedQuestion = oldQuote + inlineGripQuestion(rawQuestion, japanese);
         // Retry compatibility only: never rewrite an already saved/open native offer.
         const legacyQuote = excerpt === undefined ? "" : `${japanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): "}${excerpt}\n\n`;
         const legacyFormattedQuestion = legacyQuote + rawQuestion.replace(/\r?\n+/gu, "\n\n");
         const options = q.options.filter(option => option.label !== label) as GripQuestion["options"];
         let offered: GripQuestion = previous ?? { callID: event.id, sessionID: id, header: String(header),
-          question: formattedQuestion, consultationLabel: label,
+          question: formattedQuestion, inputQuestion: rawQuestion, ...(vision ? { vision } : {}), consultationLabel: label,
           options: [...options, { label, description: japanese ? "この方針を保留し、元の目的から考え直す" : "Hold this direction and reconsider the original goal" }] };
         await this.missions.update(owner.root, m => {
           if (m.id !== mission.id || !active(m)) throw new Error("mission-grip-owner-changed: preserve the successor Mission; discard this stale question and use its current user direction");
@@ -163,7 +174,8 @@ export class MissionGripController {
           }
           const current = m.grip.questions.find(q => q.callID === event.id && q.sessionID === id);
           if (current) {
-            if (current.header !== header || rawQuestion !== current.question && formattedQuestion !== current.question && legacyFormattedQuestion !== current.question ||
+            if (current.header !== header || rawQuestion !== current.question && rawQuestion !== current.inputQuestion &&
+                formattedQuestion !== current.question && oldFormattedQuestion !== current.question && legacyFormattedQuestion !== current.question ||
                 JSON.stringify(options) !== JSON.stringify(current.options.filter(option => option.label !== current.consultationLabel))) {
               throw new Error("mission-grip-question-call-reused: use a fresh native question call for the revised choice; the old form is not substituted");
             }

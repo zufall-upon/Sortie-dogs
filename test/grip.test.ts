@@ -23,7 +23,8 @@ async function fixture() {
   const create = () => new MissionGripController(directory, async id => sessions[id], async id => history[id] ?? []);
   const controller = create(), missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
   await missions.capture("root", { id: "original", text: "作業を速く・安く・楽に完了する。\n  原文の空白も保持。" });
-  await missions.start("root", ["元の目的を守る"]);
+  await missions.start("root", ["元の目的を守る"], false, {
+    vision: { summary: "作業を速く・安く・楽に完了する。", source_refs: ["user:original"] } });
   await missions.update("root", m => { m.coordinator = "coordinator"; });
   return { controller, create, missions, history, dispose: () => rm(directory, { recursive: true, force: true }) };
 }
@@ -38,7 +39,7 @@ test("Grip augments only explicit active-Mission controller single choices, pres
     const original = structuredClone(multiple); await f.controller.before(multiple); assert.deepEqual(multiple, original);
     const q = question("current");
     await f.controller.before(q); await f.controller.before(q);
-    assert.match(q.input.questions[0]!.question, /^🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。$/u);
+    assert.match(q.input.questions[0]!.question, /^🎯【達成したい姿・AI整理】作業を速く・安く・楽に完了する。 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。$/u);
     assert.deepEqual(q.input.questions[0]!.options.map(q => q.label), ["A", "B", "目的に戻って外部相談"]);
     assert.ok(q.input.questions[0]!.question.length + q.input.questions[0]!.options.map(q => q.label + q.description).join("").length < 300);
     const before = await f.missions.required("root");
@@ -58,12 +59,12 @@ test("Grip sections remain distinct after native whitespace collapse without cha
     await f.controller.before(q);
     const formatted = q.input.questions[0]!.question;
     assert.doesNotMatch(formatted, /[\r\n]/u);
-    assert.match(formatted.replace(/\s+/gu, " "), /🎯【元の目的・原文抜粋】.+ ┃ ❓【今回の判断】固定5件取得・既存キー限定供給・Private一時保存を許可する？ ┃ 💡【なぜ今】実packageへ進むため。 ┃ 条件：本人がキー設定、保存1日、追加課金を確認できなければ保存しない。/u);
+    assert.match(formatted.replace(/\s+/gu, " "), /🎯【達成したい姿・AI整理】.+ ┃ ❓【今回の判断】固定5件取得・既存キー限定供給・Private一時保存を許可する？ ┃ 💡【なぜ今】実packageへ進むため。 ┃ 条件：本人がキー設定、保存1日、追加課金を確認できなければ保存しない。/u);
     assert.deepEqual(q.input.questions[0]!.options.slice(0, -1), options);
     const saved = structuredClone(q);
     await f.controller.before(q);
     assert.deepEqual(q, saved);
-    assert.equal(formatted.split("🎯【元の目的・原文抜粋】").length, 2);
+    assert.equal(formatted.split("🎯【達成したい姿・AI整理】").length, 2);
   } finally { await f.dispose(); }
 });
 
@@ -71,6 +72,7 @@ test("Grip formats explicit English headings and already decorated sections with
   const f = await fixture();
   try {
     await f.missions.update("root", m => { m.requests[0]!.text = "Keep the release reproducible and affordable."; });
+    await f.missions.recordVision("root", { summary: "Keep the release reproducible and affordable.", source_refs: ["user:original"] });
     for (const [index, raw] of [
       "Decision: Allow download only?\r\nWhy now: The fixed inputs are missing.",
       "❓[Decision] Allow download only? ┃ 💡[Why now] The fixed inputs are missing.",
@@ -80,7 +82,7 @@ test("Grip formats explicit English headings and already decorated sections with
       q.input.questions[0]!.question = raw;
       await f.controller.before(q);
       const text = q.input.questions[0]!.question;
-      assert.match(text, /^🎯\[Original goal excerpt\] "Keep the release reproducible and affordable\." ┃ ❓\[Decision\]/u);
+      assert.match(text, /^🎯\[Desired outcome · AI synthesis\] Keep the release reproducible and affordable\. ┃ ❓\[Decision\]/u);
       assert.equal(text.split("❓[Decision]").length, 2);
       assert.doesNotMatch(text, /[\r\n]/u);
       if (index < 2) assert.match(text, / ┃ 💡\[Why now\] The fixed inputs are missing\./u);
@@ -109,7 +111,7 @@ test("saved legacy Grip offers retain their exact text and answer identity acros
     assert.equal(pending!.consultation_requested, true);
     const resume = question("new-format-revision", String(pending!.resume_header));
     await f.controller.before(resume);
-    assert.match(resume.input.questions[0]!.question, /^🎯【元の目的・原文抜粋】/u);
+    assert.match(resume.input.questions[0]!.question, /^🎯【達成したい姿・AI整理】/u);
     await f.controller.after(answer(resume, "A"));
     assert.equal(await f.controller.pending("root"), undefined);
     assert.equal((await f.missions.required("root")).grip!.questions[0]!.question, legacy.question);
@@ -126,6 +128,80 @@ test("Grip preserves long decision text and negated conditions instead of enforc
     assert.ok(q.input.questions[0]!.question.endsWith(decision));
     assert.match(q.input.questions[0]!.question, / ┃ ❓【今回の判断】/u);
     assert.deepEqual((await f.missions.required("root")).requests[0]!.text, "作業を速く・安く・楽に完了する。\n  原文の空白も保持。");
+  } finally { await f.dispose(); }
+});
+
+test("new offers use source-linked synthesis, not request fragments; unknown/stale sources never infer a vision", async () => {
+  const f = await fixture();
+  try {
+    const original = "Chatで相談した内容を参照しておいて\n  private fixture detail: never auto-display";
+    await f.missions.update("root", m => { m.requests[0]!.text = original; });
+    for (const [id, change] of [
+      ["stale", async () => {}],
+      ["absent", () => f.missions.recordVision("root", null)],
+    ] as const) {
+      await change();
+      const q = question(id); await f.controller.before(q);
+      assert.match(q.input.questions[0]!.question, /達成したい姿・AI整理】未整理/u);
+      assert.doesNotMatch(q.input.questions[0]!.question, /Chatで相談|private fixture|元の目的・原文抜粋/u);
+      await f.controller.after(answer(q, "A"));
+    }
+    for (const source_refs of [[], ["user:other-mission"], ["requirement:R99"], ["snapshot:not-retained"]]) {
+      await assert.rejects(f.missions.recordVision("root", { summary: "Unsupported", source_refs }), /mission-vision-invalid/u);
+    }
+    const before = await f.missions.required("root");
+    await f.missions.recordVision("root", { summary: "利用者が迷わず作業を完了できる。", source_refs: ["requirement:R1"] });
+    const q = question("synthesis"); await f.controller.before(q);
+    assert.match(q.input.questions[0]!.question, /^🎯【達成したい姿・AI整理】利用者が迷わず作業を完了できる。 ┃ /u);
+    assert.doesNotMatch(q.input.questions[0]!.question, /「利用者|原文/u);
+    const after = await f.missions.required("root");
+    assert.deepEqual(after.requests, before.requests);
+    assert.deepEqual(after.requirements, before.requirements);
+    assert.equal(after.requests[0]!.text, original);
+    assert.equal(after.runID, before.runID);
+  } finally { await f.dispose(); }
+});
+
+test("source and display snapshots survive synthesis updates, translation and long outcomes without rewriting a native offer", async () => {
+  const f = await fixture();
+  try {
+    const raw = question("fixed-offer");
+    raw.input.questions[0]!.question = "今回判断との関係：迷わない導線を決める。\n今回の判断：AかBか？\nなぜ今：次の画面を作るため。";
+    const q = structuredClone(raw); await f.controller.before(q);
+    const saved = structuredClone(q), source = (await f.missions.required("root")).grip!.questions[0]!.vision;
+    await f.missions.recordVision("root", { summary: "変更された達成像", source_refs: ["requirement:R1"] });
+    await f.controller.before(raw); assert.deepEqual(raw, saved);
+    await f.controller.before(q); assert.deepEqual(q, saved);
+    assert.deepEqual((await f.missions.required("root")).grip!.questions[0]!.vision, source);
+    assert.match(q.input.questions[0]!.question, / ┃ 🔗【今回判断との関係・AI整理】迷わない導線を決める。 ┃ ❓【今回の判断】/u);
+    await f.controller.after(answer(q, "A"));
+    const long = "Preserve every relevant outcome. ".repeat(15) + "Do not expose private source bytes.";
+    await f.missions.recordVision("root", { summary: long, source_refs: ["user:original"], translated: true });
+    const english = question("translation");
+    english.input.questions[0]!.question = "Relation to vision: Select the usable scope.\nDecision: Which scope?\nWhy now: Implementation needs it.";
+    await f.controller.before(english);
+    assert.ok(english.input.questions[0]!.question.startsWith(`🎯[Desired outcome · AI synthesis / translated] ${long} ┃ `));
+    assert.match(english.input.questions[0]!.question, /🔗\[Relation to vision · AI interpretation\]/u);
+    assert.equal(english.input.questions[0]!.options.at(-1)!.label, "Revisit goal with outside advice", "current English question overrides earlier Japanese source language");
+    assert.doesNotMatch(english.input.questions[0]!.question, /…/u);
+  } finally { await f.dispose(); }
+});
+
+test("saved inline excerpt-only offers retain their exact bytes after a vision is supplied", async () => {
+  const f = await fixture();
+  try {
+    const q = question("old-inline"), raw = structuredClone(q);
+    const legacy = { callID: q.id, sessionID: "root", header: "Grip",
+      question: "🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。",
+      consultationLabel: "目的に戻って外部相談",
+      options: [...q.input.questions[0]!.options, { label: "目的に戻って外部相談", description: "この方針を保留し、元の目的から考え直す" }] };
+    await f.missions.update("root", m => { m.grip = { questions: [legacy] }; });
+    await f.missions.recordVision("root", { summary: "新しいAI整理", source_refs: ["user:original"] });
+    await f.controller.before(raw);
+    assert.equal(raw.input.questions[0]!.question, legacy.question);
+    assert.deepEqual(raw.input.questions[0]!.options, legacy.options);
+    await f.controller.after(answer(raw, "A"));
+    assert.equal(await f.controller.pending("root"), undefined);
   } finally { await f.dispose(); }
 });
 
@@ -196,6 +272,9 @@ test("Grip policy is present on both Mission controllers, not Workers; no routin
   assert.match(GRIP_POLICY, /Native Form descriptions collapse newlines and blank lines/);
   assert.match(GRIP_POLICY, /❓【今回の判断】.+ ┃ 💡【なぜ今】/u);
   assert.match(GRIP_POLICY, /never hide them to meet that target/);
+  assert.match(GRIP_POLICY, /same ordinary start_mission\/plan_units turn/u);
+  assert.match(GRIP_POLICY, /AI synthesis/u);
+  assert.match(GRIP_POLICY, /Relation to vision/u);
 });
 
 test("a failed answer save never resumes the proposal; cancellation survives native history failure", async () => {

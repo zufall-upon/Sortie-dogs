@@ -11,6 +11,7 @@ import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuant
 import { applyPendingWork, rememberWorkMission, rememberedWorkRun } from "./work-quantity-observations.js";
 import { appendPurposeDecision, purposeDecisionView, type PurposeDecision } from "./mission-purpose.js";
 import type { MissionGrip } from "./grip.js";
+import { currentMissionVision, retainMissionVision, type MissionVision } from "./mission-vision.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -201,6 +202,8 @@ export interface OperatorMission {
   purposeDecisions?: PurposeDecision[];
   /** Explicit native Grip question and held user direction; never new execution authority. */
   grip?: MissionGrip;
+  /** Source-linked AI synthesis for display only; requests/requirements remain authoritative. */
+  vision?: MissionVision;
   /** Operator recommendation from already-known context; not a requirement or execution lock. */
   preferredExecutor?: "coordinator" | "worker";
   /** Known unit facts passed to the Coordinator without pre-starting a Worker. */
@@ -513,6 +516,7 @@ export class OperatorMissionRuntime {
       catch { return { ...source, snapshot_available: false }; }
     }));
     return { original_requests: state.requests, requirements: state.requirements, prohibited_write: state.prohibitedWrite ?? [],
+      vision: currentMissionVision(state) ?? null,
       ...(state.grip?.pending ? { grip: state.grip } : {}),
       ...(state.preferredExecutor ? { preferred_executor: state.preferredExecutor } : {}),
       launch_conditions: state.launchConditions ?? [],
@@ -686,7 +690,7 @@ export class OperatorMissionRuntime {
     });
   }
   start(root: string, requirements: unknown, replaceRequirements = false,
-    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string; executionHost?: "codex" } = {}): Promise<OperatorMission> {
+    options: { kind?: OperatorMission["kind"]; context?: MissionContext[]; cancelledRunID?: string; executionHost?: "codex"; vision?: unknown } = {}): Promise<OperatorMission> {
     return this.serial(root, async () => {
       if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 64 ||
           !requirements.every(item => typeof item === "string" && item.trim() && !/[\r\n]/u.test(item))) {
@@ -704,6 +708,7 @@ export class OperatorMissionRuntime {
         // Only an explicit Mission action adopts the latest real turn; chat capture alone never does.
         if (!previous.requests.some(item => item.id === request.id)) previous.requests.push(request);
         if (options.kind === "operation") previous.kind = "operation";
+        retainMissionVision(previous, options.vision);
         await this.save(this.file(root), previous);
         return previous;
       }
@@ -729,6 +734,7 @@ export class OperatorMissionRuntime {
           previous.requirements.every((requirement, index) => state.requirements[index]?.text === requirement.text)) {
         state.workQuantity = planWorkQuantity(state, [], undefined, previous.workQuantity);
       }
+      retainMissionVision(state, options.vision);
       await this.save(this.file(root), state);
       return state;
     });
@@ -752,6 +758,9 @@ export class OperatorMissionRuntime {
   }
   recordPurposeDecision(root: string, raw: unknown): Promise<OperatorMission> {
     return this.update(root, state => appendPurposeDecision(state, raw));
+  }
+  recordVision(root: string, raw: unknown): Promise<OperatorMission> {
+    return this.update(root, state => retainMissionVision(state, raw));
   }
   recordConsultationDispatch(root: string, input: { role: MissionConsultation["role"]; callID: string; reason: string;
     trigger?: string; question?: string }): Promise<OperatorMission> {
@@ -1055,7 +1064,8 @@ export function missionPacket(mission: OperatorMission, run?: OperatorState, inc
     ...(predecessor ? { predecessor: { run_id: predecessor.runID, status: predecessor.phase,
       completed_units: predecessor.units.filter(unit => unit.status === "succeeded").length,
       note: "Historical results and spend are retained; they do not complete the current requirements." } } : {}),
-     requirements: mission.requirements, original_request_refs: mission.requests.map(item => `user:${item.id}`),
+     requirements: mission.requirements, vision: currentMissionVision(mission) ?? null,
+     original_request_refs: mission.requests.map(item => `user:${item.id}`),
     launch_conditions: mission.launchConditions ?? [], prohibited_write: mission.prohibitedWrite ?? [],
      accounting_scope: "Implementation units (Worker, direct controller execution or scoped Reviewer correction) are not benchmark attempts. Host budget uses the existing unit ledger; orchestration, read-only Review and external campaign costs are excluded. Launch caps are fixed conditions, not a known campaign remainder.",
      delivery_observation: mission.deliveryObservation?.run_id === (run?.runID ?? mission.runID) ? mission.deliveryObservation : null,

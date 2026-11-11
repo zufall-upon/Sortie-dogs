@@ -252,6 +252,72 @@ test("V2 legacy hooks can restrict native permission effects but cannot upgrade 
   }
 });
 
+test("V2 normal Mission producer supplies the vision through start/plan into public Grip and held context", async () => {
+  const directory = await mkdtemp(resolve("_testenv/v2-grip-vision-")), fixture = contextFixture();
+  let cleanup: (() => void) | void;
+  try {
+    await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    fixture.history.length = 0;
+    // Synthetic example only, not the purpose of the user's separate API-budget Mission.
+    fixture.history.push({ id: "msg_vision_source", type: "user",
+      text: "音声案内で、初めての利用者が手を止めず練習を続けられる姿を目指す。",
+      files: [{ data: "AQID", mime: "image/png", name: "fixture.png", source: { type: "inline" } }] });
+    fixture.context.location.directory = directory;
+    fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator",
+      model: { providerID: "openai", id: "gpt-6.1-sol" } });
+    cleanup = await createSortieDogsV2Plugin(SortieDogsV010Plugin).setup({ ...fixture.context,
+      message: { list: async () => ({ data: fixture.history, cursor: { next: null } }) } });
+    const original = "Chatで相談した内容を参照しておいて\n  private fixture detail";
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_continuation", prompt: { text: original } });
+    const call = async (name: string, input: Record<string, unknown>) => {
+      const tool = fixture.tools.find(tool => tool.name === `sortie_v010_${name}`) as any;
+      const args = { ...Object.fromEntries(Object.keys(tool.input.properties).map(key => [key, ""])), ...input };
+      const validate = new Ajv({ strict: false }).compile(tool.input);
+      assert.equal(validate(args), true, JSON.stringify(validate.errors));
+      return JSON.parse((await tool.execute(args, { sessionID: "root", callID: `call_${name}` })).content);
+    };
+    const summary = "初めての利用者が音声案内で練習を続けられる。";
+    await call("start_mission", { requirements: ["初めての利用者が音声案内で練習を続けられる状態にする。", "課金・API接続は別途の明示許可まで行わない。"],
+      vision: { summary, source_refs: ["context:msg_vision_source", "requirement:R1"] } });
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), started = await missions.required("root");
+    assert.equal(started.vision!.summary, summary);
+    assert.ok(started.context!.some(item => item.id === "msg_vision_source"));
+    const source = started.continuity!.sources.flatMap(source => source.attachments ?? []).find(file => file.message_id === "msg_vision_source")!;
+    assert.deepEqual(await readFile(source.path!), Buffer.from([1, 2, 3]), "original attachment bytes remain available");
+    const plannedSummary = "初めての利用者が、操作に迷わず音声案内で練習を続けられる。";
+    await call("plan_units", { executor: "self", vision: { summary: plannedSummary, source_refs: ["context:msg_vision_source", "requirement:R1"] },
+      units: [{ title: "表示用fixture", objective: "Keep the fixture isolated", write: [], validation: ["node check.mjs"] }] });
+    const before = fixture.toolHooks.get("execute.before")!, after = fixture.toolHooks.get("execute.after")!;
+    const event = { tool: "question", id: "native-grip-vision", sessionID: "root", agent: "dog-operator", input: {
+      questions: [{ header: "Grip", question: "今回判断との関係：音声案内が使えるか確かめる試験の範囲を決める。\n今回の判断：実AI試験のAPI料金の予算上限は？\nなぜ今：作業枠とAPI料金は別単位。ここで選んでもまだAPIには接続しない。",
+        options: [{ label: "100円", description: "100円以内の試験案。課金・API接続はまだ許可しない。" },
+          { label: "まだ課金を許可しない", description: "条件整理だけ進める。" }] }] } };
+    const options = structuredClone(event.input.questions[0]!.options);
+    await before(event);
+    const text = event.input.questions[0]!.question;
+    assert.ok(text.startsWith(`🎯【達成したい姿・AI整理】${plannedSummary} ┃ 🔗【今回判断との関係・AI整理】`));
+    assert.match(text, /試験の範囲を決める。 ┃ ❓【今回の判断】実AI試験のAPI料金の予算上限は？ ┃ 💡【なぜ今】/u);
+    assert.doesNotMatch(text, /Chatで相談|private fixture|原文抜粋|132円|data:image|context:msg_/u);
+    assert.deepEqual(event.input.questions[0]!.options.slice(0, -1), options);
+    // Retain the actual public-hook output for a zero-inference native Form visual check.
+    await writeFile(resolve("_testenv/grip-vision-preview.json"), JSON.stringify(event.input, null, 2));
+    const result = { ...event, status: "completed", result: { content: "native answer", metadata: { answers: [["目的に戻って外部相談"]] } } };
+    await after(result);
+    assert.deepEqual(result.result.metadata.answers, [["目的に戻って外部相談"]]);
+    const context = { sessionID: "root", agent: "dog-operator", system: [] as unknown[], tools: {}, messages: [] };
+    await fixture.sessionHooks.get("context")!(context);
+    assert.match(JSON.stringify(context.system), /SORTIE_GRIP_HELD_DIRECTION/u);
+    assert.match(JSON.stringify(context.system), /AI整理/u);
+    await assert.rejects(before({ tool: "sortie_v010_plan_units", id: "held", sessionID: "root", input: { vision: null } }), /mission-grip-needs-user-direction/u);
+    const current = await missions.required("root");
+    assert.deepEqual(current.requests, started.requests);
+    assert.equal(current.requests[0]!.text, original);
+    assert.deepEqual(current.requirements, started.requirements);
+    assert.deepEqual(current.launchConditions, started.launchConditions);
+    assert.deepEqual(current.continuity!.sources.flatMap(source => source.attachments ?? []), started.continuity!.sources.flatMap(source => source.attachments ?? []));
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("generated Mission Worker assets expose same-Task scope repair, not Coordinator controls", () => {
   for (const name of ["dog-worker-v010", "dog-luna-worker-v010"]) {
     const content = runtimeAssets.find(asset => asset.name === name)!.content;
@@ -2619,7 +2685,7 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.match(reflection.input.properties.scope!.description!, /empty string to omit/u);
     const plan = tools.find(tool => tool.name === "sortie_v010_plan_units")!;
     const validate = new Ajv({ strict: false }).compile(plan.input);
-    const capturedHandoff = { units: "", work_quantities: "", parallel: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker", purpose_decision: "" };
+    const capturedHandoff = { units: "", work_quantities: "", parallel: "", execution: "", handoff_context: "Continue the already-edited result", reason: "", executor: "worker", purpose_decision: "", vision: "" };
     assert.equal(validate(capturedHandoff), true, JSON.stringify(validate.errors));
     assert.equal(validate({ ...capturedHandoff, parallel: true }), true);
     assert.equal(validate({ ...capturedHandoff, parallel: false }), true);

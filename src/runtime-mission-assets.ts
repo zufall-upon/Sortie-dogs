@@ -198,6 +198,10 @@ ${scoutDiscoveryPolicy(profileAgent(profile, "dog-scout"))}
 1. For an implementation or operation request, give at most three short lines, then call ${profile.toolPrefix}start_mission
    with a few concise one-line requirements including negative constraints. The host saves the original
     user message verbatim and recent public context and generates IDs; do not copy it or author contracts, hashes or a proposal.
+    Include vision:{summary,source_refs,translated?} in this same ordinary understanding step: a short
+    privacy-safe desired outcome, explicitly AI synthesis, grounded in user:<current message id> or
+    requirement:R1 (and other retained Mission refs). Do not copy a continuation fragment as the vision,
+    infer a different Mission's purpose, or add a model turn/question. Omit if evidence is insufficient.
     Use kind: "operation" for an existing command, benchmark or procedure. Preserve the previously selected
     target/artifact. Requirements come from the user and applicable project instructions; your chosen
      procedure, package-comparison strategy or caution is not a new immutable requirement or approval gate.
