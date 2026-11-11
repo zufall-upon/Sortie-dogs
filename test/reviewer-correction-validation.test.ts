@@ -1,12 +1,164 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { goalFingerprint, validGoalEvidence } from "../dist/core/goal-bound.js";
+import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import { reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 import { exec, type ObjectValue, fixture, initial, inlineReport, selfRecheck } from "./helpers/reviewer-correction-fixture.ts";
+
+for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a prior direct validation registration: ${resumed ? "native Task" : "inline"}`, async () => {
+  const f = await fixture();
+  try {
+    const A = "node required-test.mjs", B = "node check.mjs";
+    await f.prompt("root", "Produce ready output, validate, commit and independently review without weakening proof.");
+    await f.tool("root", "start_mission", { requirements: ["Output must be ready, validated, committed and independently reviewed"] });
+    const unit = { title: "Ready output", objective: "Produce ready output", read: ["check.mjs", "required-test.mjs"],
+      write: ["result.txt"], validation: [A, B] };
+    await f.tool("root", "plan_units", { executor: "self", units: [unit] });
+    await f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation_cwd: { [B]: f.directory } }],
+      reason: "Bind the exact public check cwd before executing it." });
+    await f.edit("root", "wrong");
+    await f.shell("root", "git add -- result.txt && git commit -m candidate");
+    await f.shell("root", A); await f.shell("root", B);
+    await f.tool("root", "finish_direct_unit");
+    const original = await f.run(), originalEvidence = original.units[0]!.evidence;
+    assert.equal(original.units[0]!.status, "succeeded");
+    const oldRegistration = (await f.ledger()).state.validation_registrations!["unit-1"]!;
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+    let dispatch = await f.before("root", "subagent", f.task(review.task));
+    await f.prompt("author", dispatch.input.prompt);
+    if (resumed) {
+      await f.finish(dispatch, "author", "FINDINGS\nMedium: result must be ready.");
+      const prepared = await f.tool("root", "repair_review");
+      dispatch = await f.before("root", "subagent", f.task(prepared.task));
+      await f.prompt("author", dispatch.input.prompt); await f.bind("author");
+    } else await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
+    await f.edit("author", "ready");
+    const correction = await f.run(), currentTask = /^task_id: (.+)$/mu.exec(correction.units[0]!.task.prompt)![1]!;
+    const bound = await f.ledger(), registration = bound.state.validation_registrations!["unit-1"]!;
+    assert.notEqual(currentTask, oldRegistration.unit_id);
+    assert.equal(registration.unit_id, currentTask, "an unchanged recipe must not remain bound to the preceding unit");
+    assert.equal(registration.command, B);
+    assert.ok(originalEvidence.every(evidence => !validGoalEvidence(evidence, bound.state)), "old-unit successes cannot prove this correction");
+    const registrationCount = bound.records.filter(({ event }) => event.kind === "goal.validation-registered").length;
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    await f.shell("author", A); await f.shell("author", B);
+    assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+    const returned = JSON.parse(await f.finish(dispatch, "author", inlineReport()));
+    const settled = await f.run();
+    assert.equal(settled.units[0]!.status, "succeeded", JSON.stringify(returned));
+    assert.ok(settled.units[0]!.evidence.some(evidence => evidence.execution.units.includes(currentTask) && validGoalEvidence(evidence, bound.state)));
+    assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    const ledger = await f.ledger();
+    assert.equal(ledger.records.filter(({ event }) => event.kind === "goal.validation-registered").length, registrationCount,
+      "repeated activation and finish keep the same native registration idempotent");
+    assert.equal(ledger.state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+for (const cold of [false, true]) for (const [disposition, changedRecipe] of [["succeeded", false], ["failed", false], ["cancelled", false], ["cancelled", true]] as const) test(`Reviewer finish replays its durable ${disposition} settlement after a projection failure${changedRecipe ? " without admitting a new recipe" : ""}: ${cold ? "cold" : "live"}`, async t => {
+  const f = await fixture();
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "Medium: output must be ready." });
+    await f.edit("author", "ready");
+    await f.shell("author", "git add -- result.txt && git commit -m correction");
+    await f.shell("author", "node check.mjs");
+    const before = await f.run(), unit = before.units[0]!;
+    if (disposition === "succeeded") {
+      // The real finish saves its receipt before projecting the Operator state.
+      const fault = t.mock.method(OperatorRuntime.prototype, "settled", async () => { throw new Error("fixture settlement projection failure"); });
+      try { await assert.rejects(f.tool("author", "finish_direct_unit"), /fixture settlement projection failure/u); }
+      finally { fault.mock.restore(); }
+    } else {
+      // As in ordinary Direct's finish-cancelled case, retain the host's terminal
+      // disposition even though this actor's current native checks passed.
+      const key = createHash("sha256").update("v010\0root").digest("hex");
+      const ledger = await RunFlightLedger.openGoal(join(f.directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`));
+      const snapshot = await ledger.readGoal(), reservation = snapshot.state.outstanding_reservations[0]!, at = new Date().toISOString();
+      await ledger.appendGoal({ kind: "unit.settled", at, goal_id: snapshot.state.goal_id!, reservation_id: reservation.reservation_id,
+        receipt_id: goalFingerprint({ call_id: unit.callID, output: "Host-observed direct unit finished; controller session remains active." }),
+        unit_id: reservation.unit_id, disposition, result_class: disposition === "cancelled" ? "interrupted" : "process-defect",
+        evidence: [], progress_fingerprint: null, elapsed_ms: 12, cost_usd: 0.7,
+        native_session_id: "author", native_started_at: unit.directExecution!.startedAt });
+    }
+    const durable = await f.ledger();
+    assert.equal(durable.state.outstanding_reservations.length, 0);
+    assert.equal(durable.state.consumed_units, 2);
+    assert.equal((await f.run()).units[0]!.status, "running", "only the durable settlement exists before retry");
+    if (cold) await f.start();
+    if (changedRecipe) {
+      for (const delta of [
+        { validation: ["node --check check.mjs"] },
+        { validation: ["node --check check.mjs", "node check.mjs"] },
+        { validation_cwd: { "node check.mjs": join(f.directory, ".cache") } },
+      ]) {
+        await assert.rejects(f.tool("author", "repair_review", { ...delta,
+          reason: "A changed recipe still needs this unit's live reservation." }), /mission-validation-registration-reservation-missing/u);
+        assert.deepEqual((await f.ledger()).records, durable.records, "a settled unit cannot create a new registration or reservation");
+        assert.deepEqual((await f.run()).units[0], unit, "a rejected recipe must not mutate validation, cwd, checks or registration times");
+      }
+    }
+    const result = await f.tool("author", "finish_direct_unit");
+    const settled = (await f.run()).units[0]!;
+    assert.equal(settled.status, disposition);
+    assert.equal(settled.callID, unit.callID, "recovery keeps this same admission");
+    const receipt = durable.records.map(({ event }) => event).find(event => event.kind === "unit.settled" &&
+      event.unit_id === /^task_id: (.+)$/mu.exec(unit.task.prompt)![1])!;
+    assert.equal(receipt.kind, "unit.settled");
+    if (receipt.kind === "unit.settled") assert.deepEqual(settled.evidence, receipt.evidence, "replay retains the exact recorded proof");
+    if (disposition === "succeeded") {
+      assert.equal(result.status, "correction-validated");
+      assert.ok(settled.evidence.length);
+      if (!cold) {
+        await f.finish(started.dispatch, "author", inlineReport());
+        assert.equal((await f.missions.required("root")).review!.verdict, "self-rechecked");
+      }
+    } else {
+      assert.equal(result.direct_settlement.disposition, disposition);
+      assert.match(result.next_action, /not validated/u);
+      assert.equal(settled.evidence.length, 0, "successful checks never replace the recorded failure/cancellation");
+      assert.notEqual((await f.missions.required("root")).review!.verdict, "self-rechecked");
+    }
+    const after = await f.ledger();
+    assert.deepEqual(after.records, durable.records, "replay never adds a registration, reservation, settlement or spend");
+    for (const field of ["consumed_units", "consumed_time_ms", "consumed_cost_usd", "outstanding_reservations", "validation_budget"] as const) {
+      assert.deepEqual(after.state[field], durable.state[field], `${field} is unchanged by replay`);
+    }
+  } finally { await f.dispose(); }
+});
+
+test("ordinary Direct retains finish replay after rejecting a settled unit's recipe change", async t => {
+  const f = await fixture();
+  try {
+    await f.prompt("root", "Produce ready output, validate and commit; retain the same unit after a registration failure.");
+    await f.tool("root", "start_mission", { requirements: ["Produce ready output, validate and commit"] });
+    const unit = { title: "Ready output", objective: "Produce ready output", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] };
+    await f.tool("root", "plan_units", { executor: "self", units: [unit] });
+    await f.edit("root", "ready");
+    await f.shell("root", "git add -- result.txt && git commit -m candidate");
+    await f.shell("root", "node check.mjs");
+    const fault = t.mock.method(OperatorRuntime.prototype, "settled", async () => { throw new Error("fixture ordinary projection failure"); });
+    try { await assert.rejects(f.tool("root", "finish_direct_unit"), /fixture ordinary projection failure/u); }
+    finally { fault.mock.restore(); }
+    const before = await f.run(), durable = await f.ledger();
+    await assert.rejects(f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation: ["node --check check.mjs"] }],
+      reason: "Correct the recipe in the same admission." }), /mission-validation-registration-reservation-missing/u);
+    assert.deepEqual((await f.run()).units[0], before.units[0], "ordinary registration rejection also leaves the original proof recipe intact");
+    await f.tool("root", "finish_direct_unit");
+    const settled = (await f.run()).units[0]!;
+    assert.equal(settled.status, "succeeded");
+    assert.equal(settled.callID, before.units[0]!.callID);
+    assert.ok(settled.evidence.length);
+    assert.deepEqual((await f.ledger()).records, durable.records, "ordinary finish replays without another reservation or spend");
+  } finally { await f.dispose(); }
+});
 
 for (const cold of [false, true]) test(`Reviewer repairs an expected-nonzero check recipe in the same correction admission: ${cold ? "cold" : "live"}`, async () => {
   const f = await fixture();

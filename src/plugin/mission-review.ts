@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
-import { lstat, readlink, readdir } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { access, lstat, readlink, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
@@ -667,12 +667,15 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     else local.push(scoped || ".");
   }
   const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
+  const untracked = new Set<string>(), currentFiles = new Set<string>();
+  const collected = new Set<string>();
+  const unreadableLocal = new Map<string, string>();
   // A Location may inherit an ancestor repository while its actual outputs live in a
   // nested repository/worktree. Resolve that boundary before asking the outer Git:
   // ls-files can return the whole ignored repository (or fail internally) for a narrow output.
   const rootLocal: string[] = [], nested = new Map<string, string[]>();
   for (const path of local) {
-    let current = resolve(directory), repository: string | undefined;
+    let current = resolve(directory), repository: string | undefined, deniedDirectory: string | undefined;
     for (const part of path.split("/")) {
       current = resolve(current, part);
       const info = await lstat(current).catch((error: NodeJS.ErrnoException) => {
@@ -682,19 +685,41 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       if (!info?.isDirectory()) break; // Missing files and symlink targets are not traversed.
       if (current === resolve(directory)) continue;
       const metadata = await lstat(join(current, ".git")).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "EACCES" || error.code === "EPERM") {
+          // Probing metadata searches the directory too. Preserve this boundary as
+          // uninspected, without traversing or widening a narrower declared output.
+          deniedDirectory = relative(directory, current).replaceAll("\\", "/");
+          unreadableLocal.set(deniedDirectory, error.code);
+          return undefined;
+        }
         if (error.code !== "ENOENT") throw error;
         return undefined;
       });
+      if (deniedDirectory !== undefined) break;
       if (metadata) repository = current; // Includes .git files and broken worktrees: Git must diagnose them.
     }
-    if (repository) nested.set(repository, [...(nested.get(repository) ?? []), relative(repository, resolve(directory, path)).replaceAll("\\", "/") || "."]);
+    if (deniedDirectory !== undefined) { collected.add(deniedDirectory); untracked.add(deniedDirectory); }
+    else if (repository) nested.set(repository, [...(nested.get(repository) ?? []), relative(repository, resolve(directory, path)).replaceAll("\\", "/") || "."]);
     else rootLocal.push(path);
   }
   const gitScopes = [...rootLocal, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
   const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   let names = "", ignored = "", repository = true, scopedDiff = "";
-  const untracked = new Set<string>(), currentFiles = new Set<string>();
-  const collected = new Set<string>();
+  const directoryChildren = async (absolute: string, path: string) => {
+    if (unreadableLocal.has(path)) return undefined;
+    try {
+      // A non-Git Mission inventories historical outputs in place. A denied cwd must
+      // not become a Git spawn failure, nor may an executable Git failure be called
+      // "not a repository". Apply only the existing review-only coverage disclosure.
+      await access(absolute, constants.R_OK | constants.X_OK);
+      return await readdir(absolute, { withFileTypes: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM") throw error;
+      unreadableLocal.set(path, code);
+      return undefined;
+    }
+  };
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
     const scopedGit = async (args: string[]) => (await exec("git", args, { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
     const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
@@ -734,11 +759,13 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         return undefined;
       });
       if (!stat?.isDirectory()) { collected.add(path); untracked.add(path); return; }
+      const children = await directoryChildren(absolute, path);
+      if (!children) { collected.add(path); untracked.add(path); return; }
       // Shared tooling is rooted at the Mission, not each output repository.
       try { await collectRepository(absolute, path, ["."]); }
       catch (error) {
         if (!notRepository(error)) throw error;
-        for (const child of (await readdir(absolute)).filter(name => name !== ".git").sort()) {
+        for (const child of children.map(child => child.name).filter(name => name !== ".git").sort()) {
           await collect(join(path, child).replaceAll("\\", "/"));
         }
         return;
@@ -800,6 +827,17 @@ export async function missionReviewSource(directory: string, run: OperatorState,
         preview = content.subarray(0, room);
       } else if (stat.isDirectory()) {
         sourceUpdate("directory");
+        // Keep denied directories in the candidate fingerprint and outside the clipped
+        // preview notice. This is missing Review coverage, never validation evidence.
+        const children = await directoryChildren(absolute, path);
+        if (!children) {
+          sourceUpdate(`uninspected-directory:${unreadableLocal.get(path)}`);
+          if (include) {
+            const notice = heading + "[not inspected: permission denied; select specific result files as review evidence]\n";
+            if (Buffer.byteLength(excerpt) + Buffer.byteLength(notice) <= 24_000) excerpt += notice;
+          }
+          return;
+        }
         if (include) {
           const marker = "[directory; contained artifacts follow]\n";
           const headingFits = Buffer.byteLength(excerpt) + Buffer.byteLength(heading) + Buffer.byteLength(marker) <= 24_000;
@@ -807,11 +845,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
           else omitted.push(path);
         }
         // Nested repository metadata is not candidate output and can crowd out its actual files.
-        const children = (await readdir(absolute, { withFileTypes: true }))
-          .filter(child => child.name !== ".git")
+        const ordered = children.filter(child => child.name !== ".git")
           .sort((left, right) => Number(left.isDirectory()) - Number(right.isDirectory()) ||
             (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
-        for (const child of children) {
+        for (const child of ordered) {
           await visit(join(path, child.name).replaceAll("\\", "/"), include);
         }
       } else {
@@ -868,6 +905,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     `${Buffer.from(JSON.stringify(outsideLinks.slice(0, 20))).subarray(0, 2_000).toString("utf8")}]` : "";
   return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
     (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
+    (unreadableLocal.size ? `\n[UNINSPECTED LOCAL DIRECTORIES: ${[...unreadableLocal.keys()].slice(0, 20).join(", ")}; permission denied; contents not inspected or fingerprinted; select specific result files as review evidence]` : "") +
     (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") + outsideNotice,
     truncatedEvidence, truncatedSource };
 }

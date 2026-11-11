@@ -2272,22 +2272,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       skipMissionConsultation = `${profile.toolPrefix}skip_mission_consultation`,
       extendMissionBudget = `${profile.toolPrefix}extend_mission_budget`;
     const startDirectUnit = `${profile.toolPrefix}start_direct_unit`, finishDirectUnit = `${profile.toolPrefix}finish_direct_unit`;
-    async function syncValidationRegistration(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
-      if ((!direct.unit.validationRegistration || direct.unit.validationRegistration.startedAt) &&
-          !direct.unit.reviewerCorrection?.validationRegisteredAt) return;
+    async function syncValidationRegistration(direct: NonNullable<Awaited<ReturnType<typeof directExecution>>>, requireLiveReservation = false) {
+      if (!requireLiveReservation && !direct.unit.reviewerCorrection && (!direct.unit.validationRegistration || direct.unit.validationRegistration.startedAt)) return;
+      // Even an unchanged Reviewer recipe belongs to this admission, not the preceding
+      // unit's registration. The control validates its actor/command/reservation
+      // and idempotently records the current unit before accepting native checks.
       const last = unitValidation(direct.unit).at(-1)!;
       await control!.registerDirectValidation(direct.root, direct.unit.reviewerCorrection?.author ?? direct.unit.directExecution!.actor, direct.unit.unit.id, last,
         direct.unit.reviewerCorrection?.validationRegisteredAt?.[last] ??
           direct.unit.directExecution?.validationRegisteredAt?.[last] ?? direct.unit.directExecution?.startedAt ??
-          direct.unit.reviewerCorrection?.admittedAt ?? direct.run.createdAt);
+          direct.unit.reviewerCorrection?.admittedAt ?? direct.run.createdAt, requireLiveReservation);
     }
     async function activateDirect(actor: string) {
       const direct = await directExecution(actor);
       if (direct) {
-        // Recover a crash between durable registration and its goal-ledger projection
-        // before admitting another native check or selecting finish evidence.
-        await syncValidationRegistration(direct);
         await control!.activateDirectUnit(direct.root, actor, direct.unit.task.prompt, direct.unit.handoffPath);
+        // Recover a crash between durable registration and its goal-ledger projection
+        // after binding this admission/reservation, before checks or finish evidence.
+        await syncValidationRegistration(direct);
       }
       return direct;
     }
@@ -2988,9 +2990,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const registrationPlanHash = previous && activeDirect && directValidationRegistrationPlanHash(previous, plan, activeDirect.unit.id);
       if (previous && activeDirect && (registrationChanged || replanning && registrationPlanHash === previous.planHash)) {
         if (!reason?.trim()) throw new Error("mission-replan-reason-required: name the validation registration correction");
-        if (execution !== undefined && !emptyImplementationExecution) throw new Error("mission-validation-registration-operation-change-forbidden");
-        await assertDirectPlanningQuiescent(actor, planningCallID);
-        const corrected = await operators.correctDirectValidationRegistration(root, actor, previous.runID, plan);
+         if (execution !== undefined && !emptyImplementationExecution) throw new Error("mission-validation-registration-operation-change-forbidden");
+         await assertDirectPlanningQuiescent(actor, planningCallID);
+         const owner = await directExecution(actor);
+         if (owner) await syncValidationRegistration(owner, true);
+         const corrected = await operators.correctDirectValidationRegistration(root, actor, previous.runID, plan);
         const unit = corrected.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor)!;
         const last = unitValidation(unit).at(-1)!;
         await control!.registerDirectValidation(root, actor, unit.unit.id, last,
@@ -3238,6 +3242,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              if (!Array.isArray(validation) || validation.some(command => typeof command !== "string")) throw new Error("mission-validation-registration-invalid");
              const directories = validationDirectories;
              if (directories !== undefined && (!record(directories) || Object.values(directories).some(value => typeof value !== "string"))) throw new Error("mission-validation-registration-invalid");
+             // A saved settlement may still await projection, but owns no new recipe.
+             // Check the current owner's live reservation before persisting any delta;
+             // rejection must leave the original registration available for finish replay.
+             const owner = await directExecution(context.sessionID) ?? await reviewerCorrection(context.sessionID);
+             if (owner) await syncValidationRegistration(owner, true);
              const corrected = await operators.correctReviewerValidationRegistration(root, context.sessionID, run.runID,
                (validation as string[]).map(missionValidationCommand), directories as Record<string, string> | undefined);
              const current = corrected.units.find(unit => unit.reviewerCorrection?.author === context.sessionID)!;

@@ -159,6 +159,80 @@ for (const crowded of [false, true]) test(`public broad external scope then narr
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+for (const explicitPartial of [false, true]) for (const mode of [0o000, 0o111, 0o444]) test(`public review retains inaccessible historical local outputs after a narrow replan (${mode.toString(8)}${explicitPartial ? ", explicit denied scope" : ""})`, async t => {
+  if (process.platform === "win32") return t.skip("POSIX directory permissions required");
+  const root = await mkdtemp(join(tmpdir(), "review-local-permission-"));
+  const runtime = join(root, "runtime"), partial = join(runtime, "downloads", "partial");
+  try {
+    await mkdir(partial, { recursive: true });
+    await writeFile(join(partial, "private.txt"), "UNINSPECTED_BYTES");
+    await writeFile(join(runtime, "result.json"), '{"resolved":7}\n');
+    if (mode === 0o000) await writeFile(join(runtime, "z-large.txt"), "x".repeat(30_000));
+    await writeFile(join(root, "proof.txt"), "retained\n");
+    await writeFile(join(root, "check.mjs"), 'import assert from "node:assert/strict";import fs from "node:fs";assert.equal(fs.readFileSync("proof.txt","utf8"),"retained\\n");\n');
+    await chmod(partial, mode);
+    try { await fs.readFile(join(partial, "private.txt")); await readdir(partial); return t.skip("directory is accessible by this process"); }
+    catch (error) { assert.equal((error as NodeJS.ErrnoException).code, "EACCES"); }
+    if (mode !== 0o111) await assert.rejects(git("git", ["ls-files"], { cwd: partial }), { code: "EACCES" },
+      "the historical output reproduces the reported Git cwd spawn failure");
+    const history: unknown[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+    } } } as never);
+    const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+      message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Verify retained proof without changing historical runtime outputs" }],
+    });
+    await tool("start_mission", { requirements: ["Verify retained proof without changing historical runtime outputs"] });
+    const unit = { title: "Proof", objective: "Verify retained proof", read: ["check.mjs", "proof.txt"], write: [], validation: ["node check.mjs"] };
+    const historicalWrites = ["runtime/**", ...(explicitPartial ? ["runtime/downloads/partial/**"] : [])];
+    await tool("plan_units", { executor: "worker", units: [{ ...unit, write: historicalWrites }] });
+    await tool("plan_units", { executor: "self", units: [unit], reason: "Narrow proof keeps historical Review coverage" });
+    const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
+    const started = Date.now();
+    await hooks["tool.execute.before"]!(input, { args });
+    const checked = await git(process.execPath, ["check.mjs"], { cwd: root });
+    await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: "proof",
+      state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+    const finished = await tool("finish_direct_unit");
+    assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
+    const review = await tool("review_mission", { risk_tags: ["public-logic"], mode: "independent" });
+    assert.equal(review.status, "review-required");
+    assert.ok(review.task, JSON.stringify(review));
+    const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.deepEqual(mission.reviewScope?.write, historicalWrites);
+    assert.deepEqual(run.units[0]!.unit.write, [], "historical scope does not widen the new author's grant");
+    assert.equal(mission.review?.verdict, "pending", "prepared Review is not completed Review");
+    assert.equal(mission.review?.mode, "independent");
+    assert.match(mission.review!.task!.prompt, /UNINSPECTED LOCAL DIRECTORIES:/u);
+    assert.match(mission.review!.task!.prompt, /runtime\/downloads\/partial/u);
+    const first = await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope);
+    assert.match(first.excerpt, /not inspected: permission denied/u);
+    assert.match(first.excerpt, /"resolved":7/u);
+    if (mode === 0o000) assert.ok(first.excerpt.indexOf("[UNINSPECTED LOCAL DIRECTORIES:") >= 24_000,
+      "missing coverage stays visible even when readable outputs fill the preview");
+    assert.doesNotMatch(first.excerpt, /UNINSPECTED_BYTES/u);
+    assert.equal((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).fingerprint, first.fingerprint);
+    await writeFile(join(runtime, "result.json"), '{"resolved":8}\n');
+    assert.notEqual((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).fingerprint, first.fingerprint);
+    await assert.rejects(declaredArtifacts([runtime]), /EACCES/u, "protected output collection remains strict");
+    assert.equal((await fs.stat(partial)).mode & 0o777, mode, "Review never repairs host permissions");
+    assert.equal((await tool("operator_status")).budget.consumed_units, 1);
+    await chmod(partial, 0o700);
+    const inspected = await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope);
+    assert.notEqual(inspected.fingerprint, first.fingerprint, "coverage and permission changes invalidate the Review candidate");
+    assert.doesNotMatch(inspected.excerpt, /UNINSPECTED LOCAL DIRECTORIES:/u);
+    assert.match(inspected.excerpt, /UNINSPECTED_BYTES/u);
+  } finally {
+    await chmod(partial, 0o700);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("required validation matches ordered native occurrences, not a latest-per-command map or display excerpt", () => {
   const A = "node a.mjs", B = "node b.mjs", declared = [A, B, A, B];
   const part = (command: string, i: number, exit: number | null = 0, extra: Record<string, unknown> = {}) => ({
