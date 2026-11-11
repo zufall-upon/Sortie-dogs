@@ -32,6 +32,7 @@ import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendPurposeDecision, purposeDecisionSchema, purposeDecisionView, validatePurposeDecision } from "../core/mission-purpose.js";
+import { missionVisionSchema } from "../core/mission-vision.js";
 import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
 import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
@@ -2459,6 +2460,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     }
     tools[startMission] = { description: `Operator: save current requirements and recommend preferred_executor from the original instruction and already-known context, without a routing investigation. The host retains the original request verbatim. Clear bounded work normally suits Worker; coupled design, ambiguous requirements or cross-system integration normally suit Coordinator direct execution. Follow explicit user choices. Coordinator may revise this advisory recommendation during useful work, not a mandatory reassessment. With known unit facts and meaningful formal checks, include unit now (and execution for an operation): worker/default can dispatch its Worker directly; coordinator retains these facts for its own execution choice. Unknown checks are resolved during actual work, not an Operator preflight. Investigation/edit/check/requested commit stay with the chosen author before applicable Review. ${MISSION_GIT_SCOPE} intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
+        vision: missionVisionSchema as never,
         work_quantities: { type: ["array", "object", "string", "number", "boolean", "null"], items: {}, additionalProperties: true, "x-sortie-optional": true,
           minLength: 0, maxLength: 65535, minItems: 0, maxItems: 4096,
           description: "Optional display-only workload array: stable id, kind, relative_weight, bindings.paths/commands, checkpoints. Reuse this ordinary plan; never add a planning/report turn for progress. Invalid shapes/estimates fall back without changing execution." } as never,
@@ -2511,6 +2513,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           let mission = await missions.start(context.sessionID, requirements, args.intent === "replace" || args.intent === "new", {
               kind: args.kind === "operation" ? "operation" : "implementation", executionHost: input.executionHost,
               context: missionConversationContext(history),
+              vision: args.vision,
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
@@ -3121,14 +3124,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         handoff_context: handoffContextSchema as never,
         reason: { type: "string", "x-sortie-optional": true } as never,
         purpose_decision: purposeDecisionSchema as never,
+        vision: missionVisionSchema as never,
         executor: { type: "string", enum: ["worker", "self"], description: "Use self to implement/correct and formally validate here. Use executor=worker with units=\"\" in V2 (omit units in legacy; never units=[]) to yield the current direct unit, carrying remaining action in handoff_context; the same unit, edits, checks and budget continue. With units, worker/default retains configured Worker routing.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root, mission } = await missionAuthority(context.sessionID);
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
             if (args.purpose_decision !== undefined) await missions.recordPurposeDecision(root, args.purpose_decision);
+            if (args.vision !== undefined) await missions.recordVision(root, args.vision);
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
-            const planned = await declareMissionUnits(root, context.sessionID, mission,
+            const planned = await declareMissionUnits(root, context.sessionID, await missions.required(root),
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
             if ((args as Record<string, unknown>).parallel === true && args.executor !== "self" && mission.kind === "implementation") {
               const run = await operators.required(root);
