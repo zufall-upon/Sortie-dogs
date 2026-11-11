@@ -301,12 +301,15 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
       estimatedCost: { usd, pricedRequests: 1, unpricedRequests: 0, complete: true } })),
     validation: "未確認", review: "未確認", traits: [] } } as typeof result;
   const text = insertSortieResult("status: DONE", populated);
-  assert.equal((text.match(/^🐕 /gmu) ?? []).length, 5);
-  assert.match(text, /モデル内訳\s+予測費用比率/u);
-  assert.match(text, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
-  assert.match(text, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
-  assert.match(text, /↺未取得/u);
-  assert.match(text, /⚡ 実行重複率 稼働区間の記録不足\n\n※worker区間・速度倍率ではありません/u);
+  const [main, detail] = text.split("\n\n<details>\n");
+  assert.ok(main && detail);
+  assert.equal((main.match(/^🐕 /gmu) ?? []).length, 5);
+  assert.equal((detail.match(/^🐕 /gmu) ?? []).length, 5);
+  assert.match(detail, /モデル内訳\s+予測費用比率/u);
+  assert.match(detail, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
+  assert.match(detail, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
+  assert.match(detail, /↺未取得/u);
+  assert.match(detail, /⚡ 実行重複率 稼働区間の記録不足\n\n※worker区間・速度倍率ではありません/u);
   assert.equal(insertSortieResult(text, populated), text);
 
   const partial = { ...populated.debrief, mix: populated.debrief.mix.map(entry => entry.model === "fixture/5"
