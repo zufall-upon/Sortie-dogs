@@ -96,6 +96,7 @@ test("saved legacy Grip offers retain their exact text and answer identity acros
   const f = await fixture();
   try {
     const q = question("legacy-question"), raw = structuredClone(q);
+    q.input.questions[0]!.question = raw.input.questions[0]!.question = "Decision: Allow download only?\nWhy now: The fixed inputs are missing.";
     const legacy = { callID: q.id, sessionID: "root", header: "Grip",
       question: "元の目的（原文抜粋）: 作業を速く・安く・楽に完了する。\n\n" + q.input.questions[0]!.question.replace(/\r?\n+/gu, "\n\n"),
       consultationLabel: "目的に戻って外部相談",
@@ -187,22 +188,55 @@ test("source and display snapshots survive synthesis updates, translation and lo
   } finally { await f.dispose(); }
 });
 
-test("saved inline excerpt-only offers retain their exact bytes after a vision is supplied", async () => {
-  const f = await fixture();
-  try {
-    const q = question("old-inline"), raw = structuredClone(q);
-    const legacy = { callID: q.id, sessionID: "root", header: "Grip",
-      question: "🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。",
-      consultationLabel: "目的に戻って外部相談",
-      options: [...q.input.questions[0]!.options, { label: "目的に戻って外部相談", description: "この方針を保留し、元の目的から考え直す" }] };
-    await f.missions.update("root", m => { m.grip = { questions: [legacy] }; });
-    await f.missions.recordVision("root", { summary: "新しいAI整理", source_refs: ["user:original"] });
-    await f.controller.before(raw);
-    assert.equal(raw.input.questions[0]!.question, legacy.question);
-    assert.deepEqual(raw.input.questions[0]!.options, legacy.options);
-    await f.controller.after(answer(raw, "A"));
-    assert.equal(await f.controller.pending("root"), undefined);
-  } finally { await f.dispose(); }
+test("saved inline excerpt-only offers retain their exact bytes after a vision is supplied", async t => {
+  // Expected strings follow the pre-vision public format, including its request-based language
+  // and first-line Decision prefix. Do not derive these from the current formatter.
+  for (const scenario of [
+    { name: "Japanese", original: "作業を速く・安く・楽に完了する。", raw: question("source").input.questions[0]!.question,
+      saved: "🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】方式AかBか？ ┃ 💡【なぜ今】次のUXが変わるため。", japanese: true },
+    { name: "Japanese request with English question", original: "作業を速く・安く・楽に完了する。",
+      raw: "Decision: Allow download only?\nWhy now: The fixed inputs are missing.",
+      saved: "🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】Allow download only? ┃ 💡【なぜ今】The fixed inputs are missing.", japanese: true },
+    { name: "English request with Japanese question", original: "Keep the release reproducible and affordable.",
+      raw: question("source").input.questions[0]!.question,
+      saved: '🎯[Original goal excerpt] "Keep the release reproducible and affordable." ┃ ❓[Decision] 方式AかBか？ ┃ 💡[Why now] 次のUXが変わるため。', japanese: false },
+    { name: "legacy reason-first formatting", original: "作業を速く・安く・楽に完了する。",
+      raw: "なぜ今：次のUXが変わるため。\n今回の判断：方式AかBか？",
+      saved: "🎯【元の目的・原文抜粋】「作業を速く・安く・楽に完了する。」 ┃ ❓【今回の判断】💡【なぜ今】次のUXが変わるため。 ┃ ❓【今回の判断】方式AかBか？", japanese: true },
+  ]) await t.test(scenario.name, async () => {
+    const f = await fixture();
+    try {
+      const raw = question("old-inline"); raw.input.questions[0]!.question = scenario.raw;
+      const label = scenario.japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice";
+      const legacy = { callID: raw.id, sessionID: "root", header: "Grip", question: scenario.saved, consultationLabel: label,
+        options: [...raw.input.questions[0]!.options, { label, description: scenario.japanese
+          ? "この方針を保留し、元の目的から考え直す" : "Hold this direction and reconsider the original goal" }] };
+      await f.missions.update("root", m => { m.requests[0]!.text = scenario.original;
+        m.grip = { questions: [legacy], pending: { callID: raw.id, sessionID: "root",
+          consultationRequested: false, resumeHeader: "Grip:legacy-inline" } }; });
+      await f.missions.recordVision("root", { summary: "新しいAI整理", source_refs: ["user:original"] });
+      const before = (await f.missions.required("root")).grip;
+      const changed = structuredClone(raw); changed.input.questions[0]!.question += " Changed";
+      await assert.rejects(f.controller.before(changed), /mission-grip-question-call-reused/u);
+      const changedOptions = structuredClone(raw); changedOptions.input.questions[0]!.options[0]!.description += " Changed";
+      await assert.rejects(f.controller.before(changedOptions), /mission-grip-question-call-reused/u);
+      assert.deepEqual((await f.missions.required("root")).grip, before);
+      await f.controller.before(raw);
+      assert.equal(raw.input.questions[0]!.question, legacy.question);
+      assert.deepEqual(raw.input.questions[0]!.options, legacy.options);
+      const formatted = structuredClone(raw); await f.controller.before(formatted);
+      assert.deepEqual(formatted, raw);
+      const pending = await f.controller.after(answer(raw, label));
+      assert.equal(pending!.consultation_requested, true);
+      await assert.rejects(f.controller.before({ tool: "edit", sessionID: "root", input: {} }), /mission-grip-needs-user-direction/u);
+      const resume = question("inline-fresh-resume", String(pending!.resume_header));
+      await f.controller.before(resume); await f.controller.after(answer(resume, "A"));
+      assert.equal(await f.controller.pending("root"), undefined);
+      const saved = (await f.missions.required("root")).grip!.questions[0]!;
+      assert.equal(saved.question, scenario.saved);
+      assert.equal(saved.answered, label);
+    } finally { await f.dispose(); }
+  });
 });
 
 test("consultation holds survive reload; only the corresponding fresh listed choice resumes, never advice or replay", async () => {

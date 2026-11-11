@@ -13,7 +13,7 @@ const controllers = new Set(["dog-operator", "dogs-coordinator"]);
 // import those ambiguous variants into a user-requested pause. Native read/search stay usable.
 const pausedShellReads = new Set(["pwd", "git status --short", "git status --short --branch"]);
 const short = (text: string, limit: number) => Array.from(text).slice(0, limit).join("") + (Array.from(text).length > limit ? "…" : "");
-const inlineGripQuestion = (question: string, japanese: boolean): string => {
+const inlineGripQuestion = (question: string, japanese: boolean, excerptOnly = false): string => {
   const decision = japanese ? "❓【今回の判断】" : "❓[Decision] ";
   const reason = japanese ? "💡【なぜ今】" : "💡[Why now] ";
   const relation = japanese ? "🔗【今回判断との関係・AI整理】" : "🔗[Relation to vision · AI interpretation] ";
@@ -21,10 +21,12 @@ const inlineGripQuestion = (question: string, japanese: boolean): string => {
   // relying on blank lines; recognize only explicit headings, never infer or shorten conditions.
   const sections = question.split(/\r\n|[\r\n\u2028\u2029]/u).map(line => line.trim()).filter(Boolean);
   return sections.map((line, index) => {
-    const formatted = line.replace(/^(?:今回の判断|判断|Decision|Current decision)\s*[:：]\s*/u, decision)
-      .replace(/^(?:なぜ今[?？]?|理由|Why now[?？]?)\s*[:：]\s*/u, reason)
-      .replace(/^(?:今回判断との関係|今回の判断との関係|Relation to vision)\s*[:：]\s*/u, relation);
-    return index === 0 && ![decision, relation, reason].some(label => formatted.startsWith(label)) ? decision + formatted : formatted;
+    let formatted = line.replace(/^(?:今回の判断|判断|Decision|Current decision)\s*[:：]\s*/u, decision)
+      .replace(/^(?:なぜ今[?？]?|理由|Why now[?？]?)\s*[:：]\s*/u, reason);
+    if (!excerptOnly) formatted = formatted.replace(/^(?:今回判断との関係|今回の判断との関係|Relation to vision)\s*[:：]\s*/u, relation);
+    // Match the saved pre-vision format exactly on retry, including its first-line prefix.
+    const headings = excerptOnly ? [decision] : [decision, relation, reason];
+    return index === 0 && !headings.some(label => formatted.startsWith(label)) ? decision + formatted : formatted;
   }).join(" ┃ ") || decision;
 };
 
@@ -145,7 +147,10 @@ export class MissionGripController {
         const label = previous?.consultationLabel ?? (japanese ? "目的に戻って外部相談" : "Revisit goal with outside advice");
         const original = mission.requests[0];
         const excerpt = original ? short(original.text.split(/\r?\n/u).filter(Boolean)[0] ?? original.text, 90) : undefined;
-        const oldQuote = excerpt === undefined ? "" : japanese
+        // Old offers selected their display language from the request, not the current question.
+        // Their saved consultation label retains that selection across upgrades/retries.
+        const oldJapanese = previous ? previous.consultationLabel === "目的に戻って外部相談" : japanese;
+        const oldQuote = excerpt === undefined ? "" : oldJapanese
           ? `🎯【元の目的・原文抜粋】「${excerpt}」 ┃ ` : `🎯[Original goal excerpt] "${excerpt}" ┃ `;
         const vision = currentMissionVision(mission);
         const summary = vision?.summary.replace(/\s+/gu, " ").trim();
@@ -153,9 +158,9 @@ export class MissionGripController {
           : `🎯[Desired outcome · AI synthesis${vision?.translated ? " / translated" : ""}] `;
         const prefix = title + (summary ?? (japanese ? "未整理（根拠不足なら推測しない）" : "Not established (do not infer missing context)")) + " ┃ ";
         const rawQuestion = q.question, formattedQuestion = prefix + inlineGripQuestion(rawQuestion, japanese);
-        const oldFormattedQuestion = oldQuote + inlineGripQuestion(rawQuestion, japanese);
+        const oldFormattedQuestion = oldQuote + inlineGripQuestion(rawQuestion, oldJapanese, true);
         // Retry compatibility only: never rewrite an already saved/open native offer.
-        const legacyQuote = excerpt === undefined ? "" : `${japanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): "}${excerpt}\n\n`;
+        const legacyQuote = excerpt === undefined ? "" : `${oldJapanese ? "元の目的（原文抜粋）: " : "Original goal (excerpt): "}${excerpt}\n\n`;
         const legacyFormattedQuestion = legacyQuote + rawQuestion.replace(/\r?\n+/gu, "\n\n");
         const options = q.options.filter(option => option.label !== label) as GripQuestion["options"];
         let offered: GripQuestion = previous ?? { callID: event.id, sessionID: id, header: String(header),
