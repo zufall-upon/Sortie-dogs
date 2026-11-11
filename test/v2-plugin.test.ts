@@ -284,6 +284,18 @@ test("V2 normal Mission producer supplies the vision through start/plan into pub
     assert.ok(started.context!.some(item => item.id === "msg_vision_source"));
     const source = started.continuity!.sources.flatMap(source => source.attachments ?? []).find(file => file.message_id === "msg_vision_source")!;
     assert.deepEqual(await readFile(source.path!), Buffer.from([1, 2, 3]), "original attachment bytes remain available");
+    fixture.history.push({ id: "msg_later_vision_source", type: "assistant",
+      content: [{ type: "text", text: "音声案内だけでなく、初回の操作に迷わず練習を続けられる姿として整理する。" }] });
+    const continuedSummary = "初めての利用者が、操作に迷わず音声案内で練習を続けられる。";
+    await call("start_mission", { requirements: started.requirements.map(item => item.text),
+      vision: { summary: continuedSummary, source_refs: ["context:msg_later_vision_source", "requirement:R1"] } });
+    const continued = await missions.required("root");
+    assert.equal(continued.id, started.id);
+    assert.equal(continued.vision!.summary, continuedSummary);
+    assert.ok(continued.context!.some(item => item.id === "msg_later_vision_source"));
+    assert.deepEqual(continued.context!.filter(item => item.id !== "msg_later_vision_source"), started.context);
+    assert.deepEqual(continued.requests, started.requests);
+    assert.deepEqual(continued.requirements, started.requirements);
     const plannedSummary = "初めての利用者が、操作に迷わず音声案内で練習を続けられる。";
     await call("plan_units", { executor: "self", vision: { summary: plannedSummary, source_refs: ["context:msg_vision_source", "requirement:R1"] },
       units: [{ title: "表示用fixture", objective: "Keep the fixture isolated", write: [], validation: ["node check.mjs"] }] });

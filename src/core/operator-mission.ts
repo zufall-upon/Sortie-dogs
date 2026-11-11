@@ -708,6 +708,13 @@ export class OperatorMissionRuntime {
         // Only an explicit Mission action adopts the latest real turn; chat capture alone never does.
         if (!previous.requests.some(item => item.id === request.id)) previous.requests.push(request);
         if (options.kind === "operation") previous.kind = "operation";
+        // Adopt newly supplied public context before validating its vision references.
+        // Keep existing source bytes and exclude requests already retained as user input.
+        for (const entry of options.context ?? []) {
+          if (!previous.requests.some(item => item.id === entry.id) && !previous.context?.some(item => item.id === entry.id)) {
+            (previous.context ??= []).push(entry);
+          }
+        }
         retainMissionVision(previous, options.vision);
         await this.save(this.file(root), previous);
         return previous;
