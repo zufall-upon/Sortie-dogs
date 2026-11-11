@@ -22,8 +22,7 @@ Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对
 （[发布说明](releases/v0.16.19.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
 名称中的`v010`不表示安装的仍是v0.10。v0.16.19的asset marker为`0.16.19-review-finish-recovery-v1`。
 
-以下npm示例使用已发布的v0.16.18。v0.16.19的npm发布是另一个手动步骤；在其发布前，
-如需安装v0.16.19，请使用GitHub Release附带的固定archive。
+以下npm示例使用已发布的v0.16.19。
 
 > **Beta：** 仍在向1.0稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -34,7 +33,7 @@ Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对
 在目标project中执行：
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 
@@ -421,7 +420,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局安装已发布的npm版本：
 
 ```sh
-npm install --global sortie-dogs@0.16.18
+npm install --global sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -433,7 +432,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.18
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -446,7 +445,7 @@ OpenCode V2的`opencode plugin list` / `opencode plugin update`管理；精确�
 Project-local更新时，替换dependency、重新运行init并完全重启OpenCode：
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 

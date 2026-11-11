@@ -23,8 +23,7 @@ evidence-backed result, not more agents for their own sake.
 · [Release notes](docs/releases/v0.16.19.md)
 · [Execution vision](docs/v0.14.0-execution-vision.md)
 
-The npm examples below use the published v0.16.18. The v0.16.19 npm publication is a separate
-manual step; until it is available, use the fixed archive attached to its GitHub Release for v0.16.19.
+The npm examples below use the published v0.16.19.
 
 [When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
 [Measured results](#measured-results) · [Configuration](#configuration) · [Documentation](#documentation)
@@ -81,7 +80,7 @@ Use an existing Codex CLI signed in with **ChatGPT**. On Windows, PowerShell **7
 available; POSIX uses bash. Sortie does not install Codex, start login or use a metered API fallback.
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs codex init .
 ```
 
@@ -110,7 +109,7 @@ bridge. [Codex guide: SDK, permissions, progress, resume and manifest route](doc
 Use **OpenCode V2**. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 
@@ -130,7 +129,7 @@ v0.10 is installed. [OpenCode setup and configuration](docs/configuration.md) ·
 
 ### Project Memory (OpenCode v010, opt-in)
 
-With v0.16.18 installed, run `sortie-dogs memory on .` once and reload
+With v0.16.19 installed, run `sortie-dogs memory on .` once and reload
 the project plugin. Ordinary public turns then become pending sources; the existing
 Operator records semantic additions, corrections, withdrawals and decisions without
 another save request or a dedicated model call per turn. New sessions recall the

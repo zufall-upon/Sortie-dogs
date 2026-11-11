@@ -7,15 +7,14 @@ This page describes the OpenCode plugin route. Codex has its own entrypoints and
 these host settings. The default Mission runtime keeps the `v010` compatibility names; these do
 not mean the installed package is v0.10.
 
-The npm examples below use the published v0.16.18. The v0.16.19 npm publication is a separate
-manual step; until it is available, use the fixed archive attached to its GitHub Release for v0.16.19.
+The npm examples below use the published v0.16.19.
 
 ## Project installation
 
 Requirements: Node.js 22.6+, npm and OpenCode V2. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 
@@ -184,7 +183,7 @@ The default Mission profile is serial; background responsiveness is not parallel
 Project-local installation is recommended. For the published npm version of the OpenCode Mission assets:
 
 ```sh
-npm install --global sortie-dogs@0.16.18
+npm install --global sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -193,7 +192,7 @@ may resolve a **separate dependency** under the config root. Updating npm-global
 update it. Install the same release there and rerun global init:
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.18
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -206,7 +205,7 @@ Completely restart OpenCode after updating and check installed package, assets a
 For a project update:
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 

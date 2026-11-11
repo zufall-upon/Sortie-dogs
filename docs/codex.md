@@ -17,11 +17,10 @@ refuses non-ChatGPT authentication. Recorded trials used Codex 0.160.1 on Ubuntu
 
 Install in the target project:
 
-This npm example uses the published v0.16.18. The v0.16.19 npm publication is a separate manual
-step; until it is available, use the fixed archive attached to its GitHub Release for v0.16.19.
+This npm example uses the published v0.16.19.
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs codex init .
 npx --no-install sortie-dogs codex mission --help
 ```

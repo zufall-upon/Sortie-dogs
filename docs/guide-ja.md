@@ -25,8 +25,7 @@ Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
 v0.16.19のasset markerは`0.16.19-review-finish-recovery-v1`。
 
-以下のnpm例は公開済みv0.16.18を指定する。v0.16.19のnpm公開は別途手動で行うため、
-公開前にv0.16.19を導入する場合はGitHub Releaseに添付された固定archiveを使用する。
+以下のnpm例は公開済みv0.16.19を指定する。
 
 > **Beta:** 1.0に向けて安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -38,7 +37,7 @@ v0.16.19のasset markerは`0.16.19-review-finish-recovery-v1`。
 対象projectで実行する。
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 
@@ -442,7 +441,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。公開済みnpm版をglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.16.18
+npm install --global sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -454,7 +453,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.18
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.19
 sortie-dogs init --global --profile v010
 ```
 
@@ -467,7 +466,7 @@ OpenCode V2の`opencode plugin list` / `opencode plugin update`も使える。�
 Project-local更新はdependencyを置換し、initを再実行してOpenCodeを完全再起動する。
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.18
+npm install --save-dev sortie-dogs@0.16.19
 npx --no-install sortie-dogs init .
 ```
 
