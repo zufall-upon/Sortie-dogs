@@ -20,12 +20,12 @@ Codex導入・SDK・host固有の制限は[Codexガイド](codex.md)を参照。
 用途の適合条件と不向きな用途は[README](../README.md#when-to-use-sortie-dogs)、実績と制約は
 [測定結果](../README.md#measured-results)を参照。
 
-**Release: [v0.16.19](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.19)**
-（[release notes](releases/v0.16.19.md)）。既定Mission runtimeの`v010` profile、command、設定名は
+**Release: [v0.16.20](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.20)**
+（[release notes](releases/v0.16.20.md)）。既定Mission runtimeの`v010` profile、command、設定名は
 互換性のため維持している。名前が`v010`でも導入版がv0.10という意味ではない。
-v0.16.19のasset markerは`0.16.19-review-finish-recovery-v1`。
+v0.16.20のasset markerは`0.16.20-mission-vision-v1`。
 
-以下のnpm例は公開済みv0.16.19を指定する。
+以下のnpm例はv0.16.20を指定する。npm公開の照合前は、GitHub Releaseの固定archiveを使用する。
 
 > **Beta:** 1.0に向けて安定化中。1.0まではruntime behavior、設定、生成assetが
 > 変更される可能性がある。
@@ -37,7 +37,7 @@ v0.16.19のasset markerは`0.16.19-review-finish-recovery-v1`。
 対象projectで実行する。
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.19
+npm install --save-dev sortie-dogs@0.16.20
 npx --no-install sortie-dogs init .
 ```
 
@@ -441,7 +441,7 @@ Stable profileは`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`、
 Project-local導入を推奨。公開済みnpm版をglobalで利用する場合:
 
 ```sh
-npm install --global sortie-dogs@0.16.19
+npm install --global sortie-dogs@0.16.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -453,7 +453,7 @@ default agentと無関係な利用者設定は保持する。
 この構成では実際のconfig rootにも同じreleaseを導入し、global initを再実行する。
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.19
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.20
 sortie-dogs init --global --profile v010
 ```
 
@@ -466,7 +466,7 @@ OpenCode V2の`opencode plugin list` / `opencode plugin update`も使える。�
 Project-local更新はdependencyを置換し、initを再実行してOpenCodeを完全再起動する。
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.19
+npm install --save-dev sortie-dogs@0.16.20
 npx --no-install sortie-dogs init .
 ```
 
@@ -474,7 +474,7 @@ npx --no-install sortie-dogs init .
 unknown ownershipまたは競合fileでは安全に停止する。
 
 固定version設定や別bridge dependencyも対象releaseへ揃える。
-v0.16.19の`0.16.19-review-finish-recovery-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
+v0.16.20の`0.16.20-mission-vision-v1`は導入assetの識別子であり、稼働中OpenCodeの新plugin読込を証明しない。
 
 uninstall commandは未提供。npm dependencyを別途削除後、
 [安全な手動削除ガイド](uninstall.md)に従う。既知のSortie-owned exact pathだけを削除し、
