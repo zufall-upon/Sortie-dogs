@@ -32,7 +32,11 @@ function valid(value: unknown): value is PurposeDecisionInput {
 export function purposeRequirementsFingerprint(mission: OperatorMission): string {
   return createHash("sha256").update(JSON.stringify(mission.requirements)).digest("hex");
 }
-/** A bounded strategy observation, never an evidence receipt or an execution control. */
+/**
+ * A bounded strategy observation, never an evidence receipt or execution authority.
+ * Recording it does not act on the method. At a later stop/question boundary an
+ * explicit STOP_METHOD can trigger one reconsideration, not determine scope.
+ */
 export function validatePurposeDecision(mission: OperatorMission, raw: unknown): asserts raw is PurposeDecisionInput {
   if (!valid(raw) || Object.keys(raw).some(key => !keys.includes(key)) ||
       raw.requirement_ids.some(id => !mission.requirements.some(requirement => requirement.id === id))) {
@@ -42,9 +46,10 @@ export function validatePurposeDecision(mission: OperatorMission, raw: unknown):
 export function appendPurposeDecision(mission: OperatorMission, raw: unknown): void {
   validatePurposeDecision(mission, raw);
   const input = structuredClone(raw);
-  // Transport retries may repeat an observation; do not crowd out useful prior decisions.
+  // Transport retries within the same run need not crowd out useful prior decisions.
+  // Explicitly selecting the same observation for a new run retains its new context.
   const last = purposeDecisionView(mission).current.at(-1);
-  if (last && keys.every(key => JSON.stringify(last[key as keyof PurposeDecision]) === JSON.stringify(input[key as keyof PurposeDecisionInput]))) return;
+  if (last && last.run_id === mission.runID && keys.every(key => JSON.stringify(last[key as keyof PurposeDecision]) === JSON.stringify(input[key as keyof PurposeDecisionInput]))) return;
   mission.purposeDecisions = [...retained(mission), { ...input, id: randomUUID(), mission_id: mission.id,
     run_id: mission.runID, requirements_fingerprint: purposeRequirementsFingerprint(mission), recorded_at: new Date().toISOString() }].slice(-8);
 }
@@ -66,7 +71,7 @@ export function purposeDecisionView(mission: OperatorMission) {
 }
 
 export const purposeDecisionSchema = { type: "object", "x-sortie-optional": true, additionalProperties: false,
-  description: "Optional important purpose/method decision accompanying useful planning or submission, not every Task. Record actual user outcome and concrete unmet work; references are not proof. No extra plan/approval solely to record it.",
+  description: "Optional important purpose/method decision accompanying useful planning or submission, not every Task. Record actual user outcome and concrete unmet work; references are not proof. An explicit STOP_METHOD can trigger one stop/question scope reconsideration, not permission or a semantic determination. No extra plan/approval solely to record it.",
   required: ["decision", "requirement_ids", "observed_outcome", "unmet_work", "reason", "evidence_refs", "next_action"],
   properties: { decision: { type: "string", enum: [...PURPOSE_DECISIONS] },
     ...Object.fromEntries(["observed_outcome", "reason", "affected_method", "next_action"].map(key => [key, { type: "string", minLength: 1, maxLength: 2000 }])),

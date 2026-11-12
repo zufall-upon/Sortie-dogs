@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import type { MissionGrip, GripQuestion } from "../core/grip.js";
 import { OperatorMissionRuntime, type OperatorMission } from "../core/operator-mission.js";
+import { OperatorRuntime, unitValidation, unitValidationCwd } from "../core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../core/runtime-profile.js";
 import { isKnownReadOnlyTool } from "./gate.js";
 import { currentMissionVision } from "../core/mission-vision.js";
+import { observedMissionValidation } from "./mission-review.js";
+import { isDeepStrictEqual } from "node:util";
+import { purposeDecisionView } from "../core/mission-purpose.js";
+import { BLOCKER_SCOPE_RECONSIDER, LATER_SMOKE_RECONSIDER, blockerScopeKey, laterSmokeQuestionKey,
+  rememberBlockerScopeCheck, scopedMethodDecision } from "../core/blocker-scope.js";
 
 type ObjectValue = Record<string, unknown>;
 const record = (v: unknown): v is ObjectValue => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -13,6 +19,48 @@ const controllers = new Set(["dog-operator", "dogs-coordinator"]);
 // import those ambiguous variants into a user-requested pause. Native read/search stay usable.
 const pausedShellReads = new Set(["pwd", "git status --short", "git status --short --branch"]);
 const short = (text: string, limit: number) => Array.from(text).slice(0, limit).join("") + (Array.from(text).length > limit ? "…" : "");
+
+/** Only the immediately retained native tool can be considered for reuse. */
+function previousTool(history: unknown[], currentCall: unknown): ObjectValue | undefined {
+  for (const message of [...history].reverse()) {
+    if (!record(message) || !record(message.info) || !Array.isArray(message.parts)) return;
+    if (message.info.role !== "assistant") return;
+    for (const part of [...message.parts].reverse()) {
+      if (!record(part)) return;
+      // A later public explanation can contain a changed hypothesis. Do not treat
+      // that as an unchanged repeat, even if the form itself is byte-identical.
+      if ((part.type === "text" || part.type === "reasoning") && typeof part.text === "string" && part.text.trim()) return;
+      if (part.type !== "tool") return;
+      if (part.callID === currentCall) {
+        if (record(part.state) && ["pending", "running"].includes(String(part.state.status))) continue;
+        return;
+      }
+      return part;
+    }
+  }
+}
+
+function previousQuestionAnswer(history: unknown[], input: ObjectValue, currentCall: unknown): unknown[] | undefined {
+  const part = previousTool(history, currentCall);
+  if (!part || part.tool !== "question" || !record(part.state) || part.state.status !== "completed" ||
+      !isDeepStrictEqual(part.state.input, input) || !record(part.state.metadata)) return;
+  const answers = part.state.metadata.answers;
+  if (!Array.isArray(answers) || !answers.length || !answers.every(answer => Array.isArray(answer) && answer.length &&
+      answer.every(value => typeof value === "string")) || JSON.stringify(answers).length > 1000) return;
+  return answers;
+}
+
+function previousScoutResult(history: unknown[], input: ObjectValue, currentCall: unknown): string | undefined {
+  const normalized: ObjectValue = { ...input, subagent_type: input.agent };
+  delete normalized.agent;
+  if (normalized.background === false) delete normalized.background;
+  const part = previousTool(history, currentCall);
+  if (!part || part.tool !== "task" || !record(part.state) || part.state.status !== "completed" ||
+      !isDeepStrictEqual(part.state.input, normalized) || !record(part.state.metadata) ||
+      !["completed", "succeeded"].includes(String(part.state.metadata.status)) ||
+      typeof part.state.output !== "string" || !part.state.output.trim() || part.state.output.length > 2000) return;
+  return part.state.output;
+}
 const inlineGripQuestion = (question: string, japanese: boolean, excerptOnly = false): string => {
   const decision = japanese ? "❓【今回の判断】" : "❓[Decision] ";
   const reason = japanese ? "💡【なぜ今】" : "💡[Why now] ";
@@ -33,11 +81,13 @@ const inlineGripQuestion = (question: string, japanese: boolean, excerptOnly = f
 /** Explicit native questions only: no semantic inference, outgoing traffic or process cancellation. */
 export class MissionGripController {
   readonly missions: OperatorMissionRuntime;
+  readonly operators: OperatorRuntime;
   private readonly failedWrites = new Map<string, string>();
   private readonly recoveryErrors = new Map<string, { missionID: string; reason: string }>();
   constructor(directory: string, readonly getSession: (id: string) => Promise<unknown>,
-    readonly history: (id: string) => Promise<unknown[]>) {
+    readonly history: (id: string) => Promise<unknown[]>, readonly recentHistory = history) {
     this.missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    this.operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
   }
   private async owner(id: string): Promise<{ root: string; mission: OperatorMission } | undefined> {
     let current = id;
@@ -135,6 +185,81 @@ export class MissionGripController {
     if (cancellation) return;
     const mission = await this.recover(owner.root, owner.mission);
     const input = record(event.input) ? event.input : {};
+    if (event.tool === "question" && !mission.grip?.pending && Array.isArray(input.questions) && input.questions.length === 1 &&
+        record(input.questions[0]) && typeof input.questions[0].question === "string" &&
+        !mission.grip?.questions.some(item => item.callID === event.id && item.sessionID === id)) {
+      const q = input.questions[0];
+      // No new metadata, synthetic STOP_METHOD or phase label: compare the saved
+      // real user request with the admitted run and the actual native form.
+      const choices = JSON.stringify(q.options ?? []);
+      let key: string | undefined;
+      try {
+        const run = await this.operators.read(owner.root);
+        key = laterSmokeQuestionKey(mission, run, q.question as string, choices);
+        if (key && run) {
+          const current = run.units.find(unit => unit.status === "running")!;
+          // Native Worker/history observations can precede durable check settlement.
+          // Reuse the established public observer, never turn an observed attempt
+          // into successful validation or infer current stage from the objective.
+          if (!current.childSessionID || observedMissionValidation(unitValidation(current), current.childSessionID,
+            (await this.history(current.childSessionID)).filter(record),
+            Date.parse(current.directExecution?.startedAt ?? current.reviewerCorrection?.admittedAt ?? run.createdAt),
+            this.operators.projectRoot, unitValidationCwd(current)).attempts.length) key = undefined;
+        }
+      } catch { key = undefined; /* An unavailable or old run/history leaves the native question unchanged. */ }
+      if (key) {
+        let reconsider = false;
+        try {
+          // Recheck the current run immediately before the serialized Mission update.
+          const run = await this.operators.read(owner.root);
+          if (laterSmokeQuestionKey(mission, run, q.question as string, choices) === key) await this.missions.update(owner.root, state => {
+            if (state.grip?.pending || state.grip?.questions.some(item => item.callID === event.id && item.sessionID === id) ||
+                laterSmokeQuestionKey(state, run, q.question as string, choices) !== key) return;
+            reconsider = rememberBlockerScopeCheck(state, key!);
+            // The older STOP_METHOD path can independently match the same form.
+            // One scope reconsideration covers both observations in this run.
+            const decision = purposeDecisionView(state).current.at(-1);
+            if (reconsider && scopedMethodDecision(decision) && decision.run_id === state.runID &&
+                (q.question as string).includes(decision.affected_method!)) {
+              rememberBlockerScopeCheck(state, blockerScopeKey(state, decision, "question"));
+            }
+          });
+        } catch { reconsider = false; /* Persistence failures do not create a permanent question gate. */ }
+        if (reconsider) throw new Error(`mission-blocker-scope-reconsider: ${LATER_SMOKE_RECONSIDER}`);
+      }
+    }
+    if (event.tool === "subagent" && !mission.grip?.pending && input.agent === "dog-scout-v010" &&
+        input.sessionID === undefined && input.background !== true) {
+      let previous: string | undefined;
+      try { previous = previousScoutResult(await this.recentHistory(id), input, event.id); } catch { /* keep native dispatch */ }
+      if (previous) throw new Error(`mission-scout-already-investigated: ${JSON.stringify(previous)}. Reuse the retained result only if still applicable; it is not fresh evidence or permission. A changed investigation can be dispatched normally.`);
+    }
+    if (event.tool === "question" && !mission.grip?.pending && Array.isArray(input.questions) && input.questions.length === 1 &&
+        record(input.questions[0]) && typeof input.questions[0].header === "string" &&
+        input.questions[0].header !== "Grip" && !input.questions[0].header.startsWith("Grip:")) {
+      const question = input.questions[0];
+      const decision = purposeDecisionView(mission).current.at(-1);
+      // Only the current run's selection applies. plan_units retains an explicitly
+      // selected observation again if planning changes the run, including the first run.
+      if (["open", "running"].includes(mission.phase) && scopedMethodDecision(decision) &&
+          decision.run_id === mission.runID && typeof question.question === "string" &&
+          question.question.includes(decision.affected_method!)) {
+        const key = blockerScopeKey(mission, decision, "question");
+        let reconsider = false;
+        await this.missions.update(owner.root, state => {
+          if (state.id !== mission.id || state.runID !== mission.runID || !["open", "running"].includes(state.phase) || state.grip?.pending) return;
+          const current = purposeDecisionView(state).current.at(-1);
+          if (current?.id !== decision.id || blockerScopeKey(state, current, "question") !== key) return;
+          reconsider = rememberBlockerScopeCheck(state, key);
+        });
+        if (reconsider) throw new Error(`mission-blocker-scope-reconsider: ${BLOCKER_SCOPE_RECONSIDER}`);
+      }
+      // A history outage never prevents a necessary user question. No fuzzy matching,
+      // old turns, dismissed forms or inferred answers are used for deduplication.
+      let previous: unknown[] | undefined;
+      try { previous = previousQuestionAnswer(await this.recentHistory(id), input, event.id); } catch { /* keep the native question */ }
+      if (previous) throw new Error(`mission-question-already-answered: ${JSON.stringify(previous)}. Reuse the retained answer as information, not as new permission; ask a changed question if a fresh decision is necessary.`);
+    }
     if (event.tool === "question" && typeof event.id === "string" && Array.isArray(input.questions) && input.questions.length === 1) {
       const q = input.questions[0];
       const header = record(q) ? q.header : undefined;

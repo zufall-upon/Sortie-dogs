@@ -32,6 +32,7 @@ import { prepareValidationScratch } from "./validation-scratch.js";
 import { SOURCE_REVIEW_RISK_TAGS } from "../core/consultation.js";
 import { createHash, randomUUID } from "node:crypto";
 import { appendPurposeDecision, purposeDecisionSchema, purposeDecisionView, validatePurposeDecision } from "../core/mission-purpose.js";
+import { BLOCKER_SCOPE_RECONSIDER, blockerScopeKey, rememberBlockerScopeCheck, scopedMethodDecision } from "../core/blocker-scope.js";
 import { missionVisionSchema } from "../core/mission-vision.js";
 import { proposeTerminalRescue } from "../core/terminal-rescue-policy.js";
 import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
@@ -3130,11 +3131,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
-            if (args.purpose_decision !== undefined) await missions.recordPurposeDecision(root, args.purpose_decision);
+            if (args.purpose_decision !== undefined) {
+              validatePurposeDecision(await missions.required(root), args.purpose_decision);
+              await missions.recordPurposeDecision(root, args.purpose_decision);
+            }
             if (args.vision !== undefined) await missions.recordVision(root, args.vision);
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, await missions.required(root),
               (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
+            // The selection above survives a refused plan. If planning changed the run,
+            // also retain this explicit selection in that run's context; it is still
+            // only a model observation, never proof of independence or execution.
+            if (scopedMethodDecision(args.purpose_decision)) await missions.recordPurposeDecision(root, args.purpose_decision);
             if ((args as Record<string, unknown>).parallel === true && args.executor !== "self" && mission.kind === "implementation") {
               const run = await operators.required(root);
               if (run.operatorSessionID === context.sessionID && run.phase === "prepared" && run.dispatched === 0) {
@@ -3605,6 +3613,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           let mission = await missions.required(root);
           if (args.purpose_decision !== undefined) validatePurposeDecision(mission, args.purpose_decision);
           mission = await reconcileMissionExecution(root, mission, await operators.read(root));
+          const scopeDecision = args.purpose_decision;
+          if ((args.status === "blocked" || args.status === "needs-decision") && scopedMethodDecision(scopeDecision)) {
+            const key = blockerScopeKey(mission, scopeDecision, "submission");
+            let reconsider = false;
+            mission = await missions.update(root, state => {
+              if (state.id !== mission.id || state.runID !== mission.runID || !["open", "running"].includes(state.phase) ||
+                  blockerScopeKey(state, scopeDecision, "submission") !== key) return;
+              reconsider = rememberBlockerScopeCheck(state, key);
+              if (reconsider) appendPurposeDecision(state, scopeDecision);
+            });
+            if (reconsider) return JSON.stringify({ status: "blocker-scope-reconsider", mission_id: mission.id,
+              affected_method: scopeDecision.affected_method, unmet_work: scopeDecision.unmet_work,
+              next_action: BLOCKER_SCOPE_RECONSIDER });
+          }
           if (args.status === "ready") {
             if (mission.kind === "operation" && !missionExecutionComplete(mission)) {
               return JSON.stringify({ ...missionPacket(mission, await operators.read(root)), status: "operation-incomplete",

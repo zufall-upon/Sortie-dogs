@@ -200,6 +200,8 @@ export interface OperatorMission {
   continuity?: MissionContinuity;
   /** Optional bounded strategy observations; never requirements, proof or authority. */
   purposeDecisions?: PurposeDecision[];
+  /** Bounded identities of scope reconsiderations, not evidence, permission or completed work. */
+  blockerScopeChecks?: string[];
   /** Explicit native Grip question and held user direction; never new execution authority. */
   grip?: MissionGrip;
   /** Source-linked AI synthesis for display only; requests/requirements remain authoritative. */

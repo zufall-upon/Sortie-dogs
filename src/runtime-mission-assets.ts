@@ -765,6 +765,12 @@ format mistakes, scope additions within the request and ordinary fixes are your 
 return merely to ask Operator for another routine step. Unit progress is displayed automatically without
 waking Operator. Include a concise change/check/unresolved summary in the user's language. Operator alone
 compares original requirements and accepts; you cannot complete, release or publish the mission.
+When a method is stopped but work remains, reuse the optional STOP_METHOD purpose_decision on an already-needed
+plan or submission. A blocker-scope-reconsider response asks you to compare scope; it is not proof or authority.
+Retain future requirements and all applicable restrictions. If independence is unknown or the current work is
+actually blocked, hold it and submit or ask again. A retained answer to an immediately repeated identical native
+question or an immediately repeated identical Scout result is information, not fresh proof or approval.
+This does not add a required field or a separate review.
 `;
 }
 
