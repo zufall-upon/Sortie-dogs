@@ -245,6 +245,16 @@ async function legacyMessages(context: OpenCodeV2Context, id: string,
   return converted;
 }
 
+/** Immediate repeat detection does not need the full paginated Mission history. */
+async function recentLegacyMessages(context: OpenCodeV2Context, id: string): Promise<JsonObject[]> {
+  const [info, history] = await Promise.all([context.session.get({ sessionID: id }), context.session.context({ sessionID: id })]);
+  const agent = record(info) ? string(info.agent) : undefined;
+  return array(history).slice(-8).flatMap(value => {
+    const converted = legacyMessage(value, id, agent);
+    return converted === undefined ? [] : [converted];
+  });
+}
+
 async function nativePages(fetch: (cursor?: string) => Promise<unknown>, notBefore?: number): Promise<unknown[]> {
   const items: unknown[] = [], seen = new Set<string>();
   let cursor: string | undefined;
@@ -617,7 +627,7 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
 async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks, background: NativeBackgroundLifecycle,
   liveState: Map<string, unknown>): Promise<void> {
   const grip = new MissionGripController(context.location.directory, id => context.session.get({ sessionID: id }),
-    id => legacyMessages(context, id));
+    id => legacyMessages(context, id), id => recentLegacyMessages(context, id));
   const explicitlySelectedChildren = new Set<string>();
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
