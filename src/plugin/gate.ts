@@ -189,6 +189,14 @@ function unquote(value: string): string {
   return value;
 }
 
+/** Only whole-word or whole-inline-value quotes are decoded by this extractor. */
+function hasUnresolvedOutputQuoting(source: string, prefix?: string): boolean {
+  const whollyQuoted = (value: string) => /^'[^']*'$/u.test(value) || /^"(?:\\.|[^"])*"$/u.test(value);
+  if (whollyQuoted(source)) return false;
+  const value = prefix !== undefined && source.startsWith(prefix) ? source.slice(prefix.length) : source;
+  return /["']/u.test(value) && !whollyQuoted(value);
+}
+
 function words(command: string): string[] {
   return command.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)?.map(unquote) ?? [];
 }
@@ -212,7 +220,7 @@ function operands(tokens: readonly string[], indices?: number[]): string[] {
   return result.filter(Boolean);
 }
 
-function mkdirOperands(tokens: readonly string[]): { paths: string[]; parents: boolean } {
+function mkdirOperands(tokens: readonly string[], indices?: number[]): { paths: string[]; parents: boolean } {
   const paths: string[] = [];
   let endOptions = false;
   let parents = false;
@@ -233,7 +241,8 @@ function mkdirOperands(tokens: readonly string[]): { paths: string[]; parents: b
       }
       if (token.startsWith("-") && token !== "-") continue;
     }
-    paths.push(token.replace(/[|&;]+$/u, ""));
+    const path = token.replace(/[|&;]+$/u, "");
+    if (path) { paths.push(path); indices?.push(index); }
   }
   return { paths: paths.filter(Boolean), parents };
 }
@@ -643,17 +652,26 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     let assignment = false;
     const syntax = scanShellSyntax(source, dialect);
     for (const match of syntax.masked.matchAll(redirection)) {
-      const target = redirectionTarget.exec(source.slice(match.index + match[0].length))?.[1];
+      const afterRedirect = source.slice(match.index + match[0].length);
+      const targetMatch = redirectionTarget.exec(afterRedirect);
+      const target = targetMatch?.[1];
       // Only an output redirect to this host's literal discard device is pathless.
       // Device mutations and real outputs in the same command still require their usual scope.
       const destination = target === undefined ? undefined : unquote(target);
-      if (destination !== undefined && (process.platform === "win32" ? /^nul$/iu.test(destination) : destination === "/dev/null")) continue;
+      const incompleteTarget = target !== undefined && (hasUnresolvedOutputQuoting(target) ||
+        /^["']/u.test(target) && /^[^\s;&|<>]/u.test(afterRedirect.slice(targetMatch![0].length)));
+      if (!incompleteTarget && destination !== undefined &&
+          (process.platform === "win32" ? /^nul$/iu.test(destination) : destination === "/dev/null")) continue;
       applies = true;
       if (target === undefined || target.startsWith("&")) {
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
-        if (powershell && target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
+        // A quoted prefix followed immediately by another word fragment is not the
+        // whole redirect destination (e.g. 'allowed'$suffix). Do not authorize
+        // its prefix as if it were the native shell's output path.
+        if (incompleteTarget) unresolvedPaths.push(target);
+        if (target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
         paths.push(destination!);
       }
     }
@@ -698,7 +716,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
     const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
-    const tokenSources = source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? [];
+    const tokenMatches = [...source.matchAll(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)];
+    const tokenSources = tokenMatches.map(match => match[0]);
     const rawTokens = tokenSources.map((token, index) => {
       // Strip syntax quotes once, while the original token still distinguishes an
       // inline quoted value from literal quotes inside a wholly quoted argument.
@@ -710,8 +729,20 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
+    const incompleteSourceWord = (index: number): boolean => {
+      const original = tokenMatches[rawTokens.length - tokens.length + index];
+      if (original === undefined) return false;
+      const next = source[original.index + original[0].length];
+      return next !== undefined && !/[\s;&|<>]/u.test(next);
+    };
+    const noteIncompletePath = (index: number, prefix?: string) => {
+      const original = tokenSources[rawTokens.length - tokens.length + index];
+      if (incompleteSourceWord(index) || original !== undefined && hasUnresolvedOutputQuoting(original, prefix)) {
+        unresolvedPaths.push(tokens[index]!);
+      }
+    };
     // A composed output is literal only if every dollar-bearing part was single-quoted.
-    const isLiteralDollarPath = (path: ShellTokenPath): boolean => powershell && path.parts.length > 0 && path.parts.every(({ index, prefix }) => {
+    const isLiteralDollarPath = (path: ShellTokenPath): boolean => path.parts.length > 0 && path.parts.every(({ index, prefix }) => {
       const value = shellTokenPath(tokens, index, prefix).value;
       if (!value.includes("$")) return true;
       const original = tokenSources[rawTokens.length - tokens.length + index];
@@ -720,11 +751,24 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       return singleQuoted(original) || prefix !== undefined && original.startsWith(prefix) && singleQuoted(original.slice(prefix.length));
     });
     const appendParsedPath = (path: ShellTokenPath) => {
+      for (const part of path.parts) noteIncompletePath(part.index, part.prefix);
       if (isLiteralDollarPath(path)) literalDollarPaths.add(paths.length);
       paths.push(path.value);
     };
     const appendTokenPath = (path: string, index?: number) => {
       appendParsedPath({ value: path, parts: index === undefined ? [] : [{ index }] });
+    };
+    // An extra contiguous fragment can make an otherwise recognized output form
+    // unsupported; keep its known destination unresolved even in native-shell mode.
+    const noteIncompleteOutputOptions = (outputOptions: readonly string[]) => {
+      for (let index = 1; index < tokens.length; index += 1) {
+        if (outputOptions.includes(tokens[index]!)) {
+          if (index + 1 < tokens.length) noteIncompletePath(index + 1);
+        } else {
+          const prefix = outputOptions.find(option => option.endsWith("=") && tokens[index]!.startsWith(option));
+          if (prefix !== undefined) noteIncompletePath(index, prefix);
+        }
+      }
     };
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
     const commitArguments = executable === "git" ? gitCommitArguments(tokens) : undefined;
@@ -735,8 +779,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       (["export", "unset", "declare", "typeset", "readonly"].includes(executable) &&
         tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
       /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
-    const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
     const operandIndices: number[] = [];
+    const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens, operandIndices) : undefined;
     const commandOperands = mkdirOptions?.paths ?? operands(tokens, operandIndices);
     if (powershell && syntax.activeBrace) {
       pathValues.clear(); knownCwd = undefined;
@@ -786,6 +830,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       applies = true;
       const destination = curlOutput(tokens);
       if (destination === undefined) {
+        noteIncompleteOutputOptions(["-o", "--output", "--output="]);
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-curl-form", "use one literal HTTPS URL and one explicit -o output path");
       } else appendParsedPath(destination);
@@ -821,6 +866,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     } else if (executable === "tar") {
       const mode = tarMode(tokens);
       if (mode === undefined) {
+        noteIncompleteOutputOptions(["-C", "--directory", "--directory="]);
         applies = true;
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-tar-form", "use literal tar listing or extraction with one explicit -C directory");
@@ -928,6 +974,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     } else if (executable === "git" && tokens[1] === "archive") {
       const archive = gitArchiveOutput(tokens);
       if (archive === undefined) {
+        noteIncompleteOutputOptions(["-o", "--output", "--output="]);
         applies = true;
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-git-archive-form", "use git archive --format=tar --output=<scoped-file> <local-ref>");
@@ -977,10 +1024,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     // path facts across executable statements; only the definition prefix is modeled.
     pathValues.clear(); knownCwd = undefined;
   }
-  if (powershell) {
-    const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
-    if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
-  }
+  const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
+  if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
   return {
     applies,
     ambiguous,

@@ -350,6 +350,209 @@ test("inline output options retain literal quotes protected by whole-argument qu
   ]) await narrow.check({ tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } });
 }));
 
+test("POSIX dollar destinations preserve literal quoting without authorizing variable expansion", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "archives/$id"), { recursive: true });
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "posix-inline-dollar-provenance", read: [],
+    write: ["routes/$id.tsx", "archives/$id/**"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell });
+  const native = await exec("bash", ["-c", 'id=outside; printf "%s" --output="routes/$id.tsx"']);
+  assert.equal(native.stdout, "--output=routes/outside.tsx", "double quotes do not make a POSIX dollar path literal");
+  for (const command of [
+    'curl --output="routes/$id.tsx" https://example.test/result',
+    'tar -xf input.tar --directory="archives/$id"',
+    'git archive --output="routes/$id.tsx" HEAD',
+    'curl "--output=routes/$id.tsx" https://example.test/result',
+    'curl -o "routes/$id.tsx" https://example.test/result',
+    'tar -xf input.tar -C "archives/$id"',
+    'git archive --output "routes/$id.tsx" HEAD',
+    'echo content > "routes/$id.tsx"',
+    'mkdir -p "archives/$id/new"',
+    'id=outside; curl --output="routes/$id.tsx" https://example.test/result',
+  ]) {
+    for (const investigativeShell of [false, true]) await assert.rejects(check(command, investigativeShell),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+  }
+  for (const [command, target] of [
+    ["curl --output='routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["tar -xf input.tar --directory='archives/$id'", "archives/$id"],
+    ["git archive --output='routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["curl '--output=routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["curl -o 'routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["tar -xf input.tar -C 'archives/$id'", "archives/$id"],
+    ["git archive --output 'routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["echo content > 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["mkdir -p 'archives/$id/new'", "archives/$id/new"],
+    ["touch 'routes/$id.tsx'", "routes/$id.tsx"],
+  ] as const) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [join(root, target)], command);
+    await check(command, false);
+    await check(command, true);
+  }
+  await assert.rejects(check("curl --output='routes/$other.tsx' https://example.test/result", true),
+    (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+}));
+
+test("quoted-prefix output regressions retain the original allowed and denied file layout", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "allowed"), "allowed original");
+  await writeFile(join(root, "allowed-denied"), "denied original");
+  await writeFile(join(root, "input.txt"), "archive fixture\n");
+  await exec("git", ["init", "-q"], { cwd: root });
+  await exec("git", ["add", "input.txt"], { cwd: root });
+  await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], { cwd: root });
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "quoted-prefix-original-layout", read: [], write: ["allowed"], validation: [],
+  });
+  let adapterCalls = 0;
+  for (const command of ["printf changed > 'allowed'$suffix", "git archive '--output=allowed'$suffix HEAD"]) {
+    for (const investigativeShell of [false, true]) {
+      await assert.rejects((async () => {
+        await gate.check({ tool: "shell", sessionID: "worker", callID: command },
+          { args: { command, workdir: root } }, { investigativeShell });
+        adapterCalls += 1;
+      })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+    }
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "allowed"), "utf8"), "allowed original");
+  assert.equal(await readFile(join(root, "allowed-denied"), "utf8"), "denied original");
+  await writeFile(join(root, "'allowed"), "allowed original");
+  await writeFile(join(root, "allowed part-denied"), "denied original");
+  const mixedGate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "mixed-quote-original-layout", read: [], write: ["'allowed"], validation: [],
+  });
+  const mixed = "git archive --output='allowed part'$suffix HEAD";
+  for (const investigativeShell of [false, true]) {
+    await assert.rejects((async () => {
+      await mixedGate.check({ tool: "shell", sessionID: "worker", callID: mixed },
+        { args: { command: mixed, workdir: root } }, { investigativeShell });
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "'allowed"), "utf8"), "allowed original");
+  assert.equal(await readFile(join(root, "allowed part-denied"), "utf8"), "denied original");
+}));
+
+test("POSIX output provenance blocks concatenated redirect and option destinations before the adapter", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "allowed"));
+  await mkdir(join(root, "denied"));
+  await writeFile(join(root, "denied/keep.txt"), "unchanged\n");
+  await writeFile(join(root, "input.txt"), "archive fixture\n");
+  const run = (file: string, args: string[]) => exec(file, args, { cwd: root });
+  await run("git", ["init", "-q"]);
+  await run("git", ["add", "input.txt"]);
+  await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]);
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "concatenated-output", read: [], write: ["allowed/**"], validation: [],
+  });
+  let adapterCalls = 0;
+  const blocked = async (command: string, investigativeShell: boolean) => {
+    await gate.check({ tool: "shell", sessionID: "worker", callID: command },
+      { args: { command, workdir: root } }, { investigativeShell });
+    adapterCalls += 1; // A fake adapter proves only that rejection happens before execution.
+  };
+  for (const command of [
+    "printf changed > 'allowed'$suffix",
+    "git archive '--output=allowed'$suffix HEAD",
+    "env -u UNUSED git archive --output 'allowed'$suffix HEAD",
+    "git archive --output=allowed/'prefix'foo HEAD",
+    "curl -o 'allowed'$suffix https://example.test/result",
+    "tar -xf input.tar -C 'allowed'$suffix",
+    "printf changed > 'denied/keep.txt'",
+    "printf changed > '/dev/null'$suffix",
+  ]) {
+    for (const investigativeShell of [false, true]) {
+      await assert.rejects(blocked(command, investigativeShell), (error: unknown) => error instanceof WriteDeniedError &&
+        (investigativeShell ? error.reason === "manifest-scope" : ["manifest-scope", "unclassified-command"].includes(error.reason)), command);
+    }
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "denied/keep.txt"), "utf8"), "unchanged\n");
+  assert.equal(existsSync(join(root, "denied/output.tar")), false);
+  for (const investigativeShell of [false, true]) {
+    await gate.check({ tool: "shell", sessionID: "worker", callID: "discard" },
+      { args: { command: "printf ignored > /dev/null", workdir: root } }, { investigativeShell });
+  }
+
+  const allowed = async (command: string, target: string) => {
+    const args = { command, workdir: root };
+    assert.deepEqual(extractWritePaths("shell", args, root).paths, [join(root, target)], command);
+    for (const investigativeShell of [false, true]) {
+      await gate.check({ tool: "shell", sessionID: "worker", callID: command }, { args }, { investigativeShell });
+    }
+    await run("bash", ["-c", command]);
+  };
+  await allowed("env -u UNUSED git archive --format=tar --output='allowed/$id.tar' HEAD", "allowed/$id.tar");
+  assert.equal((await run("tar", ["-xOf", "allowed/$id.tar", "input.txt"])).stdout, "archive fixture\n");
+  await allowed("env -u UNUSED git archive --output 'allowed/$separate.tar' HEAD", "allowed/$separate.tar");
+  assert.equal((await run("tar", ["-xOf", "allowed/$separate.tar", "input.txt"])).stdout, "archive fixture\n");
+  await allowed("git archive '--output=allowed/\"quoted\".tar' HEAD", 'allowed/"quoted".tar');
+  assert.equal((await run("tar", ["-xOf", 'allowed/"quoted".tar', "input.txt"])).stdout, "archive fixture\n");
+  await mkdir(join(root, "allowed/$dir"));
+  await allowed("env -u UNUSED tar -xf 'allowed/$id.tar' --directory='allowed/$dir'", "allowed/$dir");
+  assert.equal(await readFile(join(root, "allowed/$dir/input.txt"), "utf8"), "archive fixture\n");
+  await allowed("printf literal > 'allowed/$id.txt'", "allowed/$id.txt");
+  assert.equal(await readFile(join(root, "allowed/$id.txt"), "utf8"), "literal");
+  await allowed("printf literal > 'allowed/with space $id.txt'", "allowed/with space $id.txt");
+  assert.equal(await readFile(join(root, "allowed/with space $id.txt"), "utf8"), "literal");
+}));
+
+test("PowerShell call-operator output parts preserve literal and unresolved provenance", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "powershell-output-parts", read: [], write: ["allowed/**"], validation: [],
+  });
+  const literal = "& 'Robocopy.exe' source 'allowed/$dir' '$id.txt'";
+  const extracted = extractWritePaths("powershell", { command: literal, workdir: root }, root);
+  assert.equal(extracted.ambiguous, false);
+  assert.deepEqual(extracted.paths, [join(root, "allowed/$dir/$id.txt")]);
+  for (const investigativeShell of [false, true]) {
+    await gate.check({ tool: "shell", sessionID: "worker", callID: literal },
+      { args: { command: literal, workdir: root } }, { investigativeShell });
+  }
+  let adapterCalls = 0;
+  for (const [command, unresolved] of [
+    ['& \'Robocopy.exe\' source "allowed/$dir" out.txt', "allowed/$dir"],
+    ['& \'Copy-Item\' -Path input.txt -Destination "allowed/$id.txt"', "allowed/$id.txt"],
+  ] as const) {
+    const result = extractWritePaths("powershell", { command, workdir: root }, root);
+    assert.equal(result.ambiguous, true);
+    assert.deepEqual(result.unresolvedPaths, [unresolved]);
+    for (const investigativeShell of [false, true]) {
+      await assert.rejects((async () => {
+        await gate.check({ tool: "shell", sessionID: "worker", callID: command },
+          { args: { command, workdir: root } }, { investigativeShell });
+        adapterCalls += 1;
+      })(), (error: unknown) => error instanceof WriteDeniedError &&
+        (investigativeShell ? error.reason === "manifest-scope" : ["manifest-scope", "unclassified-command"].includes(error.reason)), command);
+    }
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(existsSync(join(root, "allowed")), false);
+}));
+
+test("PowerShell call-operator literal output reaches the native destination when available", async t => {
+  try { await exec("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"]); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") { t.skip("pwsh is not installed"); return; }
+    throw error;
+  }
+  await fixture(async root => {
+    await mkdir(join(root, "allowed"));
+    const command = "& 'Set-Content' -LiteralPath 'allowed/$id.txt' -Value payload -NoNewline";
+    const gate = await createWriteGate(await createProjectPaths(root), {
+      version: "0.1.0", task_id: "powershell-native-literal", read: [], write: ["allowed/**"], validation: [],
+    });
+    const args = { command, workdir: root };
+    assert.deepEqual(extractWritePaths("powershell", args, root).paths, [join(root, "allowed/$id.txt")]);
+    await gate.check({ tool: "shell", sessionID: "worker", callID: command }, { args }, { investigativeShell: true });
+    await exec("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], { cwd: root });
+    assert.equal(await readFile(join(root, "allowed/$id.txt"), "utf8"), "payload");
+  });
+});
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");
