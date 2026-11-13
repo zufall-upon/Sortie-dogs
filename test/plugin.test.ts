@@ -7905,7 +7905,13 @@ test("the contract preflight reports gate defects without granting inspection", 
       { validation: ["pwsh -NoProfile -Command 'Write-Output ok > $OUT'"], defects: [] },
       { validation: ['OUT=temp/check.txt; node check.mjs > "$OUT"; pwsh -NoProfile -Command \'Write-Output ok > $OTHER; tar -xzf archive.tar.gz -C temp/artifact/extracted\''],
         defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["pwsh -NoProfile -Command 'tar -xzf archive.tar.gz'"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["pwsh -NoProfile -Command 'Write-Output ok; tar -xzf archive.tar.gz'"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ["mkdir -p temp/artifact/extracted", "pwsh -NoProfile -Command '$DEST=''temp/artifact/extracted''; tar -xzf archive.tar.gz -C $DEST'"],
+        defects: [] },
+      { validation: ["mkdir -p temp/artifact/extracted", "pwsh -NoProfile -Command '$DEST=''temp/artifact/extracted''; tar -xzf archive.tar.gz -C $DEST; Write-Output ok'"],
         defects: [] },
     ];
     for (const { validation, defects } of compoundCases) {

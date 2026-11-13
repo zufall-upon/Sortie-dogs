@@ -5444,8 +5444,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const command = manifest.validation[index];
       let extractions: { extraction: ReturnType<typeof extractWritePaths>; artifact: boolean }[];
       try {
-        extractions = [{ extraction: extractWritePaths("bash", { command }),
-          artifact: /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command) }];
+        const extraction = extractWritePaths("bash", { command });
+        const artifact = /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command);
+        extractions = [{ extraction, artifact }];
+        if (extraction.ambiguous && !artifact) {
+          // Ambiguity from a surrounding command must not hide an unsupported
+          // artifact form. Keep the whole extraction for resolved variables and
+          // directory facts; segment inspection only adds classification defects.
+          for (const segment of artifactInspectionSegments(command)) {
+            if (!segment.artifact) continue;
+            try {
+              const part = extractWritePaths(segment.tool, { command: segment.source });
+              if (part.ambiguous) extractions.push({ extraction: part, artifact: true });
+            } catch (segmentError) {
+              // The whole extraction succeeded, so a variable unresolved only in
+              // isolation may have been resolved by its preceding definitions.
+              if (!(segmentError instanceof WriteDeniedError)) throw segmentError;
+            }
+          }
+        }
       } catch (error) {
         if (!(error instanceof WriteDeniedError)) throw error;
         // Exact declared checks need no inferred output authority. Inspect the same
