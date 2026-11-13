@@ -596,6 +596,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   const straightLine = powershell && !scanShellSyntax(command, dialect).activeBrace &&
     !/[|&]/u.test(scanShellSyntax(command, dialect).masked);
   let knownCwd = straightLine ? cwd : undefined;
+  let definitionPrefix = true;
   for (const segment of segments) {
     const name = /^\s*(\$[A-Za-z_][A-Za-z0-9_]*)\s*=/u.exec(segment)?.[1]?.toLowerCase();
     if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
@@ -621,6 +622,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       }
     }
     if (syntax.unsafeExpansion) {
+      definitionPrefix = false;
       pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
@@ -638,12 +640,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     if (powershell) {
       if (/^\$env:GIT_[A-Za-z0-9_]+\s*=/iu.test(source)) gitContextChanged = true;
       const definition = /^(\$[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/u.exec(source);
-      if (straightLine && definition) {
+      if (straightLine && definitionPrefix && definition) {
         const name = definition[1]!.toLowerCase();
         const value = assignments.get(name) === 1 ? powerShellPathValue(definition[2]!.trim(), pathValues, knownCwd) : undefined;
         if (value !== undefined) { pathValues.set(name, value); continue; }
         pathValues.delete(name);
       }
+      // An executable prefix can shadow Join-Path/Get-Location in this shell.
+      // Later literal assignments cannot restore trust in those command names.
+      definitionPrefix = false;
       const stripped = source.replace(/^\$[A-Za-z_][A-Za-z0-9_:]*\s*=\s*/u, "");
       assignment = stripped !== source;
       source = stripped;

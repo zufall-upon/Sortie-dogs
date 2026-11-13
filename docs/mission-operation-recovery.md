@@ -63,6 +63,10 @@ or a new SWE-bench score.
 
 The gate statically resolves single-assignment local PowerShell path values:
 quoted literals, `(Get-Location).Path`, and positional `Join-Path` of known values.
+Definitions are inferred only in the initial immutable prefix. After any executable
+or unknown statement, later literal assignments cannot restore command-name trust:
+an earlier statement may have shadowed `Join-Path` or `Get-Location` with an alias.
+Direct literal destinations retain their existing native-shell and scope checks.
 It does not evaluate PowerShell. Reassignment, pipelines/background forms, unknown
 expressions, scoped values and unresolved destinations fail closed. Single-quoted
 literal dollar paths retain their quoting provenance; resolved paths still use the existing

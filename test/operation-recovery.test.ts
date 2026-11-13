@@ -181,6 +181,32 @@ test("PowerShell immutable cwd and Join-Path dataflow resolves the real destinat
     [join(root, "fixture-output/child")]);
 }));
 
+test("PowerShell executable prefixes cannot restore immutable path authority after alias shadowing", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "shadowed-path-command", read: [], write: ["src/scratch", "allowed.txt"], validation: [],
+  });
+  const check = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell: true });
+  const definitions = "$r='src'; $d=Join-Path $r 'scratch'; Set-Content -Path $d -Value content";
+  for (const prefix of [
+    "Set-Alias Join-Path Move-Item",
+    "Set-Alias -Name Join-Path -Value Move-Item",
+    "Unknown-Setup",
+    "$setup=Unknown-Setup",
+    "Write-Output initialized",
+  ]) {
+    const command = `${prefix}; ${definitions}`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u, command);
+    await assert.rejects(check(command), /Write denied/u, command);
+  }
+  await assert.rejects(check("Set-Alias Get-Location Remove-Item; $r=(Get-Location).Path; $d=Join-Path $r 'scratch'; Set-Content -Path $d -Value content"), /Write denied/u);
+  // The restriction applies to inferred variable destinations, not opaque native
+  // execution itself or a directly declared literal write after such a prefix.
+  await check("Set-Alias Join-Path Move-Item; Set-Content -Path 'allowed.txt' -Value content");
+  assert.deepEqual(extractWritePaths("powershell", { command: definitions }, root).paths, [join(root, "src/scratch")]);
+  await check(definitions);
+}));
+
 test("PowerShell pipeline and background assignment cannot publish a destination before the RHS runs", async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "pipeline-path", read: [], write: ["allowed.txt"], validation: [],
