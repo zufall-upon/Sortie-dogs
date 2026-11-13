@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -49,6 +49,20 @@ const liteDev23Manifest = {
     problem_statement: `Issue ${index + 1}`,
   })),
 };
+
+async function waitForSupervisorLockRelease(runRoot: string) {
+  const lockPath = join(runRoot, "supervisor.lock");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await access(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50));
+  }
+  assert.fail(`supervisor lock was not released: ${lockPath}`);
+}
 
 function fakeDependencies(runs: string[], configuration: { limits?: number[]; statuses?: Record<string, string>; usage?: Record<string, number> } = {}) {
   return {
@@ -1020,6 +1034,7 @@ await startDetachedSupervisor(${JSON.stringify({ manifest: manifestPath, runRoot
       if (state.status === "completed") break;
     }
     assert.equal(state?.status, "completed");
+    await waitForSupervisorLockRelease(runRoot);
     assert.equal(state?.limits.timeout_seconds, 1800);
     assert.equal(await readFile(runnerTimeout, "utf8"), "1800");
     assert.equal((await readFile(output, "utf8")).includes("example__project-1"), true);
@@ -1072,6 +1087,7 @@ await writeFile(metadata, JSON.stringify({ execution: { spent_usd: 0, usage_comp
       if (state.status === "completed") break;
     }
     assert.equal(state?.status, "completed");
+    await waitForSupervisorLockRelease(runRoot);
     assert.equal(state?.limits.timeout_seconds, 2400);
     assert.equal(state?.schedule?.history, durationHistory);
     assert.deepEqual(state?.schedule?.order, [0]);
