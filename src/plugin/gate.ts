@@ -81,6 +81,8 @@ interface Extraction {
   entryPaths?: number[];
   createdDirectories?: string[];
   requiredDirectories?: string[];
+  /** Unresolved known destinations in otherwise unsupported native command forms. */
+  unresolvedPaths?: string[];
   gitCommit?: boolean;
   gitCommitAdds?: string[][];
   gitMutation?: boolean;
@@ -253,8 +255,19 @@ function unwrapEnvironmentCommand(tokens: readonly string[]): readonly string[] 
   return tokens.slice(index);
 }
 
-function curlOutput(tokens: readonly string[]): string | undefined {
-  let output: string | undefined;
+/** Preserve the actual output token(s), including inline option values, through extraction. */
+interface ShellTokenPath {
+  value: string;
+  parts: readonly { index: number; prefix?: string }[];
+}
+
+function shellTokenPath(tokens: readonly string[], index: number, prefix?: string): ShellTokenPath {
+  const token = tokens[index]!;
+  return { value: prefix === undefined ? token : unquote(token.slice(prefix.length)), parts: [{ index, prefix }] };
+}
+
+function curlOutput(tokens: readonly string[]): ShellTokenPath | undefined {
+  let output: ShellTokenPath | undefined;
   let urls = 0;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -272,13 +285,14 @@ function curlOutput(tokens: readonly string[]): string | undefined {
     if (token === "-o" || token === "--output") {
       const candidate = tokens[++index];
       if (candidate === undefined || candidate.startsWith("-") || output !== undefined) return undefined;
-      output = candidate;
+      output = shellTokenPath(tokens, index);
       continue;
     }
     const inline = /^--output=(.+)$/u.exec(token)?.[1];
     if (inline !== undefined) {
       if (inline.length === 0 || output !== undefined) return undefined;
-      output = inline;
+      output = shellTokenPath(tokens, index, "--output=");
+      if (!output.value) return undefined;
       continue;
     }
     if (/^https:\/\/[^\s]+$/u.test(token)) {
@@ -290,8 +304,8 @@ function curlOutput(tokens: readonly string[]): string | undefined {
   return urls === 1 ? output : undefined;
 }
 
-function powerShellDownloadOutput(tokens: readonly string[]): string | undefined {
-  let output: string | undefined;
+function powerShellDownloadOutput(tokens: readonly string[]): ShellTokenPath | undefined {
+  let output: ShellTokenPath | undefined;
   let uri = false;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index].toLowerCase();
@@ -305,7 +319,7 @@ function powerShellDownloadOutput(tokens: readonly string[]): string | undefined
     if (token === "-outfile") {
       const value = tokens[++index];
       if (value === undefined || value.startsWith("-") || output !== undefined) return undefined;
-      output = value;
+      output = shellTokenPath(tokens, index);
       continue;
     }
     return undefined;
@@ -313,7 +327,7 @@ function powerShellDownloadOutput(tokens: readonly string[]): string | undefined
   return uri ? output : undefined;
 }
 
-function tarMode(tokens: readonly string[]): { extractTo?: string; readOnly: boolean } | undefined {
+function tarMode(tokens: readonly string[]): { extractTo?: ShellTokenPath; readOnly: boolean } | undefined {
   const options = tokens.slice(1).filter((token) => token.startsWith("-"));
   if (options.some((token) => !(
     token === "--" || token === "-C" || /^-[xtzjJvf]+$/u.test(token) ||
@@ -328,16 +342,17 @@ function tarMode(tokens: readonly string[]): { extractTo?: string; readOnly: boo
   const writeArchive = options.some((token) => /^(?:--create|--append|--update|--delete)$/u.test(token) || /^-[^-]*[crudA]/u.test(token));
   if (writeArchive || (extract && list) || (!extract && !list)) return undefined;
   if (list) return { readOnly: true };
-  let destination: string | undefined;
+  let destination: ShellTokenPath | undefined;
   for (let index = 1; index < tokens.length; index += 1) {
     if (tokens[index] === "-C" || tokens[index] === "--directory") {
       if (destination !== undefined || tokens[index + 1] === undefined) return undefined;
-      destination = tokens[++index];
+      destination = shellTokenPath(tokens, ++index);
     } else {
       const inline = /^--directory=(.+)$/u.exec(tokens[index])?.[1];
       if (inline !== undefined) {
         if (destination !== undefined) return undefined;
-        destination = inline;
+        destination = shellTokenPath(tokens, index, "--directory=");
+        if (!destination.value) return undefined;
       }
     }
   }
@@ -382,8 +397,8 @@ function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
     (command === "branch" && tokens.length === 3 && tokens[2] === "--show-current");
 }
 
-function gitArchiveOutput(tokens: readonly string[]): { output?: string } | undefined {
-  let output: string | undefined, tree = false, paths = false;
+function gitArchiveOutput(tokens: readonly string[]): { output?: ShellTokenPath } | undefined {
+  let output: ShellTokenPath | undefined, tree = false, paths = false;
   for (let index = 2; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token === "--" && tree) { paths = true; continue; }
@@ -391,10 +406,11 @@ function gitArchiveOutput(tokens: readonly string[]): { output?: string } | unde
     if (token === "-o" || token === "--output") {
       const value = tokens[++index];
       if (!value || value.startsWith("-") || output !== undefined) return undefined;
-      output = value;
+      output = shellTokenPath(tokens, index);
     } else if (token.startsWith("--output=")) {
       if (output !== undefined || !token.slice(9)) return undefined;
-      output = token.slice(9);
+      output = shellTokenPath(tokens, index, "--output=");
+      if (!output.value) return undefined;
     } else if (/^--(?:format|prefix)=.+$/u.test(token) || /^-[0-9]$/u.test(token)) continue;
     else return undefined;
   }
@@ -550,22 +566,24 @@ function commandIssue(segment: string, cause: string, hint: string): CommandIssu
   return { segment: segment.trim().slice(0, 240), cause, hint };
 }
 
-function isLiteralPowerShellPath(value: string): boolean {
-  return value.length > 0 && !/[\u0000-\u001f\u007f$*?\[\]@(){},;|&`<>]/u.test(value);
+function isLiteralPowerShellPath(value: string, literalDollar = false): boolean {
+  return value.length > 0 && (literalDollar || !value.includes("$")) &&
+    !/[\u0000-\u001f\u007f*?\[\]@(){},;|&`<>]/u.test(value);
 }
 
-function robocopyOutput(tokens: readonly string[]): string | undefined {
+function robocopyOutput(tokens: readonly string[], literalDollar: (index: number) => boolean): ShellTokenPath | undefined {
   if (tokens.length !== 4) return undefined;
   const source = tokens[1];
   const destination = tokens[2];
   const file = tokens[3];
-  const literal = (value: string) => value.length > 0 && !/[\u0000-\u001f\u007f$*?]/u.test(value);
+  const literal = (value: string, index: number) => value.length > 0 &&
+    (!value.includes("$") || literalDollar(index)) && !/[\u0000-\u001f\u007f*?]/u.test(value);
   if (
-    !literal(source) || !literal(destination) || !literal(file) ||
+    !literal(source, 1) || !literal(destination, 2) || !literal(file, 3) ||
     file === "." || file === ".." || /[\\/]/u.test(file) ||
     source.startsWith("/") || destination.startsWith("/") || file.startsWith("/")
   ) return undefined;
-  return win32.join(destination, file);
+  return { value: win32.join(destination, file), parts: [{ index: 2 }, { index: 3 }] };
 }
 
 /** Deliberately not a PowerShell evaluator. Only immutable, local path definitions in
@@ -603,6 +621,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   let remoteMutation = false;
   const createdDirectories: string[] = [];
   const requiredDirectories: string[] = [];
+  const unresolvedPaths: string[] = [];
   let issue: CommandIssue | undefined;
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
@@ -688,10 +707,21 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
+    // A composed output is literal only if every dollar-bearing part was single-quoted.
+    const isLiteralDollarPath = (path: ShellTokenPath): boolean => powershell && path.parts.length > 0 && path.parts.every(({ index, prefix }) => {
+      const value = shellTokenPath(tokens, index, prefix).value;
+      if (!value.includes("$")) return true;
+      const original = tokenSources[rawTokens.length - tokens.length + index];
+      if (original === undefined) return false;
+      const singleQuoted = (source: string) => /^'[^']*'$/u.test(source);
+      return singleQuoted(original) || prefix !== undefined && original.startsWith(prefix) && singleQuoted(original.slice(prefix.length));
+    });
+    const appendParsedPath = (path: ShellTokenPath) => {
+      if (isLiteralDollarPath(path)) literalDollarPaths.add(paths.length);
+      paths.push(path.value);
+    };
     const appendTokenPath = (path: string, index?: number) => {
-      const original = index === undefined ? undefined : tokenSources[rawTokens.length - tokens.length + index];
-      if (powershell && original?.startsWith("'") && original.endsWith("'")) literalDollarPaths.add(paths.length);
-      paths.push(path);
+      appendParsedPath({ value: path, parts: index === undefined ? [] : [{ index }] });
     };
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
     const commitArguments = executable === "git" ? gitCommitArguments(tokens) : undefined;
@@ -755,20 +785,26 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (destination === undefined) {
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-curl-form", "use one literal HTTPS URL and one explicit -o output path");
-      } else paths.push(destination);
-      if (destination !== undefined) requiredDirectories.push(dirname(destination));
+      } else appendParsedPath(destination);
+      if (destination !== undefined) requiredDirectories.push(dirname(destination.value));
     } else if (/^(?:invoke-webrequest|iwr)$/u.test(executable)) {
       applies = true;
       const destination = powerShellDownloadOutput(tokens);
       if (destination === undefined) {
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-webrequest-form", "use one literal HTTPS -Uri and one explicit -OutFile path");
-      } else paths.push(destination);
-      if (destination !== undefined) requiredDirectories.push(dirname(destination));
+      } else appendParsedPath(destination);
+      if (destination !== undefined) requiredDirectories.push(dirname(destination.value));
     } else if (/^robocopy(?:\.exe)?$/u.test(executable)) {
       applies = true;
-      const destination = robocopyOutput(tokens);
+      const destination = robocopyOutput(tokens, index => isLiteralDollarPath(shellTokenPath(tokens, index)));
       if (destination === undefined) {
+        if (powershell && tokens.length === 4) {
+          for (const index of [2, 3]) {
+            const part = shellTokenPath(tokens, index);
+            if (part.value.includes("$") && !isLiteralDollarPath(part)) unresolvedPaths.push(part.value);
+          }
+        }
         ambiguous = true;
         issue ??= commandIssue(
           source,
@@ -776,8 +812,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
           "use literal Robocopy.exe <source-dir> <destination-dir> <single-file>",
         );
       } else {
-        paths.push(destination);
-        requiredDirectories.push(dirname(destination));
+        appendParsedPath(destination);
+        requiredDirectories.push(dirname(destination.value));
       }
     } else if (executable === "tar") {
       const mode = tarMode(tokens);
@@ -787,28 +823,28 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         issue ??= commandIssue(source, "unsupported-tar-form", "use literal tar listing or extraction with one explicit -C directory");
       } else if (!mode.readOnly) {
         applies = true;
-        paths.push(mode.extractTo!);
-        requiredDirectories.push(mode.extractTo!);
+        appendParsedPath(mode.extractTo!);
+        requiredDirectories.push(mode.extractTo!.value);
       }
     } else if (executable === "find" && isDirectFindHash(tokens)) {
       // Exact member lookup plus sha256sum is read-only; a following tee owns any output path.
     } else if (executable === "copy-item") {
       applies = true;
-      const destinations: string[] = [];
-      const sources: string[] = [];
-      const positional: string[] = [];
+      const destinations: ShellTokenPath[] = [];
+      const sources: ShellTokenPath[] = [];
+      const positional: ShellTokenPath[] = [];
       let unsupported = false;
       let force = false;
       for (let index = 1; index < tokens.length; index += 1) {
         const token = tokens[index]!;
         if (/^-(?:path|literalpath)$/iu.test(token)) {
           const candidate = tokens[index + 1];
-          if (candidate !== undefined && !candidate.startsWith("-")) sources.push(candidate);
+          if (candidate !== undefined && !candidate.startsWith("-")) sources.push(shellTokenPath(tokens, index + 1));
           else unsupported = true;
           index += 1;
         } else if (/^-destination$/iu.test(token)) {
           const candidate = tokens[index + 1];
-          if (candidate !== undefined && !candidate.startsWith("-")) destinations.push(candidate);
+          if (candidate !== undefined && !candidate.startsWith("-")) destinations.push(shellTokenPath(tokens, index + 1));
           else unsupported = true;
           index += 1;
         } else if (/^-force$/iu.test(token)) {
@@ -817,7 +853,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         } else if (token.startsWith("-")) {
           unsupported = true;
         } else if (!token.startsWith("-")) {
-          positional.push(token);
+          positional.push(shellTokenPath(tokens, index));
         }
       }
       const namedForm = sources.length === 1 && destinations.length === 1 && positional.length === 0;
@@ -834,18 +870,21 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         : namedSourceForm || positionalForm
           ? positional.at(-1)
           : undefined;
+      if (powershell && destination !== undefined && destination.value.includes("$") && !isLiteralDollarPath(destination)) {
+        unresolvedPaths.push(destination.value);
+      }
       if (unsupported
         || copySource === undefined
         || destination === undefined
-        || !isLiteralPowerShellPath(copySource)
-        || !isLiteralPowerShellPath(destination)) {
+        || !isLiteralPowerShellPath(copySource.value, isLiteralDollarPath(copySource))
+        || !isLiteralPowerShellPath(destination.value, isLiteralDollarPath(destination))) {
         ambiguous = true;
         issue ??= commandIssue(
           source,
           "unsupported-copy-item-form",
           "use one literal source, one literal destination, and optional -Force",
         );
-      } else paths.push(destination);
+      } else appendParsedPath(destination);
     } else if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
       applies = true;
       const named: number[] = [];
@@ -891,7 +930,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         issue ??= commandIssue(source, "unsupported-git-archive-form", "use git archive --format=tar --output=<scoped-file> <local-ref>");
       } else if (archive.output !== undefined) {
         applies = true;
-        paths.push(archive.output);
+        appendParsedPath(archive.output);
       }
     } else if (executable === "git" && isReadOnlyGitCommand(tokens)) {
       // Explicitly read-only git subcommands.
@@ -920,6 +959,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         remoteMutation ||= nested.remoteMutation === true;
         createdDirectories.push(...(nested.createdDirectories ?? []));
         requiredDirectories.push(...(nested.requiredDirectories ?? []));
+        unresolvedPaths.push(...(nested.unresolvedPaths ?? []));
         issue ??= nested.issue;
       }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
@@ -945,6 +985,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     ...(entryPaths.length ? { entryPaths } : {}),
     ...(createdDirectories.length > 0 ? { createdDirectories } : {}),
     ...(requiredDirectories.length > 0 ? { requiredDirectories } : {}),
+    ...(unresolvedPaths.length > 0 ? { unresolvedPaths } : {}),
     ...(gitCommit ? { gitCommit: true } : {}),
     ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
@@ -1018,6 +1059,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       ...(extracted.entryPaths ? { entryPaths: extracted.entryPaths.map(index => paths.length + index) } : {}),
       ...(extracted.createdDirectories ? { createdDirectories: extracted.createdDirectories } : {}),
       ...(extracted.requiredDirectories ? { requiredDirectories: extracted.requiredDirectories } : {}),
+      ...(extracted.unresolvedPaths ? { unresolvedPaths: extracted.unresolvedPaths } : {}),
       ...(extracted.gitCommit ? { gitCommit: true } : {}),
       // Preserve operand kind: Git resolves relative adds from the physical native cwd.
       ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds } : {}),
@@ -1641,6 +1683,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         }
         throw new WriteDeniedError("path-required", "<missing-path>");
       }
+      if (extracted.unresolvedPaths?.length) throw new WriteDeniedError("manifest-scope", extracted.unresolvedPaths[0]!);
       // OpenCode resolves native file-tool paths against its instance directory, not the
       // manifest root. Check the same destination without rewriting the tool arguments.
       const nativeFileTool = /^(?:write|edit)(?:$|[_-])/iu.test(_input.tool) || /patch/iu.test(_input.tool);
