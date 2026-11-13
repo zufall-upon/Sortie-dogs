@@ -1572,7 +1572,16 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   const declaredValidation = new Set(manifest.validation.map(normalizeCommand));
   const declaredDirectories = new Set<string>();
   for (const command of manifest.validation) {
-    for (const directory of extractWritePaths("bash", { command }).createdDirectories ?? []) {
+    let directories: readonly string[];
+    try {
+      directories = extractWritePaths("bash", { command }).createdDirectories ?? [];
+    } catch (error) {
+      if (!(error instanceof WriteDeniedError)) throw error;
+      // Directory inference is optional, unlike exact declared-command authority.
+      // An unresolved output must not prevent binding or grant a directory scope.
+      continue;
+    }
+    for (const directory of directories) {
       try {
         const normalized = normalizeManifestPath(directory);
         if (normalized.kind === "relative") declaredDirectories.add(normalized.path);

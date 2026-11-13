@@ -149,6 +149,38 @@ test("mission shell uses native execution policy while known destinations retain
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
 }));
 
+test("declared variable-output checks bind without inferring unresolved directory authority", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "nested"));
+  await writeFile(join(root, "check.txt"), "original");
+  const command = 'OUT=check.txt; printf ok > "$OUT"';
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "declared-variable-output-inference", read: [],
+    write: ["allowed.txt", "unresolved", "declared"],
+    validation: [command, 'mkdir -p unresolved; printf ok > "$OUT"', "mkdir -p declared"],
+  });
+  const check = (command: string, investigativeShell: boolean, workdir = root) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir } }, { investigativeShell });
+  let adapterCalls = 0;
+  for (const mode of [false, true]) {
+    await check(command, mode);
+    for (const [input, workdir] of [
+      ['OUT=check.txt; printf changed > "$OUT"', root],
+      [command, join(root, "nested")],
+    ] as const) await assert.rejects((async () => {
+      await check(input, mode, workdir);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "check.txt"), "utf8"), "original");
+  assert.equal(existsSync(join(root, "nested/check.txt")), false);
+  await assert.rejects(gate.checkPath("unresolved/child.txt"),
+    (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  await gate.checkPath("declared/child.txt");
+  await exec("bash", ["-c", command], { cwd: root });
+  assert.equal(await readFile(join(root, "check.txt"), "utf8"), "ok");
+}));
+
 test("PowerShell immutable cwd and Join-Path dataflow resolves the real destination without evaluating expressions", async () => fixture(async root => {
   const command = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
   const gate = await createWriteGate(await createProjectPaths(root), {
