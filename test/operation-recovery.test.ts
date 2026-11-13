@@ -717,6 +717,55 @@ test("POSIX output provenance blocks concatenated redirect and option destinatio
   assert.equal(await readFile(join(root, "allowed/with space $id.txt"), "utf8"), "literal");
 }));
 
+test("POSIX backslash output words cannot authorize normalized directory aliases", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "allowed"));
+  await writeFile(join(root, "input.txt"), "archive fixture\n");
+  await writeFile(join(root, "allowed/outside.tar"), "allowed original\n");
+  await writeFile(join(root, "allowed\\outside.tar"), "outside original\n");
+  const run = (file: string, args: string[]) => exec(file, args, { cwd: root });
+  await run("git", ["init", "-q"]);
+  await run("git", ["add", "input.txt"]);
+  await run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]);
+  // Native POSIX interpretation, independently of the gate: this is a filename
+  // containing a backslash, not a child of the allowed directory.
+  await run("bash", ["-c", String.raw`git archive --output="allowed\\native-oracle.tar" HEAD`]);
+  assert.ok((await readFile(join(root, "allowed\\native-oracle.tar"))).includes(Buffer.from("archive fixture\n")));
+  assert.equal(existsSync(join(root, "allowed/native-oracle.tar")), false);
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "posix-backslash-output-provenance", read: [], write: ["allowed/**"], validation: [],
+  });
+  let adapterCalls = 0;
+  for (const command of [
+    String.raw`git archive --output="allowed\\outside.tar" HEAD`,
+    String.raw`git archive --output='allowed\outside.tar' HEAD`,
+    String.raw`git archive --output "allowed\\outside.tar" HEAD`,
+    String.raw`git archive --output="allowed\".tar" HEAD`,
+    String.raw`curl --output="allowed\\outside.tar" https://example.test/result`,
+    String.raw`curl --progress-bar --output="allowed\\outside.tar" https://example.test/result`,
+    String.raw`tar -xf input.tar --directory="allowed\\outside"`,
+    String.raw`printf changed > "allowed\\outside.tar"`,
+    String.raw`cp input.txt "allowed\\outside.tar"`,
+  ]) for (const investigativeShell of [false, true]) {
+    await assert.rejects((async () => {
+      await gate.check({ tool: "shell", sessionID: "worker", callID: command },
+        { args: { command, workdir: root } }, { investigativeShell });
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError &&
+      (investigativeShell ? error.reason === "manifest-scope" : ["manifest-scope", "unclassified-command"].includes(error.reason)), command);
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "allowed/outside.tar"), "utf8"), "allowed original\n");
+  assert.equal(await readFile(join(root, "allowed\\outside.tar"), "utf8"), "outside original\n");
+  const safe = 'git archive --output="allowed/safe.tar" HEAD';
+  for (const investigativeShell of [false, true]) await gate.check({ tool: "shell", sessionID: "worker", callID: safe },
+    { args: { command: safe, workdir: root } }, { investigativeShell });
+  await run("bash", ["-c", safe]);
+  assert.ok((await readFile(join(root, "allowed/safe.tar"))).includes(Buffer.from("archive fixture\n")));
+  const windowsPath = String.raw`curl.exe --output="allowed\safe.tar" https://example.test/result`;
+  assert.deepEqual(extractWritePaths("powershell", { command: windowsPath, workdir: root }, root).paths, [join(root, "allowed/safe.tar")]);
+  await gate.check({ tool: "powershell", sessionID: "worker", callID: windowsPath }, { args: { command: windowsPath, workdir: root } });
+}));
+
 test("PowerShell call-operator output parts preserve literal and unresolved provenance", async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "powershell-output-parts", read: [], write: ["allowed/**"], validation: [],

@@ -748,6 +748,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       // Device mutations and real outputs in the same command still require their usual scope.
       const destination = target === undefined ? undefined : unquote(target);
       const incompleteTarget = target !== undefined && (hasUnresolvedOutputQuoting(target) ||
+        !powershell && target.includes("\\") ||
         /^["']/u.test(target) && /^[^\s;&|<>]/u.test(afterRedirect.slice(targetMatch![0].length)));
       if (!incompleteTarget && destination !== undefined &&
           (process.platform === "win32" ? /^nul$/iu.test(destination) : destination === "/dev/null")) continue;
@@ -827,9 +828,12 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       const next = source[original.index + original[0].length];
       return next !== undefined && !/[\s;&|<>]/u.test(next);
     };
-    const noteIncompletePath = (index: number, prefix?: string) => {
+    const noteIncompletePath = (index: number, prefix?: string, nativeOutput = true) => {
       const original = tokenSources[rawTokens.length - tokens.length + index];
-      if (incompleteSourceWord(index) || original !== undefined && hasUnresolvedOutputQuoting(original, prefix)) {
+      // This tokenizer does not decode POSIX escapes. A retained backslash is
+      // filename data (or shell syntax), never proof of a normalized separator.
+      if (incompleteSourceWord(index) || original !== undefined &&
+          (hasUnresolvedOutputQuoting(original, prefix) || nativeOutput && !powershell && original.includes("\\"))) {
         unresolvedPaths.push(tokens[index]!);
       }
     };
@@ -842,13 +846,13 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       const singleQuoted = (source: string) => /^'[^']*'$/u.test(source);
       return singleQuoted(original) || prefix !== undefined && original.startsWith(prefix) && singleQuoted(original.slice(prefix.length));
     });
-    const appendParsedPath = (path: ShellTokenPath) => {
-      for (const part of path.parts) noteIncompletePath(part.index, part.prefix);
+    const appendParsedPath = (path: ShellTokenPath, nativeOutput = true) => {
+      for (const part of path.parts) noteIncompletePath(part.index, part.prefix, nativeOutput);
       if (isLiteralDollarPath(path)) literalDollarPaths.add(paths.length);
       paths.push(path.value);
     };
-    const appendTokenPath = (path: string, index?: number) => {
-      appendParsedPath({ value: path, parts: index === undefined ? [] : [{ index }] });
+    const appendTokenPath = (path: string, index?: number, nativeOutput = true) => {
+      appendParsedPath({ value: path, parts: index === undefined ? [] : [{ index }] }, nativeOutput);
     };
     // An extra contiguous fragment can make an otherwise recognized output form
     // unsupported; keep its known destination unresolved even in native-shell mode.
@@ -1065,7 +1069,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
       else {
         entryPaths.push(...selected.map((_, index) => paths.length + index));
-        selected.forEach((path, index) => appendTokenPath(path, tokens.length - selected.length + index));
+        // Preserve the existing Git index-path contract, distinct from native outputs.
+        selected.forEach((path, index) => appendTokenPath(path, tokens.length - selected.length + index, false));
         gitAdds.push(...selected);
       }
     } else if (commitArguments !== undefined) {
