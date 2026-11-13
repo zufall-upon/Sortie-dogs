@@ -395,12 +395,56 @@ test("POSIX dollar destinations preserve literal quoting without authorizing var
     (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
 }));
 
+test("POSIX line continuations retain copy and move destinations before the adapter", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "source"), "fixture source\n");
+  await writeFile(join(root, "outside"), "outside original\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "line-continuation-destinations", read: [],
+    write: ["source", "allowed", "installed", "moved"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell });
+  let adapterCalls = 0;
+  for (const [command, expected] of [
+    ["cp source\\\n outside", ["outside"]],
+    ["env -u UNUSED cp source\\\n outside", ["outside"]],
+    ["cp sou\\\nrce out\\\nside", ["outside"]],
+    ['cp "so\\\nurce" outside', ["outside"]],
+    ["install source\\\n outside", ["outside"]],
+    ["mv source\\\n outside", ["source", "outside"]],
+  ] as const) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths,
+      expected.map(path => join(root, path)), command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "source"), "utf8"), "fixture source\n");
+  assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
+
+  for (const [command, target] of [
+    ["cp source\\\n allowed", "allowed"],
+    ["install source\\\n installed", "installed"],
+    ["mv source\\\n moved", "moved"],
+  ] as const) {
+    for (const mode of [false, true]) await check(command, mode);
+    await exec("bash", ["-c", command], { cwd: root });
+    assert.equal(await readFile(join(root, target), "utf8"), "fixture source\n");
+  }
+  assert.equal(existsSync(join(root, "source")), false);
+  assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
+}));
+
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
   await mkdir(join(root, "routes"));
   await writeFile(join(root, "routes/outside.tsx"), "unchanged\n");
+  await writeFile(join(root, "2file"), "numeric prefix unchanged\n");
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "shell-patch-provenance", read: [],
-    write: ["routes/$id.tsx", "routes/$heredoc.tsx", "routes/$moved.tsx", "routes/static.tsx"], validation: [],
+    write: ["routes/$id.tsx", "routes/$heredoc.tsx", "routes/$moved.tsx", "routes/$redirected.tsx", "routes/static.tsx", "routes/log.txt", "2"], validation: [],
   });
   const patch = "*** Begin Patch\n*** Add File: routes/$id.tsx\n+literal\n*** End Patch";
   const command = `apply_patch '${patch}'`;
@@ -411,6 +455,16 @@ test("shell patch bodies retain literal path provenance without trusting expansi
   for (const mode of [false, true]) await check(command, mode);
   const observed = await exec("bash", ["-c", `id=outside; apply_patch() { printf '%s' "$1"; }; ${command}`], { cwd: root });
   assert.equal(observed.stdout, patch, "the native shell passes the exact literal envelope");
+  for (const redirected of [
+    `${command} > /dev/null`,
+    `env -u UNUSED ${command}>/dev/null`,
+    `${command} > routes/log.txt`,
+    `${command} > 2 > routes/log.txt`,
+  ]) for (const mode of [false, true]) await check(redirected, mode);
+  assert.deepEqual(extractWritePaths("shell", { command: `${command} > routes/log.txt`, workdir: root }, root).paths,
+    [join(root, "routes/log.txt"), join(root, "routes/$id.tsx")]);
+  assert.deepEqual(extractWritePaths("shell", { command: `${command} > 2file`, workdir: root }, root).paths,
+    [join(root, "2file"), join(root, "routes/$id.tsx")]);
 
   // Use the native patch program as a local consumer of the shell argument; this
   // checks the real destination, not just the gate's extracted path or fake adapter.
@@ -419,13 +473,18 @@ test("shell patch bodies retain literal path provenance without trusting expansi
   for (const mode of [false, true]) await check(unifiedCommand, mode);
   await exec("bash", ["-c", `apply_patch() { printf '%s' "$1" | patch -p1 -s; }; ${unifiedCommand}`], { cwd: root });
   assert.equal(await readFile(join(root, "routes/$id.tsx"), "utf8"), "literal\n");
+  const redirectedUnified = "--- /dev/null\n+++ b/routes/$redirected.tsx\n@@ -0,0 +1,2 @@\n+line\\\n+tail\n";
+  const redirectedCommand = `apply_patch '${redirectedUnified}' > /dev/null`;
+  for (const mode of [false, true]) await check(redirectedCommand, mode);
+  await exec("bash", ["-c", `apply_patch() { printf '%s' "$1" | patch -p1 -s; }; ${redirectedCommand}`], { cwd: root });
+  assert.equal(await readFile(join(root, "routes/$redirected.tsx"), "utf8"), "line\\\ntail\n");
 
-  const herePatch = "--- /dev/null\n+++ b/routes/$heredoc.tsx\n@@ -0,0 +1 @@\n+quoted ' $()\n";
+  const herePatch = "--- /dev/null\n+++ b/routes/$heredoc.tsx\n@@ -0,0 +1,2 @@\n+quoted ' $()\\\n+tail\n";
   const heredoc = `apply_patch <<'PATCH'\n${herePatch}PATCH`;
   assert.deepEqual(extractWritePaths("shell", { command: heredoc, workdir: root }, root).paths, [join(root, "routes/$heredoc.tsx")]);
   for (const mode of [false, true]) await check(heredoc, mode);
   await exec("bash", ["-c", `apply_patch() { patch -p1 -s; }; ${heredoc}`], { cwd: root });
-  assert.equal(await readFile(join(root, "routes/$heredoc.tsx"), "utf8"), "quoted ' $()\n");
+  assert.equal(await readFile(join(root, "routes/$heredoc.tsx"), "utf8"), "quoted ' $()\\\ntail\n");
   for (const mode of [false, true]) {
     await check(`env -u UNUSED apply_patch<<"PATCH-END"\n${patch}\nPATCH-END`, mode);
     await check(`apply_patch <<-'PATCH'\n\t${patch.replaceAll("\n", "\n\t")}\n\tPATCH`, mode);
@@ -451,6 +510,11 @@ test("shell patch bodies retain literal path provenance without trusting expansi
     `apply_patch <<PATCH\n${patch.replace("routes/$id.tsx", "routes/static.tsx").replace("+literal", "+$PATCH")}\nPATCH`,
     `apply_patch<<'PATCH.1'\n${patch}\nPATCH.1`,
     `apply_patch <<'PATCH'\n${patch}`,
+    `apply_patch "${patch}" > /dev/null`,
+    'apply_patch "$PATCH" > /dev/null',
+    `apply_patch '${patch}'"$suffix" > /dev/null`,
+    `${command} > /dev/null unexpected`,
+    `${command} > "$output"`,
   ]) for (const mode of [false, true]) {
     await assert.rejects((async () => { await check(denied, mode); adapterCalls += 1; })(),
       (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
@@ -460,6 +524,9 @@ test("shell patch bodies retain literal path provenance without trusting expansi
     `apply_patch '${patch.replace("routes/$id.tsx", "routes/outside.tsx")}'`,
     `apply_patch <<'PATCH'\n${patch.replace("routes/$id.tsx", "routes/outside.tsx")}\nPATCH`,
     `apply_patch '${move.replace("routes/$moved.tsx", "routes/outside.tsx")}'`,
+    `apply_patch '${patch.replace("routes/$id.tsx", "routes/outside.tsx")}' > /dev/null`,
+    `${command} > routes/outside.tsx`,
+    `${command} > 2file`,
     `printf changed > routes/outside.tsx; ${heredoc}`,
     `${heredoc}\nprintf changed > routes/outside.tsx`,
   ]) for (const mode of [false, true]) {
@@ -467,7 +534,9 @@ test("shell patch bodies retain literal path provenance without trusting expansi
       (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", denied);
   }
   assert.equal(adapterCalls, 0);
+  assert.equal(existsSync(join(root, "routes/log.txt")), false);
   assert.equal(await readFile(join(root, "routes/outside.tsx"), "utf8"), "unchanged\n");
+  assert.equal(await readFile(join(root, "2file"), "utf8"), "numeric prefix unchanged\n");
   assert.equal(await readFile(join(root, "routes/$id.tsx"), "utf8"), "literal\n");
 }));
 

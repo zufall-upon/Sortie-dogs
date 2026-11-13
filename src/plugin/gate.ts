@@ -554,18 +554,39 @@ interface ShellPathSegment {
   patchHeredoc?: { body: string; literal: boolean; closed: boolean };
 }
 
+/** Remove POSIX line continuations from command syntax, but not single-quoted data or heredoc bodies. */
+function posixCommandLine(source: string): { line: string; next?: number } {
+  let line = "";
+  let quote: "\"" | "'" | undefined;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (character === "\\" && quote !== "'") {
+      const next = source[index + 1];
+      if (next === "\n") { index += 1; continue; }
+      line += character;
+      if (next !== undefined) { line += next; index += 1; }
+      continue;
+    }
+    if (character === "\n" && quote === undefined) return { line, next: index + 1 };
+    if (character === quote) quote = undefined;
+    else if (quote === undefined && (character === "'" || character === "\"")) quote = character;
+    line += character;
+  }
+  return { line };
+}
+
 /** Keep a direct patch heredoc together: its body is data, not shell statements. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
   const result: ShellPathSegment[] = [];
   let remaining = command;
   while (remaining.length > 0) {
-    const newline = scanShellSyntax(remaining, dialect).masked.indexOf("\n");
-    if (newline < 0) {
-      result.push(...shellSegments(remaining, dialect).map(source => ({ source })));
+    const { line, next } = posixCommandLine(remaining);
+    if (next === undefined) {
+      result.push(...shellSegments(line, dialect).map(source => ({ source })));
       break;
     }
-    const before = shellSegments(remaining.slice(0, newline), dialect);
+    const before = shellSegments(line, dialect);
     const source = before.at(-1) ?? "";
     const header = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u.exec(source);
     const head = header && unwrapEnvironmentCommand(words(header[1]!));
@@ -574,13 +595,13 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     if (!header || head?.length !== 1 || !/^(?:apply_?patch)$/iu.test(executable ?? "") ||
         scanShellSyntax(source, dialect).masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
       result.push(...before.map(part => ({ source: part })));
-      remaining = remaining.slice(newline + 1);
+      remaining = remaining.slice(next);
       continue;
     }
     result.push(...before.slice(0, -1).map(part => ({ source: part })));
     const delimiter = header[4] ?? header[5] ?? header[6]!;
     const stripTabs = header[2] === "<<-";
-    const bodyStart = newline + 1;
+    const bodyStart = next;
     let cursor = bodyStart;
     let bodyEnd = remaining.length;
     let after = remaining.length;
@@ -690,7 +711,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   const unresolvedPaths: string[] = [];
   let issue: CommandIssue | undefined;
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
-  const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
+  const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&\d+|[^\s;&|<>]+)/u;
   const dialect: ShellDialect = powershell ? "powershell" : "posix";
   const segments = shellPathSegments(command, dialect);
   const pathValues = new Map<string, string>();
@@ -1010,10 +1031,14 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       }
     } else if (/^(?:apply_?patch)$/iu.test(executable) || /(?:^|[\\/])apply_?patch(?=<)/iu.test(tokens[0]!)) {
       applies = true;
-      const argument = tokenSources[rawTokens.length - tokens.length + 1];
+      const argumentMatch = tokenMatches[rawTokens.length - tokens.length + 1];
+      const argument = argumentMatch?.[0];
       const singleQuoted = argument !== undefined && /^'[^']*'$/u.test(argument);
       const plainDoubleQuoted = argument !== undefined && /^"[^"$`\\]*"$/u.test(argument);
-      const literalArgument = /^(?:apply_?patch)$/iu.test(executable) && tokens.length === 2 &&
+      // Output redirects are validated separately above; they are not patch arguments.
+      const suffix = argumentMatch === undefined ? "" : source.slice(argumentMatch.index + argumentMatch[0].length);
+      const outputRedirectsOnly = /^(?:\s*(?:&|\d*)?(?:>>|>\||>)(?![=])\s*(?:"(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|<>]+))*\s*$/u.test(suffix);
+      const literalArgument = /^(?:apply_?patch)$/iu.test(executable) && outputRedirectsOnly &&
         !incompleteSourceWord(1) && (singleQuoted || plainDoubleQuoted);
       const literalHeredoc = patchHeredoc?.closed && (patchHeredoc.literal || !/[$`\\]/u.test(patchHeredoc.body));
       const trusted = literalArgument || literalHeredoc;
