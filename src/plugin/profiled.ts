@@ -19,7 +19,7 @@ import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
-  missionOperationCommandDecorated, missionOperationDirectoryMatch,
+  missionOperationCommandDecorated, missionOperationCommandRebind, missionOperationDirectoryMatch,
   missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
@@ -2731,7 +2731,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
           !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
-      return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
+      const directory = resolve(input.directory, execution.directory);
+      const observations = (operation?.observations ?? []).map(observation => {
+        // A later collector keeps the original native ownership and terminal, not a
+        // new permission to search its predecessor's history. Only rebind a recorded
+        // result to one equivalent declaration in the unchanged operation cwd.
+        if (!operation || operation.directory !== directory || observation.directory !== directory ||
+            !operation.commands.includes(observation.command) || commands.includes(observation.command)) return observation;
+        const equivalent = missionOperationCommandRebind(observation.command, commands, directory);
+        return equivalent !== undefined ? { ...observation, command: equivalent } : observation;
+      });
+      return { commands, directory, observations };
     }
     async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined): Promise<OperatorMission> {
       const execution = mission.execution;
@@ -2856,7 +2866,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
             const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
-            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
+            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
             // A completed tool envelope without an exit/result does not prove a successful
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
@@ -4582,7 +4592,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               observation.status = output.status === "error" || metadata.status === "error" ? "error" : "completed";
               if (Number.isSafeInteger(metadata.exit)) observation.exit = metadata.exit as number;
               if (Number.isSafeInteger(metadata.exit)) {
-                Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status));
+                Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status,
+                  typeof args.command === "string" ? args.command : undefined));
               }
             });
           }

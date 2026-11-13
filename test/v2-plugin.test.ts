@@ -2028,6 +2028,127 @@ test("V2 report accounting traverses native pages and retains child model, tool 
   } finally { cleanup?.(); }
 });
 
+for (const mode of ["success", "failure", "no-start", "structured-failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
+  "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "redeclared-node-pin", "unobserved-redeclared-run"] as const) {
+  test(`V2 timed native operation recovery through Mission APIs: ${mode}`, async () => {
+    await mkdir(resolve("_testenv"), { recursive: true });
+    const directory = await mkdtemp(resolve("_testenv/v2-timed-operation-"));
+    const fixture = contextFixture();
+    const identities: Record<string, { agent: string; parentID?: string; time?: { created: number } }> = {
+      root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+      worker: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 10_000 } },
+      former: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 20_000 } },
+    };
+    const history: Record<string, Record<string, unknown>[]> = {};
+    const requested: string[] = [];
+    let hooks!: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+    let client: any;
+    const cleanup = await createSortieDogsV2Plugin(async input => {
+      client = input.client;
+      hooks = await SortieDogsV010Plugin(input);
+      return {};
+    }).setup({ ...fixture.context, location: { directory },
+      session: { ...fixture.context.session, get: async ({ sessionID }) => ({ id: sessionID, ...identities[sessionID] }),
+        list: async ({ parentID }) => ({ data: Object.entries(identities).filter(([, info]) => info.parentID === parentID)
+          .map(([id, info]) => ({ id, ...info })), cursor: {} }),
+        context: async ({ sessionID }) => history[sessionID] ?? [] },
+      message: { list: async ({ sessionID, order }) => {
+        requested.push(sessionID);
+        const messages = history[sessionID] ?? [];
+        return { data: order === "desc" ? [...messages].reverse() : messages, cursor: {} };
+      } },
+    });
+    const chat = async (sessionID: string, text: string) => hooks["chat.message"]!(
+      { sessionID, messageID: `${sessionID}-prompt`, agent: identities[sessionID]!.agent },
+      { message: { id: `${sessionID}-prompt`, agent: identities[sessionID]!.agent,
+        model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }] });
+    const tool = async (name: string, sessionID: string, input: object = {}) =>
+      JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(input, { sessionID }));
+    try {
+      await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+      await writeFile(join(directory, "check.mjs"), 'console.log("PASS");\n');
+      const command = mode === "redeclared-node-pin" ? "node check.mjs" : "/usr/bin/python3 -B tools/start.py --background > /tmp/result.json";
+      const timed = `TIMEFORMAT='ELAPSED=%R'; time ${command}`;
+      const failed = mode === "failure" || mode === "redeclared-failure";
+      const expected = mode === "no-start" ? "not-started" : mode === "structured-failure" || failed ? "execution-failed" : "executed";
+      const output = (mode === "no-start" ? "NO_START\n" : mode === "structured-failure"
+        ? JSON.stringify({ status: "setup-failed", attempts: 1 }, null, 2) + "\n" : "") + "ELAPSED=0.284\n";
+      await chat("root", "Collect the already executed operation result without replay.");
+      const mission = await tool("start_mission", "root", { requirements: ["Collect the operation result"], kind: "operation",
+        execution: { commands: [mode === "foreign-owner" ? timed : command], directory } });
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(mission.task) });
+      await chat("coordinator", mission.task.prompt);
+      const plan = await tool("plan_units", "coordinator", { units: [{ title: "Collect result", objective: "Collect native result",
+        read: ["check.mjs"], write: ["result.json"], validation: ["node check.mjs"] }] });
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { args: structuredClone(plan.task) });
+      await chat("worker", plan.task.prompt);
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+        { output: "completed", metadata: { sessionId: "worker" } });
+      const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const started = mode === "before-admission" ? Date.parse(run.createdAt) - 1_000 : Date.now() + 10;
+      const native = { id: "msg_native", type: "assistant", agent: "dog-worker-v010", time: { created: started - 100, completed: started + 350 },
+        content: [{ type: "tool", id: "call_native", name: "shell", time: { created: started - 265, ran: started, completed: started + 350 },
+          state: { status: "completed", input: { command: mode === "redeclared-node-pin" ? "/actual/node check.mjs"
+            : mode === "command-mismatch" ? timed.replace("start.py", "other.py") : timed,
+            workdir: mode === "cwd-mismatch" ? join(directory, "other") : directory },
+          metadata: { exit: failed ? 1 : 0 }, content: [{ type: "text", text: output }] } }] };
+      if (mode !== "unobserved-redeclared-run") history[mode === "foreign-owner" ? "former" : "worker"] = [native, structuredClone(native)];
+      if (mode === "success") {
+        const projected = (await client.session.reviewMessages({ path: { id: "worker" }, query: { notBefore: run.createdAt } })).data[0].parts[0];
+        assert.equal(projected.tool, "bash");
+        assert.equal(projected.callID, "call_native");
+        assert.equal(projected.state.input.command, timed);
+        assert.equal(projected.state.time.start, started);
+        assert.equal(projected.state.time.end, started + 350);
+        assert.equal(projected.state.output, "ELAPSED=0.284\n");
+        assert.equal(projected.state.metadata.exit, 0);
+      }
+      const operation = (await tool("operator_status", "root")).acceptance_summary.operation;
+      if (mode === "success" || mode === "failure" || mode === "no-start" || mode === "structured-failure" || mode.startsWith("redeclared-")) {
+        assert.equal(operation.status, expected);
+        assert.equal(operation.process_succeeded, expected === "not-started" ? null : expected === "executed");
+        assert.equal(operation.observations.length, 1, "duplicate native records do not duplicate observations");
+        assert.equal(operation.observations[0].callID, "call_native");
+        assert.equal(operation.observations[0].exit, failed ? 1 : 0);
+        if (mode === "structured-failure") assert.deepEqual(operation.observations[0].result, { status: "setup-failed", attempts: 1 });
+        const submitted = await tool("submit_mission", "coordinator", { status: "blocked", summary: "The native result was collected; acceptance remains separate." });
+        assert.equal(submitted.acceptance_summary.operation.status, operation.status);
+        assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 1);
+      } else {
+        assert.equal(operation.status, "not-started");
+        assert.equal(operation.process_succeeded, null);
+        assert.deepEqual(operation.observations, []);
+        if (mode === "foreign-owner") assert.equal(requested.includes("former"), false, "a new owner cannot search the prior author's session");
+      }
+      if (mode.startsWith("redeclared-") || mode === "unobserved-redeclared-run") {
+        const replanned = await tool("plan_units", "coordinator", { executor: "self", reason: "Collect the existing native result with its literal timing spelling, without replay.",
+          execution: { commands: mode === "redeclared-node-pin" ? ["/other/node check.mjs"]
+            : mode === "redeclared-ambiguous" ? [timed, timed.replace("ELAPSED", "OTHER")]
+            : [mode === "redeclared-mismatch" ? timed.replace("result.json", "other.json") : timed],
+            directory: mode === "redeclared-cwd" ? join(directory, "other") : directory }, units: [{ title: "Retain result", objective: "Read-only result collection",
+            read: ["check.mjs"], write: [], validation: ["node check.mjs"] }] });
+        assert.notEqual(replanned.run_id, run.runID, "the collector has a different run and author");
+        // The known predecessor may still be read for native terminal/accounting
+        // reconciliation. Those reads must not import an unobserved operation.
+        if (mode === "unobserved-redeclared-run") history.worker = [native];
+        const retained = (await tool("operator_status", "root")).acceptance_summary.operation;
+        const equivalent = mode === "redeclared-run" || mode === "redeclared-failure";
+        assert.equal(retained.status, equivalent ? failed ? "execution-failed" : "executed" : "not-started",
+          "only a unique equivalent declaration retains the already admitted native result");
+        assert.equal(retained.process_succeeded, equivalent ? !failed : null);
+        assert.equal(retained.observations.length, mode === "unobserved-redeclared-run" ? 0 : 1);
+        if (retained.observations.length) {
+          assert.equal(retained.observations[0].callID, "call_native");
+          assert.equal(retained.observations[0].sessionID, "worker", "the original author is not reassigned to the collector");
+          assert.equal(retained.observations[0].command, equivalent ? timed : command);
+          assert.equal(retained.observations[0].exit, failed ? 1 : 0);
+        }
+      }
+      assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+    } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 async function registeredHost(run: (host: { requests: URL[]; pid: number; repeated: boolean; malformed: boolean;
   fail: boolean; noRegistration(): Promise<void>; register(pid: number): Promise<void> }) => Promise<void>) {
   await mkdir(resolve("_testenv"), { recursive: true });
