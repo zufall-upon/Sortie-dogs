@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import test from "node:test";
-import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths } from "../dist/plugin/gate.js";
+import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths, WriteDeniedError } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { missionOperationCommandMatch, OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
@@ -238,30 +238,86 @@ test("PowerShell pipeline and background assignment cannot publish a destination
 }));
 
 test("PowerShell literal-dollar destinations keep quote provenance without granting variable expansion", async () => fixture(async root => {
+  await mkdir(join(root, "archives/$id"), { recursive: true });
   const gate = await createWriteGate(await createProjectPaths(root), {
-    version: "0.1.0", task_id: "literal-dollar", read: [], write: ["routes/$id.tsx"], validation: [],
+    version: "0.1.0", task_id: "literal-dollar", read: [], write: ["routes/$id.tsx", "archives/$id/**"], validation: [],
   });
   const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
     { args: { command: `$seed='unused'; ${command}`, workdir: root } }, { investigativeShell: true });
-  for (const command of [
-    "Set-Content -LiteralPath 'routes/$id.tsx' -Value content",
-    "Add-Content -Path 'routes/$id.tsx' -Value $id",
-    "New-Item -Path 'routes/$id.tsx'",
-    "Remove-Item -LiteralPath 'routes/$id.tsx'",
-    "Out-File -FilePath 'routes/$id.tsx'",
-    "touch 'routes/$id.tsx'",
-    "echo content > 'routes/$id.tsx'",
-    "pwsh -NoProfile -Command 'Set-Content -LiteralPath ''routes/$id.tsx'' -Value content'",
-  ]) {
-    assert.deepEqual(extractWritePaths("powershell", { command }, root).paths, [join(root, "routes/$id.tsx")]);
+  const strict = (command: string) => gate.check({ tool: "powershell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } });
+  for (const [command, target] of [
+    ["Set-Content -LiteralPath 'routes/$id.tsx' -Value content", "routes/$id.tsx"],
+    ["Add-Content -Path 'routes/$id.tsx' -Value $id", "routes/$id.tsx"],
+    ["New-Item -Path 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["Remove-Item -LiteralPath 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["Out-File -FilePath 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["touch 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["echo content > 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["curl.exe -o 'routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["& 'curl.exe' --output 'routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["curl.exe --output='routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["Invoke-WebRequest -Uri https://example.test/result -OutFile 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["iwr -OutFile 'routes/$id.tsx' -Uri https://example.test/result", "routes/$id.tsx"],
+    ["tar -xf input.tar -C 'archives/$id'", "archives/$id"],
+    ["tar -xf input.tar --directory='archives/$id'", "archives/$id"],
+    ["git archive --format=tar --output 'routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["git archive --format=tar --output='routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["Copy-Item -LiteralPath 'source/$id.tsx' -Destination 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["Robocopy.exe 'source' 'routes' '$id.tsx'", "routes/$id.tsx"],
+    ["Robocopy.exe source 'archives/$id' ok.tsx", "archives/$id/ok.tsx"],
+    ["pwsh -NoProfile -Command 'Set-Content -LiteralPath ''routes/$id.tsx'' -Value content'", "routes/$id.tsx"],
+    ["pwsh -NoProfile -Command 'curl.exe -o ''routes/$id.tsx'' https://example.test/result'", "routes/$id.tsx"],
+  ] as const) {
+    const extracted = extractWritePaths("powershell", { command }, root);
+    assert.equal(extracted.ambiguous, false, command);
+    assert.deepEqual(extracted.paths, [join(root, target)], command);
     await shell(command);
+    await strict(command);
+  }
+  for (const command of [
+    "curl.exe -o 'routes/$other.tsx' https://example.test/result",
+    "Invoke-WebRequest -Uri https://example.test/result -OutFile 'routes/$other.tsx'",
+    "tar -xf input.tar -C 'archives/$other'",
+    "git archive --output 'routes/$other.tsx' HEAD",
+    "Copy-Item -Path input.txt -Destination 'routes/$other.tsx'",
+    "Robocopy.exe 'source' 'routes' '$other.tsx'",
+  ]) {
+    const scopeDenied = (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope";
+    await assert.rejects(shell(command), scopeDenied, command);
+    await assert.rejects(strict(command), scopeDenied, command);
   }
   for (const command of [
     'Set-Content -LiteralPath "routes/$id.tsx" -Value content',
     "Set-Content -Path $id -Value 'routes/$id.tsx'",
     'Set-Content -Path "\'$id\'" -Value content',
     "echo content > $id",
-  ]) await assert.rejects(shell(command), /Write denied/u, command);
+    'curl.exe -o "routes/$id.tsx" https://example.test/result',
+    "curl.exe -o $id https://example.test/result",
+    'curl.exe --output="\'routes/$id.tsx\'" https://example.test/result',
+    'Invoke-WebRequest -Uri https://example.test/result -OutFile "routes/$id.tsx"',
+    'tar -xf input.tar -C "archives/$id"',
+    'git archive --output "routes/$id.tsx" HEAD',
+    'Copy-Item -Path input.txt -Destination "routes/$id.tsx"',
+    'Robocopy.exe source routes "$id.tsx"',
+    'Robocopy.exe source "archives/$id" ok.tsx',
+    "curl.exe -o 'routes/$id.tsx' https://example.test/result; curl.exe -o $id https://example.test/result",
+  ]) {
+    await assert.rejects(shell(command), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+    await assert.rejects(strict(command), (error: unknown) => error instanceof WriteDeniedError &&
+      ["manifest-scope", "unclassified-command"].includes(error.reason), command);
+  }
+  const reviewerGate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "reviewer-literal-dollar", read: [], write: ["asset$id.json"], validation: [],
+  });
+  for (const command of [
+    "$seed='unused'; curl.exe -o 'asset$id.json' https://example.test/result",
+    "$seed='unused'; Invoke-WebRequest -Uri https://example.test/result -OutFile 'asset$id.json'",
+  ]) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [join(root, "asset$id.json")]);
+    await reviewerGate.check({ tool: "shell", sessionID: "reviewer", callID: command },
+      { args: { command, workdir: root } }, { investigativeShell: true });
+  }
 }));
 
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
