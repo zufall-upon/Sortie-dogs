@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { missionReviewIndependent } from "../dist/core/operator-mission.js";
@@ -259,6 +259,42 @@ for (const legacy of [false, true]) test(`actual implementation authorship survi
     assert.equal(mission.review!.verdict, "findings");
     assert.equal(missionReviewIndependent(mission, "worker"), false);
     await assert.rejects(f.tool("root", "complete_mission"));
+  } finally { await f.dispose(); }
+});
+
+for (const recovery of [false, true]) test(`unresolved declared output conservatively retains source authorship: ${recovery ? "history recovery" : "live after-hook"}`, async () => {
+  const f = await fixture();
+  try {
+    const harmless = "node --check check.mjs";
+    const command = 'OUT=.sortie-env/check.txt; cp check.mjs result.txt; node --check check.mjs > "$OUT"';
+    await mkdir(join(f.directory, ".sortie-env"), { recursive: true });
+    await f.prompt("root", "Implement and validate result");
+    await f.tool("root", "start_mission", { requirements: ["Implement and validate result"] });
+    const plan = await f.tool("root", "plan_units", { units: [{ title: "Implement", objective: "Implement result",
+      read: ["check.mjs"], write: ["result.txt"], validation: [harmless, command] }] });
+    const worker = await f.before("root", "subagent", f.task(plan.task));
+    await f.prompt("worker", worker.input.prompt); await f.bind("worker");
+    await f.shell("worker", harmless);
+    assert.equal((await f.missions.required("root")).sourceAuthors?.includes("worker") ?? false, false);
+    await f.shell("worker", command);
+    assert.match(await readFile(join(f.directory, "result.txt"), "utf8"), /readFileSync/u);
+    assert.equal((await f.missions.required("root")).sourceAuthors?.includes("worker"), true);
+    // Both required checks must observe the same post-write candidate.
+    await f.shell("worker", harmless);
+    await f.shell("worker", command);
+    await f.finish(worker, "worker", "Implemented and validated");
+    await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+    if (recovery) {
+      await f.missions.update("root", mission => { delete mission.sourceAuthors; });
+      await f.start();
+    }
+    f.agents.worker!.agent = "dog-reviewer-v010";
+    await f.missions.update("root", mission => { mission.review!.child = "worker"; });
+    const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
+    assert.equal(review.status, "self-recheck-required");
+    const mission = await f.missions.required("root");
+    assert.equal(mission.sourceAuthors?.includes("worker"), true);
+    assert.equal(missionReviewIndependent(mission, "worker"), false);
   } finally { await f.dispose(); }
 });
 

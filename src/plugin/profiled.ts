@@ -207,11 +207,11 @@ function forwardTerminalText(text: string): string {
 }
 
 /** Best-effort observation only; unresolved outputs never grant path authority. */
-function observedWritePaths(tool: string, args: unknown, directory: string): readonly string[] {
-  try { return extractWritePaths(tool, args, directory).paths; }
+function observedWritePaths(tool: string, args: unknown, directory: string): { paths: readonly string[]; unresolved: boolean } {
+  try { return { paths: extractWritePaths(tool, args, directory).paths, unresolved: false }; }
   catch (error) {
     if (!(error instanceof WriteDeniedError)) throw error;
-    return [];
+    return { paths: [], unresolved: true };
   }
 }
 
@@ -459,9 +459,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const prompt = history.findIndex(message => record(message.info) && message.info.role === "user" && Array.isArray(message.parts) &&
           message.parts.some(part => record(part) && part.type === "text" && typeof part.text === "string" &&
             (part.text.includes(`task_id: ${attempt.taskID}\n`) || promptText && part.text.includes(promptText))));
-        return prompt >= 0 && reviewResponseMessages(history, prompt).some(message => Array.isArray(message.parts) && message.parts.some(part =>
-          record(part) && part.type === "tool" && record(part.state) && part.state.status === "completed" &&
-          observedWritePaths(String(part.tool), part.state.input, input.directory).length));
+        return prompt >= 0 && reviewResponseMessages(history, prompt).some(message => Array.isArray(message.parts) && message.parts.some(part => {
+          if (!record(part) || part.type !== "tool" || !record(part.state) || part.state.status !== "completed") return false;
+          const observed = observedWritePaths(String(part.tool), part.state.input, input.directory);
+          return observed.unresolved || observed.paths.length > 0;
+        }));
       });
       if (wrote) {
         return missions.update(root, current => { current.sourceAuthors = [...new Set([...(current.sourceAuthors ?? []), id])]; });
@@ -4454,7 +4456,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const successful = output.status !== "error" && output.status !== "cancelled";
         const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
-        const changed = successful ? observedWritePaths(request.tool, args, input.directory).map(relativePath) : [];
+        const observed = successful ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
+        const changed = observed.paths.map(relativePath);
         if (changed.length) observeActorWork(input.directory, id, { kind: "change", paths: changed, callID: request.callID });
         if (successful && request.tool === "read" && typeof (args.filePath ?? args.path) === "string") {
           observeActorWork(input.directory, id, { kind: "read", paths: [relativePath(String(args.filePath ?? args.path))], callID: request.callID });
@@ -4653,8 +4656,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return;
         }
         if ((!ownership && !await rootFor(id)) || ownTools.has(request.tool)) return;
-        if (!ownership && output.status !== "error" && output.status !== "cancelled" &&
-            observedWritePaths(request.tool, record(request.args) ? request.args : {}, input.directory).length) {
+        if (!ownership && successful && (observed.unresolved || observed.paths.length > 0)) {
           const root = await rootFor(id);
           if (root && await missions.read(root)) await missions.update(root, mission => {
             mission.sourceAuthors = [...new Set([...(mission.sourceAuthors ?? []), id])];

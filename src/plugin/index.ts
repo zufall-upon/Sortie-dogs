@@ -79,6 +79,7 @@ import {
 } from "./continuation.js";
 import {
   WriteDeniedError,
+  artifactInspectionSegments,
   canonicalManifestReadScopes,
   canonicalManifestWriteScopes,
   canonicalDeclaredValidationSequence,
@@ -5441,33 +5442,43 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const preparedDirectories: string[] = [];
     for (let index = 0; index < manifest.validation.length; index += 1) {
       const command = manifest.validation[index];
-      let extraction: ReturnType<typeof extractWritePaths>;
+      let extractions: { extraction: ReturnType<typeof extractWritePaths>; artifact: boolean }[];
       try {
-        extraction = extractWritePaths("bash", { command });
+        extractions = [{ extraction: extractWritePaths("bash", { command }),
+          artifact: /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command) }];
       } catch (error) {
         if (!(error instanceof WriteDeniedError)) throw error;
-        // Exact declared checks need no inferred output authority. Artifact commands
-        // below still require a classified form and their directory prerequisites.
-        extraction = { applies: true, ambiguous: true, paths: [] };
-      }
-      if (extraction.ambiguous && /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command)) {
-        throw new HandoffDeniedError("contract-invalid", path, {
-          defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
+        // Exact declared checks need no inferred output authority. Inspect the same
+        // shell segments individually so an unresolved output cannot hide a later
+        // artifact's classification or another segment's directory prerequisites.
+        extractions = artifactInspectionSegments(command).map(({ source, tool, artifact }) => {
+          try { return { extraction: extractWritePaths(tool, { command: source }), artifact }; }
+          catch (segmentError) {
+            if (!(segmentError instanceof WriteDeniedError)) throw segmentError;
+            return { extraction: { applies: true, ambiguous: true, paths: [] }, artifact };
+          }
         });
       }
-      for (const required of extraction.requiredDirectories ?? []) {
-        const absolute = resolve(inspectedProjectRoot, required);
-        const exists = await stat(absolute).then((value) => value.isDirectory()).catch(() => false);
-        const prepared = preparedDirectories.some((candidate) =>
-          samePath(candidate, absolute) || relative(absolute, candidate).split(/[\\/]/u)[0] !== "..");
-        if (!exists && !prepared) {
+      for (const { extraction, artifact } of extractions) {
+        if (extraction.ambiguous && artifact) {
           throw new HandoffDeniedError("contract-invalid", path, {
-            defects: [contractDefect("manifest", `/validation/${index}`, "artifact_directory_unprepared")],
+            defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
           });
         }
+        for (const required of extraction.requiredDirectories ?? []) {
+          const absolute = resolve(inspectedProjectRoot, required);
+          const exists = await stat(absolute).then((value) => value.isDirectory()).catch(() => false);
+          const prepared = preparedDirectories.some((candidate) =>
+            samePath(candidate, absolute) || relative(absolute, candidate).split(/[\\/]/u)[0] !== "..");
+          if (!exists && !prepared) {
+            throw new HandoffDeniedError("contract-invalid", path, {
+              defects: [contractDefect("manifest", `/validation/${index}`, "artifact_directory_unprepared")],
+            });
+          }
+        }
+        preparedDirectories.push(...(extraction.createdDirectories ?? []).map((directory) =>
+          resolve(inspectedProjectRoot, directory)));
       }
-      preparedDirectories.push(...(extraction.createdDirectories ?? []).map((directory) =>
-        resolve(inspectedProjectRoot, directory)));
     }
 
     const continuity = inspectAcceptanceContinuity(validation.value);

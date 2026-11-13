@@ -7879,6 +7879,31 @@ test("the contract preflight reports gate defects without granting inspection", 
     artifactManifest.validation[1] = validDownload;
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
 
+    // An unresolved ordinary output must not erase artifact facts from later segments.
+    const compoundCases: Array<{ validation: string[]; defects: string[] }> = [
+      { validation: ['OUT=temp/artifact/extracted; node check.mjs && tar -xzf archive.tar.gz -C "$OUT"'],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ['OUT=temp/artifact/extracted; node check.mjs && env MODE=test tar -xzf archive.tar.gz -C "$OUT"'],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["$out = 'temp/check.txt'; Write-Output ok > $missing; & tar -xzf archive.tar.gz -C $unknown"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ['OUT=temp/check.txt; node check.mjs > "$OUT" && tar -xzf archive.tar.gz -C temp/artifact/extracted'],
+        defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["mkdir -p temp/artifact/extracted", 'OUT=temp/check.txt; node check.mjs > "$OUT" && tar -xzf archive.tar.gz -C temp/artifact/extracted'],
+        defects: [] },
+      { validation: ['OUT=temp/check.txt; printf \'tar -xzf archive.tar.gz\' > "$OUT"'], defects: [] },
+    ];
+    for (const { validation, defects } of compoundCases) {
+      artifactManifest.validation = validation;
+      await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+      const result = await report(handoffPath);
+      assert.deepEqual(result.defects, defects, validation.join("; "));
+      assert.equal(result.status, defects.length ? "defective" : "ok");
+    }
+    artifactManifest.validation = ["mkdir -p temp/artifact/extracted", validDownload,
+      "tar -xzf temp/artifact/archive.tar.gz -C temp/artifact/extracted"];
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+
     // A passing report must not stand in for the binding child's own Read.
     await activate(hooks);
     const denied = await executeBindWriteGate(hooks, directory);

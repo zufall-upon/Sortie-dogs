@@ -638,6 +638,23 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
   return result;
 }
 
+function usesPowerShell(name: string, command: string): boolean {
+  return /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
+    process.platform === "win32" && name === "shell" || /^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/u.test(command) ||
+    /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
+}
+
+/** Non-authorizing preflight view, using the same dialect and segments as path extraction. */
+export function artifactInspectionSegments(command: string): { source: string; tool: string; artifact: boolean }[] {
+  const powershell = usesPowerShell("bash", command);
+  return shellPathSegments(command, powershell ? "powershell" : "posix").map(({ source }) => {
+    let tokens = unwrapEnvironmentCommand(words(source));
+    if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
+    const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+    return { source, tool: powershell ? "powershell" : "bash", artifact: /^(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)$/u.test(executable ?? "") };
+  });
+}
+
 /** Prefixes before unquoted shell suffixes, including those after a declared envelope or redirect. */
 export function* shellCommandPrefixes(command: string, dialect: ShellDialect): Generator<string> {
   const masked = scanShellSyntax(command, dialect).masked;
@@ -1194,9 +1211,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
         } : {}),
       };
     }
-    const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
-      process.platform === "win32" && name === "shell" || /^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/u.test(command) ||
-      /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
+    const powershell = usesPowerShell(name, command);
     // Native ShellTool defaults to Location, resolves an explicit workdir against it,
     // then resolves outputs against that cwd, never an unrelated manifest root.
     const workdir = toolDirectory === undefined ? undefined : resolve(toolDirectory,
