@@ -11226,6 +11226,20 @@ test("plugin shell gate allows explicit reads and denies unknown executables", a
       'Write denied for "blocked.txt": operation manifest write scope.',
       "manifest-scope",
     );
+    if (process.platform !== "win32") {
+      await expectMessage(
+        () => invoke("cp allowed.txt\\\n blocked-copy-line.txt"),
+        'Write denied for "blocked-copy-line.txt": operation manifest write scope.',
+        "manifest-scope",
+      );
+      const patch = "*** Begin Patch\n*** Add File: allowed.txt\n+ok\n*** End Patch";
+      await invoke(`apply_patch '${patch}' > /dev/null`);
+      await expectMessage(
+        () => invoke(`apply_patch '${patch}' > blocked-patch-output.txt`),
+        'Write denied for "blocked-patch-output.txt": operation manifest write scope.',
+        "manifest-scope",
+      );
+    }
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" project item-list 1 --owner example');
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" project item-edit --id ITEM --field-id FIELD --single-select-option-id OPTION');
     await invoke('env -u GITHUB_TOKEN "/approved/gh.exe" api graphql -f query="query { viewer { login } }"');
