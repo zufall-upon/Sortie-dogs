@@ -504,15 +504,20 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
   return segments;
 }
 
-/** The command before an unquoted shell suffix, reusing the gate's existing syntax scanner. */
-export function shellCommandBase(command: string, dialect: ShellDialect): string | undefined {
+/** Prefixes before unquoted shell suffixes, including those after a declared envelope or redirect. */
+export function* shellCommandPrefixes(command: string, dialect: ShellDialect): Generator<string> {
   const masked = scanShellSyntax(command, dialect).masked;
   for (let index = 0; index < masked.length; index += 1) {
     const character = masked[index]!;
     if (!";|><\r\n".includes(character) && !(character === "&" && masked.slice(0, index).trim())) continue;
     const base = command.slice(0, index);
-    return (character === ">" || character === "<" ? base.replace(/(?:^|\s)\d+$/u, "") : base).trim();
+    yield (character === ">" || character === "<" ? base.replace(/(?:^|\s)\d+$/u, "") : base).trim();
   }
+}
+
+/** The command before the first unquoted shell suffix. */
+export function shellCommandBase(command: string, dialect: ShellDialect): string | undefined {
+  for (const prefix of shellCommandPrefixes(command, dialect)) return prefix;
   return undefined;
 }
 
