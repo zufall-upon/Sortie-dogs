@@ -79,6 +79,7 @@ import {
 } from "./continuation.js";
 import {
   WriteDeniedError,
+  artifactInspectionSegments,
   canonicalManifestReadScopes,
   canonicalManifestWriteScopes,
   canonicalDeclaredValidationSequence,
@@ -5441,25 +5442,60 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const preparedDirectories: string[] = [];
     for (let index = 0; index < manifest.validation.length; index += 1) {
       const command = manifest.validation[index];
-      const extraction = extractWritePaths("bash", { command });
-      if (extraction.ambiguous && /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command)) {
-        throw new HandoffDeniedError("contract-invalid", path, {
-          defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
+      let extractions: { extraction: ReturnType<typeof extractWritePaths>; artifact: boolean }[];
+      try {
+        const extraction = extractWritePaths("bash", { command });
+        const artifact = /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command);
+        extractions = [{ extraction, artifact }];
+        if (extraction.ambiguous && !artifact) {
+          // Ambiguity from a surrounding command must not hide an unsupported
+          // artifact form. Keep the whole extraction for resolved variables and
+          // directory facts; segment inspection only adds classification defects.
+          for (const segment of artifactInspectionSegments(command)) {
+            if (!segment.artifact) continue;
+            try {
+              const part = extractWritePaths(segment.tool, { command: segment.source });
+              if (part.ambiguous) extractions.push({ extraction: part, artifact: true });
+            } catch (segmentError) {
+              // The whole extraction succeeded, so a variable unresolved only in
+              // isolation may have been resolved by its preceding definitions.
+              if (!(segmentError instanceof WriteDeniedError)) throw segmentError;
+            }
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof WriteDeniedError)) throw error;
+        // Exact declared checks need no inferred output authority. Inspect the same
+        // shell segments individually so an unresolved output cannot hide a later
+        // artifact's classification or another segment's directory prerequisites.
+        extractions = artifactInspectionSegments(command).map(({ source, tool, artifact }) => {
+          try { return { extraction: extractWritePaths(tool, { command: source }), artifact }; }
+          catch (segmentError) {
+            if (!(segmentError instanceof WriteDeniedError)) throw segmentError;
+            return { extraction: { applies: true, ambiguous: true, paths: [] }, artifact };
+          }
         });
       }
-      for (const required of extraction.requiredDirectories ?? []) {
-        const absolute = resolve(inspectedProjectRoot, required);
-        const exists = await stat(absolute).then((value) => value.isDirectory()).catch(() => false);
-        const prepared = preparedDirectories.some((candidate) =>
-          samePath(candidate, absolute) || relative(absolute, candidate).split(/[\\/]/u)[0] !== "..");
-        if (!exists && !prepared) {
+      for (const { extraction, artifact } of extractions) {
+        if (extraction.ambiguous && artifact) {
           throw new HandoffDeniedError("contract-invalid", path, {
-            defects: [contractDefect("manifest", `/validation/${index}`, "artifact_directory_unprepared")],
+            defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
           });
         }
+        for (const required of extraction.requiredDirectories ?? []) {
+          const absolute = resolve(inspectedProjectRoot, required);
+          const exists = await stat(absolute).then((value) => value.isDirectory()).catch(() => false);
+          const prepared = preparedDirectories.some((candidate) =>
+            samePath(candidate, absolute) || relative(absolute, candidate).split(/[\\/]/u)[0] !== "..");
+          if (!exists && !prepared) {
+            throw new HandoffDeniedError("contract-invalid", path, {
+              defects: [contractDefect("manifest", `/validation/${index}`, "artifact_directory_unprepared")],
+            });
+          }
+        }
+        preparedDirectories.push(...(extraction.createdDirectories ?? []).map((directory) =>
+          resolve(inspectedProjectRoot, directory)));
       }
-      preparedDirectories.push(...(extraction.createdDirectories ?? []).map((directory) =>
-        resolve(inspectedProjectRoot, directory)));
     }
 
     const continuity = inspectAcceptanceContinuity(validation.value);

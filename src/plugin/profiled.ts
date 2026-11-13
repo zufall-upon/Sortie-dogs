@@ -15,7 +15,7 @@ import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { reportText, resolveReportLocale } from "./report-locale.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool, WriteDeniedError } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
@@ -204,6 +204,15 @@ function forwardTerminalText(text: string): string {
   const first = lines.findIndex(line => line.trim().length > 0);
   if (first >= 0 && /^DONE(?=[ \t]*(?:[—-]|$))/u.test(lines[first]!)) lines[first] = `status: ${lines[first]}`;
   return lines.join(newline);
+}
+
+/** Best-effort observation only; unresolved outputs never grant path authority. */
+function observedWritePaths(tool: string, args: unknown, directory: string): { paths: readonly string[]; unresolved: boolean } {
+  try { return { paths: extractWritePaths(tool, args, directory).paths, unresolved: false }; }
+  catch (error) {
+    if (!(error instanceof WriteDeniedError)) throw error;
+    return { paths: [], unresolved: true };
+  }
 }
 
 /** One transport namespace around the existing MkII engine; no second write gate or acceptance engine. */
@@ -450,9 +459,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const prompt = history.findIndex(message => record(message.info) && message.info.role === "user" && Array.isArray(message.parts) &&
           message.parts.some(part => record(part) && part.type === "text" && typeof part.text === "string" &&
             (part.text.includes(`task_id: ${attempt.taskID}\n`) || promptText && part.text.includes(promptText))));
-        return prompt >= 0 && reviewResponseMessages(history, prompt).some(message => Array.isArray(message.parts) && message.parts.some(part =>
-          record(part) && part.type === "tool" && record(part.state) && part.state.status === "completed" &&
-          extractWritePaths(String(part.tool), part.state.input, input.directory).paths.length));
+        return prompt >= 0 && reviewResponseMessages(history, prompt).some(message => Array.isArray(message.parts) && message.parts.some(part => {
+          if (!record(part) || part.type !== "tool" || !record(part.state) || part.state.status !== "completed") return false;
+          const observed = observedWritePaths(String(part.tool), part.state.input, input.directory);
+          return observed.unresolved || observed.paths.length > 0;
+        }));
       });
       if (wrote) {
         return missions.update(root, current => { current.sourceAuthors = [...new Set([...(current.sourceAuthors ?? []), id])]; });
@@ -4445,7 +4456,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const successful = output.status !== "error" && output.status !== "cancelled";
         const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
-        const changed = successful ? extractWritePaths(request.tool, args, input.directory).paths.map(relativePath) : [];
+        const observed = successful ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
+        const changed = observed.paths.map(relativePath);
         if (changed.length) observeActorWork(input.directory, id, { kind: "change", paths: changed, callID: request.callID });
         if (successful && request.tool === "read" && typeof (args.filePath ?? args.path) === "string") {
           observeActorWork(input.directory, id, { kind: "read", paths: [relativePath(String(args.filePath ?? args.path))], callID: request.callID });
@@ -4644,8 +4656,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           return;
         }
         if ((!ownership && !await rootFor(id)) || ownTools.has(request.tool)) return;
-        if (!ownership && output.status !== "error" && output.status !== "cancelled" &&
-            extractWritePaths(request.tool, record(request.args) ? request.args : {}, input.directory).paths.length) {
+        if (!ownership && successful && (observed.unresolved || observed.paths.length > 0)) {
           const root = await rootFor(id);
           if (root && await missions.read(root)) await missions.update(root, mission => {
             mission.sourceAuthors = [...new Set([...(mission.sourceAuthors ?? []), id])];

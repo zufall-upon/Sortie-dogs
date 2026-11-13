@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -12,13 +12,15 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
-for (const mode of ["single", "long", "first-failed", "first-missing", "recovered", "wrapped-recovered", "stale-first-tool"] as const) test(
+for (const mode of ["single", "long", "variable-output", "first-failed", "first-missing", "recovered", "wrapped-recovered", "stale-first-tool"] as const) test(
   mode === "long" ? "long native validation keeps its original Worker and budget through setup repair"
+    : mode === "variable-output" ? "declared variable-output validation survives public handoff binding and native result recording"
     : mode === "single" ? "same Worker reruns its exact failed check after setup repair without a new plan or source change"
       : `ordinary Worker requires every declared native check: ${mode}`, async () => {
-  const longCommand = mode === "long", multiple = !["single", "long"].includes(mode);
+  const longCommand = mode === "long", multiple = !["single", "long", "variable-output"].includes(mode);
   const checkArgs = ["check.mjs", ...(longCommand ? [`--command-bound=${"x".repeat(4096)}`] : [])];
-  const validator = mode === "stale-first-tool" ? "./.sortie-env/check-tool" : ["node", ...checkArgs].join(" ");
+  const validator = mode === "variable-output" ? 'OUT=.sortie-env/check.txt; node check.mjs && printf ok > "$OUT"'
+    : mode === "stale-first-tool" ? "./.sortie-env/check-tool" : ["node", ...checkArgs].join(" ");
   const later = ["node --check check.mjs", "node --check ./check.mjs", "node -e 'process.exit(0)'"];
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/mission-validation-retry-"));
@@ -70,7 +72,7 @@ for (const mode of ["single", "long", "first-failed", "first-missing", "recovere
       const call = calls.get(callID)!;
       history.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID,
         state: { status: "completed", input: call.args, metadata: { exit }, time: { start: call.started, end: Date.now() } } }] });
-      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID }, { output, metadata: { exit, status: "completed" } });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "worker", callID, args: call.args }, { output, metadata: { exit, status: "completed" } });
     };
     if (mode !== "first-missing") await before("check-first");
     let failure: { code: number; stderr: string } | undefined;
@@ -124,6 +126,7 @@ for (const mode of ["single", "long", "first-failed", "first-missing", "recovere
     assert.equal(retry.command, validator, "a failed check must run, not reuse a fake PASS");
     const result = await exec("bash", ["-c", validator], { cwd: root });
     await after("check-retry", result.stdout, 0);
+    if (mode === "variable-output") assert.equal(await readFile(join(root, ".sortie-env/check.txt"), "utf8"), "ok");
     if (multiple) await runLater("recovered-round");
     identities.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "validated after local setup repair", metadata: { sessionId: "worker" } });
