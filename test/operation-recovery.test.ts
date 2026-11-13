@@ -561,6 +561,46 @@ test("literal heredoc stdin does not mask known header or following output desti
   assert.equal(await readFile(join(root, "allowed.txt"), "utf8"), "tar -xzf archive.tar.gz\n");
 }));
 
+test("heredoc pipelines and shell stdin retain executable output checks", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-executable-stdin", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const pipeline = "cat <<FIRST | cat <<'SECOND'\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND";
+  const commands = [
+    pipeline,
+    pipeline.replace(" | ", "; "),
+    "bash <<'EOF'\nprintf changed > outside.txt\nEOF",
+    "env -u UNUSED /bin/sh -s <<'EOF'\nprintf changed > outside.txt\nEOF",
+  ];
+  let adapterCalls = 0;
+  for (const command of commands) {
+    assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")), command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+      ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)), command);
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // The same native input is run only in a separate owned fixture, not the gated project.
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const result = await exec("bash", ["-c", pipeline], { cwd: native });
+  assert.equal(result.stdout, "literal\n");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  const data = "printf '%s' '<<NOT_A_HEREDOC' | cat <<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED";
+  for (const mode of [false, true]) await check(data, mode);
+  assert.equal((await exec("bash", ["-c", data], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+}));
+
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
   await mkdir(join(root, "routes"));
   await writeFile(join(root, "routes/outside.tsx"), "unchanged\n");

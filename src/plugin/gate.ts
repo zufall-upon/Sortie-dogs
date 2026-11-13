@@ -601,14 +601,17 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     const source = before.at(-1) ?? "";
     const header = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u.exec(source);
     const head = header && unwrapEnvironmentCommand(words(header[1]!));
-    const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1);
+    const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
     const operator = header?.[1]?.length ?? -1;
     const patch = head?.length === 1 && /^(?:apply_?patch)$/iu.test(executable ?? "");
+    const dataOnly = READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee";
     const literal = header?.[4] !== undefined || header?.[5] !== undefined;
     const syntax = scanShellSyntax(source, dialect);
-    // Only one direct heredoc is modeled here. Nonliteral stdin can execute shell
-    // substitutions, so retain its existing inspection instead of hiding its body.
-    if (!header || !head?.length || !patch && (!literal || syntax.unsafeExpansion || syntax.activeBrace) ||
+    // Only one direct heredoc is modeled. Earlier pipeline segments may own other
+    // heredocs, and a quoted body can still be executable stdin for a shell.
+    // Skip literal data only for known data consumers; retain other bodies for inspection.
+    if (!header || !head?.length || !patch && (!dataOnly || !literal || syntax.unsafeExpansion || syntax.activeBrace) ||
+        before.slice(0, -1).some(part => scanShellSyntax(part, dialect).masked.includes("<<")) ||
         syntax.masked.slice(0, operator).includes("<<") || source[operator - 1] === "<" ||
         syntax.masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
       result.push(...before.map(part => ({ source: part })));

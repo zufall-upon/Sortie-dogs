@@ -7889,6 +7889,12 @@ test("the contract preflight reports gate defects without granting inspection", 
         defects: ["manifest /validation/0 artifact_directory_unprepared"] },
       { validation: ["cat <<EXPECTED\n$(\ntar -xzf archive.tar.gz\n)\nEXPECTED"],
         defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["bash <<'EOF'\ntar -xzf archive.tar.gz\nEOF"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["sh <<'EOF'\ntar -xzf archive.tar.gz -C temp/artifact/extracted\nEOF"],
+        defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["mkdir -p temp/artifact/extracted", "sh <<'EOF'\ntar -xzf archive.tar.gz -C temp/artifact/extracted\nEOF"],
+        defects: [] },
       { validation: ['OUT=temp/artifact/extracted; node check.mjs && tar -xzf archive.tar.gz -C "$OUT"'],
         defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ['OUT=temp/artifact/extracted; node check.mjs && env MODE=test tar -xzf archive.tar.gz -C "$OUT"'],
@@ -7968,6 +7974,52 @@ for (const trailingArtifact of [false, true]) test(`declared literal heredoc pre
     assert.equal(result.stdout, "tar -xzf archive.tar.gz\n");
     await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
     assert.equal(await stat(join(directory, "archive.tar.gz")).catch(() => undefined), undefined);
+  });
+});
+
+for (const shell of ["bash", "env -u UNUSED /bin/sh -s"]) test(`declared shell heredoc checks artifact prerequisites before Worker admission: ${shell}`,
+  { skip: process.platform === "win32" }, async () => {
+  await withProject("shell-heredoc-worker", async directory => {
+    const command = `${shell} <<'EOF'\ntar -xzf archive.tar.gz -C missing-data-directory\nEOF`;
+    await writeFile(join(directory, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: directory });
+    const archive = await readFile(join(directory, "archive.tar.gz"));
+    await assert.rejects(execFileAsync("bash", ["-c", command], { cwd: directory }),
+      (error: unknown) => (error as { code?: number; stderr?: string }).code === 2 &&
+        /missing-data-directory/u.test((error as { stderr?: string }).stderr ?? ""));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    let dispatched = false;
+    await assert.rejects((async () => {
+      await beginTrackedTaskChild(hooks, directory, "shell-heredoc-parent", "shell-heredoc-worker", "shell-heredoc-task");
+      dispatched = true;
+    })(), /artifact_directory_unprepared/u);
+    assert.equal(dispatched, false);
+    assert.equal(await stat(join(directory, "missing-data-directory")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+    assert.equal(await readFile(join(directory, "source.txt"), "utf8"), "fixture\n");
+  });
+});
+
+test("declared shell heredoc runs after its artifact directory is prepared", { skip: process.platform === "win32" }, async () => {
+  await withProject("prepared-shell-heredoc-worker", async directory => {
+    const command = "bash <<'EOF'\ntar -xzf archive.tar.gz -C prepared\nEOF";
+    await writeFile(join(directory, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: directory });
+    await mkdir(join(directory, "prepared"));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "prepared-parent", "prepared-worker", "prepared-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "prepared-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "prepared-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "prepared-worker", callID: "prepared-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await readFile(join(directory, "prepared/source.txt"), "utf8"), "fixture\n");
   });
 });
 
