@@ -400,13 +400,30 @@ function sameNodeOperation(declared: string, actual: string, directory: string):
   return true;
 }
 
-/** Match only the same declared operation, allowing its native PowerShell envelope and
- * an absolute Node/script/path spelling resolved from the unchanged operation cwd. */
+// Recognize only the observed literal elapsed-time envelope. This is not a shell
+// parser: assignments, expansions, time options and arbitrary wrappers stay distinct.
+function stripMissionElapsedEnvelope(command: string): string | undefined {
+  const match = /^TIMEFORMAT='[A-Za-z_][A-Za-z0-9_]*=%R';[ \t]*time[ \t]+/u.exec(command.trim());
+  return match ? command.trim().slice(match[0].length) : undefined;
+}
+
+/** Match only the same declared operation, allowing its native PowerShell envelope,
+ * the literal elapsed-time envelope, or an absolute Node/script/path spelling. */
 export function missionOperationCommandMatch(command: string, declared: readonly string[], directory: string): string | undefined {
   const normalized = normalizeCommand(stripMissionPowerShellPrefix(command));
   const exact = declared.filter(item => normalizeCommand(stripMissionPowerShellPrefix(item)) === normalized);
   if (exact.length === 1) return normalizeCommand(exact[0]!);
   if (exact.length > 1) return undefined;
+  const elapsed = stripMissionElapsedEnvelope(command);
+  if (elapsed !== undefined) {
+    // The entire remaining command, including its own redirections, must match.
+    // Newlines can introduce another shell command, even where normalizing
+    // whitespace would otherwise make its text look like the declaration.
+    if (missionWindowsPath(directory) || /[\r\n]/u.test(elapsed)) return undefined;
+    // Do not combine this exception with other command-equivalence rules.
+    const timed = declared.filter(item => normalizeCommand(item) === normalizeCommand(elapsed));
+    return timed.length === 1 ? normalizeCommand(timed[0]!) : undefined;
+  }
   const equivalent = declared.filter(item => sameNodeOperation(item, command, directory));
   return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
 }
@@ -414,12 +431,14 @@ export function missionOperationCommandMatch(command: string, declared: readonly
 /** Apply the existing no-decoration operation check to the same accepted native spelling. */
 export function missionOperationCommandDecorated(command: string, declared: readonly string[], directory: string): boolean {
   if (missionOperationCommandMatch(command, declared, directory) !== undefined) return false;
-  const stripped = stripMissionPowerShellPrefix(command), actual = normalizeCommand(stripped);
+  const elapsed = stripMissionElapsedEnvelope(command);
+  const candidate = elapsed !== undefined && !missionWindowsPath(directory) ? elapsed : command;
+  const stripped = stripMissionPowerShellPrefix(candidate), actual = normalizeCommand(stripped);
   if (declared.some(item => {
     const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
     return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
   })) return true;
-  const base = shellCommandBase(stripped, stripped !== command.trim() || stripped.startsWith("&") ? "powershell" : "posix");
+  const base = shellCommandBase(stripped, stripped !== candidate.trim() || stripped.startsWith("&") ? "powershell" : "posix");
   return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
 }
 

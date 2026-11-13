@@ -4,13 +4,71 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { missionExecutionStatus, missionExecutionRecoveryAction, missionPacket, missionOperationCommandMatch,
+import { missionExecutionStatus, missionExecutionRecoveryAction, missionPacket, missionOperationCommandMatch, missionOperationCommandDecorated,
   OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
+
+test("literal elapsed-time operation envelope preserves exact command identity", () => {
+  const command = "/usr/bin/python3 -B tools/start.py --background > /tmp/result.json";
+  const timed = `TIMEFORMAT='ELAPSED=%R'; time ${command}`;
+  assert.equal(missionOperationCommandMatch(timed, [command], "/repo"), command);
+  assert.equal(missionOperationCommandDecorated(timed, [command], "/repo"), false);
+  assert.equal(missionOperationCommandMatch(timed, [timed, command], "/repo"), timed, "an exact declaration takes precedence");
+  assert.equal(missionOperationCommandMatch(timed, [command], "C:\\repo"), undefined, "POSIX timing is not inferred for Windows operations");
+  assert.equal(missionOperationCommandMatch(timed, [command, ` ${command} `], "/repo"), undefined, "ambiguous declarations cannot be recovered");
+  for (const other of [timed.replace("start.py", "other.py"), timed.replace("result.json", "other.json"),
+    `TIMEFORMAT='ELAPSED=$VALUE'; time ${command}`, `TIMEFORMAT='ELAPSED=%R'; time -p ${command}`,
+    `TIMEFORMAT='ELAPSED=%R'; time ${command}; echo done`, timed.replace("tools/start.py --background", "tools/start.py\n--background")]) {
+    assert.equal(missionOperationCommandMatch(other, [command], "/repo"), undefined, other);
+  }
+  assert.equal(missionOperationCommandDecorated(`${timed}; echo done`, [command], "/repo"), true);
+});
+
+test("live timed operation records its actual terminal without accepting extra commands", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/operation-timed-live-"));
+  const identities = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root", time: { created: Date.now() } } };
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: { path: { id: keyof typeof identities } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    messages: async () => ({ data: [] }), children: async () => ({ data: [] }), abort: async () => ({ data: true }),
+  } } } as never);
+  const chat = (id: keyof typeof identities, text: string) => hooks["chat.message"]!({ sessionID: id, agent: identities[id].agent, messageID: `${id}-prompt` }, {
+    message: { id: `${id}-prompt`, agent: identities[id].agent, model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }],
+  });
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), 'console.log("PASS");\n');
+    await chat("root", "Run once and retain its native operation result.");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Collect operation result"], kind: "operation",
+      execution: { commands: ["node check.mjs"], directory }, unit: { title: "Operation", objective: "Collect result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] } }, { sessionID: "root" }));
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, { args: structuredClone(started.task) });
+    await chat("worker", started.task.prompt);
+    const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+    const read = { tool: "read", sessionID: "worker", callID: "handoff", args: { filePath: unit.handoffPath } };
+    await hooks["tool.execute.before"]!(read, { args: read.args });
+    await hooks["tool.execute.after"]!(read, { output: "inspected" });
+    await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath }, { sessionID: "worker" });
+    const command = "TIMEFORMAT='ELAPSED=%R'; time node check.mjs";
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "extra" },
+      { args: { command: `${command}; echo extra`, workdir: directory } }), /mission-operation-command-not-observed/);
+    const request = { tool: "shell", sessionID: "worker", callID: "timed", args: { command, workdir: directory } };
+    await hooks["tool.execute.before"]!(request, { args: request.args });
+    const mission = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    assert.equal((await mission.required("root")).execution!.observations[0]!.command, "node check.mjs");
+    const result = await exec("bash", ["-c", command], { cwd: directory });
+    await hooks["tool.execute.after"]!(request, { output: result.stdout + result.stderr, metadata: { exit: 0, status: "completed" } });
+    const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+    assert.equal(status.acceptance_summary.operation.status, "executed");
+    assert.equal(status.acceptance_summary.operation.observations.length, 1);
+    assert.equal(status.acceptance_summary.operation.observations[0].callID, "timed");
+    assert.equal(status.phase, "running", "operation observation is not Mission acceptance");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("PR250 review follow-up: Windows absolute arguments retain drive and UNC path identity", () => {
   for (const [declared, actual] of [["M:\\Work\\plan.json", "m:/work/PLAN.json"],
