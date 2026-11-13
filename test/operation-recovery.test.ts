@@ -487,6 +487,8 @@ test("POSIX output provenance blocks concatenated redirect and option destinatio
   };
   await allowed("env -u UNUSED git archive --format=tar --output='allowed/$id.tar' HEAD", "allowed/$id.tar");
   assert.equal((await run("tar", ["-xOf", "allowed/$id.tar", "input.txt"])).stdout, "archive fixture\n");
+  await allowed("env -u UNUSED git archive --output 'allowed/$separate.tar' HEAD", "allowed/$separate.tar");
+  assert.equal((await run("tar", ["-xOf", "allowed/$separate.tar", "input.txt"])).stdout, "archive fixture\n");
   await allowed("git archive '--output=allowed/\"quoted\".tar' HEAD", 'allowed/"quoted".tar');
   assert.equal((await run("tar", ["-xOf", 'allowed/"quoted".tar', "input.txt"])).stdout, "archive fixture\n");
   await mkdir(join(root, "allowed/$dir"));
