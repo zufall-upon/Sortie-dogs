@@ -19,7 +19,7 @@ import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
-  missionOperationCommandDecorated, missionOperationDirectoryMatch,
+  missionOperationCommandDecorated, missionOperationCommandRebind, missionOperationDirectoryMatch,
   missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
@@ -2738,10 +2738,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // result to one equivalent declaration in the unchanged operation cwd.
         if (!operation || operation.directory !== directory || observation.directory !== directory ||
             !operation.commands.includes(observation.command) || commands.includes(observation.command)) return observation;
-        const equivalent = commands.filter(command =>
-          missionOperationCommandMatch(observation.command, [command], directory) !== undefined ||
-          missionOperationCommandMatch(command, [observation.command], directory) !== undefined);
-        return equivalent.length === 1 ? { ...observation, command: equivalent[0]! } : observation;
+        const equivalent = missionOperationCommandRebind(observation.command, commands, directory);
+        return equivalent !== undefined ? { ...observation, command: equivalent } : observation;
       });
       return { commands, directory, observations };
     }
@@ -2868,7 +2866,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
             const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
-            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status);
+            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
             // A completed tool envelope without an exit/result does not prove a successful
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
@@ -4594,7 +4592,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               observation.status = output.status === "error" || metadata.status === "error" ? "error" : "completed";
               if (Number.isSafeInteger(metadata.exit)) observation.exit = metadata.exit as number;
               if (Number.isSafeInteger(metadata.exit)) {
-                Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status));
+                Object.assign(observation, missionCommandOutcome(returnedOutput, metadata.exit, observation.status,
+                  typeof args.command === "string" ? args.command : undefined));
               }
             });
           }

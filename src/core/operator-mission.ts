@@ -402,9 +402,9 @@ function sameNodeOperation(declared: string, actual: string, directory: string):
 
 // Recognize only the observed literal elapsed-time envelope. This is not a shell
 // parser: assignments, expansions, time options and arbitrary wrappers stay distinct.
-function stripMissionElapsedEnvelope(command: string): string | undefined {
-  const match = /^TIMEFORMAT='[A-Za-z_][A-Za-z0-9_]*=%R';[ \t]*time[ \t]+/u.exec(command.trim());
-  return match ? command.trim().slice(match[0].length) : undefined;
+function missionElapsedEnvelope(command: string): { command: string; label: string } | undefined {
+  const match = /^TIMEFORMAT='([A-Za-z_][A-Za-z0-9_]*)=%R';[ \t]*time[ \t]+/u.exec(command.trim());
+  return match ? { command: command.trim().slice(match[0].length), label: match[1]! } : undefined;
 }
 
 /** Match only the same declared operation, allowing its native PowerShell envelope,
@@ -414,7 +414,7 @@ export function missionOperationCommandMatch(command: string, declared: readonly
   const exact = declared.filter(item => normalizeCommand(stripMissionPowerShellPrefix(item)) === normalized);
   if (exact.length === 1) return normalizeCommand(exact[0]!);
   if (exact.length > 1) return undefined;
-  const elapsed = stripMissionElapsedEnvelope(command);
+  const elapsed = missionElapsedEnvelope(command)?.command;
   if (elapsed !== undefined) {
     // The entire remaining command, including its own redirections, must match.
     // Newlines can introduce another shell command, even where normalizing
@@ -428,10 +428,22 @@ export function missionOperationCommandMatch(command: string, declared: readonly
   return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
 }
 
+/** A saved declaration is evidence only in the original matching direction. In particular,
+ * bare Node cannot prove a newly pinned binary. Only the literal timing envelope is reversible. */
+export function missionOperationCommandRebind(command: string, declared: readonly string[], directory: string): string | undefined {
+  const equivalent = declared.filter(item => {
+    if (missionOperationCommandMatch(command, [item], directory) !== undefined) return true;
+    const elapsed = missionElapsedEnvelope(item)?.command;
+    return elapsed !== undefined && !missionWindowsPath(directory) && !/[\r\n]/u.test(elapsed) &&
+      normalizeCommand(elapsed) === normalizeCommand(command);
+  });
+  return equivalent.length === 1 ? normalizeCommand(equivalent[0]!) : undefined;
+}
+
 /** Apply the existing no-decoration operation check to the same accepted native spelling. */
 export function missionOperationCommandDecorated(command: string, declared: readonly string[], directory: string): boolean {
   if (missionOperationCommandMatch(command, declared, directory) !== undefined) return false;
-  const elapsed = stripMissionElapsedEnvelope(command);
+  const elapsed = missionElapsedEnvelope(command)?.command;
   const candidate = elapsed !== undefined && !missionWindowsPath(directory) ? elapsed : command;
   const stripped = stripMissionPowerShellPrefix(candidate), actual = normalizeCommand(stripped);
   if (declared.some(item => {
@@ -467,10 +479,14 @@ export function missionOperationSummary(mission: OperatorMission): Record<string
 
 /** Observe the command's own terminal summary, never Worker/Reviewer prose. Scores are result data,
  * not process success. Unstructured commands retain their native exit semantics. */
-export function missionCommandOutcome(output: unknown, exit: unknown, status: unknown): {
+export function missionCommandOutcome(output: unknown, exit: unknown, status: unknown, nativeCommand?: string): {
   outcome: "not-started" | "execution-failed" | "executed"; result?: Record<string, unknown>;
 } {
-  const text = typeof output === "string" ? output.trim() : "";
+  let text = typeof output === "string" ? output.trim() : "";
+  const elapsed = nativeCommand === undefined ? undefined : missionElapsedEnvelope(nativeCommand);
+  // Classify the command's summary, not the wrapper's trailing duration. Do not
+  // alter the native output or strip timing-like text from an ordinary command.
+  if (elapsed) text = text.replace(new RegExp(`(?:\\r?\\n)?${elapsed.label}=\\d+(?:[.,]\\d+)?$`, "u"), "").trim();
   let result: Record<string, unknown> | undefined;
   for (const value of [text, ...text.split(/\r?\n/u).reverse().slice(0, 8)]) {
     try { const parsed: unknown = JSON.parse(value); if (record(parsed)) { result = parsed; break; } } catch { /* not a JSON summary */ }

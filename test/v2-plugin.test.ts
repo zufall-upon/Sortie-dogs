@@ -2028,8 +2028,8 @@ test("V2 report accounting traverses native pages and retains child model, tool 
   } finally { cleanup?.(); }
 });
 
-for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
-  "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "unobserved-redeclared-run"] as const) {
+for (const mode of ["success", "failure", "no-start", "structured-failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
+  "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "redeclared-node-pin", "unobserved-redeclared-run"] as const) {
   test(`V2 timed native operation recovery through Mission APIs: ${mode}`, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const directory = await mkdtemp(resolve("_testenv/v2-timed-operation-"));
@@ -2067,9 +2067,12 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
     try {
       await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
       await writeFile(join(directory, "check.mjs"), 'console.log("PASS");\n');
-      const command = "/usr/bin/python3 -B tools/start.py --background > /tmp/result.json";
+      const command = mode === "redeclared-node-pin" ? "node check.mjs" : "/usr/bin/python3 -B tools/start.py --background > /tmp/result.json";
       const timed = `TIMEFORMAT='ELAPSED=%R'; time ${command}`;
       const failed = mode === "failure" || mode === "redeclared-failure";
+      const expected = mode === "no-start" ? "not-started" : mode === "structured-failure" || failed ? "execution-failed" : "executed";
+      const output = (mode === "no-start" ? "NO_START\n" : mode === "structured-failure"
+        ? JSON.stringify({ status: "setup-failed", attempts: 1 }, null, 2) + "\n" : "") + "ELAPSED=0.284\n";
       await chat("root", "Collect the already executed operation result without replay.");
       const mission = await tool("start_mission", "root", { requirements: ["Collect the operation result"], kind: "operation",
         execution: { commands: [mode === "foreign-owner" ? timed : command], directory } });
@@ -2085,9 +2088,10 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
       const started = mode === "before-admission" ? Date.parse(run.createdAt) - 1_000 : Date.now() + 10;
       const native = { id: "msg_native", type: "assistant", agent: "dog-worker-v010", time: { created: started - 100, completed: started + 350 },
         content: [{ type: "tool", id: "call_native", name: "shell", time: { created: started - 265, ran: started, completed: started + 350 },
-          state: { status: "completed", input: { command: mode === "command-mismatch" ? timed.replace("start.py", "other.py") : timed,
+          state: { status: "completed", input: { command: mode === "redeclared-node-pin" ? "/actual/node check.mjs"
+            : mode === "command-mismatch" ? timed.replace("start.py", "other.py") : timed,
             workdir: mode === "cwd-mismatch" ? join(directory, "other") : directory },
-          metadata: { exit: failed ? 1 : 0 }, content: [{ type: "text", text: "ELAPSED=0.284\n" }] } }] };
+          metadata: { exit: failed ? 1 : 0 }, content: [{ type: "text", text: output }] } }] };
       if (mode !== "unobserved-redeclared-run") history[mode === "foreign-owner" ? "former" : "worker"] = [native, structuredClone(native)];
       if (mode === "success") {
         const projected = (await client.session.reviewMessages({ path: { id: "worker" }, query: { notBefore: run.createdAt } })).data[0].parts[0];
@@ -2100,12 +2104,13 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
         assert.equal(projected.state.metadata.exit, 0);
       }
       const operation = (await tool("operator_status", "root")).acceptance_summary.operation;
-      if (mode === "success" || mode === "failure" || mode.startsWith("redeclared-")) {
-        assert.equal(operation.status, failed ? "execution-failed" : "executed");
-        assert.equal(operation.process_succeeded, !failed);
+      if (mode === "success" || mode === "failure" || mode === "no-start" || mode === "structured-failure" || mode.startsWith("redeclared-")) {
+        assert.equal(operation.status, expected);
+        assert.equal(operation.process_succeeded, expected === "not-started" ? null : expected === "executed");
         assert.equal(operation.observations.length, 1, "duplicate native records do not duplicate observations");
         assert.equal(operation.observations[0].callID, "call_native");
         assert.equal(operation.observations[0].exit, failed ? 1 : 0);
+        if (mode === "structured-failure") assert.deepEqual(operation.observations[0].result, { status: "setup-failed", attempts: 1 });
         const submitted = await tool("submit_mission", "coordinator", { status: "blocked", summary: "The native result was collected; acceptance remains separate." });
         assert.equal(submitted.acceptance_summary.operation.status, operation.status);
         assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 1);
@@ -2117,7 +2122,8 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
       }
       if (mode.startsWith("redeclared-") || mode === "unobserved-redeclared-run") {
         const replanned = await tool("plan_units", "coordinator", { executor: "self", reason: "Collect the existing native result with its literal timing spelling, without replay.",
-          execution: { commands: mode === "redeclared-ambiguous" ? [timed, timed.replace("ELAPSED", "OTHER")]
+          execution: { commands: mode === "redeclared-node-pin" ? ["/other/node check.mjs"]
+            : mode === "redeclared-ambiguous" ? [timed, timed.replace("ELAPSED", "OTHER")]
             : [mode === "redeclared-mismatch" ? timed.replace("result.json", "other.json") : timed],
             directory: mode === "redeclared-cwd" ? join(directory, "other") : directory }, units: [{ title: "Retain result", objective: "Read-only result collection",
             read: ["check.mjs"], write: [], validation: ["node check.mjs"] }] });

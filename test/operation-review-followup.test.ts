@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { missionExecutionStatus, missionExecutionRecoveryAction, missionPacket, missionOperationCommandMatch, missionOperationCommandDecorated,
+  missionOperationCommandRebind, missionCommandOutcome,
   OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -28,7 +29,24 @@ test("literal elapsed-time operation envelope preserves exact command identity",
   assert.equal(missionOperationCommandDecorated(`${timed}; echo done`, [command], "/repo"), true);
 });
 
-test("live timed operation records its actual terminal without accepting extra commands", async () => {
+test("elapsed operation rebind keeps directional binary proof and timing output stays command-bound", () => {
+  const plain = "node check.mjs", timed = `TIMEFORMAT='ELAPSED=%R'; time ${plain}`;
+  assert.equal(missionOperationCommandRebind(plain, [timed], "/repo"), timed);
+  assert.equal(missionOperationCommandRebind(timed, [plain], "/repo"), plain);
+  assert.equal(missionOperationCommandRebind(plain, ["/other/node check.mjs"], "/repo"), undefined);
+  assert.equal(missionOperationCommandRebind("/actual/node check.mjs", [plain], "/repo"), plain,
+    "an already pinned binary may still prove the less specific bare-node declaration");
+  const output = "NO_START\nELAPSED=0.001\n";
+  for (const command of [undefined, plain, timed.replace("ELAPSED", "OTHER")]) {
+    assert.equal(missionCommandOutcome(output, 0, "completed", command).outcome, "executed",
+      "unrelated output interpretation retains the established unstructured-exit contract");
+  }
+  assert.equal(missionCommandOutcome(output, 0, "completed", timed).outcome, "not-started");
+  assert.equal(missionCommandOutcome("NO_STARTELAPSED=0.001\n", 0, "completed", timed).outcome, "not-started");
+  assert.equal(missionCommandOutcome("NO_START\nOTHER=0.001\n", 0, "completed", timed).outcome, "executed");
+});
+
+for (const mode of ["success", "no-start", "structured-failure"] as const) test(`live timed operation records its actual terminal without accepting extra commands: ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/operation-timed-live-"));
   const identities = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root", time: { created: Date.now() } } };
@@ -41,7 +59,9 @@ test("live timed operation records its actual terminal without accepting extra c
   });
   try {
     await exec("git", ["init", "--quiet"], { cwd: directory });
-    await writeFile(join(directory, "check.mjs"), 'console.log("PASS");\n');
+    const script = mode === "no-start" ? 'console.log("NO_START");\n' : mode === "structured-failure"
+      ? 'console.log(JSON.stringify({status:"setup-failed",attempts:1}, null, 2));\n' : 'console.log("PASS");\n';
+    await writeFile(join(directory, "check.mjs"), script);
     await chat("root", "Run once and retain its native operation result.");
     const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Collect operation result"], kind: "operation",
       execution: { commands: ["node check.mjs"], directory }, unit: { title: "Operation", objective: "Collect result",
@@ -63,9 +83,14 @@ test("live timed operation records its actual terminal without accepting extra c
     const result = await exec("bash", ["-c", command], { cwd: directory });
     await hooks["tool.execute.after"]!(request, { output: result.stdout + result.stderr, metadata: { exit: 0, status: "completed" } });
     const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
-    assert.equal(status.acceptance_summary.operation.status, "executed");
+    const expected = mode === "no-start" ? "not-started" : mode === "structured-failure" ? "execution-failed" : "executed";
+    assert.equal(status.acceptance_summary.operation.status, expected);
+    assert.equal(status.acceptance_summary.operation.process_succeeded, mode === "no-start" ? null : mode === "success");
     assert.equal(status.acceptance_summary.operation.observations.length, 1);
     assert.equal(status.acceptance_summary.operation.observations[0].callID, "timed");
+    assert.equal(status.acceptance_summary.operation.observations[0].exit, 0, "the actual native exit is retained even for a structured failure");
+    if (mode === "structured-failure") assert.deepEqual(status.acceptance_summary.operation.observations[0].result,
+      { status: "setup-failed", attempts: 1 });
     assert.equal(status.phase, "running", "operation observation is not Mission acceptance");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
