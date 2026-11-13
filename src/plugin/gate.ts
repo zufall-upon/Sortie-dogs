@@ -263,7 +263,7 @@ interface ShellTokenPath {
 
 function shellTokenPath(tokens: readonly string[], index: number, prefix?: string): ShellTokenPath {
   const token = tokens[index]!;
-  return { value: prefix === undefined ? token : unquote(token.slice(prefix.length)), parts: [{ index, prefix }] };
+  return { value: prefix === undefined ? token : token.slice(prefix.length), parts: [{ index, prefix }] };
 }
 
 function curlOutput(tokens: readonly string[]): ShellTokenPath | undefined {
@@ -700,7 +700,10 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
     const tokenSources = source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? [];
     const rawTokens = tokenSources.map((token, index) => {
-      const value = unquote(token);
+      // Strip syntax quotes once, while the original token still distinguishes an
+      // inline quoted value from literal quotes inside a wholly quoted argument.
+      const inlinePath = /^(--(?:output|directory)=)(.+)$/u.exec(token);
+      const value = inlinePath ? inlinePath[1]! + unquote(inlinePath[2]!) : unquote(token);
       return index > 0 && safePathUse && !token.startsWith("'") && /^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
         ? pathValues.get(value.toLowerCase()) ?? value : value;
     });
