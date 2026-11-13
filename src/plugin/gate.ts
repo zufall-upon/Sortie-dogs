@@ -548,7 +548,26 @@ function robocopyOutput(tokens: readonly string[]): string | undefined {
   return win32.join(destination, file);
 }
 
-function shellPaths(command: string, powershell: boolean, depth = 0): Extraction {
+/** Deliberately not a PowerShell evaluator. Only immutable, local path definitions in
+ * one straight-line call are understood; scopes, reassignment and unknown expressions
+ * never become path authority. The resolved destinations still go through checkPath. */
+function powerShellPathValue(source: string, values: ReadonlyMap<string, string>, cwd?: string): string | undefined {
+  if (/^\(Get-Location\)\.Path$/iu.test(source)) return cwd;
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(source)) return values.get(source.toLowerCase());
+  const literal = /^(?:'([^']*)'|"([^"`$]*)")$/u.exec(source);
+  if (literal) {
+    const value = literal[1] ?? literal[2]!;
+    return isLiteralPowerShellPath(value) ? value : undefined;
+  }
+  const join = /^Join-Path\s+(\$[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"`$]*")\s+('[^']*'|"[^"`$]*")$/iu.exec(source);
+  if (!join) return undefined;
+  const parent = powerShellPathValue(join[1]!, values, cwd), child = powerShellPathValue(join[2]!, values, cwd);
+  if (!parent || !child || /^(?:[\\/]|[A-Za-z]:)/u.test(child)) return undefined;
+  // Join-Path preserves relative parents; rebasing happens once, against the native cwd.
+  return `${parent.replace(/[\\/]$/u, "")}/${child}`;
+}
+
+function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: string): Extraction {
   const paths: string[] = [];
   const entryPaths: number[] = [];
   let applies = false;
@@ -568,6 +587,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
   const dialect: ShellDialect = powershell ? "powershell" : "posix";
   const segments = shellSegments(command, dialect);
+  const pathValues = new Map<string, string>();
+  const assignments = new Map<string, number>();
+  const straightLine = powershell && !scanShellSyntax(command, dialect).activeBrace &&
+    !/&&|\|\|/u.test(scanShellSyntax(command, dialect).masked);
+  let knownCwd = straightLine ? cwd : undefined;
+  for (const segment of segments) {
+    const name = /^\s*(\$[A-Za-z_][A-Za-z0-9_]*)\s*=/u.exec(segment)?.[1]?.toLowerCase();
+    if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
+  }
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
     let source = segment.trim();
@@ -588,6 +616,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       }
     }
     if (syntax.unsafeExpansion) {
+      pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
       unresolvedExpansion = true;
@@ -603,13 +632,26 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     }
     if (powershell) {
       if (/^\$env:GIT_[A-Za-z0-9_]+\s*=/iu.test(source)) gitContextChanged = true;
+      const definition = /^(\$[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/u.exec(source);
+      if (straightLine && definition) {
+        const name = definition[1]!.toLowerCase();
+        const value = assignments.get(name) === 1 ? powerShellPathValue(definition[2]!.trim(), pathValues, knownCwd) : undefined;
+        if (value !== undefined) { pathValues.set(name, value); continue; }
+        pathValues.delete(name);
+      }
       const stripped = source.replace(/^\$[A-Za-z_][A-Za-z0-9_:]*\s*=\s*/u, "");
       assignment = stripped !== source;
       source = stripped;
+      if (assignment) pathValues.clear();
       if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
-    const rawTokens = words(source);
+    const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
+    const rawTokens = (source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? []).map((token, index) => {
+      const value = unquote(token);
+      return index > 0 && safePathUse && !token.startsWith("'") && /^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
+        ? pathValues.get(value.toLowerCase()) ?? value : value;
+    });
     let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
@@ -625,7 +667,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
     const commandOperands = mkdirOptions?.paths ?? operands(tokens);
     if (powershell && syntax.activeBrace) {
+      pathValues.clear(); knownCwd = undefined;
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
+      // A closing scope delimiter must not hide a cmdlet's unresolved destination
+      // from the native-shell path checks, even when its surrounding script is opaque.
+      if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
+        for (let index = 1; index < tokens.length - 1; index++) {
+          if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index]!)) paths.push(tokens[index + 1]!);
+        }
+      }
       applies = true;
       ambiguous = true;
       issue ??= commandIssue(source, "active-scriptblock", "use strict ForEach-Object { $_.Property } or a direct command");
@@ -815,7 +865,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-pwsh-form", "use pwsh -NoProfile -Command '<literal>' at depth one");
       } else {
-        const nested = shellPaths(literal, true, depth + 1);
+        const nested = shellPaths(literal, true, depth + 1, cwd);
         applies ||= nested.applies;
         ambiguous ||= nested.ambiguous;
         paths.push(...nested.paths);
@@ -829,12 +879,20 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         issue ??= nested.issue;
       }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
+      pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
       if ((executable === "git" || rawTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token))) &&
         tokens.slice(1).some(token => token === "add" || token === "commit")) gitAmbiguous = true;
       issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }
+    // Even a read cmdlet can assign OutVariable or evaluate arguments. Do not carry
+    // path facts across executable statements; only the definition prefix is modeled.
+    pathValues.clear(); knownCwd = undefined;
+  }
+  if (powershell) {
+    const unresolved = paths.find(path => path.includes("$"));
+    if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
   }
   return {
     applies,
@@ -894,13 +952,14 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       };
     }
     const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
+      process.platform === "win32" && name === "shell" || /^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/u.test(command) ||
       /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
-    const extracted = shellPaths(command, powershell);
-    const destinations = [...paths, ...extracted.paths];
     // Native ShellTool defaults to Location, resolves an explicit workdir against it,
     // then resolves outputs against that cwd, never an unrelated manifest root.
     const workdir = toolDirectory === undefined ? undefined : resolve(toolDirectory,
       isRecord(args) && typeof args.workdir === "string" ? args.workdir : ".");
+    const extracted = shellPaths(command, powershell, 0, workdir);
+    const destinations = [...paths, ...extracted.paths];
     const rebase = (path: string): string => {
       if (workdir === undefined) return path;
       let normalized: ReturnType<typeof normalizeManifestPath>;

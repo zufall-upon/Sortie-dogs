@@ -149,6 +149,38 @@ test("mission shell uses native execution policy while known destinations retain
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
 }));
 
+test("PowerShell immutable cwd and Join-Path dataflow resolves the real destination without evaluating expressions", async () => fixture(async root => {
+  const command = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "static-paths", read: [], write: ["fixture-output/**"], validation: [],
+  });
+  const args = { command, workdir: root };
+  assert.deepEqual(extractWritePaths("shell", args, root).paths, [join(root, "fixture-output")]);
+  await gate.check({ tool: "shell", sessionID: "worker", callID: "allowed" }, { args }, { investigativeShell: true });
+  for (const denied of [
+    command.replace("'fixture-output'", "'other-output'"),
+    command.replace("$root=(Get-Location).Path", "$root=Unknown-Expression"),
+    command.replace("; New-Item", "; $d='other-output'; New-Item"),
+    command.replace("$root=(Get-Location).Path", "$script:root=(Get-Location).Path"),
+    command.replace("'fixture-output'", "'../outside'"),
+    `& { ${command} }`,
+    "Set-Location elsewhere; " + command,
+    command.replace("; New-Item", "; echo ($d='other-output'); New-Item"),
+    command.replace("-Path $d", "-Value ($d='other-output') -Path $d"),
+    "$d=$unknown; New-Item -ItemType Directory -Path $d",
+  ]) await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: denied },
+    { args: { command: denied, workdir: root } }, { investigativeShell: true }), /Write denied/u, denied);
+  const broad = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "unknown-paths", read: [], write: [root.replaceAll("\\", "/") + "/**"], validation: [],
+  });
+  await assert.rejects(broad.check({ tool: "shell", sessionID: "worker", callID: "unknown" },
+    { args: { command: "$d=Unknown-Expression; New-Item -Path $d", workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  await assert.rejects(broad.check({ tool: "shell", sessionID: "worker", callID: "nested-unknown" },
+    { args: { command: "pwsh -NoProfile -Command '$d=Unknown-Expression; New-Item -Path $d'", workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  assert.deepEqual(extractWritePaths("shell", { command: "$root='fixture-output'; $d=Join-Path $root 'child'; New-Item -Path $d" }, root).paths,
+    [join(root, "fixture-output/child")]);
+}));
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");

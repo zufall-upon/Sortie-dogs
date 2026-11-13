@@ -12,6 +12,14 @@ export const probeTaskIdentity = (request, instance, actualBaseCommit) => ({
   task_sha256: createHash('sha256').update(request).digest('hex'),
   instance: instance ? { instance_id: instance.instance_id, repo: instance.repo, base_commit: actualBaseCommit } : null,
 });
+export const prelaunchRecoveryCommand = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+export function prelaunchRecoveryObserved(mission) {
+  const calls = mission?.execution?.observations ?? [];
+  return calls.length === 2 && calls.every(call => call.command === prelaunchRecoveryCommand && !call.conflicting) &&
+    calls[0].outcome === 'not-started' && calls[0].prelaunchRejection?.source === 'host-before-hook' &&
+    calls[0].prelaunchRejection.runID === mission.runID && calls[0].exit === undefined &&
+    calls[1].outcome === 'executed' && calls[1].exit === 0 && calls[0].sessionID === calls[1].sessionID && calls[0].callID !== calls[1].callID;
+}
 export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator', databasePath = missionDatabasePath(process.env, project), { root: rootID } = {}) {
   const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -335,7 +343,9 @@ async function updateBudget(file, update) {
 }
 
 export async function probe(tgz, output, { mode = 'start', prompt, instance, timeoutSeconds = 180, capUSD = 1, pythonBin, budgetFile,
-  setupFixture, onServer, model, profileId = 'v012', workerStartDeadlineMs } = {}) {
+  setupFixture, onServer, model, profileId = 'v012', workerStartDeadlineMs, scenario } = {}) {
+  if (scenario !== undefined && scenario !== 'prelaunch-scope-recovery') throw Error('Unknown Mission CLI scenario');
+  if (scenario && (process.platform !== 'win32' || mode !== 'complete' || instance)) throw Error('Prelaunch scope recovery requires an isolated Windows complete probe');
   if (!Number.isFinite(capUSD) || capUSD <= 0 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw Error('Probe needs finite positive limits');
   const fixture = await installedFixture(tgz, output, profileId, { nested: false });
   const { project, env, run } = fixture;
@@ -354,6 +364,15 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   await command('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], project, env);
   }
   if (setupFixture) await setupFixture(fixture);
+  const recoveryCommand = prelaunchRecoveryCommand;
+  if (scenario) {
+    const configPath = join(fixture.control, 'opencode.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.shell = 'pwsh.exe';
+    config.agents = { ...config.agents, 'dog-operator': { model: 'openai/gpt-6.1-sol#xhigh' } };
+    await writeFile(configPath, JSON.stringify(config, null, 2));
+    await writeFile(join(project, 'check.mjs'), "import assert from 'node:assert/strict';import{statSync}from'node:fs';assert.ok(statSync('fixture-output').isDirectory());console.log('PRELAUNCH_SCOPE_RECOVERY_PASS');\n");
+  }
   const actualBaseCommit = (await command('git', ['rev-parse', 'HEAD'], project, env)).trim();
   const candidateSHA256 = createHash('sha256').update(await readFile(tgz)).digest('hex');
   await updateBudget(budgetFile, budget => {
@@ -369,7 +388,12 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
   const operatorResponse = mode === 'operator-response';
   const statusOnly = mode === 'status';
   const rootAgent = buildStart ? 'build' : 'dog-operator';
-  const request = prompt ?? (statusOnly ? 'Call sortie_v010_operator_status once. Do not start a Mission or dispatch a Worker.' :
+  const request = prompt ?? (scenario ? `合成ローカル課題。日本語。あなた自身をexecutor=selfとして1ユニットだけで完遂。子dispatch・commit・push・公開・設定変更は禁止。
+kind=operation、execution.commandsは次の文字列1件をそのまま登録し、directoryは現在のproject絶対path。
+${recoveryCommand}
+要求はfixture-outputディレクトリを一回だけ作ること。read=["check.mjs"], 初期write=["result.txt"], validation=["node check.mjs"]。初期write見積りには意図的にディレクトリが欠けている。
+同一session/unitで上記commandをforeground shellで一度送る。起動前のscope拒否を観測したら、expand_unit(unit-1, ["fixture-output/**"])で正規補正。同じcommandを一度だけ再送。別command、別Task、保護metadata編集で迂回しない。
+実開始/開始不明なら再送せず既存結果回収。成功後node check.mjs、finish_direct_unit、低リスクReview、complete_missionまで進める。check.mjs・入力・設定は変更しない。` : statusOnly ? 'Call sortie_v010_operator_status once. Do not start a Mission or dispatch a Worker.' :
     buildStart ? 'Reply with just: ready' : operatorResponse
     ? '作業は不要です。ツールを呼ばず、READYとだけ返してください。' : 'result.txt の seed を recovered に置換して。末尾改行は維持。検証は node check.mjs。check.mjs と設定は変更しない。単純な1ユニット作業として実装して。');
   const rootModel = model ?? (operatorResponse ? 'openai/gpt-6-luna-fast#max' : 'openai/gpt-6.1-sol#xhigh');
@@ -474,7 +498,9 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
       const worker = result.models.find(item => item.agent === 'dog-worker-v010');
       const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
       Object.assign(result, completeProbeObservations(result, schemaRejected));
-      result.accepted = statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
+       result.accepted = scenario ? !schemaRejected && result.native_completed &&
+         result.models.some(item => item.sessionID === result.root && item.model?.providerID === 'openai' &&
+           item.model.id === 'gpt-6.1-sol' && item.model.variant === 'xhigh') : statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
         result.mission_phase === null :
         operatorResponse ? !schemaRejected && !result.errors.length &&
         (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
@@ -486,7 +512,13 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
         workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
         (mode === 'start' ? stopped === 'worker-started'
           : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
-      if (observationError || cliError || cleanupErrors.length) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
+       if (observationError || cliError || cleanupErrors.length) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
+       if (scenario) {
+         result.scenario = scenario;
+         result.operation = mission?.execution ?? null;
+         result.same_command_recovered_once = prelaunchRecoveryObserved(mission);
+         result.accepted &&= result.same_command_recovered_once;
+       }
       await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
       await writeFile(join(run, 'cli.stderr.log'), stderr);
       await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));
@@ -508,7 +540,9 @@ export async function probe(tgz, output, { mode = 'start', prompt, instance, tim
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  const result = await probe(resolve(process.argv[2]), resolve(process.argv[3]), { mode: process.argv[4] ?? 'start',
+  const scopeRecovery = process.argv[4] === 'prelaunch-scope-recovery';
+  const result = await probe(resolve(process.argv[2]), resolve(process.argv[3]), { mode: scopeRecovery ? 'complete' : process.argv[4] ?? 'start',
+    ...(scopeRecovery ? { scenario: 'prelaunch-scope-recovery', capUSD: 1.5, profileId: 'v016' } : {}),
     timeoutSeconds: Number(process.argv[5] ?? 180), ...(process.argv[6] ? { prompt: await readFile(process.argv[6], 'utf8') } : {}) });
   console.log(JSON.stringify(result, null, 2));
   // CLI-only start probes have already persisted their observation and logs.

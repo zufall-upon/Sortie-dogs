@@ -450,6 +450,91 @@ test("scope update persistence failure rolls back manifest, handoff and binding 
   assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
 }));
 
+test("prelaunch scope rejection recovers the SAME operation once across history, rebind and cold reload", async () => fixture(async f => {
+  const command = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Create the synthetic directory once", "Do not write forbidden.txt"],
+    prohibited_write: ["forbidden.txt"], kind: "operation", execution: { commands: [command], directory: f.directory } });
+  const { unit } = await f.dispatch();
+  const before = await f.runtime.required("root"), budget = (await f.tool("operator_status")).budget;
+  const args = { command, workdir: f.directory };
+  const deny = async (callID: string, pattern: RegExp) => {
+    const start = Date.now();
+    const state = { status: "running", input: args, time: { start, end: undefined as number | undefined }, error: undefined as string | undefined };
+    (f.history.worker ??= []).push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID, state }] });
+    await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args }), pattern);
+    state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+  };
+  await deny("prelaunch-1", /manifest write scope/);
+  await deny("prelaunch-2", /repeated-command/);
+  let packet = await f.tool("operator_status");
+  assert.equal(packet.acceptance_summary.operation.status, "not-started");
+  assert.equal(packet.acceptance_summary.operation.observations.length, 2);
+  assert.ok(packet.acceptance_summary.operation.observations.every((item: any) => item.prelaunchRejection && item.exit === undefined));
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const cold = await f.create();
+  const coldTool = async (name: string, input = {}, id = "root") => JSON.parse(await cold.tool[`sortie_v010_${name}`].execute(input, { sessionID: id }));
+  assert.equal((await coldTool("operator_status")).acceptance_summary.operation.status, "not-started");
+  assert.equal((await f.tool("expand_unit", { unit_id: "unit-1", paths: ["fixture-output/**"], reason: "Synthetic operation directory" }, "worker")).status, "scope-updated");
+  await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "native-once" }, { args });
+  // The gate admits the unchanged native input; the unit fixture uses an actual local
+  // directory mutation. The real CLI probe separately runs this PowerShell command.
+  await mkdir(join(f.directory, "fixture-output"));
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "duplicate" }, { args }), /already-admitted/);
+  packet = await coldTool("operator_status");
+  assert.equal(packet.acceptance_summary.operation.status, "running", "missing result cannot authorize another launch");
+  await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "native-once" }, { output: "created", metadata: { exit: 0, status: "completed" } });
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "duplicate-after-exit" }, { args }), /already-admitted/);
+  assert.equal((await coldTool("operator_status")).acceptance_summary.operation.status, "executed");
+  const after = await f.runtime.required("root");
+  assert.equal(after.runID, before.runID); assert.equal(after.units[0].callID, unit.callID);
+  assert.deepEqual((await coldTool("operator_status")).budget, budget);
+}));
+
+test("denial identity changes only with effective scope; no-op and rolled-back expansion preserve the refusal", async () => fixture(async f => {
+  await f.start(); const { unit } = await f.dispatch();
+  const command = "$d=Unknown-Expression; New-Item -ItemType Directory -Path $d";
+  const invoke = (callID: string) => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args: { command } });
+  await assert.rejects(invoke("initial"), /manifest write scope/);
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["result.txt"], reason: "Already covered" }, "worker");
+  await assert.rejects(invoke("no-op"), /repeated-command/);
+  const prototype = OperatorRuntime.prototype as any, save = prototype.save;
+  prototype.save = async function(state: any) {
+    if (state.units[0].unit.write.includes("extra/**")) throw Error("injected-scope-save-failure");
+    return save.call(this, state);
+  };
+  try { await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra/**"], reason: "Output" }, "worker"), /injected-scope/); }
+  finally { prototype.save = save; }
+  await assert.rejects(invoke("rollback"), /repeated-command/);
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra/**"], reason: "Storage restored" }, "worker");
+  await assert.rejects(invoke("revised"), (error: any) => error.reason === "manifest-scope", "an effective revision is reevaluated, not automatically allowed");
+  await assert.rejects(invoke("unchanged-revision"), /repeated-command/);
+  const manifest = await readFile(unit.manifestPath, "utf8");
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "forbidden-static" },
+    { args: { command: "$root=(Get-Location).Path; $d=Join-Path $root 'forbidden.txt'; New-Item -Path $d" } }), /mission-explicit-write-prohibition/);
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+}));
+
+for (const evidence of ["error-text-only", "contradictory-exit", "wrong-call"] as const)
+test(`prelaunch recovery never infers non-execution from ${evidence}`, async () => fixture(async f => {
+  f.agents.worker.time = { created: Date.now() };
+  const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
+  await f.tool("start_mission", { requirements: ["Create one directory"], kind: "operation", execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const args = { command, workdir: f.directory }, start = Date.now();
+  if (evidence !== "error-text-only") await assert.rejects(f.hooks["tool.execute.before"](
+    { tool: "shell", sessionID: "worker", callID: "refused" }, { args }), /write scope/);
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "shell",
+    callID: evidence === "contradictory-exit" ? "refused" : "unproven", state: { status: "error", input: args,
+      error: 'Write denied for "$d": operation manifest write scope.', time: { start, end: start + 1 },
+      metadata: evidence === "contradictory-exit" ? { exit: 1 } : { prelaunchRejection: { source: "host-before-hook" } } } }] }];
+  const cold = await f.create();
+  const packet = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(packet.acceptance_summary.operation.status, "recovery-blocked");
+  assert.equal(packet.acceptance_summary.operation.terminal_complete, false);
+  await assert.rejects(cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "must-not-replay" }, { args }), /already-admitted/);
+}));
+
 test("another writer blocks only the overlapping scope update and retains both original bindings", async () => fixture(async f => {
   await f.start();
   const { unit } = await f.dispatch();

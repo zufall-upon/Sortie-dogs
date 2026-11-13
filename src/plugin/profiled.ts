@@ -19,7 +19,7 @@ import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
-  missionOperationCommandDecorated, missionOperationCommandRebind, missionOperationDirectoryMatch,
+  missionOperationCommandDecorated, missionOperationCommandRebind, missionOperationDirectoryMatch, missionOperationInputHash,
   missionOperationSummary, missionValidationCommand, missionReviewTraces, missionReviewVerdict, missionSelfRecheckReport, type OperatorMission } from "../core/operator-mission.js";
 import { publishMissionProgress } from "./mission-progress.js";
 import { formatWorkQuantity, planWorkQuantity } from "../core/work-quantity.js";
@@ -2743,7 +2743,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       });
       return { commands, directory, observations };
     }
-    async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined): Promise<OperatorMission> {
+    async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined,
+      beforeCall?: { sessionID: string; callID: string }): Promise<OperatorMission> {
       const execution = mission.execution;
       if (mission.kind !== "operation" || !execution || !run || run.runID !== mission.runID ||
           ["completed", "cancelled"].includes(mission.phase)) return mission;
@@ -2827,6 +2828,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const state = part.state as Record<string, unknown>;
             const nativeInput = state.input as Record<string, unknown>;
             if (typeof nativeInput.command !== "string") continue;
+            // V2 publishes this call's running tool envelope before invoking our
+            // before-hook. It is not an earlier native execution. Exclude only that
+            // still-prelaunch envelope during admission, never a saved observation,
+            // terminal record or any process evidence for the same call.
+            if (beforeCall?.sessionID === sessionID && beforeCall.callID === part.callID && state.status === "running" &&
+                !execution.observations.some(item => item.sessionID === sessionID && item.callID === part.callID) &&
+                (!record(state.metadata) || state.metadata.exit === undefined && state.metadata.shellID === undefined && state.metadata.pid === undefined) &&
+                !state.output) continue;
             const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
             const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
               : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
@@ -2866,12 +2875,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
             const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
-            const outcome = conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
+            const receipt = execution.observations.find(item => item.sessionID === sessionID && item.callID === key)?.prelaunchRejection;
+            const rejected = receipt?.source === "host-before-hook" && receipt.runID === run.runID &&
+              receipt.inputHash === missionOperationInputHash(String(part.tool), nativeInput.command, directory);
+            // Error text and a native tool clock cannot establish non-execution. Only our
+            // persisted same-call before-hook receipt can, and actual process evidence wins.
+            if (receipt && (!rejected || running || !failed || exit !== undefined || metadata.shellID !== undefined ||
+                metadata.pid !== undefined || output.length > 0)) conflicts.add(key);
+            const outcome = rejected && !conflicts.has(key) && failed && completedAt
+              ? { outcome: "not-started" as const }
+              : conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
             // A completed tool envelope without an exit/result does not prove a successful
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
             const observation = { command, directory: execution.directory, callID: key, sessionID, startedAt, nativeStartedAt: startedAt,
               ...(completedAt ? { completedAt } : {}), ...(exit === undefined ? {} : { exit }), status,
+              ...(rejected ? { prelaunchRejection: receipt } : {}),
               ...(typeof metadata.shellID === "string" ? { shellID: metadata.shellID } : {}), ...(outcome ?? {}) };
             const prior = calls.get(key);
             if (prior && (prior.command !== command || prior.directory !== directory || prior.observation.startedAt !== startedAt ||
@@ -4242,6 +4261,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false });
         }
         const mapped = translate(expandedWorker === undefined ? output : { ...output, args: expandedWorker }, false) as typeof output;
+        let operationAdmission = false;
         try {
           if (writer) {
             const checkedArgs = record(mapped.args) ? mapped.args : {};
@@ -4275,6 +4295,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (decorated) throw new Error("mission-operation-command-not-observed: run the declared operation command exactly; " +
               "do not append a pipe, tee, redirection or chained command. Capture its tool output or write a separate result file afterward. " +
               "No new plan or approval is needed; if the run already started, inspect its existing state instead of starting another one.");
+            if (declaredOperation !== undefined) {
+              await reconcileMissionExecution(root, mission, await operators.read(root), { sessionID: request.sessionID, callID: request.callID });
+              // Serialize admission in the durable Mission, so concurrent calls and cold
+              // reloads cannot both spend this operation. A crash here stays unknown.
+              await missions.update(root, current => {
+                if (current.runID !== mission.runID || !current.execution) throw new Error("mission-operation-admission-stale");
+                const prior = current.execution.observations.filter(item => item.command === declaredOperation && item.directory === current.execution!.directory);
+                if (prior.some(item => item.callID === request.callID && item.sessionID === request.sessionID ||
+                    item.conflicting || item.outcome !== "not-started" || !item.prelaunchRejection ||
+                    item.prelaunchRejection.runID !== current.runID)) {
+                  throw new Error("mission-operation-already-admitted: recover this operation's existing native result; do not replay or rerun");
+                }
+                current.execution.observations.push({ command: declaredOperation, directory: current.execution.directory,
+                  callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });
+              });
+              operationAdmission = true;
+            }
           }
           await core["tool.execute.before"]?.({ ...translate(request, false) as typeof request,
             ...(delegated ? { sessionID: root, agent: "dog-coordinator" } : {}) }, mapped);
@@ -4307,17 +4344,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // Keep the caller-visible/native Task input as the opaque reference. The
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
-          if (writer && isShellTool(request.tool) && mission?.execution &&
-              typeof args.command === "string" && missionOperationDirectoryMatch(resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."), mission.execution.directory)) {
-            const command = missionOperationCommandMatch(args.command, mission.execution.commands, mission.execution.directory);
-            if (command !== undefined) await missions.update(root, item => {
-              if (!item.execution!.observations.some(observation => observation.callID === request.callID)) {
-                item.execution!.observations.push({ command, directory: item.execution!.directory,
-                  callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });
-              }
-            });
-          }
         } catch (error) {
+          if (operationAdmission) await missions.update(root, current => {
+            const observation = current.execution?.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
+            if (!observation || current.runID !== mission?.runID) return;
+            if (observation.nativeStartedAt || observation.status || observation.exit !== undefined || observation.shellID) {
+              observation.conflicting = true;
+              return;
+            }
+            observation.completedAt = new Date().toISOString();
+            observation.status = "error";
+            observation.outcome = "not-started";
+            const rejectedArgs = record(mapped.args) ? mapped.args : {};
+            observation.prelaunchRejection = { source: "host-before-hook", runID: current.runID!, tool: request.tool,
+              inputHash: missionOperationInputHash(request.tool, String(rejectedArgs.command), observation.directory) };
+          });
           if (delegated) {
             taskOwners.delete(request.callID);
             await operators.rejectedAdmission(root, request.callID, error instanceof Error ? error.message : String(error));
@@ -4581,6 +4622,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const metadata = record(output.metadata) ? output.metadata : {};
             await missions.update(root, item => {
               const observation = item.execution!.observations.find(value => value.callID === request.callID && value.sessionID === id)!;
+              if (observation.prelaunchRejection) {
+                // A refused before-hook has no native after-result. Never erase its receipt
+                // if contradictory process evidence arrives later for the same call.
+                if (metadata.exit !== undefined || metadata.shellID !== undefined || metadata.pid !== undefined ||
+                    metadata.status === "running" || returnedOutput) observation.conflicting = true;
+                return;
+              }
               // V2's background shell finishes the launch tool while its process is still running.
               // Keep that observation pending; it cannot establish a process exit or justify a retry.
               if (metadata.status === "running" && output.status !== "error") {
