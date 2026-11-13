@@ -113,6 +113,23 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
   "add-content", "copy-item", "move-item", "new-item", "out-file", "remove-item",
   "rename-item", "set-content",
 ]);
+// Engine-owned names are not ordinary string locals: assignment may be rejected,
+// coerced or validated. The automatic/preference-variable family includes the
+// NoProfile Get-Variable / InitialSessionState default registry on PowerShell 7,
+// plus the contextual automatic and Windows PowerShell preference entries.
+const POWERSHELL_ENGINE_VARIABLES = new Set([
+  "_", "args", "confirmpreference", "consolefilename", "debugpreference", "enabledexperimentalfeatures", "error",
+  "erroractionpreference", "errorview", "event", "eventargs", "eventsubscriber", "executioncontext", "false", "foreach",
+  "formatenumerationlimit", "home", "host", "informationpreference", "input", "iscoreclr", "islinux", "ismacos", "iswindows",
+  "lastexitcode", "logcommandhealthevent", "logcommandlifecycleevent", "logenginehealthevent", "logenginelifecycleevent",
+  "logproviderhealthevent", "logproviderlifecycleevent", "matches", "maximumaliascount", "maximumdrivecount", "maximumerrorcount",
+  "maximumfunctioncount", "maximumhistorycount", "maximumvariablecount", "myinvocation", "nestedpromptlevel", "null", "ofs",
+  "outputencoding", "pid", "profile", "progresspreference", "psboundparameters", "pscmdlet", "pscommandpath", "psculture",
+  "psdebugcontext", "psdefaultparametervalues", "psedition", "psemailserver", "pshome", "psitem", "psmoduleautoloadingpreference",
+  "psnativecommandargumentpassing", "psnativecommanduseerroractionpreference", "psscriptroot", "pssenderinfo",
+  "pssessionapplicationname", "pssessionconfigurationname", "pssessionoption", "psstyle", "psuiculture", "psversiontable", "pwd",
+  "shellid", "stacktrace", "switch", "this", "true", "verbosepreference", "warningpreference", "whatifpreference",
+]);
 const READ_ONLY_OPTIONS_WITH_VALUES = new Set(["-c", "--directory", "--exclude", "--include"]);
 /**
  * Tools that never change project files themselves. A dispatched subagent runs in its own session
@@ -179,13 +196,16 @@ export function shellCommandWords(command: string): string[] {
   return words(command);
 }
 
-function operands(tokens: readonly string[]): string[] {
+function operands(tokens: readonly string[], indices?: number[]): string[] {
   const result: string[] = [];
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (/^(?:\d*>>?|>\||[|&])(?:.*)?$/u.test(token)) break;
     if (READ_ONLY_OPTIONS_WITH_VALUES.has(token)) index += 1;
-    else if (!token.startsWith("-")) result.push(token.replace(/[|&;]+$/u, ""));
+    else if (!token.startsWith("-")) {
+      const value = token.replace(/[|&;]+$/u, "");
+      if (value) { result.push(value); indices?.push(index); }
+    }
   }
   return result.filter(Boolean);
 }
@@ -488,7 +508,7 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
     const segmentBefore = masked.slice(start, index).trim();
     const hasCommandBefore = segmentBefore.length > 0;
     const powershellCallOperator = dialect === "powershell" &&
-      (segmentBefore.length === 0 || segmentBefore.endsWith("="));
+      (segmentBefore.length === 0 || command.slice(start, index).trimEnd().endsWith("="));
     const escapedPosixSeparator = dialect === "posix" && command[index - 1] === "\\";
     const separator = pair === "&&" || pair === "||" ? 2
       : !escapedPosixSeparator && (character === ";" || character === "\n" || character === "\r" ||
@@ -548,8 +568,28 @@ function robocopyOutput(tokens: readonly string[]): string | undefined {
   return win32.join(destination, file);
 }
 
-function shellPaths(command: string, powershell: boolean, depth = 0): Extraction {
+/** Deliberately not a PowerShell evaluator. Only immutable, local path definitions in
+ * one straight-line call are understood; scopes, reassignment and unknown expressions
+ * never become path authority. The resolved destinations still go through checkPath. */
+function powerShellPathValue(source: string, values: ReadonlyMap<string, string>, cwd?: string): string | undefined {
+  if (/^\(Get-Location\)\.Path$/iu.test(source)) return cwd;
+  if (/^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(source)) return values.get(source.toLowerCase());
+  const literal = /^(?:'([^']*)'|"([^"`$]*)")$/u.exec(source);
+  if (literal) {
+    const value = literal[1] ?? literal[2]!;
+    return isLiteralPowerShellPath(value) ? value : undefined;
+  }
+  const join = /^Join-Path\s+(\$[A-Za-z_][A-Za-z0-9_]*|'[^']*'|"[^"`$]*")\s+('[^']*'|"[^"`$]*")$/iu.exec(source);
+  if (!join) return undefined;
+  const parent = powerShellPathValue(join[1]!, values, cwd), child = powerShellPathValue(join[2]!, values, cwd);
+  if (!parent || !child || /^(?:[\\/]|[A-Za-z]:)/u.test(child)) return undefined;
+  // Join-Path preserves relative parents; rebasing happens once, against the native cwd.
+  return `${parent.replace(/[\\/]$/u, "")}/${child}`;
+}
+
+function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: string): Extraction {
   const paths: string[] = [];
+  const literalDollarPaths = new Set<number>();
   const entryPaths: number[] = [];
   let applies = false;
   let ambiguous = false;
@@ -568,6 +608,16 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
   const dialect: ShellDialect = powershell ? "powershell" : "posix";
   const segments = shellSegments(command, dialect);
+  const pathValues = new Map<string, string>();
+  const assignments = new Map<string, number>();
+  const straightLine = powershell && !scanShellSyntax(command, dialect).activeBrace &&
+    !/[|&]/u.test(scanShellSyntax(command, dialect).masked);
+  let knownCwd = straightLine ? cwd : undefined;
+  let definitionPrefix = true;
+  for (const segment of segments) {
+    const name = /^\s*(\$[A-Za-z_][A-Za-z0-9_]*)\s*=/u.exec(segment)?.[1]?.toLowerCase();
+    if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
+  }
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
     let source = segment.trim();
@@ -584,10 +634,13 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
+        if (powershell && target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
         paths.push(destination!);
       }
     }
     if (syntax.unsafeExpansion) {
+      definitionPrefix = false;
+      pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
       unresolvedExpansion = true;
@@ -603,16 +656,43 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
     }
     if (powershell) {
       if (/^\$env:GIT_[A-Za-z0-9_]+\s*=/iu.test(source)) gitContextChanged = true;
+      const definition = /^(\$[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/u.exec(source);
+      if (straightLine && definitionPrefix && definition) {
+        const name = definition[1]!.toLowerCase();
+        const expression = definition[2]!.trim();
+        const engineOwned = POWERSHELL_ENGINE_VARIABLES.has(name.slice(1));
+        // A literal preference assignment can preserve command-name trust (including
+        // the native ErrorActionPreference wrapper), without asserting its value.
+        if (engineOwned && isLiteralPowerShellAssignment(expression)) continue;
+        const value = !engineOwned && assignments.get(name) === 1 ? powerShellPathValue(expression, pathValues, knownCwd) : undefined;
+        if (value !== undefined) { pathValues.set(name, value); continue; }
+        pathValues.delete(name);
+      }
+      // An executable prefix can shadow Join-Path/Get-Location in this shell.
+      // Later literal assignments cannot restore trust in those command names.
+      definitionPrefix = false;
       const stripped = source.replace(/^\$[A-Za-z_][A-Za-z0-9_:]*\s*=\s*/u, "");
       assignment = stripped !== source;
       source = stripped;
+      if (assignment) pathValues.clear();
       if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
-    const rawTokens = words(source);
+    const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
+    const tokenSources = source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? [];
+    const rawTokens = tokenSources.map((token, index) => {
+      const value = unquote(token);
+      return index > 0 && safePathUse && !token.startsWith("'") && /^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
+        ? pathValues.get(value.toLowerCase()) ?? value : value;
+    });
     let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
+    const appendTokenPath = (path: string, index?: number) => {
+      const original = index === undefined ? undefined : tokenSources[rawTokens.length - tokens.length + index];
+      if (powershell && original?.startsWith("'") && original.endsWith("'")) literalDollarPaths.add(paths.length);
+      paths.push(path);
+    };
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
     const commitArguments = executable === "git" ? gitCommitArguments(tokens) : undefined;
     // A commit preflight observes the native cwd/index, not a command-local replacement.
@@ -623,9 +703,18 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
       /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
     const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
-    const commandOperands = mkdirOptions?.paths ?? operands(tokens);
+    const operandIndices: number[] = [];
+    const commandOperands = mkdirOptions?.paths ?? operands(tokens, operandIndices);
     if (powershell && syntax.activeBrace) {
+      pathValues.clear(); knownCwd = undefined;
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
+      // A closing scope delimiter must not hide a cmdlet's unresolved destination
+      // from the native-shell path checks, even when its surrounding script is opaque.
+      if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
+        for (let index = 1; index < tokens.length - 1; index++) {
+          if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index]!)) appendTokenPath(tokens[index + 1]!, index + 1);
+        }
+      }
       applies = true;
       ambiguous = true;
       issue ??= commandIssue(source, "active-scriptblock", "use strict ForEach-Object { $_.Property } or a direct command");
@@ -634,7 +723,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       if (!powershell && ["rm", "unlink", "rmdir"].includes(executable)) {
         entryPaths.push(...commandOperands.flatMap((path, i) => /[\\/]$/u.test(path) ? [] : [paths.length + i]));
       }
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
       if (executable === "mkdir" && (mkdirOptions?.parents ?? tokens.some((token) => token === "-p" || token === "--parents"))) {
         createdDirectories.push(...commandOperands);
       }
@@ -642,7 +731,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       applies = true;
       const destination = commandOperands.at(-1);
       if (destination === undefined) ambiguous = true;
-      else paths.push(destination);
+      else appendTokenPath(destination, operandIndices.at(-1));
     } else if (executable === "mv") {
       applies = true;
       if (commandOperands.length < 2) ambiguous = true;
@@ -655,11 +744,11 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         if (!/[\\/]$/u.test(commandOperands[0]!)) entryPaths.push(paths.length);
         if ((options.includes("-T") || options.includes("--no-target-directory")) && !/[\\/]$/u.test(commandOperands[1]!)) entryPaths.push(paths.length + 1);
       }
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
     } else if (executable === "tee") {
       applies = true;
       if (commandOperands.length === 0) ambiguous = true;
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
     } else if (/^curl(?:\.exe)?$/u.test(executable)) {
       applies = true;
       const destination = curlOutput(tokens);
@@ -759,13 +848,14 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       } else paths.push(destination);
     } else if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
       applies = true;
-      const named: string[] = [];
+      const named: number[] = [];
       for (let index = 1; index < tokens.length - 1; index += 1) {
-        if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index])) named.push(tokens[index + 1]);
+        if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index])) named.push(index + 1);
       }
-      const selected = named.length > 0 ? named : commandOperands.slice(0, 1);
+      const selectedIndices = named.length > 0 ? named : operandIndices.slice(0, 1);
+      const selected = selectedIndices.map(index => tokens[index]!);
       if (selected.length === 0) ambiguous = true;
-      paths.push(...selected);
+      selected.forEach((path, index) => appendTokenPath(path, selectedIndices[index]));
       if (executable === "new-item" && tokens.some((token, index) =>
         token.toLowerCase() === "-itemtype" && tokens[index + 1]?.toLowerCase() === "directory")) {
         createdDirectories.push(...selected);
@@ -782,7 +872,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
       if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
       else {
         entryPaths.push(...selected.map((_, index) => paths.length + index));
-        paths.push(...selected);
+        selected.forEach((path, index) => appendTokenPath(path, tokens.length - selected.length + index));
         gitAdds.push(...selected);
       }
     } else if (commitArguments !== undefined) {
@@ -815,10 +905,14 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         ambiguous = true;
         issue ??= commandIssue(source, "unsupported-pwsh-form", "use pwsh -NoProfile -Command '<literal>' at depth one");
       } else {
-        const nested = shellPaths(literal, true, depth + 1);
+        const nested = shellPaths(literal, true, depth + 1, cwd);
         applies ||= nested.applies;
         ambiguous ||= nested.ambiguous;
-        paths.push(...nested.paths);
+        for (const path of nested.paths) {
+          // Nested extraction already rejected unresolved variables; preserve its proof.
+          literalDollarPaths.add(paths.length);
+          paths.push(path);
+        }
         gitCommit ||= nested.gitCommit === true;
         gitCommitAdds.push(...(nested.gitCommitAdds ?? []));
         gitMutation ||= nested.gitMutation === true;
@@ -829,12 +923,20 @@ function shellPaths(command: string, powershell: boolean, depth = 0): Extraction
         issue ??= nested.issue;
       }
     } else if (!READ_ONLY_COMMANDS.has(executable)) {
+      pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
       if ((executable === "git" || rawTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token))) &&
         tokens.slice(1).some(token => token === "add" || token === "commit")) gitAmbiguous = true;
       issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }
+    // Even a read cmdlet can assign OutVariable or evaluate arguments. Do not carry
+    // path facts across executable statements; only the definition prefix is modeled.
+    pathValues.clear(); knownCwd = undefined;
+  }
+  if (powershell) {
+    const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
+    if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
   }
   return {
     applies,
@@ -894,13 +996,14 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       };
     }
     const powershell = /^(?:powershell|pwsh)(?:$|[_-])/u.test(name) ||
+      process.platform === "win32" && name === "shell" || /^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*=/u.test(command) ||
       /^\s*&\s+(?:"[^"]+"|'[^']+'|\S+)/u.test(command);
-    const extracted = shellPaths(command, powershell);
-    const destinations = [...paths, ...extracted.paths];
     // Native ShellTool defaults to Location, resolves an explicit workdir against it,
     // then resolves outputs against that cwd, never an unrelated manifest root.
     const workdir = toolDirectory === undefined ? undefined : resolve(toolDirectory,
       isRecord(args) && typeof args.workdir === "string" ? args.workdir : ".");
+    const extracted = shellPaths(command, powershell, 0, workdir);
+    const destinations = [...paths, ...extracted.paths];
     const rebase = (path: string): string => {
       if (workdir === undefined) return path;
       let normalized: ReturnType<typeof normalizeManifestPath>;

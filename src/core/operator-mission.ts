@@ -92,8 +92,16 @@ export interface MissionExecution {
   /** History-service availability is not a process outcome or an execution permission. */
   recovery?: { status: "unavailable"; errors: { sessionID: string; reason: string }[] };
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
-    /** Actual native execution start, distinct from a live hook's admission clock. */
+    /** Native tool clock, distinct from hook admission; alone it does not prove process start. */
     nativeStartedAt?: string;
+    /** Positive native process evidence, unlike a tool's pre-hook running envelope/clock. */
+    nativeProcessObserved?: true;
+    /** Exact input of a recovered native envelope; not proof of host admission. */
+    nativeInputHash?: string;
+    /** Durable same-call host admission, distinct from history-only pre-hook clocks. */
+    hostAdmitted?: true;
+    /** Written only by the host before-hook that refused this exact call, never parsed from error prose. */
+    prelaunchRejection?: { source: "host-before-hook"; runID: string; tool: string; inputHash: string };
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
     /** Contradictory native records retained for this same call, not a process outcome. */
     conflicting?: boolean;
@@ -332,7 +340,12 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
   const orderingTime = (item: MissionExecution["observations"][number]) => Math.max(Date.parse(item.nativeStartedAt ?? item.startedAt),
     Date.parse(item.latestConflictingStartedAt ?? item.nativeStartedAt ?? item.startedAt));
   const ordered = [...execution.observations].sort((left, right) => orderingTime(left) - orderingTime(right)).reverse();
-  const latest = execution.commands.map(command => ordered.find(item => item.command === command && item.directory === execution.directory));
+  const latest = execution.commands.map(command => {
+    const matching = ordered.filter(item => item.command === command && item.directory === execution.directory);
+    // A later host-refused launch cannot erase an earlier started/unknown/conflicting
+    // operation. A command's own legacy NO_START result keeps its existing semantics.
+    return matching.find(item => item.conflicting || item.outcome !== "not-started" || !item.prelaunchRejection) ?? matching[0];
+  });
   if (latest.some(item => item?.conflicting || item && ["completed", "error"].includes(item.status ?? "") &&
       !["executed", "execution-failed", "not-started"].includes(item.outcome ?? ""))) return "recovery-blocked";
   if (latest.some(item => item && !item.completedAt)) return "running";
@@ -464,6 +477,14 @@ export function missionOperationCommandDecorated(command: string, declared: read
  * remains in the declared formal checks and Operator's original-request comparison. */
 export function missionExecutionComplete(mission: OperatorMission): boolean {
   return ["not-required", "executed", "execution-failed"].includes(missionExecutionStatus(mission));
+}
+
+/** Exact native call input binding for a host-owned rejection receipt; not execution permission. */
+export function missionOperationInputHash(tool: string, command: string, directory: string): string {
+  // The V2 live hook retains `shell`; its legacyPart history adapter emits `bash`
+  // for that very same native tool. No other tool spelling is interchangeable.
+  const nativeTool = tool.toLowerCase() === "bash" ? "shell" : tool.toLowerCase();
+  return createHash("sha256").update(JSON.stringify([nativeTool, command, directory])).digest("hex");
 }
 
 /** Missing history cannot justify replay; adequate collected results remain usable. */

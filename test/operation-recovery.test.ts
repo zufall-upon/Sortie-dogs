@@ -149,6 +149,121 @@ test("mission shell uses native execution policy while known destinations retain
     { args: { command: "curl --progress-bar -o output/result https://example.test/result" } }), /retry=false/);
 }));
 
+test("PowerShell immutable cwd and Join-Path dataflow resolves the real destination without evaluating expressions", async () => fixture(async root => {
+  const command = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "static-paths", read: [], write: ["fixture-output/**"], validation: [],
+  });
+  const args = { command, workdir: root };
+  assert.deepEqual(extractWritePaths("shell", args, root).paths, [join(root, "fixture-output")]);
+  await gate.check({ tool: "shell", sessionID: "worker", callID: "allowed" }, { args }, { investigativeShell: true });
+  for (const denied of [
+    command.replace("'fixture-output'", "'other-output'"),
+    command.replace("$root=(Get-Location).Path", "$root=Unknown-Expression"),
+    command.replace("; New-Item", "; $d='other-output'; New-Item"),
+    command.replace("$root=(Get-Location).Path", "$script:root=(Get-Location).Path"),
+    command.replace("'fixture-output'", "'../outside'"),
+    `& { ${command} }`,
+    "Set-Location elsewhere; " + command,
+    command.replace("; New-Item", "; echo ($d='other-output'); New-Item"),
+    command.replace("-Path $d", "-Value ($d='other-output') -Path $d"),
+    "$d=$unknown; New-Item -ItemType Directory -Path $d",
+  ]) await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: denied },
+    { args: { command: denied, workdir: root } }, { investigativeShell: true }), /Write denied/u, denied);
+  const broad = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "unknown-paths", read: [], write: [root.replaceAll("\\", "/") + "/**"], validation: [],
+  });
+  await assert.rejects(broad.check({ tool: "shell", sessionID: "worker", callID: "unknown" },
+    { args: { command: "$d=Unknown-Expression; New-Item -Path $d", workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  await assert.rejects(broad.check({ tool: "shell", sessionID: "worker", callID: "nested-unknown" },
+    { args: { command: "pwsh -NoProfile -Command '$d=Unknown-Expression; New-Item -Path $d'", workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  assert.deepEqual(extractWritePaths("shell", { command: "$root='fixture-output'; $d=Join-Path $root 'child'; New-Item -Path $d" }, root).paths,
+    [join(root, "fixture-output/child")]);
+}));
+
+test("PowerShell executable prefixes cannot restore immutable path authority after alias shadowing", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "shadowed-path-command", read: [], write: ["src/scratch", "allowed.txt"], validation: [],
+  });
+  const check = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell: true });
+  const definitions = "$r='src'; $d=Join-Path $r 'scratch'; Set-Content -Path $d -Value content";
+  for (const prefix of [
+    "Set-Alias Join-Path Move-Item",
+    "Set-Alias -Name Join-Path -Value Move-Item",
+    "Unknown-Setup",
+    "$setup=Unknown-Setup",
+    "Write-Output initialized",
+  ]) {
+    const command = `${prefix}; ${definitions}`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u, command);
+    await assert.rejects(check(command), /Write denied/u, command);
+  }
+  await assert.rejects(check("Set-Alias Get-Location Remove-Item; $r=(Get-Location).Path; $d=Join-Path $r 'scratch'; Set-Content -Path $d -Value content"), /Write denied/u);
+  // The restriction applies to inferred variable destinations, not opaque native
+  // execution itself or a directly declared literal write after such a prefix.
+  await check("Set-Alias Join-Path Move-Item; Set-Content -Path 'allowed.txt' -Value content");
+  assert.deepEqual(extractWritePaths("powershell", { command: definitions }, root).paths, [join(root, "src/scratch")]);
+  await check(definitions);
+}));
+
+test("PowerShell engine-owned variables cannot become immutable local path facts", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "engine-owned-paths", read: [], write: ["allowed.txt", "fixture-output/**"], validation: [],
+  });
+  // Constants/read-only automatic variables and typed/validated preferences do not
+  // share ordinary local-string assignment semantics. Errors can be nonterminating.
+  for (const variable of ["true", "false", "PID", "IsWindows", "ConfirmPreference", "ErrorActionPreference", "MaximumHistoryCount", "OutputEncoding"]) {
+    const command = `$ErrorActionPreference='Continue'; $${variable}='allowed.txt'; Set-Content -Path $${variable} -Value changed`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u, variable);
+    await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: variable },
+      { args: { command, workdir: root } }, { investigativeShell: true }), /Write denied/u, variable);
+  }
+  const command = "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  assert.deepEqual(extractWritePaths("powershell", { command }, root).paths, [join(root, "fixture-output")]);
+  await gate.check({ tool: "shell", sessionID: "worker", callID: "ordinary-locals" },
+    { args: { command, workdir: root } }, { investigativeShell: true });
+}));
+
+test("PowerShell pipeline and background assignment cannot publish a destination before the RHS runs", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "pipeline-path", read: [], write: ["allowed.txt"], validation: [],
+  });
+  for (const operator of ["|", "&"]) {
+    const command = `Set-Variable -Name d -Value 'forbidden.txt'; $d='allowed.txt' ${operator} Set-Content -Path $d`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u);
+    await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: command },
+      { args: { command: `$seed='unused'; ${command}`, workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  }
+}));
+
+test("PowerShell literal-dollar destinations keep quote provenance without granting variable expansion", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "literal-dollar", read: [], write: ["routes/$id.tsx"], validation: [],
+  });
+  const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command: `$seed='unused'; ${command}`, workdir: root } }, { investigativeShell: true });
+  for (const command of [
+    "Set-Content -LiteralPath 'routes/$id.tsx' -Value content",
+    "Add-Content -Path 'routes/$id.tsx' -Value $id",
+    "New-Item -Path 'routes/$id.tsx'",
+    "Remove-Item -LiteralPath 'routes/$id.tsx'",
+    "Out-File -FilePath 'routes/$id.tsx'",
+    "touch 'routes/$id.tsx'",
+    "echo content > 'routes/$id.tsx'",
+    "pwsh -NoProfile -Command 'Set-Content -LiteralPath ''routes/$id.tsx'' -Value content'",
+  ]) {
+    assert.deepEqual(extractWritePaths("powershell", { command }, root).paths, [join(root, "routes/$id.tsx")]);
+    await shell(command);
+  }
+  for (const command of [
+    'Set-Content -LiteralPath "routes/$id.tsx" -Value content',
+    "Set-Content -Path $id -Value 'routes/$id.tsx'",
+    'Set-Content -Path "\'$id\'" -Value content',
+    "echo content > $id",
+  ]) await assert.rejects(shell(command), /Write denied/u, command);
+}));
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");

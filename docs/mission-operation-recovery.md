@@ -58,3 +58,46 @@ Release-specific live results and fixed package hashes belong in
 `_testenv/releases/0.12.11/`. A successful isolated mission is evidence for this
 preparation path; it does not establish completion of an existing Desktop campaign
 or a new SWE-bench score.
+
+## Call-bound prelaunch scope recovery
+
+The gate statically resolves single-assignment local PowerShell path values:
+quoted literals, `(Get-Location).Path`, and positional `Join-Path` of known values.
+Definitions are inferred only in the initial immutable prefix. After any executable
+or unknown statement, later literal assignments cannot restore command-name trust:
+an earlier statement may have shadowed `Join-Path` or `Get-Location` with an alias.
+Direct literal destinations retain their existing native-shell and scope checks.
+Engine-owned automatic/preference variables are not inferred as string path locals:
+their assignments can fail or undergo conversion. Literal preference settings such
+as the native `ErrorActionPreference='Stop'` prefix do not supply path facts.
+It does not evaluate PowerShell. Reassignment, pipelines/background forms, unknown
+expressions, scoped values and unresolved destinations fail closed. Single-quoted
+literal dollar paths retain their quoting provenance; resolved paths still use the existing
+prohibition, boundary, link and manifest checks. Denial identity includes the
+bound Task and manifest hash: an effective scope revision is reevaluated, while
+no-op or rolled-back revisions retain the repeated-denial diagnosis.
+
+An operation refusal is recorded by the host before-hook for the exact session,
+call, run and native input. Error prose, missing PID/output, short duration and a
+tool start clock are not non-execution evidence. Native history can reconcile a
+matching receipt after rebind/reload, but contradictory inputs or process results
+block recovery. Concurrent status reads of V2's pre-hook running envelope do not
+turn a host refusal into process evidence. Unavailable native history blocks new
+admission until the same history can be recovered. Durable serialized admission
+prevents a second launch while the first is running, completed or unresolved.
+Refusals before admission (including history outages and duplicate-launch guards)
+also retain a new call's receipt, without relabeling an existing admission of the
+same call. Their native error envelopes cannot hide an earlier actual result.
+Existing histories without this
+receipt are not retroactively relabeled.
+
+`node scripts/mission-cli-probe.mjs <fixed.tgz> <evidence-directory> prelaunch-scope-recovery 600`
+uses the existing isolated runner on Windows with Sol/xhigh, Coordinator direct
+execution (no Worker dispatch), a $1.50 priced-usage cap, and a synthetic local
+directory only. It requires an initial scope refusal, regular `expand_unit`, the
+unchanged PowerShell command succeeding exactly once, a real validator exit and
+Mission receipt. The retained model/session/operation observations, not generic
+wrapper success, determine this scenario's result. It is not release or recovery
+of any preexisting operation.
+Acceptance also binds both operation calls to the Sol/xhigh root executor and
+rejects child dispatch, rather than inferring the operation's model from its parent.

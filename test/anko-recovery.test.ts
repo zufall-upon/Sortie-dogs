@@ -20,6 +20,7 @@ async function fixture(run: (f: any) => Promise<void>) {
     await writeFile(join(directory, "result.txt"), "before\n");
     const agents: Record<string, any> = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root" } };
     const history: Record<string, any[]> = {};
+    const historyReads: Record<string, () => Promise<void>> = {};
     const unavailable = new Set<string>();
     const create = () => SortieDogsV010Plugin({ directory, returnReportTransport: "tool-result", client: { session: {
       get: async ({ path }: any) => {
@@ -32,6 +33,7 @@ async function fixture(run: (f: any) => Promise<void>) {
       },
       messages: async ({ path }: any) => {
         if (unavailable.has(path.id)) throw Error("native API unavailable");
+        await historyReads[path.id]?.();
         return { data: history[path.id] ?? [] };
       }, abort: async () => { throw Error("recovery must not cancel"); },
     } } } as never);
@@ -67,7 +69,7 @@ async function fixture(run: (f: any) => Promise<void>) {
       agents.worker.outcome = outcome;
       await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, { output: "Done. Checks passed.", metadata: { sessionId: "worker" } });
     };
-    await run({ directory, hooks, runtime, missions, tool, chat, start, dispatch, validate, finish, agents, history, unavailable, create });
+    await run({ directory, hooks, runtime, missions, tool, chat, start, dispatch, validate, finish, agents, history, historyReads, unavailable, create });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
@@ -448,6 +450,261 @@ test("scope update persistence failure rolls back manifest, handoff and binding 
   await f.validate();
   await f.finish();
   assert.equal((await f.tool("operator_status")).budget.consumed_units, 1);
+}));
+
+test("prelaunch scope rejection recovers the SAME operation once across history, rebind and cold reload", async () => fixture(async f => {
+  const command = "$root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Create the synthetic directory once", "Do not write forbidden.txt"],
+    prohibited_write: ["forbidden.txt"], kind: "operation", execution: { commands: [command], directory: f.directory } });
+  const { unit } = await f.dispatch();
+  const before = await f.runtime.required("root"), budget = (await f.tool("operator_status")).budget;
+  const args = { command, workdir: f.directory };
+  const deny = async (callID: string, pattern: RegExp) => {
+    const start = Date.now();
+    const state = { status: "running", input: args, time: { start, end: undefined as number | undefined }, error: undefined as string | undefined };
+    (f.history.worker ??= []).push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID, state }] });
+    await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args }), pattern);
+    state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+  };
+  await deny("prelaunch-1", /manifest write scope/);
+  await deny("prelaunch-2", /repeated-command/);
+  let packet = await f.tool("operator_status");
+  assert.equal(packet.acceptance_summary.operation.status, "not-started");
+  assert.equal(packet.acceptance_summary.operation.observations.length, 2);
+  assert.ok(packet.acceptance_summary.operation.observations.every((item: any) => item.prelaunchRejection && item.exit === undefined));
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const cold = await f.create();
+  const coldTool = async (name: string, input = {}, id = "root") => JSON.parse(await cold.tool[`sortie_v010_${name}`].execute(input, { sessionID: id }));
+  assert.equal((await coldTool("operator_status")).acceptance_summary.operation.status, "not-started");
+  assert.equal((await f.tool("expand_unit", { unit_id: "unit-1", paths: ["fixture-output/**"], reason: "Synthetic operation directory" }, "worker")).status, "scope-updated");
+  await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "native-once" }, { args });
+  // The gate admits the unchanged native input; the unit fixture uses an actual local
+  // directory mutation. The real CLI probe separately runs this PowerShell command.
+  await mkdir(join(f.directory, "fixture-output"));
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "duplicate" }, { args }), /already-admitted/);
+  packet = await coldTool("operator_status");
+  assert.equal(packet.acceptance_summary.operation.status, "running", "missing result cannot authorize another launch");
+  await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "native-once" }, { output: "created", metadata: { exit: 0, status: "completed" } });
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "duplicate-after-exit" }, { args }), /already-admitted/);
+  assert.equal((await coldTool("operator_status")).acceptance_summary.operation.status, "executed");
+  const after = await f.runtime.required("root");
+  assert.equal(after.runID, before.runID); assert.equal(after.units[0].callID, unit.callID);
+  assert.deepEqual((await coldTool("operator_status")).budget, budget);
+}));
+
+for (const evidence of ["tool-envelope", "exit", "pid", "shellID", "output", "process-running", "changed-input", "late-process", "late-input"] as const)
+test(`prelaunch scope refusal tolerates concurrent status but retains process contradictions: ${evidence}`, async () => fixture(async f => {
+  const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Create one directory"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const budget = (await f.tool("operator_status")).budget;
+  const args = { command, workdir: f.directory }, start = Date.now();
+  const state: any = { status: "running", input: { ...args }, time: { start }, metadata: {} };
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "polled-refusal", state }] }];
+  const prototype = OperatorMissionRuntime.prototype, update = prototype.update;
+  let entered!: () => void, release!: () => void, paused = false;
+  const admitted = new Promise<void>(resolve => { entered = resolve; });
+  const proceed = new Promise<void>(resolve => { release = resolve; });
+  let releaseHistory = () => {};
+  prototype.update = async function(...input: Parameters<typeof update>) {
+    const result = await update.apply(this, input);
+    if (!paused && result.execution?.observations.some(item => item.callID === "polled-refusal")) {
+      paused = true; entered(); await proceed;
+    }
+    return result;
+  };
+  try {
+    const refused = assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "polled-refusal" }, { args }), /write scope/);
+    await admitted;
+    if (evidence === "exit") state.metadata.exit = 1;
+    if (evidence === "pid" || evidence === "late-process") state.metadata.pid = 123;
+    if (evidence === "shellID") state.metadata.shellID = "native-shell";
+    if (evidence === "output") state.output = "process output";
+    if (evidence === "process-running") state.metadata.status = "running";
+    if (evidence === "changed-input") state.input.command = "node other.mjs";
+    if (evidence === "late-input") state.input.command += " ";
+    let delayedPacket: any;
+    if (evidence === "late-process" || evidence === "late-input") {
+      let enteredHistory!: () => void;
+      const reading = new Promise<void>(resolve => { enteredHistory = resolve; });
+      const deliver = new Promise<void>(resolve => { releaseHistory = resolve; });
+      f.historyReads.worker = async () => { enteredHistory(); await deliver; };
+      // The poll captures the pre-receipt Mission, but returns contradictory evidence
+      // only after the rejecting before-hook has saved its authoritative receipt.
+      const poll = f.tool("operator_status");
+      await reading; release(); await refused; releaseHistory();
+      delayedPacket = await poll;
+      delete f.historyReads.worker;
+    } else {
+      await f.tool("operator_status");
+      release(); await refused;
+    }
+    // V2 has not yet replaced the pre-hook running envelope with its error part.
+    const pending = (delayedPacket ?? await f.tool("operator_status")).acceptance_summary.operation;
+    assert.equal(pending.status, evidence === "tool-envelope" ? "not-started" : "recovery-blocked");
+    if (evidence === "tool-envelope") {
+      assert.equal(pending.observations[0].prelaunchRejection.source, "host-before-hook");
+      assert.notEqual(pending.observations[0].conflicting, true);
+    }
+    state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+    const terminal = (await f.tool("operator_status")).acceptance_summary.operation;
+    assert.equal(terminal.status, evidence === "tool-envelope" ? "not-started" : "recovery-blocked");
+    await f.tool("expand_unit", { unit_id: "unit-1", paths: ["fixture-output/**"], reason: "Synthetic output" }, "worker");
+    const retryHooks = evidence.startsWith("late-") ? await f.create() : f.hooks;
+    const retry = () => retryHooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "after-poll" }, { args });
+    if (evidence === "tool-envelope") {
+      await retry();
+      await mkdir(join(f.directory, "fixture-output"));
+      await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "after-poll" }, { output: "created", metadata: { exit: 0 } });
+      assert.equal((await f.tool("operator_status")).acceptance_summary.operation.status, "executed");
+    } else await assert.rejects(retry(), /already-admitted/);
+    assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  } finally { release(); releaseHistory(); prototype.update = update; }
+}));
+
+test("pre-admission status cannot spend a call, while durable host admission remains run-once", async () => fixture(async f => {
+  const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Create one directory"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const args = { command, workdir: f.directory }, start = Date.now();
+  const state: any = { status: "running", input: args, time: { start } };
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "polled-first", state }] }];
+  assert.equal((await f.tool("operator_status")).acceptance_summary.operation.status, "running");
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "polled-first" }, { args }), /write scope/);
+  state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+  const refused = (await f.tool("operator_status")).acceptance_summary.operation;
+  assert.equal(refused.status, "not-started");
+  assert.equal(refused.observations[0].prelaunchRejection.source, "host-before-hook");
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["fixture-output/**"], reason: "Synthetic output" }, "worker");
+  const retryState = { status: "running", input: args, time: { start: Date.now() } };
+  f.history.worker.push({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "polled-retry", state: retryState }] });
+  await f.tool("operator_status");
+  await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "polled-retry" }, { args });
+  const cold = await f.create();
+  await assert.rejects(cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "polled-retry" }, { args }), /already-admitted/);
+  await assert.rejects(cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "another-call" }, { args }), /already-admitted/);
+  await mkdir(join(f.directory, "fixture-output"));
+  await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "polled-retry" }, { output: "created", metadata: { exit: 0 } });
+  assert.equal((await f.tool("operator_status")).acceptance_summary.operation.status, "executed");
+}));
+
+for (const refusal of ["history-empty", "history-legacy-result", "duplicate-after-exit"] as const)
+test(`pre-admission refusal receipts survive native terminal history: ${refusal}`, async () => fixture(async f => {
+  const command = "node check.mjs";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Execute once"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const args = { command, workdir: f.directory }, start = Date.now();
+  const budget = (await f.tool("operator_status")).budget;
+  const state: any = { status: "running", input: args, time: { start } };
+  const history = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "pre-admission-refused", state }] }];
+  if (refusal === "duplicate-after-exit") {
+    await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { args });
+    await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { output: "PASS", metadata: { exit: 0 } });
+    await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { args }), /already-admitted/);
+    const actual = (await f.missions.required("root")).execution.observations[0];
+    assert.equal(actual.outcome, "executed");
+    assert.equal(actual.prelaunchRejection, undefined, "repeating an admitted call cannot relabel its process result");
+  } else {
+    f.historyReads.worker = async () => { throw Error("native-history-service-unavailable"); };
+    if (refusal === "history-legacy-result") history.unshift({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "legacy",
+      state: { status: "completed", input: args, output: "PASS", metadata: { exit: 0 }, time: { start, end: start + 1 } } }] });
+  }
+  state.time.start = Date.now();
+  f.history.worker = history;
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "pre-admission-refused" }, { args }),
+    refusal === "duplicate-after-exit" ? /already-admitted/ : /recovery-unavailable/);
+  state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+  delete f.historyReads.worker;
+  const cold = await f.create();
+  const packet = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" })).acceptance_summary.operation;
+  assert.equal(packet.status, refusal === "history-empty" ? "not-started" : "executed");
+  const rejected = packet.observations.find((item: any) => item.callID === "pre-admission-refused");
+  assert.equal(rejected.prelaunchRejection.source, "host-before-hook");
+  assert.equal(rejected.outcome, "not-started");
+  const retry = () => cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "restored-history" }, { args });
+  if (refusal === "history-empty") await retry();
+  else await assert.rejects(retry(), /already-admitted/);
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+}));
+
+for (const legacyResult of [false, true])
+test(`operation admission refuses unavailable history and recovers without replay: legacy=${legacyResult}`, async () => fixture(async f => {
+  const command = "node check.mjs";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Execute once"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const budget = (await f.tool("operator_status")).budget, start = Date.now();
+  const saved = legacyResult ? [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "legacy-result",
+    state: { status: "completed", input: { command, workdir: f.directory }, output: "PASS", metadata: { exit: 0 }, time: { start, end: start + 1 } } }] }] : [];
+  // Only the history endpoint fails: normal identity and native permissions remain available.
+  Object.defineProperty(f.history, "worker", { configurable: true, get() { throw Error("native-history-service-unavailable"); } });
+  const invoke = (callID = "after-outage") => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args: { command, workdir: f.directory } });
+  await assert.rejects(invoke(), /mission-operation-recovery-unavailable/);
+  const unavailable = (await f.missions.required("root")).execution;
+  assert.equal(unavailable.recovery.status, "unavailable");
+  assert.equal(unavailable.observations.length, 1, "an unreadable history records only the host refusal, never a launch");
+  assert.equal(unavailable.observations[0].outcome, "not-started");
+  assert.equal(unavailable.observations[0].prelaunchRejection.source, "host-before-hook");
+  Object.defineProperty(f.history, "worker", { configurable: true, writable: true, value: saved });
+  const cold = await f.create();
+  const restored = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" })).acceptance_summary.operation;
+  assert.equal(restored.recovery, undefined);
+  assert.equal(restored.status, legacyResult ? "executed" : "not-started");
+  if (legacyResult) await assert.rejects(invoke("restored-history"), /already-admitted/);
+  else await invoke("restored-history");
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+}));
+
+test("denial identity changes only with effective scope; no-op and rolled-back expansion preserve the refusal", async () => fixture(async f => {
+  await f.start(); const { unit } = await f.dispatch();
+  const command = "$d=Unknown-Expression; New-Item -ItemType Directory -Path $d";
+  const invoke = (callID: string) => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args: { command } });
+  await assert.rejects(invoke("initial"), /manifest write scope/);
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["result.txt"], reason: "Already covered" }, "worker");
+  await assert.rejects(invoke("no-op"), /repeated-command/);
+  const prototype = OperatorRuntime.prototype as any, save = prototype.save;
+  prototype.save = async function(state: any) {
+    if (state.units[0].unit.write.includes("extra/**")) throw Error("injected-scope-save-failure");
+    return save.call(this, state);
+  };
+  try { await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra/**"], reason: "Output" }, "worker"), /injected-scope/); }
+  finally { prototype.save = save; }
+  await assert.rejects(invoke("rollback"), /repeated-command/);
+  await f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra/**"], reason: "Storage restored" }, "worker");
+  await assert.rejects(invoke("revised"), (error: any) => error.reason === "manifest-scope", "an effective revision is reevaluated, not automatically allowed");
+  await assert.rejects(invoke("unchanged-revision"), /repeated-command/);
+  const manifest = await readFile(unit.manifestPath, "utf8");
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "forbidden-static" },
+    { args: { command: "$root=(Get-Location).Path; $d=Join-Path $root 'forbidden.txt'; New-Item -Path $d" } }), /mission-explicit-write-prohibition/);
+  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+}));
+
+for (const evidence of ["error-text-only", "contradictory-exit", "wrong-call"] as const)
+test(`prelaunch recovery never infers non-execution from ${evidence}`, async () => fixture(async f => {
+  f.agents.worker.time = { created: Date.now() };
+  const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
+  await f.tool("start_mission", { requirements: ["Create one directory"], kind: "operation", execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const args = { command, workdir: f.directory }, start = Date.now();
+  if (evidence !== "error-text-only") await assert.rejects(f.hooks["tool.execute.before"](
+    { tool: "shell", sessionID: "worker", callID: "refused" }, { args }), /write scope/);
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "shell",
+    callID: evidence === "contradictory-exit" ? "refused" : "unproven", state: { status: "error", input: args,
+      error: 'Write denied for "$d": operation manifest write scope.', time: { start, end: start + 1 },
+      metadata: evidence === "contradictory-exit" ? { exit: 1 } : { prelaunchRejection: { source: "host-before-hook" } } } }] }];
+  const cold = await f.create();
+  const packet = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" }));
+  assert.equal(packet.acceptance_summary.operation.status, "recovery-blocked");
+  assert.equal(packet.acceptance_summary.operation.terminal_complete, false);
+  await assert.rejects(cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "must-not-replay" }, { args }), /already-admitted/);
 }));
 
 test("another writer blocks only the overlapping scope update and retains both original bindings", async () => fixture(async f => {

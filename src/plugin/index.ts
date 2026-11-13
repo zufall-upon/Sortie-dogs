@@ -1469,12 +1469,15 @@ function denialSignature(
   input: ToolExecuteBeforeInput,
   output: ToolExecuteBeforeOutput,
   reason: string,
+  authorization?: SessionAuthorization,
 ): string {
   const command = isRecord(output.args) && typeof output.args.command === "string"
     ? normalizeCommand(output.args.command)
     : JSON.stringify(stableValue(output.args));
   return createHash("sha256")
-    .update(JSON.stringify([input.tool.toLowerCase(), command, reason]))
+    .update(JSON.stringify([input.tool.toLowerCase(), command, reason,
+      isRecord(output.args) ? output.args.workdir : undefined,
+      authorization && [authorization.taskID, authorization.projectRoot, authorization.manifestHash]]))
     .digest("hex");
 }
 
@@ -8143,7 +8146,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         activeState?.inFlightCalls.delete(toolInput.callID);
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
         if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
-        const signature = denialSignature(toolInput, output, error.reason);
+        const signature = denialSignature(toolInput, output, error.reason, sessionAuthorizations.get(toolInput.sessionID));
         const activeSession = activeSessions.get(toolInput.sessionID);
         if (activeSession === undefined) throw error;
         const denied = activeSession.deniedSignatures;
