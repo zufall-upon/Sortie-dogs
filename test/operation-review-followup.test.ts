@@ -28,7 +28,7 @@ test("literal elapsed-time operation envelope preserves exact command identity",
   }
   assert.equal(missionOperationCommandDecorated(`${timed}; echo done`, [command], "/repo"), true);
   assert.equal(missionOperationCommandDecorated(timed, [timed], "/repo"), false);
-  for (const suffix of ["; echo done", " && echo done", " | cat"]) {
+  for (const suffix of ["; echo done", " && echo done", " | cat", "\necho done", "\r\necho done", " < /dev/null"]) {
     assert.equal(missionOperationCommandMatch(`${timed}${suffix}`, [timed], "/repo"), undefined);
     assert.equal(missionOperationCommandDecorated(`${timed}${suffix}`, [timed], "/repo"), true);
   }
@@ -80,8 +80,12 @@ for (const declaration of ["plain", "timed"] as const) for (const mode of ["succ
     await hooks["tool.execute.before"]!(read, { args: read.args });
     await hooks["tool.execute.after"]!(read, { output: "inspected" });
     await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath }, { sessionID: "worker" });
-    await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "extra" },
-      { args: { command: `${command}; echo extra`, workdir: directory } }), /mission-operation-command-not-observed/);
+    for (const [index, suffix] of ["; echo extra", "\necho extra", "\r\necho extra", " < /dev/null"].entries()) {
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: `extra-${index}` },
+        { args: { command: command + suffix, workdir: directory } }), /mission-operation-command-not-observed/);
+    }
+    assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).execution!.observations, [],
+      "refused decorated calls do not execute or create an operation observation");
     const request = { tool: "shell", sessionID: "worker", callID: "timed", args: { command, workdir: directory } };
     await hooks["tool.execute.before"]!(request, { args: request.args });
     const mission = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);

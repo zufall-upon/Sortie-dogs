@@ -4,7 +4,7 @@ import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
 import { parseOperatorPlan, unitValidation, unitValidationCwd, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
-import { normalizeCommand, shellCommandBase, shellCommandWords } from "../plugin/gate.js";
+import { normalizeCommand, shellCommandPrefixes, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
 import { retainMissionContext, missionContextView, type MissionContinuity } from "./mission-context.js";
 import { planWorkQuantity, projectWorkQuantity, syncWorkQuantity, type WorkQuantityState } from "./work-quantity.js";
@@ -451,8 +451,12 @@ export function missionOperationCommandDecorated(command: string, declared: read
       const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
       return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
     })) return true;
-    const base = shellCommandBase(stripped, stripped !== candidate.trim() || stripped.startsWith("&") ? "powershell" : "posix");
-    return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
+    // A literal timing envelope and declared redirects can themselves contain shell
+    // separators. Check later boundaries too, not just the first TIMEFORMAT assignment.
+    for (const base of shellCommandPrefixes(stripped, stripped !== candidate.trim() || stripped.startsWith("&") ? "powershell" : "posix")) {
+      if (missionOperationCommandMatch(base, declared, directory) !== undefined) return true;
+    }
+    return false;
   });
 }
 
