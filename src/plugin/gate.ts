@@ -610,6 +610,54 @@ function posixHeredocBody(source: string, start: number, delimiter: string, stri
   return { body: stripTabs ? body.replace(/^\t+/gmu, "") : body, after, closed };
 }
 
+/** Quotes in unquoted heredoc data do not suppress command substitution. */
+function heredocSubstitutions(body: string): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] === "\\") { index += 1; continue; }
+    if (body[index] === "`") {
+      let end = index + 1;
+      for (; end < body.length; end += 1) {
+        if (body[end] === "\\") { end += 1; continue; }
+        if (body[end] === "`") break;
+      }
+      if (end < body.length) { result.push(body.slice(index + 1, end)); index = end; }
+      continue;
+    }
+    if (body[index] !== "$" || body[index + 1] !== "(") continue;
+    const quotes: Array<"'" | "\"" | undefined> = [undefined];
+    const starts: Array<number | undefined> = [index + 2];
+    let end = index + 2;
+    for (; end < body.length && quotes.length; end += 1) {
+      const character = body[end]!;
+      const quote = quotes.at(-1);
+      if (character === "\\" && quote !== "'") { end += 1; continue; }
+      if (character === quote) { quotes[quotes.length - 1] = undefined; continue; }
+      if (quote === "'") continue;
+      if (character === "`") {
+        let close = end + 1;
+        for (; close < body.length; close += 1) {
+          if (body[close] === "\\") { close += 1; continue; }
+          if (body[close] === "`") break;
+        }
+        if (close < body.length) { result.push(body.slice(end + 1, close)); end = close; }
+        continue;
+      }
+      if (character === "$" && body[end + 1] === "(") { quotes.push(undefined); starts.push(end + 2); end += 1; continue; }
+      if (quote === "\"") continue;
+      if (character === "'" || character === "\"") quotes[quotes.length - 1] = character;
+      else if (character === "(") { quotes.push(undefined); starts.push(undefined); }
+      else if (character === ")") {
+        quotes.pop();
+        const start = starts.pop();
+        if (start !== undefined) result.push(body.slice(start, end));
+      }
+    }
+    if (quotes.length === 0) index = end - 1;
+  }
+  return result;
+}
+
 /** Keep direct literal stdin data out of shell statements; retain patch bodies for path extraction. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
@@ -655,10 +703,28 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
           if (part!.delimiter === undefined) continue;
           const body = posixHeredocBody(remaining, after, part!.delimiter, part!.stripTabs === true);
           if (!body.closed) { complete = false; break; }
-          if (!part!.literal) parsed.push(...shellPathSegments(body.body, dialect));
+          if (!part!.literal) {
+            parsed.push(...shellPathSegments(body.body, dialect));
+            // The raw data can resemble a quoted heredoc even though its own
+            // substitutions still execute before the consumer receives it.
+            for (const substitution of heredocSubstitutions(body.body)) parsed.push(...shellPathSegments(substitution, dialect));
+          }
           after = body.after;
         }
         if (complete) { result.push(...parsed); remaining = remaining.slice(after); continue; }
+      }
+      // If a later consumer is opaque, keep the ordinary fallback while still
+      // inspecting substitutions in any preceding, independently parsed bodies.
+      let after = next;
+      for (const part of parts) {
+        if (part === undefined) break;
+        if (part.delimiter === undefined) continue;
+        const body = posixHeredocBody(remaining, after, part.delimiter, part.stripTabs === true);
+        if (!body.closed) break;
+        if (!part.literal) for (const substitution of heredocSubstitutions(body.body)) {
+          result.push(...shellPathSegments(substitution, dialect));
+        }
+        after = body.after;
       }
     }
     const source = before.at(-1) ?? "";
@@ -670,6 +736,14 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     const dataOnly = READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee";
     const literal = header?.[4] !== undefined || header?.[5] !== undefined;
     const syntax = scanShellSyntax(source, dialect);
+    if (!earlierHeredoc && header && head?.length && dataOnly && !literal &&
+        !syntax.unsafeExpansion && !syntax.activeBrace && !syntax.masked.slice(0, operator).includes("<<") &&
+        source[operator - 1] !== "<" && syntax.masked.slice(operator, operator + 2) === "<<" && source[operator - 1] !== "\\") {
+      const body = posixHeredocBody(remaining, next, header[6]!, header[2] === "<<-");
+      if (body.closed) for (const substitution of heredocSubstitutions(body.body)) {
+        result.push(...shellPathSegments(substitution, dialect));
+      }
+    }
     // Only one direct heredoc is modeled. Earlier pipeline segments may own other
     // heredocs, and a quoted body can still be executable stdin for a shell.
     // Skip literal data only for known data consumers; retain other bodies for inspection.
