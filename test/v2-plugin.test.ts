@@ -2028,7 +2028,8 @@ test("V2 report accounting traverses native pages and retains child model, tool 
   } finally { cleanup?.(); }
 });
 
-for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission"] as const) {
+for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
+  "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "unobserved-redeclared-run"] as const) {
   test(`V2 timed native operation recovery through Mission APIs: ${mode}`, async () => {
     await mkdir(resolve("_testenv"), { recursive: true });
     const directory = await mkdtemp(resolve("_testenv/v2-timed-operation-"));
@@ -2068,6 +2069,7 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
       await writeFile(join(directory, "check.mjs"), 'console.log("PASS");\n');
       const command = "/usr/bin/python3 -B tools/start.py --background > /tmp/result.json";
       const timed = `TIMEFORMAT='ELAPSED=%R'; time ${command}`;
+      const failed = mode === "failure" || mode === "redeclared-failure";
       await chat("root", "Collect the already executed operation result without replay.");
       const mission = await tool("start_mission", "root", { requirements: ["Collect the operation result"], kind: "operation",
         execution: { commands: [mode === "foreign-owner" ? timed : command], directory } });
@@ -2085,8 +2087,8 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
         content: [{ type: "tool", id: "call_native", name: "shell", time: { created: started - 265, ran: started, completed: started + 350 },
           state: { status: "completed", input: { command: mode === "command-mismatch" ? timed.replace("start.py", "other.py") : timed,
             workdir: mode === "cwd-mismatch" ? join(directory, "other") : directory },
-          metadata: { exit: mode === "failure" ? 1 : 0 }, content: [{ type: "text", text: "ELAPSED=0.284\n" }] } }] };
-      history[mode === "foreign-owner" ? "former" : "worker"] = [native, structuredClone(native)];
+          metadata: { exit: failed ? 1 : 0 }, content: [{ type: "text", text: "ELAPSED=0.284\n" }] } }] };
+      if (mode !== "unobserved-redeclared-run") history[mode === "foreign-owner" ? "former" : "worker"] = [native, structuredClone(native)];
       if (mode === "success") {
         const projected = (await client.session.reviewMessages({ path: { id: "worker" }, query: { notBefore: run.createdAt } })).data[0].parts[0];
         assert.equal(projected.tool, "bash");
@@ -2098,12 +2100,12 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
         assert.equal(projected.state.metadata.exit, 0);
       }
       const operation = (await tool("operator_status", "root")).acceptance_summary.operation;
-      if (mode === "success" || mode === "failure") {
-        assert.equal(operation.status, mode === "success" ? "executed" : "execution-failed");
-        assert.equal(operation.process_succeeded, mode === "success");
+      if (mode === "success" || mode === "failure" || mode.startsWith("redeclared-")) {
+        assert.equal(operation.status, failed ? "execution-failed" : "executed");
+        assert.equal(operation.process_succeeded, !failed);
         assert.equal(operation.observations.length, 1, "duplicate native records do not duplicate observations");
         assert.equal(operation.observations[0].callID, "call_native");
-        assert.equal(operation.observations[0].exit, mode === "failure" ? 1 : 0);
+        assert.equal(operation.observations[0].exit, failed ? 1 : 0);
         const submitted = await tool("submit_mission", "coordinator", { status: "blocked", summary: "The native result was collected; acceptance remains separate." });
         assert.equal(submitted.acceptance_summary.operation.status, operation.status);
         assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 1);
@@ -2112,6 +2114,29 @@ for (const mode of ["success", "failure", "command-mismatch", "cwd-mismatch", "f
         assert.equal(operation.process_succeeded, null);
         assert.deepEqual(operation.observations, []);
         if (mode === "foreign-owner") assert.equal(requested.includes("former"), false, "a new owner cannot search the prior author's session");
+      }
+      if (mode.startsWith("redeclared-") || mode === "unobserved-redeclared-run") {
+        const replanned = await tool("plan_units", "coordinator", { executor: "self", reason: "Collect the existing native result with its literal timing spelling, without replay.",
+          execution: { commands: mode === "redeclared-ambiguous" ? [timed, timed.replace("ELAPSED", "OTHER")]
+            : [mode === "redeclared-mismatch" ? timed.replace("result.json", "other.json") : timed],
+            directory: mode === "redeclared-cwd" ? join(directory, "other") : directory }, units: [{ title: "Retain result", objective: "Read-only result collection",
+            read: ["check.mjs"], write: [], validation: ["node check.mjs"] }] });
+        assert.notEqual(replanned.run_id, run.runID, "the collector has a different run and author");
+        // The known predecessor may still be read for native terminal/accounting
+        // reconciliation. Those reads must not import an unobserved operation.
+        if (mode === "unobserved-redeclared-run") history.worker = [native];
+        const retained = (await tool("operator_status", "root")).acceptance_summary.operation;
+        const equivalent = mode === "redeclared-run" || mode === "redeclared-failure";
+        assert.equal(retained.status, equivalent ? failed ? "execution-failed" : "executed" : "not-started",
+          "only a unique equivalent declaration retains the already admitted native result");
+        assert.equal(retained.process_succeeded, equivalent ? !failed : null);
+        assert.equal(retained.observations.length, mode === "unobserved-redeclared-run" ? 0 : 1);
+        if (retained.observations.length) {
+          assert.equal(retained.observations[0].callID, "call_native");
+          assert.equal(retained.observations[0].sessionID, "worker", "the original author is not reassigned to the collector");
+          assert.equal(retained.observations[0].command, equivalent ? timed : command);
+          assert.equal(retained.observations[0].exit, failed ? 1 : 0);
+        }
       }
       assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
     } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }

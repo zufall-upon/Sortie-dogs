@@ -2731,7 +2731,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           !Array.isArray(execution.commands) || execution.commands.length === 0 || execution.commands.length > 16 ||
           !execution.commands.every(command => typeof command === "string" && command.trim())) throw new Error("mission-operation-input: supply the actual operation commands and their working directory");
       const commands = [...new Set((execution.commands as string[]).map(missionValidationCommand).map(normalizeCommand))];
-      return { commands, directory: resolve(input.directory, execution.directory), observations: operation?.observations ?? [] };
+      const directory = resolve(input.directory, execution.directory);
+      const observations = (operation?.observations ?? []).map(observation => {
+        // A later collector keeps the original native ownership and terminal, not a
+        // new permission to search its predecessor's history. Only rebind a recorded
+        // result to one equivalent declaration in the unchanged operation cwd.
+        if (!operation || operation.directory !== directory || observation.directory !== directory ||
+            !operation.commands.includes(observation.command) || commands.includes(observation.command)) return observation;
+        const equivalent = commands.filter(command =>
+          missionOperationCommandMatch(observation.command, [command], directory) !== undefined ||
+          missionOperationCommandMatch(command, [observation.command], directory) !== undefined);
+        return equivalent.length === 1 ? { ...observation, command: equivalent[0]! } : observation;
+      });
+      return { commands, directory, observations };
     }
     async function reconcileMissionExecution(root: string, mission: OperatorMission, run: OperatorState | undefined): Promise<OperatorMission> {
       const execution = mission.execution;
