@@ -320,6 +320,36 @@ test("PowerShell literal-dollar destinations keep quote provenance without grant
   }
 }));
 
+test("inline output options retain literal quotes protected by whole-argument quoting", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "archives"));
+  await mkdir(join(root, '"archives"'));
+  const manifest = { version: "0.1.0", task_id: "inline-quote-provenance", read: [], validation: [] };
+  const narrow = await createWriteGate(await createProjectPaths(root), { ...manifest, write: ["allowed.json", "archives/**"] });
+  const literal = await createWriteGate(await createProjectPaths(root), {
+    ...manifest, write: ['"allowed.json"', "'allowed.json'", '"archives"/**'],
+  });
+  for (const [command, target] of [
+    [`curl '--output="allowed.json"' https://example.test/result`, '"allowed.json"'],
+    [`curl --output='"allowed.json"' https://example.test/result`, '"allowed.json"'],
+    [`curl "--output='allowed.json'" https://example.test/result`, "'allowed.json'"],
+    [`tar -xf input.tar '--directory="archives"'`, '"archives"'],
+    [`git archive '--output="allowed.json"' HEAD`, '"allowed.json"'],
+  ] as const) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [join(root, target)], command);
+    const request = { tool: "shell", sessionID: "worker", callID: command };
+    const output = { args: { command, workdir: root } };
+    await assert.rejects(narrow.check(request, output, { investigativeShell: true }),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+    await literal.check(request, output, { investigativeShell: true });
+  }
+  for (const command of [
+    `curl --output="allowed.json" https://example.test/result`,
+    `curl '--output=allowed.json' https://example.test/result`,
+    `tar -xf input.tar --directory='archives'`,
+    `git archive --output='allowed.json' HEAD`,
+  ]) await narrow.check({ tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } });
+}));
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");
