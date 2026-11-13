@@ -73,8 +73,11 @@ An operation refusal is recorded by the host before-hook for the exact session,
 call, run and native input. Error prose, missing PID/output, short duration and a
 tool start clock are not non-execution evidence. Native history can reconcile a
 matching receipt after rebind/reload, but contradictory inputs or process results
-block recovery. Durable serialized admission prevents a second launch while the
-first is running, completed or unresolved. Existing histories without this
+block recovery. Concurrent status reads of V2's pre-hook running envelope do not
+turn a host refusal into process evidence. Unavailable native history blocks new
+admission until the same history can be recovered. Durable serialized admission
+prevents a second launch while the first is running, completed or unresolved.
+Existing histories without this
 receipt are not retroactively relabeled.
 
 `node scripts/mission-cli-probe.mjs <fixed.tgz> <evidence-directory> prelaunch-scope-recovery 600`

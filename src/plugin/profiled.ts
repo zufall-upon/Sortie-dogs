@@ -2828,14 +2828,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const state = part.state as Record<string, unknown>;
             const nativeInput = state.input as Record<string, unknown>;
             if (typeof nativeInput.command !== "string") continue;
+            const metadata = record(state.metadata) ? state.metadata : {};
+            const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
+            const nativeProcessObserved = metadata.exit !== undefined || metadata.shellID !== undefined || metadata.pid !== undefined ||
+              String(metadata.status ?? "").toLowerCase() === "running" || output.length > 0;
             // V2 publishes this call's running tool envelope before invoking our
             // before-hook. It is not an earlier native execution. Exclude only that
             // still-prelaunch envelope during admission, never a saved observation,
             // terminal record or any process evidence for the same call.
             if (beforeCall?.sessionID === sessionID && beforeCall.callID === part.callID && state.status === "running" &&
                 !execution.observations.some(item => item.sessionID === sessionID && item.callID === part.callID) &&
-                (!record(state.metadata) || state.metadata.exit === undefined && state.metadata.shellID === undefined && state.metadata.pid === undefined) &&
-                !state.output) continue;
+                !nativeProcessObserved) continue;
             const time = record(state.time) ? state.time : record(part.time) ? part.time : {};
             const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
               : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
@@ -2861,7 +2864,6 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             observedInputs.push({ sessionID, callID: key, command, directory, startedAt });
             if (directory !== execution.directory) continue;
             if (!command) continue;
-            const metadata = record(state.metadata) ? state.metadata : {};
             const nativeStatus = String(state.status ?? "").toLowerCase();
             const resultStatus = String(metadata.status ?? "").toLowerCase();
             if ((nativeStatus === "error" && resultStatus === "running") || (nativeStatus === "running" && resultStatus === "error")) {
@@ -2873,15 +2875,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             if (!running && !failed && nativeStatus !== "completed") continue;
             const completedAt = running ? undefined : date(time.end ?? time.completed);
             const exit = Number.isSafeInteger(metadata.exit) ? metadata.exit as number : undefined;
-            const output = typeof state.output === "string" ? state.output : typeof part.output === "string" ? part.output : "";
             const status: "error" | "running" | "completed" = failed ? "error" : running ? "running" : "completed";
             const receipt = execution.observations.find(item => item.sessionID === sessionID && item.callID === key)?.prelaunchRejection;
             const rejected = receipt?.source === "host-before-hook" && receipt.runID === run.runID &&
               receipt.inputHash === missionOperationInputHash(String(part.tool), nativeInput.command, directory);
             // Error text and a native tool clock cannot establish non-execution. Only our
             // persisted same-call before-hook receipt can, and actual process evidence wins.
-            if (receipt && (!rejected || running || !failed || exit !== undefined || metadata.shellID !== undefined ||
-                metadata.pid !== undefined || output.length > 0)) conflicts.add(key);
+            // V2 can still expose its pre-hook running envelope after the host has
+            // refused the call. Only a process result, not that envelope, contradicts it.
+            if (receipt && (!rejected || nativeProcessObserved || !running && !failed)) conflicts.add(key);
             const outcome = rejected && !conflicts.has(key) && failed && completedAt
               ? { outcome: "not-started" as const }
               : conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
@@ -2889,6 +2891,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
             const observation = { command, directory: execution.directory, callID: key, sessionID, startedAt, nativeStartedAt: startedAt,
+              ...(nativeProcessObserved ? { nativeProcessObserved: true as const } : {}),
               ...(completedAt ? { completedAt } : {}), ...(exit === undefined ? {} : { exit }), status,
               ...(rejected ? { prelaunchRejection: receipt } : {}),
               ...(typeof metadata.shellID === "string" ? { shellID: metadata.shellID } : {}), ...(outcome ?? {}) };
@@ -2930,6 +2933,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             continue;
           }
           if (prior.command !== observation.command || prior.directory !== observation.directory) continue;
+          if (observation.nativeProcessObserved) prior.nativeProcessObserved = true;
           if (observation.conflicting || prior.nativeStartedAt !== undefined && prior.nativeStartedAt !== observation.nativeStartedAt ||
               prior.completedAt && observation.completedAt && (prior.status !== observation.status ||
               prior.exit !== undefined && observation.exit !== undefined && prior.exit !== observation.exit ||
@@ -4301,6 +4305,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               // reloads cannot both spend this operation. A crash here stays unknown.
               await missions.update(root, current => {
                 if (current.runID !== mission.runID || !current.execution) throw new Error("mission-operation-admission-stale");
+                if (current.execution.recovery) throw new Error("mission-operation-recovery-unavailable: recover the existing native history before launch; do not replay or rerun");
                 const prior = current.execution.observations.filter(item => item.command === declaredOperation && item.directory === current.execution!.directory);
                 if (prior.some(item => item.callID === request.callID && item.sessionID === request.sessionID ||
                     item.conflicting || item.outcome !== "not-started" || !item.prelaunchRejection ||
@@ -4348,7 +4353,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (operationAdmission) await missions.update(root, current => {
             const observation = current.execution?.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
             if (!observation || current.runID !== mission?.runID) return;
-            if (observation.nativeStartedAt || observation.status || observation.exit !== undefined || observation.shellID) {
+            if (observation.conflicting || observation.nativeProcessObserved || observation.outcome !== undefined ||
+                observation.exit !== undefined || observation.shellID) {
               observation.conflicting = true;
               return;
             }

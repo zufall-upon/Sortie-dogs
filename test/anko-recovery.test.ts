@@ -491,6 +491,88 @@ test("prelaunch scope rejection recovers the SAME operation once across history,
   assert.deepEqual((await coldTool("operator_status")).budget, budget);
 }));
 
+for (const evidence of ["tool-envelope", "exit", "pid", "shellID", "output", "process-running", "changed-input"] as const)
+test(`prelaunch scope refusal tolerates concurrent status but retains process contradictions: ${evidence}`, async () => fixture(async f => {
+  const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Create one directory"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const budget = (await f.tool("operator_status")).budget;
+  const args = { command, workdir: f.directory }, start = Date.now();
+  const state: any = { status: "running", input: { ...args }, time: { start }, metadata: {} };
+  f.history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "polled-refusal", state }] }];
+  const prototype = OperatorMissionRuntime.prototype, update = prototype.update;
+  let entered!: () => void, release!: () => void, paused = false;
+  const admitted = new Promise<void>(resolve => { entered = resolve; });
+  const proceed = new Promise<void>(resolve => { release = resolve; });
+  prototype.update = async function(...input: Parameters<typeof update>) {
+    const result = await update.apply(this, input);
+    if (!paused && result.execution?.observations.some(item => item.callID === "polled-refusal")) {
+      paused = true; entered(); await proceed;
+    }
+    return result;
+  };
+  try {
+    const refused = assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "polled-refusal" }, { args }), /write scope/);
+    await admitted;
+    if (evidence === "exit") state.metadata.exit = 1;
+    if (evidence === "pid") state.metadata.pid = 123;
+    if (evidence === "shellID") state.metadata.shellID = "native-shell";
+    if (evidence === "output") state.output = "process output";
+    if (evidence === "process-running") state.metadata.status = "running";
+    if (evidence === "changed-input") state.input.command = "node other.mjs";
+    await f.tool("operator_status");
+    release(); await refused;
+    // V2 has not yet replaced the pre-hook running envelope with its error part.
+    const pending = (await f.tool("operator_status")).acceptance_summary.operation;
+    assert.equal(pending.status, evidence === "tool-envelope" ? "not-started" : "recovery-blocked");
+    if (evidence === "tool-envelope") {
+      assert.equal(pending.observations[0].prelaunchRejection.source, "host-before-hook");
+      assert.notEqual(pending.observations[0].conflicting, true);
+    }
+    state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+    const terminal = (await f.tool("operator_status")).acceptance_summary.operation;
+    assert.equal(terminal.status, evidence === "tool-envelope" ? "not-started" : "recovery-blocked");
+    await f.tool("expand_unit", { unit_id: "unit-1", paths: ["fixture-output/**"], reason: "Synthetic output" }, "worker");
+    const retry = () => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "after-poll" }, { args });
+    if (evidence === "tool-envelope") {
+      await retry();
+      await mkdir(join(f.directory, "fixture-output"));
+      await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "after-poll" }, { output: "created", metadata: { exit: 0 } });
+      assert.equal((await f.tool("operator_status")).acceptance_summary.operation.status, "executed");
+    } else await assert.rejects(retry(), /already-admitted/);
+    assert.deepEqual((await f.tool("operator_status")).budget, budget);
+  } finally { release(); prototype.update = update; }
+}));
+
+for (const legacyResult of [false, true])
+test(`operation admission refuses unavailable history and recovers without replay: legacy=${legacyResult}`, async () => fixture(async f => {
+  const command = "node check.mjs";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Execute once"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const budget = (await f.tool("operator_status")).budget, start = Date.now();
+  const saved = legacyResult ? [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "legacy-result",
+    state: { status: "completed", input: { command, workdir: f.directory }, output: "PASS", metadata: { exit: 0 }, time: { start, end: start + 1 } } }] }] : [];
+  // Only the history endpoint fails: normal identity and native permissions remain available.
+  Object.defineProperty(f.history, "worker", { configurable: true, get() { throw Error("native-history-service-unavailable"); } });
+  const invoke = () => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "after-outage" }, { args: { command, workdir: f.directory } });
+  await assert.rejects(invoke(), /mission-operation-recovery-unavailable/);
+  const unavailable = (await f.missions.required("root")).execution;
+  assert.equal(unavailable.recovery.status, "unavailable");
+  assert.deepEqual(unavailable.observations, [], "an unreadable history cannot authorize a new launch");
+  Object.defineProperty(f.history, "worker", { configurable: true, writable: true, value: saved });
+  const cold = await f.create();
+  const restored = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" })).acceptance_summary.operation;
+  assert.equal(restored.recovery, undefined);
+  assert.equal(restored.status, legacyResult ? "executed" : "not-started");
+  if (legacyResult) await assert.rejects(invoke(), /already-admitted/);
+  else await invoke();
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+}));
+
 test("denial identity changes only with effective scope; no-op and rolled-back expansion preserve the refusal", async () => fixture(async f => {
   await f.start(); const { unit } = await f.dispatch();
   const command = "$d=Unknown-Expression; New-Item -ItemType Directory -Path $d";

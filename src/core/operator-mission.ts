@@ -94,6 +94,8 @@ export interface MissionExecution {
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
     /** Native tool clock, distinct from hook admission; alone it does not prove process start. */
     nativeStartedAt?: string;
+    /** Positive native process evidence, unlike a tool's pre-hook running envelope/clock. */
+    nativeProcessObserved?: true;
     /** Written only by the host before-hook that refused this exact call, never parsed from error prose. */
     prelaunchRejection?: { source: "host-before-hook"; runID: string; tool: string; inputHash: string };
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;
