@@ -586,7 +586,7 @@ function posixCommandLine(source: string): { line: string; next?: number } {
   return { line };
 }
 
-/** Keep a direct patch heredoc together: its body is data, not shell statements. */
+/** Keep direct literal stdin data out of shell statements; retain patch bodies for path extraction. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
   const result: ShellPathSegment[] = [];
@@ -603,8 +603,14 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     const head = header && unwrapEnvironmentCommand(words(header[1]!));
     const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1);
     const operator = header?.[1]?.length ?? -1;
-    if (!header || head?.length !== 1 || !/^(?:apply_?patch)$/iu.test(executable ?? "") ||
-        scanShellSyntax(source, dialect).masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
+    const patch = head?.length === 1 && /^(?:apply_?patch)$/iu.test(executable ?? "");
+    const literal = header?.[4] !== undefined || header?.[5] !== undefined;
+    const syntax = scanShellSyntax(source, dialect);
+    // Only one direct heredoc is modeled here. Nonliteral stdin can execute shell
+    // substitutions, so retain its existing inspection instead of hiding its body.
+    if (!header || !head?.length || !patch && (!literal || syntax.unsafeExpansion || syntax.activeBrace) ||
+        syntax.masked.slice(0, operator).includes("<<") || source[operator - 1] === "<" ||
+        syntax.masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
       result.push(...before.map(part => ({ source: part })));
       remaining = remaining.slice(next);
       continue;
@@ -632,7 +638,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     }
     let body = remaining.slice(bodyStart, bodyEnd);
     if (stripTabs) body = body.replace(/^\t+/gmu, "");
-    result.push({ source: header[1]!, patchHeredoc: { body, literal: header[4] !== undefined || header[5] !== undefined, closed } });
+    result.push({ source: header[1]!, ...(patch ? { patchHeredoc: { body, literal, closed } } : {}) });
     remaining = remaining.slice(after);
   }
   return result;

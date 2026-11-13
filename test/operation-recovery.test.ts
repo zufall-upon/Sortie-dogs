@@ -542,6 +542,25 @@ test("POSIX comments end at newline without hiding writes or changing literal ha
   assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
 }));
 
+test("literal heredoc stdin does not mask known header or following output destinations", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "literal-heredoc-known-outputs", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const data = "<<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED";
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  for (const command of [`cat > outside.txt ${data}`, `cat ${data}\nprintf changed > outside.txt`]) {
+    for (const mode of [false, true]) await assert.rejects(check(command, mode),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  }
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+  const allowed = `cat > allowed.txt ${data}`;
+  for (const mode of [false, true]) await check(allowed, mode);
+  await exec("bash", ["-c", allowed], { cwd: root });
+  assert.equal(await readFile(join(root, "allowed.txt"), "utf8"), "tar -xzf archive.tar.gz\n");
+}));
+
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
   await mkdir(join(root, "routes"));
   await writeFile(join(root, "routes/outside.tsx"), "unchanged\n");

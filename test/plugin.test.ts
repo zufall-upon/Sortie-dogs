@@ -7881,6 +7881,14 @@ test("the contract preflight reports gate defects without granting inspection", 
 
     // An unresolved ordinary output must not erase artifact facts from later segments.
     const compoundCases: Array<{ validation: string[]; defects: string[] }> = [
+      { validation: ["cat <<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED"], defects: [] },
+      { validation: ['cat <<"EXPECTED"\ntar -xzf archive.tar.gz -C missing-data-directory\nEXPECTED'], defects: [] },
+      { validation: ["cat <<-'EXPECTED'\n\ttar -xzf archive.tar.gz\n\tEXPECTED\ntar -xzf archive.tar.gz"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["cat <<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED\ntar -xzf archive.tar.gz -C temp/artifact/extracted"],
+        defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["cat <<EXPECTED\n$(\ntar -xzf archive.tar.gz\n)\nEXPECTED"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ['OUT=temp/artifact/extracted; node check.mjs && tar -xzf archive.tar.gz -C "$OUT"'],
         defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ['OUT=temp/artifact/extracted; node check.mjs && env MODE=test tar -xzf archive.tar.gz -C "$OUT"'],
@@ -7933,6 +7941,33 @@ test("the contract preflight reports gate defects without granting inspection", 
     await activate(hooks);
     const denied = await executeBindWriteGate(hooks, directory);
     assert.equal(denied.reason, "handoff-uninspected");
+  });
+});
+
+for (const trailingArtifact of [false, true]) test(`declared literal heredoc preserves public Worker admission: ${trailingArtifact ? "reject real suffix" : "allow data"}`,
+  { skip: process.platform === "win32" }, async () => {
+  await withProject("literal-heredoc-worker", async directory => {
+    const command = "cat <<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED" + (trailingArtifact ? "\ntar -xzf archive.tar.gz" : "");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    const launch = async () => {
+      await beginTrackedTaskChild(hooks, directory, "heredoc-parent", "heredoc-worker", "heredoc-task");
+      await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "heredoc-worker");
+    };
+    if (trailingArtifact) {
+      await assert.rejects(launch(), /artifact_command_unclassified/u);
+      return;
+    }
+    await launch();
+    assert.equal((await executeBindWriteGate(hooks, directory, "heredoc-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "heredoc-worker", callID: "heredoc-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(result.stdout, "tar -xzf archive.tar.gz\n");
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "archive.tar.gz")).catch(() => undefined), undefined);
   });
 });
 
