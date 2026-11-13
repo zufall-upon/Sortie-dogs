@@ -7869,11 +7869,13 @@ test("the contract preflight reports gate defects without granting inspection", 
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
     assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
     const validDownload = artifactManifest.validation[1]!;
-    artifactManifest.validation[1] = "curl -fLO https://example.test/archive.tar.gz";
-    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
-    assert.deepEqual((await report(handoffPath)).defects, [
-      "manifest /validation/1 artifact_command_unclassified",
-    ]);
+    for (const command of ["curl -fLO https://example.test/archive.tar.gz", 'curl -fL https://example.test/archive.tar.gz -o "$OUT"']) {
+      artifactManifest.validation[1] = command;
+      await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+      assert.deepEqual((await report(handoffPath)).defects, [
+        "manifest /validation/1 artifact_command_unclassified",
+      ]);
+    }
     artifactManifest.validation[1] = validDownload;
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
 

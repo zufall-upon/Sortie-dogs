@@ -5441,7 +5441,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const preparedDirectories: string[] = [];
     for (let index = 0; index < manifest.validation.length; index += 1) {
       const command = manifest.validation[index];
-      const extraction = extractWritePaths("bash", { command });
+      let extraction: ReturnType<typeof extractWritePaths>;
+      try {
+        extraction = extractWritePaths("bash", { command });
+      } catch (error) {
+        if (!(error instanceof WriteDeniedError)) throw error;
+        // Exact declared checks need no inferred output authority. Artifact commands
+        // below still require a classified form and their directory prerequisites.
+        extraction = { applies: true, ambiguous: true, paths: [] };
+      }
       if (extraction.ambiguous && /^\s*(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)\b/iu.test(command)) {
         throw new HandoffDeniedError("contract-invalid", path, {
           defects: [contractDefect("manifest", `/validation/${index}`, "artifact_command_unclassified")],
