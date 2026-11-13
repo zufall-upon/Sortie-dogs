@@ -549,6 +549,63 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
   return segments;
 }
 
+interface ShellPathSegment {
+  source: string;
+  patchHeredoc?: { body: string; literal: boolean; closed: boolean };
+}
+
+/** Keep a direct patch heredoc together: its body is data, not shell statements. */
+function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
+  if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
+  const result: ShellPathSegment[] = [];
+  let remaining = command;
+  while (remaining.length > 0) {
+    const newline = scanShellSyntax(remaining, dialect).masked.indexOf("\n");
+    if (newline < 0) {
+      result.push(...shellSegments(remaining, dialect).map(source => ({ source })));
+      break;
+    }
+    const before = shellSegments(remaining.slice(0, newline), dialect);
+    const source = before.at(-1) ?? "";
+    const header = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u.exec(source);
+    const head = header && unwrapEnvironmentCommand(words(header[1]!));
+    const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1);
+    const operator = header?.[1]?.length ?? -1;
+    if (!header || head?.length !== 1 || !/^(?:apply_?patch)$/iu.test(executable ?? "") ||
+        scanShellSyntax(source, dialect).masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
+      result.push(...before.map(part => ({ source: part })));
+      remaining = remaining.slice(newline + 1);
+      continue;
+    }
+    result.push(...before.slice(0, -1).map(part => ({ source: part })));
+    const delimiter = header[4] ?? header[5] ?? header[6]!;
+    const stripTabs = header[2] === "<<-";
+    const bodyStart = newline + 1;
+    let cursor = bodyStart;
+    let bodyEnd = remaining.length;
+    let after = remaining.length;
+    let closed = false;
+    while (cursor <= remaining.length) {
+      const end = remaining.indexOf("\n", cursor);
+      const lineEnd = end < 0 ? remaining.length : end;
+      const line = remaining.slice(cursor, lineEnd);
+      if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) {
+        bodyEnd = cursor;
+        after = end < 0 ? lineEnd : end + 1;
+        closed = true;
+        break;
+      }
+      if (end < 0) break;
+      cursor = end + 1;
+    }
+    let body = remaining.slice(bodyStart, bodyEnd);
+    if (stripTabs) body = body.replace(/^\t+/gmu, "");
+    result.push({ source: header[1]!, patchHeredoc: { body, literal: header[4] !== undefined || header[5] !== undefined, closed } });
+    remaining = remaining.slice(after);
+  }
+  return result;
+}
+
 /** Prefixes before unquoted shell suffixes, including those after a declared envelope or redirect. */
 export function* shellCommandPrefixes(command: string, dialect: ShellDialect): Generator<string> {
   const masked = scanShellSyntax(command, dialect).masked;
@@ -635,19 +692,19 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   const redirection = /(?<![<>=!])(?:&|\d*)?(?:>>|>\||>)(?![=])/gu;
   const redirectionTarget = /^\s*("(?:\\.|[^"])*"|'[^']*'|&?\d+|[^\s;&|]+)/u;
   const dialect: ShellDialect = powershell ? "powershell" : "posix";
-  const segments = shellSegments(command, dialect);
+  const segments = shellPathSegments(command, dialect);
   const pathValues = new Map<string, string>();
   const assignments = new Map<string, number>();
   const straightLine = powershell && !scanShellSyntax(command, dialect).activeBrace &&
     !/[|&]/u.test(scanShellSyntax(command, dialect).masked);
   let knownCwd = straightLine ? cwd : undefined;
   let definitionPrefix = true;
-  for (const segment of segments) {
+  for (const { source: segment } of segments) {
     const name = /^\s*(\$[A-Za-z_][A-Za-z0-9_]*)\s*=/u.exec(segment)?.[1]?.toLowerCase();
     if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
   }
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
-    const segment = segments[segmentIndex];
+    const { source: segment, patchHeredoc } = segments[segmentIndex]!;
     let source = segment.trim();
     let assignment = false;
     const syntax = scanShellSyntax(source, dialect);
@@ -683,6 +740,9 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       unresolvedExpansion = true;
       // Native investigative shells still cannot execute an opaque Git mutation.
       const expandedTokens = words(source);
+      let expandedCommand = unwrapEnvironmentCommand(expandedTokens);
+      if (powershell && expandedCommand[0] === "&") expandedCommand = expandedCommand.slice(1);
+      if (/(?:^|[\\/])apply_?patch(?=$|<)/iu.test(expandedCommand[0] ?? "")) unresolvedPaths.push("<patch-content-unresolved>");
       // A substitution's internal separator can put the subcommand in another segment.
       const identityConfig = expandedTokens.some((token, index) => token === "-c" &&
         /^user\.(?:name|email)=/iu.test(expandedTokens[index + 1] ?? ""));
@@ -948,10 +1008,19 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         token.toLowerCase() === "-itemtype" && tokens[index + 1]?.toLowerCase() === "directory")) {
         createdDirectories.push(...selected);
       }
-    } else if (/^(?:apply_?patch)$/iu.test(executable)) {
+    } else if (/^(?:apply_?patch)$/iu.test(executable) || /(?:^|[\\/])apply_?patch(?=<)/iu.test(tokens[0]!)) {
       applies = true;
-      const selected = patchPaths(segment);
+      const argument = tokenSources[rawTokens.length - tokens.length + 1];
+      const singleQuoted = argument !== undefined && /^'[^']*'$/u.test(argument);
+      const plainDoubleQuoted = argument !== undefined && /^"[^"$`\\]*"$/u.test(argument);
+      const literalArgument = /^(?:apply_?patch)$/iu.test(executable) && tokens.length === 2 &&
+        !incompleteSourceWord(1) && (singleQuoted || plainDoubleQuoted);
+      const literalHeredoc = patchHeredoc?.closed && (patchHeredoc.literal || !/[$`\\]/u.test(patchHeredoc.body));
+      const trusted = literalArgument || literalHeredoc;
+      const selected = patchPaths(patchHeredoc?.body ?? (literalArgument ? unquote(argument!) : segment));
       if (selected.length === 0) ambiguous = true;
+      if (!trusted || selected.length === 0) unresolvedPaths.push("<patch-content-unresolved>");
+      if (trusted) for (let index = 0; index < selected.length; index += 1) literalDollarPaths.add(paths.length + index);
       paths.push(...selected);
     } else if (executable === "git" && tokens[1]?.toLowerCase() === "add") {
       applies = true;
