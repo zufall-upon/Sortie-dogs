@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import test from "node:test";
-import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths, WriteDeniedError } from "../dist/plugin/gate.js";
+import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths, isKnownReadOnlyTool, WriteDeniedError } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { missionOperationCommandMatch, OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
@@ -435,6 +435,78 @@ test("POSIX line continuations retain copy and move destinations before the adap
     assert.equal(await readFile(join(root, target), "utf8"), "fixture source\n");
   }
   assert.equal(existsSync(join(root, "source")), false);
+  assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
+}));
+
+test("POSIX comments end at newline without hiding writes or changing literal hash words", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "source"), "fixture source\n");
+  await writeFile(join(root, "outside"), "outside original\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "posix-comment-boundaries", read: [],
+    write: ["allowed#literal", "allowed#quoted", "allowed#patch"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell });
+  let adapterCalls = 0;
+  for (const [command, target] of [
+    ["echo ready # note \\\ncp source outside", "outside"],
+    ["# note \\\ncp source absent", "absent"],
+    ["echo ready;# note \\\ncp source outside", "outside"],
+    ["echo ready # unterminated ' \" <<PATCH > ignored \\\ncp source outside", "outside"],
+  ] as const) {
+    const args = { command, workdir: root };
+    const extracted = extractWritePaths("shell", args, root);
+    assert.deepEqual(extracted.paths, [join(root, target)], command);
+    assert.equal(isKnownReadOnlyTool("shell", args), false, command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
+  assert.equal(existsSync(join(root, "absent")), false);
+
+  for (const command of [
+    "echo ready # fake > outside; cp source outside ' \" \\\nprintf safe",
+    "echo foo\\ #not-comment\\\ncp source outside",
+    "echo \\#not-comment\\\ncp source outside",
+    "echo foo\\\n#not-comment",
+  ]) {
+    const args = { command, workdir: root };
+    assert.equal(isKnownReadOnlyTool("shell", args), true, command);
+    assert.deepEqual(extractWritePaths("shell", args, root).paths, [], command);
+    for (const mode of [false, true]) await check(command, mode);
+  }
+  assert.equal((await exec("bash", ["-c", "echo foo\\ #not-comment\\\ncp source outside"], { cwd: root })).stdout,
+    "foo #not-commentcp source outside\n");
+  for (const [command, target] of [
+    ["cp source allowed\\\n#literal", "allowed#literal"],
+    ["cp source 'allowed#quoted'", "allowed#quoted"],
+  ] as const) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [join(root, target)]);
+    for (const mode of [false, true]) await check(command, mode);
+    await exec("bash", ["-c", command], { cwd: root });
+    assert.equal(await readFile(join(root, target), "utf8"), "fixture source\n");
+  }
+
+  const body = "--- /dev/null\n+++ b/allowed#patch\n@@ -0,0 +1,2 @@\n+literal # \\\n+tail\n";
+  const heredoc = `apply_patch <<'PATCH' # trailing \\\n${body}PATCH`;
+  assert.deepEqual(extractWritePaths("shell", { command: heredoc, workdir: root }, root).paths, [join(root, "allowed#patch")]);
+  const appended = `${heredoc}\ncp source outside`;
+  assert.deepEqual(extractWritePaths("shell", { command: appended, workdir: root }, root).paths,
+    [join(root, "allowed#patch"), join(root, "outside")]);
+  assert.equal(isKnownReadOnlyTool("shell", { command: appended, workdir: root }), false);
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(appended, mode);
+    adapterCalls += 1;
+  })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  assert.equal(adapterCalls, 0);
+  assert.equal(existsSync(join(root, "allowed#patch")), false);
+  for (const mode of [false, true]) await check(heredoc, mode);
+  await exec("bash", ["-c", `apply_patch() { patch -p1 -s; }; ${heredoc}`], { cwd: root });
+  assert.equal(await readFile(join(root, "allowed#patch"), "utf8"), "literal # \\\ntail\n");
   assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
 }));
 

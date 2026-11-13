@@ -554,10 +554,11 @@ interface ShellPathSegment {
   patchHeredoc?: { body: string; literal: boolean; closed: boolean };
 }
 
-/** Remove POSIX line continuations from command syntax, but not single-quoted data or heredoc bodies. */
+/** Remove POSIX line continuations, preserving quoted data and comment boundaries. */
 function posixCommandLine(source: string): { line: string; next?: number } {
   let line = "";
   let quote: "\"" | "'" | undefined;
+  let wordStart = true;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]!;
     if (character === "\\" && quote !== "'") {
@@ -565,11 +566,21 @@ function posixCommandLine(source: string): { line: string; next?: number } {
       if (next === "\n") { index += 1; continue; }
       line += character;
       if (next !== undefined) { line += next; index += 1; }
+      if (quote === undefined) wordStart = false;
       continue;
     }
     if (character === "\n" && quote === undefined) return { line, next: index + 1 };
+    // A comment starts only at the beginning of an unquoted word. Its contents,
+    // including quotes and backslashes, do not affect the terminating newline.
+    if (character === "#" && quote === undefined && wordStart) {
+      const newline = source.indexOf("\n", index);
+      return newline < 0 ? { line } : { line, next: newline + 1 };
+    }
     if (character === quote) quote = undefined;
-    else if (quote === undefined && (character === "'" || character === "\"")) quote = character;
+    else if (quote === undefined && (character === "'" || character === "\"")) {
+      quote = character;
+      wordStart = false;
+    } else if (quote === undefined) wordStart = /[ \t;|&()<>]/u.test(character);
     line += character;
   }
   return { line };
