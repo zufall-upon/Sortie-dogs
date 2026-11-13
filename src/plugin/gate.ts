@@ -646,13 +646,18 @@ function usesPowerShell(name: string, command: string): boolean {
 
 /** Non-authorizing preflight view, using the same dialect and segments as path extraction. */
 export function artifactInspectionSegments(command: string): { source: string; tool: string; artifact: boolean }[] {
-  const powershell = usesPowerShell("bash", command);
-  return shellPathSegments(command, powershell ? "powershell" : "posix").map(({ source }) => {
-    let tokens = unwrapEnvironmentCommand(words(source));
-    if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
-    const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
-    return { source, tool: powershell ? "powershell" : "bash", artifact: /^(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)$/u.test(executable ?? "") };
-  });
+  const inspect = (body: string, powershell: boolean, depth: number): { source: string; tool: string; artifact: boolean }[] =>
+    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source }) => {
+      // Match the same literal, depth-one envelope accepted by shellPaths; an
+      // unresolved sibling output must not hide its inner artifact commands.
+      const literal = depth === 0 ? depthOnePowerShellLiteral(source) : undefined;
+      if (literal !== undefined) return inspect(literal, true, depth + 1);
+      let tokens = unwrapEnvironmentCommand(words(source));
+      if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
+      const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+      return [{ source, tool: powershell ? "powershell" : "bash", artifact: /^(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)$/u.test(executable ?? "") }];
+    });
+  return inspect(command, usesPowerShell("bash", command), 0);
 }
 
 /** Prefixes before unquoted shell suffixes, including those after a declared envelope or redirect. */

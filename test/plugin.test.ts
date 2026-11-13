@@ -7892,6 +7892,21 @@ test("the contract preflight reports gate defects without granting inspection", 
       { validation: ["mkdir -p temp/artifact/extracted", 'OUT=temp/check.txt; node check.mjs > "$OUT" && tar -xzf archive.tar.gz -C temp/artifact/extracted'],
         defects: [] },
       { validation: ['OUT=temp/check.txt; printf \'tar -xzf archive.tar.gz\' > "$OUT"'], defects: [] },
+      { validation: ["pwsh -NoProfile -Command 'Write-Output ok > $OUT; tar -xzf archive.tar.gz -C temp/artifact/extracted'"],
+        defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["mkdir -p temp/artifact/extracted", "pwsh -NoProfile -Command 'Write-Output ok > $OUT; tar -xzf archive.tar.gz -C temp/artifact/extracted'"],
+        defects: [] },
+      { validation: ["pwsh -NoProfile -Command 'New-Item -ItemType Directory -Path temp/artifact/extracted; Write-Output ok > $OUT; tar -xzf archive.tar.gz -C temp/artifact/extracted'"],
+        defects: [] },
+      { validation: ["pwsh -NoProfile -Command 'Write-Output ok > $OUT; & tar -xzf archive.tar.gz -C $DEST'"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["pwsh -NoProfile -Command 'Write-Output ''tar -xzf archive.tar.gz'' > $OUT'"],
+        defects: [] },
+      { validation: ["pwsh -NoProfile -Command 'Write-Output ok > $OUT'"], defects: [] },
+      { validation: ['OUT=temp/check.txt; node check.mjs > "$OUT"; pwsh -NoProfile -Command \'Write-Output ok > $OTHER; tar -xzf archive.tar.gz -C temp/artifact/extracted\''],
+        defects: ["manifest /validation/0 artifact_directory_unprepared"] },
+      { validation: ["mkdir -p temp/artifact/extracted", "pwsh -NoProfile -Command '$DEST=''temp/artifact/extracted''; tar -xzf archive.tar.gz -C $DEST'"],
+        defects: [] },
     ];
     for (const { validation, defects } of compoundCases) {
       artifactManifest.validation = validation;
@@ -7900,6 +7915,10 @@ test("the contract preflight reports gate defects without granting inspection", 
       assert.deepEqual(result.defects, defects, validation.join("; "));
       assert.equal(result.status, defects.length ? "defective" : "ok");
     }
+    await mkdir(join(directory, "temp/artifact/extracted"), { recursive: true });
+    artifactManifest.validation = ["pwsh -NoProfile -Command 'Write-Output ok > $OUT; tar -xzf archive.tar.gz -C temp/artifact/extracted'"];
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
+    assert.deepEqual(await report(handoffPath), { status: "ok", defects: [] });
     artifactManifest.validation = ["mkdir -p temp/artifact/extracted", validDownload,
       "tar -xzf temp/artifact/archive.tar.gz -C temp/artifact/extracted"];
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(artifactManifest));
