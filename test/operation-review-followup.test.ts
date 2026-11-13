@@ -27,6 +27,11 @@ test("literal elapsed-time operation envelope preserves exact command identity",
     assert.equal(missionOperationCommandMatch(other, [command], "/repo"), undefined, other);
   }
   assert.equal(missionOperationCommandDecorated(`${timed}; echo done`, [command], "/repo"), true);
+  assert.equal(missionOperationCommandDecorated(timed, [timed], "/repo"), false);
+  for (const suffix of ["; echo done", " && echo done", " | cat"]) {
+    assert.equal(missionOperationCommandMatch(`${timed}${suffix}`, [timed], "/repo"), undefined);
+    assert.equal(missionOperationCommandDecorated(`${timed}${suffix}`, [timed], "/repo"), true);
+  }
 });
 
 test("elapsed operation rebind keeps directional binary proof and timing output stays command-bound", () => {
@@ -46,7 +51,7 @@ test("elapsed operation rebind keeps directional binary proof and timing output 
   assert.equal(missionCommandOutcome("NO_START\nOTHER=0.001\n", 0, "completed", timed).outcome, "executed");
 });
 
-for (const mode of ["success", "no-start", "structured-failure"] as const) test(`live timed operation records its actual terminal without accepting extra commands: ${mode}`, async () => {
+for (const declaration of ["plain", "timed"] as const) for (const mode of ["success", "no-start", "structured-failure"] as const) test(`live timed operation records its actual terminal without accepting extra commands: ${declaration}, ${mode}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/operation-timed-live-"));
   const identities = { root: { agent: "dog-operator" }, worker: { agent: "dog-worker-v010", parentID: "root", time: { created: Date.now() } } };
@@ -63,8 +68,10 @@ for (const mode of ["success", "no-start", "structured-failure"] as const) test(
       ? 'console.log(JSON.stringify({status:"setup-failed",attempts:1}, null, 2));\n' : 'console.log("PASS");\n';
     await writeFile(join(directory, "check.mjs"), script);
     await chat("root", "Run once and retain its native operation result.");
+    const command = "TIMEFORMAT='ELAPSED=%R'; time node check.mjs";
+    const declared = declaration === "timed" ? command : "node check.mjs";
     const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Collect operation result"], kind: "operation",
-      execution: { commands: ["node check.mjs"], directory }, unit: { title: "Operation", objective: "Collect result",
+      execution: { commands: [declared], directory }, unit: { title: "Operation", objective: "Collect result",
         read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] } }, { sessionID: "root" }));
     await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-call" }, { args: structuredClone(started.task) });
     await chat("worker", started.task.prompt);
@@ -73,13 +80,12 @@ for (const mode of ["success", "no-start", "structured-failure"] as const) test(
     await hooks["tool.execute.before"]!(read, { args: read.args });
     await hooks["tool.execute.after"]!(read, { output: "inspected" });
     await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: directory, manifest_path: unit.manifestPath }, { sessionID: "worker" });
-    const command = "TIMEFORMAT='ELAPSED=%R'; time node check.mjs";
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "extra" },
       { args: { command: `${command}; echo extra`, workdir: directory } }), /mission-operation-command-not-observed/);
     const request = { tool: "shell", sessionID: "worker", callID: "timed", args: { command, workdir: directory } };
     await hooks["tool.execute.before"]!(request, { args: request.args });
     const mission = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
-    assert.equal((await mission.required("root")).execution!.observations[0]!.command, "node check.mjs");
+    assert.equal((await mission.required("root")).execution!.observations[0]!.command, declared);
     const result = await exec("bash", ["-c", command], { cwd: directory });
     await hooks["tool.execute.after"]!(request, { output: result.stdout + result.stderr, metadata: { exit: 0, status: "completed" } });
     const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" }));

@@ -18,11 +18,11 @@ Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对
 适用与不适用的场景见[README](../README.md#when-to-use-sortie-dogs)，实测与限制见
 [测量结果](../README.md#measured-results)。
 
-**Release：[v0.16.21](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.21)**
-（[发布说明](releases/v0.16.21.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
-名称中的`v010`不表示安装的仍是v0.10。v0.16.21的asset marker为`0.16.21-blocker-scope-v1`。
+**Release：[v0.16.22](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.22)**
+（[发布说明](releases/v0.16.22.md)）。默认Mission runtime保留`v010` profile、命令和配置名称以兼容已有安装；
+名称中的`v010`不表示安装的仍是v0.10。v0.16.22的asset marker为`0.16.22-operation-elapsed-v1`。
 
-以下npm示例使用v0.16.21；确认npm发布前，请使用GitHub Release附带的固定archive。
+以下npm示例使用v0.16.22；确认npm发布前，请使用GitHub Release附带的固定archive。
 
 > **Beta：** 仍在向1.0稳定化。1.0之前runtime behavior、配置和生成asset仍可能变化。
 
@@ -33,7 +33,7 @@ Codex安装、SDK及host特定边界请参见[Codex指南](codex.md)；不要对
 在目标project中执行：
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.21
+npm install --save-dev sortie-dogs@0.16.22
 npx --no-install sortie-dogs init .
 ```
 
@@ -420,7 +420,7 @@ Stable profile使用`/sortie`、`dog-coordinator`、`.opencode/sortie-dogs.json`
 推荐project-local安装。若需全局安装已发布的npm版本：
 
 ```sh
-npm install --global sortie-dogs@0.16.21
+npm install --global sortie-dogs@0.16.22
 sortie-dogs init --global --profile v010
 ```
 
@@ -432,7 +432,7 @@ Global init注册package或复用已有local V2 bridge，将subagent depth设为
 对此布局，还需在实际config root安装同一release，然后重新运行global init：
 
 ```sh
-npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.21
+npm install --prefix "$HOME/.config/opencode" sortie-dogs@0.16.22
 sortie-dogs init --global --profile v010
 ```
 
@@ -445,7 +445,7 @@ OpenCode V2的`opencode plugin list` / `opencode plugin update`管理；精确�
 Project-local更新时，替换dependency、重新运行init并完全重启OpenCode：
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.21
+npm install --save-dev sortie-dogs@0.16.22
 npx --no-install sortie-dogs init .
 ```
 
@@ -453,7 +453,7 @@ npx --no-install sortie-dogs init .
 遇到unknown ownership或冲突file时安全停止。
 
 同时将精确版本配置和独立bridge dependency对齐到目标release。
-v0.16.21的`0.16.21-blocker-scope-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
+v0.16.22的`0.16.22-operation-elapsed-v1`标识已安装asset，不证明正在运行的OpenCode已经重新加载新plugin。
 
 目前没有受支持的uninstall command。请单独删除npm dependency，再按
 [安全手动删除指南](uninstall.md)操作。只能删除已知Sortie-owned exact path，

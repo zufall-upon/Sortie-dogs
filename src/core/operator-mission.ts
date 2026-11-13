@@ -444,14 +444,16 @@ export function missionOperationCommandRebind(command: string, declared: readonl
 export function missionOperationCommandDecorated(command: string, declared: readonly string[], directory: string): boolean {
   if (missionOperationCommandMatch(command, declared, directory) !== undefined) return false;
   const elapsed = missionElapsedEnvelope(command)?.command;
-  const candidate = elapsed !== undefined && !missionWindowsPath(directory) ? elapsed : command;
-  const stripped = stripMissionPowerShellPrefix(candidate), actual = normalizeCommand(stripped);
-  if (declared.some(item => {
-    const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
-    return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
-  })) return true;
-  const base = shellCommandBase(stripped, stripped !== candidate.trim() || stripped.startsWith("&") ? "powershell" : "posix");
-  return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
+  const candidates = elapsed !== undefined && !missionWindowsPath(directory) ? [command, elapsed] : [command];
+  return candidates.some(candidate => {
+    const stripped = stripMissionPowerShellPrefix(candidate), actual = normalizeCommand(stripped);
+    if (declared.some(item => {
+      const expected = normalizeCommand(stripMissionPowerShellPrefix(item));
+      return actual.startsWith(expected) && /^\s*(?:\||\d?>|&&?|;)/u.test(actual.slice(expected.length));
+    })) return true;
+    const base = shellCommandBase(stripped, stripped !== candidate.trim() || stripped.startsWith("&") ? "powershell" : "posix");
+    return base !== undefined && missionOperationCommandMatch(base, declared, directory) !== undefined;
+  });
 }
 
 /** A terminal failure is a collected result, not a successful operation. Required success
