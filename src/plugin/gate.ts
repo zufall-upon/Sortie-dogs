@@ -212,7 +212,7 @@ function operands(tokens: readonly string[], indices?: number[]): string[] {
   return result.filter(Boolean);
 }
 
-function mkdirOperands(tokens: readonly string[]): { paths: string[]; parents: boolean } {
+function mkdirOperands(tokens: readonly string[], indices?: number[]): { paths: string[]; parents: boolean } {
   const paths: string[] = [];
   let endOptions = false;
   let parents = false;
@@ -233,7 +233,8 @@ function mkdirOperands(tokens: readonly string[]): { paths: string[]; parents: b
       }
       if (token.startsWith("-") && token !== "-") continue;
     }
-    paths.push(token.replace(/[|&;]+$/u, ""));
+    const path = token.replace(/[|&;]+$/u, "");
+    if (path) { paths.push(path); indices?.push(index); }
   }
   return { paths: paths.filter(Boolean), parents };
 }
@@ -653,7 +654,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
-        if (powershell && target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
+        if (target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
         paths.push(destination!);
       }
     }
@@ -711,7 +712,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
     // A composed output is literal only if every dollar-bearing part was single-quoted.
-    const isLiteralDollarPath = (path: ShellTokenPath): boolean => powershell && path.parts.length > 0 && path.parts.every(({ index, prefix }) => {
+    const isLiteralDollarPath = (path: ShellTokenPath): boolean => path.parts.length > 0 && path.parts.every(({ index, prefix }) => {
       const value = shellTokenPath(tokens, index, prefix).value;
       if (!value.includes("$")) return true;
       const original = tokenSources[rawTokens.length - tokens.length + index];
@@ -735,8 +736,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       (["export", "unset", "declare", "typeset", "readonly"].includes(executable) &&
         tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
       /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
-    const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
     const operandIndices: number[] = [];
+    const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens, operandIndices) : undefined;
     const commandOperands = mkdirOptions?.paths ?? operands(tokens, operandIndices);
     if (powershell && syntax.activeBrace) {
       pathValues.clear(); knownCwd = undefined;
@@ -977,10 +978,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     // path facts across executable statements; only the definition prefix is modeled.
     pathValues.clear(); knownCwd = undefined;
   }
-  if (powershell) {
-    const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
-    if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
-  }
+  const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
+  if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
   return {
     applies,
     ambiguous,

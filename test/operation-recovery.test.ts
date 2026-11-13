@@ -350,6 +350,51 @@ test("inline output options retain literal quotes protected by whole-argument qu
   ]) await narrow.check({ tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } });
 }));
 
+test("POSIX dollar destinations preserve literal quoting without authorizing variable expansion", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await mkdir(join(root, "archives/$id"), { recursive: true });
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "posix-inline-dollar-provenance", read: [],
+    write: ["routes/$id.tsx", "archives/$id/**"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command, workdir: root } }, { investigativeShell });
+  const native = await exec("bash", ["-c", 'id=outside; printf "%s" --output="routes/$id.tsx"']);
+  assert.equal(native.stdout, "--output=routes/outside.tsx", "double quotes do not make a POSIX dollar path literal");
+  for (const command of [
+    'curl --output="routes/$id.tsx" https://example.test/result',
+    'tar -xf input.tar --directory="archives/$id"',
+    'git archive --output="routes/$id.tsx" HEAD',
+    'curl "--output=routes/$id.tsx" https://example.test/result',
+    'curl -o "routes/$id.tsx" https://example.test/result',
+    'tar -xf input.tar -C "archives/$id"',
+    'git archive --output "routes/$id.tsx" HEAD',
+    'echo content > "routes/$id.tsx"',
+    'mkdir -p "archives/$id/new"',
+    'id=outside; curl --output="routes/$id.tsx" https://example.test/result',
+  ]) {
+    for (const investigativeShell of [false, true]) await assert.rejects(check(command, investigativeShell),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope", command);
+  }
+  for (const [command, target] of [
+    ["curl --output='routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["tar -xf input.tar --directory='archives/$id'", "archives/$id"],
+    ["git archive --output='routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["curl '--output=routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["curl -o 'routes/$id.tsx' https://example.test/result", "routes/$id.tsx"],
+    ["tar -xf input.tar -C 'archives/$id'", "archives/$id"],
+    ["git archive --output 'routes/$id.tsx' HEAD", "routes/$id.tsx"],
+    ["echo content > 'routes/$id.tsx'", "routes/$id.tsx"],
+    ["mkdir -p 'archives/$id/new'", "archives/$id/new"],
+    ["touch 'routes/$id.tsx'", "routes/$id.tsx"],
+  ] as const) {
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [join(root, target)], command);
+    await check(command, false);
+    await check(command, true);
+  }
+  await assert.rejects(check("curl --output='routes/$other.tsx' https://example.test/result", true),
+    (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+}));
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");
