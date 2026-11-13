@@ -207,6 +207,24 @@ test("PowerShell executable prefixes cannot restore immutable path authority aft
   await check(definitions);
 }));
 
+test("PowerShell engine-owned variables cannot become immutable local path facts", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "engine-owned-paths", read: [], write: ["allowed.txt", "fixture-output/**"], validation: [],
+  });
+  // Constants/read-only automatic variables and typed/validated preferences do not
+  // share ordinary local-string assignment semantics. Errors can be nonterminating.
+  for (const variable of ["true", "false", "PID", "IsWindows", "ConfirmPreference", "ErrorActionPreference", "MaximumHistoryCount", "OutputEncoding"]) {
+    const command = `$ErrorActionPreference='Continue'; $${variable}='allowed.txt'; Set-Content -Path $${variable} -Value changed`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u, variable);
+    await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: variable },
+      { args: { command, workdir: root } }, { investigativeShell: true }), /Write denied/u, variable);
+  }
+  const command = "$ErrorActionPreference='Stop'; $root=(Get-Location).Path; $d=Join-Path $root 'fixture-output'; New-Item -ItemType Directory -Path $d";
+  assert.deepEqual(extractWritePaths("powershell", { command }, root).paths, [join(root, "fixture-output")]);
+  await gate.check({ tool: "shell", sessionID: "worker", callID: "ordinary-locals" },
+    { args: { command, workdir: root } }, { investigativeShell: true });
+}));
+
 test("PowerShell pipeline and background assignment cannot publish a destination before the RHS runs", async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "pipeline-path", read: [], write: ["allowed.txt"], validation: [],

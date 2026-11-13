@@ -113,6 +113,23 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
   "add-content", "copy-item", "move-item", "new-item", "out-file", "remove-item",
   "rename-item", "set-content",
 ]);
+// Engine-owned names are not ordinary string locals: assignment may be rejected,
+// coerced or validated. The automatic/preference-variable family includes the
+// NoProfile Get-Variable / InitialSessionState default registry on PowerShell 7,
+// plus the contextual automatic and Windows PowerShell preference entries.
+const POWERSHELL_ENGINE_VARIABLES = new Set([
+  "_", "args", "confirmpreference", "consolefilename", "debugpreference", "enabledexperimentalfeatures", "error",
+  "erroractionpreference", "errorview", "event", "eventargs", "eventsubscriber", "executioncontext", "false", "foreach",
+  "formatenumerationlimit", "home", "host", "informationpreference", "input", "iscoreclr", "islinux", "ismacos", "iswindows",
+  "lastexitcode", "logcommandhealthevent", "logcommandlifecycleevent", "logenginehealthevent", "logenginelifecycleevent",
+  "logproviderhealthevent", "logproviderlifecycleevent", "matches", "maximumaliascount", "maximumdrivecount", "maximumerrorcount",
+  "maximumfunctioncount", "maximumhistorycount", "maximumvariablecount", "myinvocation", "nestedpromptlevel", "null", "ofs",
+  "outputencoding", "pid", "profile", "progresspreference", "psboundparameters", "pscmdlet", "pscommandpath", "psculture",
+  "psdebugcontext", "psdefaultparametervalues", "psedition", "psemailserver", "pshome", "psitem", "psmoduleautoloadingpreference",
+  "psnativecommandargumentpassing", "psnativecommanduseerroractionpreference", "psscriptroot", "pssenderinfo",
+  "pssessionapplicationname", "pssessionconfigurationname", "pssessionoption", "psstyle", "psuiculture", "psversiontable", "pwd",
+  "shellid", "stacktrace", "switch", "this", "true", "verbosepreference", "warningpreference", "whatifpreference",
+]);
 const READ_ONLY_OPTIONS_WITH_VALUES = new Set(["-c", "--directory", "--exclude", "--include"]);
 /**
  * Tools that never change project files themselves. A dispatched subagent runs in its own session
@@ -642,7 +659,12 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       const definition = /^(\$[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/u.exec(source);
       if (straightLine && definitionPrefix && definition) {
         const name = definition[1]!.toLowerCase();
-        const value = assignments.get(name) === 1 ? powerShellPathValue(definition[2]!.trim(), pathValues, knownCwd) : undefined;
+        const expression = definition[2]!.trim();
+        const engineOwned = POWERSHELL_ENGINE_VARIABLES.has(name.slice(1));
+        // A literal preference assignment can preserve command-name trust (including
+        // the native ErrorActionPreference wrapper), without asserting its value.
+        if (engineOwned && isLiteralPowerShellAssignment(expression)) continue;
+        const value = !engineOwned && assignments.get(name) === 1 ? powerShellPathValue(expression, pathValues, knownCwd) : undefined;
         if (value !== undefined) { pathValues.set(name, value); continue; }
         pathValues.delete(name);
       }

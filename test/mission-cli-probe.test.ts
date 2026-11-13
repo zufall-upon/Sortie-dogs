@@ -5,7 +5,7 @@ import { resolve, join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity, prelaunchRecoveryCommand, prelaunchRecoveryObserved } from "../scripts/mission-cli-probe.mjs";
+import { cliCloseStopReason, completeProbeObservations, missionDatabasePath, monitorMissionCLI, observeMissionCLI, observationDirectories, probeStopReason, statusProbeStopReason, workerStartWithinProbeLimit, probeTaskIdentity, prelaunchRecoveryCommand, prelaunchRecoveryObserved, prelaunchRecoveryExecutorObserved } from "../scripts/mission-cli-probe.mjs";
 import { fixtureDataEnvironment, nativeCLI, spawnPromptCLI, stopProcessGroup } from "../scripts/release-cli.mjs";
 import { fixtureFiles, loadedRuntime, authorRoute, prompts, assessExisting, phaseTools, stageRecovery, nativeTraceFingerprint } from "../scripts/purpose-autonomy-probe.mjs";
 
@@ -98,6 +98,17 @@ test("prelaunch CLI scenario requires a call-bound refusal and one unchanged suc
   assert.equal(prelaunchRecoveryObserved({ ...mission, runID: "other" }), false);
   assert.equal(prelaunchRecoveryObserved({ execution: { observations: [executed] } }), false);
   assert.equal(prelaunchRecoveryObserved({ ...mission, execution: { observations: [denied, executed, executed] } }), false);
+  const result = { root: "author", models: [{ ...root, sessionID: "author" }], tools: [] };
+  assert.equal(prelaunchRecoveryExecutorObserved(result, mission), true);
+  const workerMission = { ...mission, execution: { observations: [denied, executed].map(call => ({ ...call, sessionID: "worker" })) } };
+  assert.equal(prelaunchRecoveryObserved(workerMission), true, "same-command recovery alone does not establish the executor");
+  assert.equal(prelaunchRecoveryExecutorObserved(result, workerMission), false);
+  assert.equal(prelaunchRecoveryExecutorObserved({ ...result, models: [...result.models,
+    { sessionID: "worker", agent: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" } }] }, mission), false);
+  assert.equal(prelaunchRecoveryExecutorObserved({ ...result, tools: [{ tool: "task", status: "error" }] }, mission), false,
+    "even a child dispatch with no model response violates the direct-only scenario");
+  assert.equal(prelaunchRecoveryExecutorObserved({ ...result, root: undefined }, mission), false);
+  assert.equal(prelaunchRecoveryExecutorObserved({ ...result, models: [] }, mission), false);
 });
 
 for (const phase of ["server-start-error", "server-start-cleanup-error", "server-start-persistence-error", "server-start-cleanup-persistence-error",

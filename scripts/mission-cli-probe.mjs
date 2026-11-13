@@ -20,6 +20,14 @@ export function prelaunchRecoveryObserved(mission) {
     calls[0].prelaunchRejection.runID === mission.runID && calls[0].exit === undefined &&
     calls[1].outcome === 'executed' && calls[1].exit === 0 && calls[0].sessionID === calls[1].sessionID && calls[0].callID !== calls[1].callID;
 }
+export function prelaunchRecoveryExecutorObserved(result, mission) {
+  return typeof result.root === 'string' && result.root.length > 0 &&
+    mission?.execution?.observations?.every(call => call.sessionID === result.root) === true &&
+    result.models.some(item => item.sessionID === result.root && item.model?.providerID === 'openai' &&
+      item.model.id === 'gpt-6.1-sol' && item.model.variant === 'xhigh') &&
+    !result.models.some(item => item.agent === 'dog-worker-v010') &&
+    !result.tools.some(item => item.tool === 'task');
+}
 export function observeMissionCLI(project, since = 0, rootAgent = 'dog-operator', databasePath = missionDatabasePath(process.env, project), { root: rootID } = {}) {
   const db = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -498,9 +506,8 @@ ${recoveryCommand}
       const worker = result.models.find(item => item.agent === 'dog-worker-v010');
       const schemaRejected = /invalid_function_parameters|Invalid schema for function/u.test(stdout + stderr);
       Object.assign(result, completeProbeObservations(result, schemaRejected));
-       result.accepted = scenario ? !schemaRejected && result.native_completed &&
-         result.models.some(item => item.sessionID === result.root && item.model?.providerID === 'openai' &&
-           item.model.id === 'gpt-6.1-sol' && item.model.variant === 'xhigh') : statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
+      result.accepted = scenario ? !schemaRejected && result.native_completed && prelaunchRecoveryExecutorObserved(result, mission)
+        : statusOnly ? !schemaRejected && !result.errors.length && stopped === 'status-observed' &&
         result.mission_phase === null :
         operatorResponse ? !schemaRejected && !result.errors.length &&
         (stopped === 'operator-responded' || (!stopped && code === 0)) && result.responses.some(item => item.agent === 'dog-operator') &&
@@ -512,13 +519,13 @@ ${recoveryCommand}
         workerStartWithinProbeLimit(mode, worker, instance, workerStartDeadlineMs) &&
         (mode === 'start' ? stopped === 'worker-started'
           : !stopped && code === 0 && result.mission_phase === 'completed' && result.receipt_status === 'succeeded');
-       if (observationError || cliError || cleanupErrors.length) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
-       if (scenario) {
-         result.scenario = scenario;
-         result.operation = mission?.execution ?? null;
-         result.same_command_recovered_once = prelaunchRecoveryObserved(mission);
-         result.accepted &&= result.same_command_recovered_once;
-       }
+      if (observationError || cliError || cleanupErrors.length) result.accepted = false; // Preserve the prior thrown-error failure, now with a durable receipt.
+      if (scenario) {
+        result.scenario = scenario;
+        result.operation = mission?.execution ?? null;
+        result.same_command_recovered_once = prelaunchRecoveryObserved(mission);
+        result.accepted &&= result.same_command_recovered_once;
+      }
       await writeFile(join(run, 'cli.stdout.jsonl'), stdout);
       await writeFile(join(run, 'cli.stderr.log'), stderr);
       await writeFile(join(run, 'observation.json'), JSON.stringify(result, null, 2));

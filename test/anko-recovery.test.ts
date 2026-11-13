@@ -593,6 +593,47 @@ test("pre-admission status cannot spend a call, while durable host admission rem
   assert.equal((await f.tool("operator_status")).acceptance_summary.operation.status, "executed");
 }));
 
+for (const refusal of ["history-empty", "history-legacy-result", "duplicate-after-exit"] as const)
+test(`pre-admission refusal receipts survive native terminal history: ${refusal}`, async () => fixture(async f => {
+  const command = "node check.mjs";
+  f.agents.worker.time = { created: Date.now() };
+  await f.tool("start_mission", { requirements: ["Execute once"], kind: "operation",
+    execution: { commands: [command], directory: f.directory } });
+  await f.dispatch();
+  const args = { command, workdir: f.directory }, start = Date.now();
+  const budget = (await f.tool("operator_status")).budget;
+  const state: any = { status: "running", input: args, time: { start } };
+  const history = [{ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "pre-admission-refused", state }] }];
+  if (refusal === "duplicate-after-exit") {
+    await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { args });
+    await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { output: "PASS", metadata: { exit: 0 } });
+    await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "actual" }, { args }), /already-admitted/);
+    const actual = (await f.missions.required("root")).execution.observations[0];
+    assert.equal(actual.outcome, "executed");
+    assert.equal(actual.prelaunchRejection, undefined, "repeating an admitted call cannot relabel its process result");
+  } else {
+    f.historyReads.worker = async () => { throw Error("native-history-service-unavailable"); };
+    if (refusal === "history-legacy-result") history.unshift({ info: { role: "assistant", sessionID: "worker" }, parts: [{ type: "tool", tool: "bash", callID: "legacy",
+      state: { status: "completed", input: args, output: "PASS", metadata: { exit: 0 }, time: { start, end: start + 1 } } }] });
+  }
+  state.time.start = Date.now();
+  f.history.worker = history;
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "pre-admission-refused" }, { args }),
+    refusal === "duplicate-after-exit" ? /already-admitted/ : /recovery-unavailable/);
+  state.status = "error"; state.error = "host refused before launch"; state.time.end = Date.now();
+  delete f.historyReads.worker;
+  const cold = await f.create();
+  const packet = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" })).acceptance_summary.operation;
+  assert.equal(packet.status, refusal === "history-empty" ? "not-started" : "executed");
+  const rejected = packet.observations.find((item: any) => item.callID === "pre-admission-refused");
+  assert.equal(rejected.prelaunchRejection.source, "host-before-hook");
+  assert.equal(rejected.outcome, "not-started");
+  const retry = () => cold["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "restored-history" }, { args });
+  if (refusal === "history-empty") await retry();
+  else await assert.rejects(retry(), /already-admitted/);
+  assert.deepEqual((await f.tool("operator_status")).budget, budget);
+}));
+
 for (const legacyResult of [false, true])
 test(`operation admission refuses unavailable history and recovers without replay: legacy=${legacyResult}`, async () => fixture(async f => {
   const command = "node check.mjs";
@@ -605,18 +646,20 @@ test(`operation admission refuses unavailable history and recovers without repla
     state: { status: "completed", input: { command, workdir: f.directory }, output: "PASS", metadata: { exit: 0 }, time: { start, end: start + 1 } } }] }] : [];
   // Only the history endpoint fails: normal identity and native permissions remain available.
   Object.defineProperty(f.history, "worker", { configurable: true, get() { throw Error("native-history-service-unavailable"); } });
-  const invoke = () => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "after-outage" }, { args: { command, workdir: f.directory } });
+  const invoke = (callID = "after-outage") => f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID }, { args: { command, workdir: f.directory } });
   await assert.rejects(invoke(), /mission-operation-recovery-unavailable/);
   const unavailable = (await f.missions.required("root")).execution;
   assert.equal(unavailable.recovery.status, "unavailable");
-  assert.deepEqual(unavailable.observations, [], "an unreadable history cannot authorize a new launch");
+  assert.equal(unavailable.observations.length, 1, "an unreadable history records only the host refusal, never a launch");
+  assert.equal(unavailable.observations[0].outcome, "not-started");
+  assert.equal(unavailable.observations[0].prelaunchRejection.source, "host-before-hook");
   Object.defineProperty(f.history, "worker", { configurable: true, writable: true, value: saved });
   const cold = await f.create();
   const restored = JSON.parse(await cold.tool.sortie_v010_operator_status.execute({}, { sessionID: "root" })).acceptance_summary.operation;
   assert.equal(restored.recovery, undefined);
   assert.equal(restored.status, legacyResult ? "executed" : "not-started");
-  if (legacyResult) await assert.rejects(invoke(), /already-admitted/);
-  else await invoke();
+  if (legacyResult) await assert.rejects(invoke("restored-history"), /already-admitted/);
+  else await invoke("restored-history");
   assert.deepEqual((await f.tool("operator_status")).budget, budget);
 }));
 

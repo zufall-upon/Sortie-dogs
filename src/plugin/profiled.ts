@@ -4270,6 +4270,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false });
         }
         const mapped = translate(expandedWorker === undefined ? output : { ...output, args: expandedWorker }, false) as typeof output;
+        const operationArgs = record(mapped.args) ? mapped.args : {};
+        const declaredOperation = writer && isShellTool(request.tool) && mission?.execution &&
+          typeof operationArgs.command === "string" &&
+          missionOperationDirectoryMatch(resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : "."), mission.execution.directory)
+          ? missionOperationCommandMatch(operationArgs.command, mission.execution.commands, mission.execution.directory) : undefined;
         let operationAdmission = false;
         try {
           if (writer) {
@@ -4288,13 +4293,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               }
             }
           }
-          const operationArgs = record(mapped.args) ? mapped.args : {};
           // A decorated launch would spend on the real operation but leave the native mission observation empty.
           // Ask the same Worker to correct its shell input before that expensive side effect.
           if (writer && isShellTool(request.tool) && mission?.execution &&
               typeof operationArgs.command === "string" &&
               missionOperationDirectoryMatch(resolve(input.directory, typeof operationArgs.workdir === "string" ? operationArgs.workdir : "."), mission.execution.directory)) {
-            const declaredOperation = missionOperationCommandMatch(operationArgs.command, mission.execution.commands, mission.execution.directory);
             if (operationArgs.background === true && declaredOperation !== undefined) {
               throw new Error("mission-operation-background: run the declared command in foreground with a suitable timeout. " +
                 "A background shell reports only launch, not process exit; no run was started by this refused call. " +
@@ -4363,9 +4366,31 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
         } catch (error) {
-          if (operationAdmission) await missions.update(root, current => {
-            const observation = current.execution?.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
-            if (!observation || current.runID !== mission?.runID) return;
+          if (declaredOperation !== undefined && operationArgs.background !== true) await missions.update(root, current => {
+            if (!current.execution || current.runID !== mission?.runID || current.execution.directory !== mission?.execution?.directory ||
+                !current.execution.commands.includes(declaredOperation)) return;
+            const inputHash = missionOperationInputHash(request.tool, String(operationArgs.command), current.execution.directory);
+            let observation = current.execution.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
+            if (observation && (observation.command !== declaredOperation || observation.directory !== current.execution.directory ||
+                observation.nativeInputHash && observation.nativeInputHash !== inputHash ||
+                observation.prelaunchRejection && observation.prelaunchRejection.inputHash !== inputHash)) {
+              observation.conflicting = true;
+              return;
+            }
+            // A new call can be refused before admission (history outage or run-once).
+            // Never turn a previous admission of this SAME call into a refusal receipt.
+            if (observation && !operationAdmission) {
+              if (observation.hostAdmitted || observation.prelaunchRejection) return;
+              if (observation.status !== "running" || observation.completedAt || observation.nativeInputHash !== inputHash) {
+                observation.conflicting = true;
+                return;
+              }
+            }
+            if (!observation) {
+              observation = { command: declaredOperation, directory: current.execution.directory,
+                callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() };
+              current.execution.observations.push(observation);
+            }
             if (observation.conflicting || observation.nativeProcessObserved || observation.outcome !== undefined ||
                 observation.exit !== undefined || observation.shellID) {
               observation.conflicting = true;
@@ -4374,9 +4399,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             observation.completedAt = new Date().toISOString();
             observation.status = "error";
             observation.outcome = "not-started";
-            const rejectedArgs = record(mapped.args) ? mapped.args : {};
             observation.prelaunchRejection = { source: "host-before-hook", runID: current.runID!, tool: request.tool,
-              inputHash: missionOperationInputHash(request.tool, String(rejectedArgs.command), observation.directory) };
+              inputHash };
           });
           if (delegated) {
             taskOwners.delete(request.callID);

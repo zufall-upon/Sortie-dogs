@@ -67,6 +67,9 @@ Definitions are inferred only in the initial immutable prefix. After any executa
 or unknown statement, later literal assignments cannot restore command-name trust:
 an earlier statement may have shadowed `Join-Path` or `Get-Location` with an alias.
 Direct literal destinations retain their existing native-shell and scope checks.
+Engine-owned automatic/preference variables are not inferred as string path locals:
+their assignments can fail or undergo conversion. Literal preference settings such
+as the native `ErrorActionPreference='Stop'` prefix do not supply path facts.
 It does not evaluate PowerShell. Reassignment, pipelines/background forms, unknown
 expressions, scoped values and unresolved destinations fail closed. Single-quoted
 literal dollar paths retain their quoting provenance; resolved paths still use the existing
@@ -82,6 +85,9 @@ block recovery. Concurrent status reads of V2's pre-hook running envelope do not
 turn a host refusal into process evidence. Unavailable native history blocks new
 admission until the same history can be recovered. Durable serialized admission
 prevents a second launch while the first is running, completed or unresolved.
+Refusals before admission (including history outages and duplicate-launch guards)
+also retain a new call's receipt, without relabeling an existing admission of the
+same call. Their native error envelopes cannot hide an earlier actual result.
 Existing histories without this
 receipt are not retroactively relabeled.
 
@@ -93,3 +99,5 @@ unchanged PowerShell command succeeding exactly once, a real validator exit and
 Mission receipt. The retained model/session/operation observations, not generic
 wrapper success, determine this scenario's result. It is not release or recovery
 of any preexisting operation.
+Acceptance also binds both operation calls to the Sol/xhigh root executor and
+rejects child dispatch, rather than inferring the operation's model from its parent.
