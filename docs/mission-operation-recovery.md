@@ -63,8 +63,9 @@ or a new SWE-bench score.
 
 The gate statically resolves single-assignment local PowerShell path values:
 quoted literals, `(Get-Location).Path`, and positional `Join-Path` of known values.
-It does not evaluate PowerShell. Reassignment, unknown expressions, scoped values
-and unresolved destinations fail closed; resolved paths still use the existing
+It does not evaluate PowerShell. Reassignment, pipelines/background forms, unknown
+expressions, scoped values and unresolved destinations fail closed. Single-quoted
+literal dollar paths retain their quoting provenance; resolved paths still use the existing
 prohibition, boundary, link and manifest checks. Denial identity includes the
 bound Task and manifest hash: an effective scope revision is reevaluated, while
 no-op or rolled-back revisions retain the repeated-denial diagnosis.

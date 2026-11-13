@@ -181,6 +181,45 @@ test("PowerShell immutable cwd and Join-Path dataflow resolves the real destinat
     [join(root, "fixture-output/child")]);
 }));
 
+test("PowerShell pipeline and background assignment cannot publish a destination before the RHS runs", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "pipeline-path", read: [], write: ["allowed.txt"], validation: [],
+  });
+  for (const operator of ["|", "&"]) {
+    const command = `Set-Variable -Name d -Value 'forbidden.txt'; $d='allowed.txt' ${operator} Set-Content -Path $d`;
+    assert.throws(() => extractWritePaths("powershell", { command }, root), /Write denied/u);
+    await assert.rejects(gate.check({ tool: "shell", sessionID: "worker", callID: command },
+      { args: { command: `$seed='unused'; ${command}`, workdir: root } }, { investigativeShell: true }), /Write denied/u);
+  }
+}));
+
+test("PowerShell literal-dollar destinations keep quote provenance without granting variable expansion", async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "literal-dollar", read: [], write: ["routes/$id.tsx"], validation: [],
+  });
+  const shell = (command: string) => gate.check({ tool: "shell", sessionID: "worker", callID: command },
+    { args: { command: `$seed='unused'; ${command}`, workdir: root } }, { investigativeShell: true });
+  for (const command of [
+    "Set-Content -LiteralPath 'routes/$id.tsx' -Value content",
+    "Add-Content -Path 'routes/$id.tsx' -Value $id",
+    "New-Item -Path 'routes/$id.tsx'",
+    "Remove-Item -LiteralPath 'routes/$id.tsx'",
+    "Out-File -FilePath 'routes/$id.tsx'",
+    "touch 'routes/$id.tsx'",
+    "echo content > 'routes/$id.tsx'",
+    "pwsh -NoProfile -Command 'Set-Content -LiteralPath ''routes/$id.tsx'' -Value content'",
+  ]) {
+    assert.deepEqual(extractWritePaths("powershell", { command }, root).paths, [join(root, "routes/$id.tsx")]);
+    await shell(command);
+  }
+  for (const command of [
+    'Set-Content -LiteralPath "routes/$id.tsx" -Value content',
+    "Set-Content -Path $id -Value 'routes/$id.tsx'",
+    'Set-Content -Path "\'$id\'" -Value content',
+    "echo content > $id",
+  ]) await assert.rejects(shell(command), /Write denied/u, command);
+}));
+
 test("native formatter and exact Git delivery compose without reviving unrelated shell ambiguity", async () => fixture(async root => {
   await exec("git", ["init", "--quiet"], { cwd: root });
   await writeFile(join(root, "result.go"), "package result\n");

@@ -96,6 +96,10 @@ export interface MissionExecution {
     nativeStartedAt?: string;
     /** Positive native process evidence, unlike a tool's pre-hook running envelope/clock. */
     nativeProcessObserved?: true;
+    /** Exact input of a recovered native envelope; not proof of host admission. */
+    nativeInputHash?: string;
+    /** Durable same-call host admission, distinct from history-only pre-hook clocks. */
+    hostAdmitted?: true;
     /** Written only by the host before-hook that refused this exact call, never parsed from error prose. */
     prelaunchRejection?: { source: "host-before-hook"; runID: string; tool: string; inputHash: string };
     completedAt?: string; exit?: number; status?: "running" | "completed" | "error"; shellID?: string;

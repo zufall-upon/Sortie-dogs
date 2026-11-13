@@ -2799,7 +2799,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (owners.size === 0 && recoveryErrors.length === 0) return mission;
 
       const recovered: NonNullable<OperatorMission["execution"]>["observations"] = [];
-      const observedInputs: { sessionID: string; callID: string; command?: string; directory: string; startedAt: string }[] = [];
+      const observedInputs: { sessionID: string; callID: string; command?: string; directory: string; startedAt: string; inputHash: string }[] = [];
       const conflictingCalls: { sessionID: string; callID: string; latestConflictingStartedAt: string }[] = [];
       const laterStart = (saved: string | undefined, observed: string) =>
         !saved || Date.parse(observed) > Date.parse(saved) ? observed : saved;
@@ -2861,7 +2861,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const command = missionOperationCommandMatch(nativeInput.command, execution.commands, execution.directory);
             // Compare admitted inputs with persisted same-call observations even when this
             // record is no longer a matching command/cwd and will not yield a new result.
-            observedInputs.push({ sessionID, callID: key, command, directory, startedAt });
+            observedInputs.push({ sessionID, callID: key, command, directory, startedAt,
+              inputHash: missionOperationInputHash(String(part.tool), nativeInput.command, directory) });
             if (directory !== execution.directory) continue;
             if (!command) continue;
             const nativeStatus = String(state.status ?? "").toLowerCase();
@@ -2891,6 +2892,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // process. Keep it unclassified instead of turning missing metadata into success.
             if (nativeInput.background === true && !running) continue;
             const observation = { command, directory: execution.directory, callID: key, sessionID, startedAt, nativeStartedAt: startedAt,
+              nativeInputHash: missionOperationInputHash(String(part.tool), nativeInput.command, directory),
               ...(nativeProcessObserved ? { nativeProcessObserved: true as const } : {}),
               ...(completedAt ? { completedAt } : {}), ...(exit === undefined ? {} : { exit }), status,
               ...(rejected ? { prelaunchRejection: receipt } : {}),
@@ -2921,7 +2923,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         else delete current.execution.recovery;
         for (const nativeInput of observedInputs) {
           const prior = current.execution.observations.find(item => item.callID === nativeInput.callID && item.sessionID === nativeInput.sessionID);
-          if (prior && (prior.command !== nativeInput.command || prior.directory !== nativeInput.directory)) {
+          if (prior && (prior.command !== nativeInput.command || prior.directory !== nativeInput.directory ||
+              prior.nativeInputHash && prior.nativeInputHash !== nativeInput.inputHash ||
+              prior.prelaunchRejection && prior.prelaunchRejection.inputHash !== nativeInput.inputHash)) {
             prior.conflicting = true;
             prior.latestConflictingStartedAt = laterStart(prior.latestConflictingStartedAt ?? prior.nativeStartedAt, nativeInput.startedAt);
           }
@@ -2934,7 +2938,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
           if (prior.command !== observation.command || prior.directory !== observation.directory) continue;
           if (observation.nativeProcessObserved) prior.nativeProcessObserved = true;
-          if (observation.conflicting || prior.nativeStartedAt !== undefined && prior.nativeStartedAt !== observation.nativeStartedAt ||
+          if (observation.conflicting || prior.prelaunchRejection && observation.nativeProcessObserved ||
+              prior.nativeStartedAt !== undefined && prior.nativeStartedAt !== observation.nativeStartedAt ||
               prior.completedAt && observation.completedAt && (prior.status !== observation.status ||
               prior.exit !== undefined && observation.exit !== undefined && prior.exit !== observation.exit ||
               prior.outcome !== undefined && observation.outcome !== undefined && prior.outcome !== observation.outcome)) {
@@ -4307,12 +4312,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 if (current.runID !== mission.runID || !current.execution) throw new Error("mission-operation-admission-stale");
                 if (current.execution.recovery) throw new Error("mission-operation-recovery-unavailable: recover the existing native history before launch; do not replay or rerun");
                 const prior = current.execution.observations.filter(item => item.command === declaredOperation && item.directory === current.execution!.directory);
-                if (prior.some(item => item.callID === request.callID && item.sessionID === request.sessionID ||
+                // Status may have saved this current call's pre-hook envelope first.
+                // Only this genuine callback can claim that exact history-only input;
+                // an admitted, terminal, conflicting or process-bearing call cannot.
+                const historyOnly = prior.find(item => item.callID === request.callID && item.sessionID === request.sessionID &&
+                  !item.hostAdmitted && !item.prelaunchRejection && !item.conflicting && !item.nativeProcessObserved &&
+                  item.status === "running" && !item.completedAt && item.exit === undefined && !item.shellID && item.outcome === undefined && item.result === undefined &&
+                  item.nativeInputHash === missionOperationInputHash(request.tool, operationArgs.command as string, current.execution!.directory));
+                if (prior.some(item => item !== historyOnly && (item.callID === request.callID && item.sessionID === request.sessionID ||
                     item.conflicting || item.outcome !== "not-started" || !item.prelaunchRejection ||
-                    item.prelaunchRejection.runID !== current.runID)) {
+                    item.prelaunchRejection.runID !== current.runID))) {
                   throw new Error("mission-operation-already-admitted: recover this operation's existing native result; do not replay or rerun");
                 }
-                current.execution.observations.push({ command: declaredOperation, directory: current.execution.directory,
+                if (historyOnly) historyOnly.hostAdmitted = true;
+                else current.execution.observations.push({ command: declaredOperation, directory: current.execution.directory, hostAdmitted: true,
                   callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString() });
               });
               operationAdmission = true;

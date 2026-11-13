@@ -179,13 +179,16 @@ export function shellCommandWords(command: string): string[] {
   return words(command);
 }
 
-function operands(tokens: readonly string[]): string[] {
+function operands(tokens: readonly string[], indices?: number[]): string[] {
   const result: string[] = [];
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (/^(?:\d*>>?|>\||[|&])(?:.*)?$/u.test(token)) break;
     if (READ_ONLY_OPTIONS_WITH_VALUES.has(token)) index += 1;
-    else if (!token.startsWith("-")) result.push(token.replace(/[|&;]+$/u, ""));
+    else if (!token.startsWith("-")) {
+      const value = token.replace(/[|&;]+$/u, "");
+      if (value) { result.push(value); indices?.push(index); }
+    }
   }
   return result.filter(Boolean);
 }
@@ -488,7 +491,7 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
     const segmentBefore = masked.slice(start, index).trim();
     const hasCommandBefore = segmentBefore.length > 0;
     const powershellCallOperator = dialect === "powershell" &&
-      (segmentBefore.length === 0 || segmentBefore.endsWith("="));
+      (segmentBefore.length === 0 || command.slice(start, index).trimEnd().endsWith("="));
     const escapedPosixSeparator = dialect === "posix" && command[index - 1] === "\\";
     const separator = pair === "&&" || pair === "||" ? 2
       : !escapedPosixSeparator && (character === ";" || character === "\n" || character === "\r" ||
@@ -569,6 +572,7 @@ function powerShellPathValue(source: string, values: ReadonlyMap<string, string>
 
 function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: string): Extraction {
   const paths: string[] = [];
+  const literalDollarPaths = new Set<number>();
   const entryPaths: number[] = [];
   let applies = false;
   let ambiguous = false;
@@ -590,7 +594,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   const pathValues = new Map<string, string>();
   const assignments = new Map<string, number>();
   const straightLine = powershell && !scanShellSyntax(command, dialect).activeBrace &&
-    !/&&|\|\|/u.test(scanShellSyntax(command, dialect).masked);
+    !/[|&]/u.test(scanShellSyntax(command, dialect).masked);
   let knownCwd = straightLine ? cwd : undefined;
   for (const segment of segments) {
     const name = /^\s*(\$[A-Za-z_][A-Za-z0-9_]*)\s*=/u.exec(segment)?.[1]?.toLowerCase();
@@ -612,6 +616,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         ambiguous = true;
         issue ??= commandIssue(source, "redirect-target-unresolved", "name one manifest-scoped output path");
       } else {
+        if (powershell && target.startsWith("'") && target.endsWith("'")) literalDollarPaths.add(paths.length);
         paths.push(destination!);
       }
     }
@@ -647,7 +652,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
     const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
-    const rawTokens = (source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? []).map((token, index) => {
+    const tokenSources = source.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu) ?? [];
+    const rawTokens = tokenSources.map((token, index) => {
       const value = unquote(token);
       return index > 0 && safePathUse && !token.startsWith("'") && /^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
         ? pathValues.get(value.toLowerCase()) ?? value : value;
@@ -655,6 +661,11 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     let tokens = unwrapEnvironmentCommand(rawTokens);
     if (powershell && tokens[0] === "&") tokens = tokens.slice(1);
     if (tokens.length === 0) continue;
+    const appendTokenPath = (path: string, index?: number) => {
+      const original = index === undefined ? undefined : tokenSources[rawTokens.length - tokens.length + index];
+      if (powershell && original?.startsWith("'") && original.endsWith("'")) literalDollarPaths.add(paths.length);
+      paths.push(path);
+    };
     const executable = tokens[0].replaceAll("\\", "/").split("/").at(-1)!.toLowerCase().replace(/^git\.exe$/u, "git");
     const commitArguments = executable === "git" ? gitCommitArguments(tokens) : undefined;
     // A commit preflight observes the native cwd/index, not a command-local replacement.
@@ -665,7 +676,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         tokens.slice(1).some(token => /^GIT_[A-Za-z0-9_]+(?:=|$)/u.test(token))) ||
       /^(?:export\s+)?GIT_[A-Za-z0-9_]+=/u.test(source)) gitContextChanged = true;
     const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens) : undefined;
-    const commandOperands = mkdirOptions?.paths ?? operands(tokens);
+    const operandIndices: number[] = [];
+    const commandOperands = mkdirOptions?.paths ?? operands(tokens, operandIndices);
     if (powershell && syntax.activeBrace) {
       pathValues.clear(); knownCwd = undefined;
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
@@ -673,7 +685,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       // from the native-shell path checks, even when its surrounding script is opaque.
       if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
         for (let index = 1; index < tokens.length - 1; index++) {
-          if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index]!)) paths.push(tokens[index + 1]!);
+          if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index]!)) appendTokenPath(tokens[index + 1]!, index + 1);
         }
       }
       applies = true;
@@ -684,7 +696,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (!powershell && ["rm", "unlink", "rmdir"].includes(executable)) {
         entryPaths.push(...commandOperands.flatMap((path, i) => /[\\/]$/u.test(path) ? [] : [paths.length + i]));
       }
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
       if (executable === "mkdir" && (mkdirOptions?.parents ?? tokens.some((token) => token === "-p" || token === "--parents"))) {
         createdDirectories.push(...commandOperands);
       }
@@ -692,7 +704,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       applies = true;
       const destination = commandOperands.at(-1);
       if (destination === undefined) ambiguous = true;
-      else paths.push(destination);
+      else appendTokenPath(destination, operandIndices.at(-1));
     } else if (executable === "mv") {
       applies = true;
       if (commandOperands.length < 2) ambiguous = true;
@@ -705,11 +717,11 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         if (!/[\\/]$/u.test(commandOperands[0]!)) entryPaths.push(paths.length);
         if ((options.includes("-T") || options.includes("--no-target-directory")) && !/[\\/]$/u.test(commandOperands[1]!)) entryPaths.push(paths.length + 1);
       }
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
     } else if (executable === "tee") {
       applies = true;
       if (commandOperands.length === 0) ambiguous = true;
-      paths.push(...commandOperands);
+      commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
     } else if (/^curl(?:\.exe)?$/u.test(executable)) {
       applies = true;
       const destination = curlOutput(tokens);
@@ -809,13 +821,14 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       } else paths.push(destination);
     } else if (POWERSHELL_WRITE_COMMANDS.has(executable)) {
       applies = true;
-      const named: string[] = [];
+      const named: number[] = [];
       for (let index = 1; index < tokens.length - 1; index += 1) {
-        if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index])) named.push(tokens[index + 1]);
+        if (/^-(?:path|literalpath|destination)$/iu.test(tokens[index])) named.push(index + 1);
       }
-      const selected = named.length > 0 ? named : commandOperands.slice(0, 1);
+      const selectedIndices = named.length > 0 ? named : operandIndices.slice(0, 1);
+      const selected = selectedIndices.map(index => tokens[index]!);
       if (selected.length === 0) ambiguous = true;
-      paths.push(...selected);
+      selected.forEach((path, index) => appendTokenPath(path, selectedIndices[index]));
       if (executable === "new-item" && tokens.some((token, index) =>
         token.toLowerCase() === "-itemtype" && tokens[index + 1]?.toLowerCase() === "directory")) {
         createdDirectories.push(...selected);
@@ -832,7 +845,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
       else {
         entryPaths.push(...selected.map((_, index) => paths.length + index));
-        paths.push(...selected);
+        selected.forEach((path, index) => appendTokenPath(path, tokens.length - selected.length + index));
         gitAdds.push(...selected);
       }
     } else if (commitArguments !== undefined) {
@@ -868,7 +881,11 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
         const nested = shellPaths(literal, true, depth + 1, cwd);
         applies ||= nested.applies;
         ambiguous ||= nested.ambiguous;
-        paths.push(...nested.paths);
+        for (const path of nested.paths) {
+          // Nested extraction already rejected unresolved variables; preserve its proof.
+          literalDollarPaths.add(paths.length);
+          paths.push(path);
+        }
         gitCommit ||= nested.gitCommit === true;
         gitCommitAdds.push(...(nested.gitCommitAdds ?? []));
         gitMutation ||= nested.gitMutation === true;
@@ -891,7 +908,7 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     pathValues.clear(); knownCwd = undefined;
   }
   if (powershell) {
-    const unresolved = paths.find(path => path.includes("$"));
+    const unresolved = paths.find((path, index) => path.includes("$") && !literalDollarPaths.has(index));
     if (unresolved !== undefined) throw new WriteDeniedError("manifest-scope", unresolved);
   }
   return {
