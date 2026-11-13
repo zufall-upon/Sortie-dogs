@@ -569,9 +569,13 @@ test("heredoc pipelines and shell stdin retain executable output checks", { skip
   const check = (command: string, investigativeShell: boolean) => gate.check(
     { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
   const pipeline = "cat <<FIRST | cat <<'SECOND'\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND";
+  const scriptPipe = "cat <<'FIRST' | bash\nprintf changed > outside.txt\nFIRST";
   const commands = [
     pipeline,
+    pipeline.replace("\nliteral\nSECOND", "\ntar -xzf archive.tar.gz\nSECOND"),
     pipeline.replace(" | ", "; "),
+    scriptPipe,
+    scriptPipe.replace(" | bash", " | env -u UNUSED /bin/sh"),
     "bash <<'EOF'\nprintf changed > outside.txt\nEOF",
     "env -u UNUSED /bin/sh -s <<'EOF'\nprintf changed > outside.txt\nEOF",
   ];
@@ -593,6 +597,9 @@ test("heredoc pipelines and shell stdin retain executable output checks", { skip
   await writeFile(join(native, "outside.txt"), "unchanged\n");
   const result = await exec("bash", ["-c", pipeline], { cwd: native });
   assert.equal(result.stdout, "literal\n");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  await exec("bash", ["-c", scriptPipe], { cwd: native });
   assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
   assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
 

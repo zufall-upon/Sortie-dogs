@@ -586,6 +586,30 @@ function posixCommandLine(source: string): { line: string; next?: number } {
   return { line };
 }
 
+const POSIX_HEREDOC_HEADER = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u;
+
+function posixHeredocBody(source: string, start: number, delimiter: string, stripTabs: boolean): { body: string; after: number; closed: boolean } {
+  let cursor = start;
+  let bodyEnd = source.length;
+  let after = source.length;
+  let closed = false;
+  while (cursor <= source.length) {
+    const end = source.indexOf("\n", cursor);
+    const lineEnd = end < 0 ? source.length : end;
+    const line = source.slice(cursor, lineEnd);
+    if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) {
+      bodyEnd = cursor;
+      after = end < 0 ? lineEnd : end + 1;
+      closed = true;
+      break;
+    }
+    if (end < 0) break;
+    cursor = end + 1;
+  }
+  const body = source.slice(start, bodyEnd);
+  return { body: stripTabs ? body.replace(/^\t+/gmu, "") : body, after, closed };
+}
+
 /** Keep direct literal stdin data out of shell statements; retain patch bodies for path extraction. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
@@ -598,8 +622,47 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
       break;
     }
     const before = shellSegments(line, dialect);
+    const earlierHeredoc = before.slice(0, -1).some(part => scanShellSyntax(part, dialect).masked.includes("<<"));
+    if (earlierHeredoc) {
+      // Handle direct data consumers in header order. Unquoted bodies still need
+      // inspection for substitutions; a later literal body must not hide them. A
+      // downstream executable can consume an earlier heredoc as a script via a pipe.
+      let sawHeredoc = false;
+      const parts = before.map((part): { source: string; delimiter?: string; literal?: boolean; stripTabs?: boolean } | undefined => {
+        const syntax = scanShellSyntax(part, dialect);
+        if (!syntax.masked.includes("<<")) {
+          const head = unwrapEnvironmentCommand(words(part));
+          const executable = head[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+          return !sawHeredoc || READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee" ? { source: part } : undefined;
+        }
+        sawHeredoc = true;
+        const header = POSIX_HEREDOC_HEADER.exec(part);
+        const head = header && unwrapEnvironmentCommand(words(header[1]!));
+        const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+        const operator = header?.[1]?.length ?? -1;
+        if (!header || !head?.length || !(READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee") ||
+            syntax.unsafeExpansion || syntax.activeBrace || syntax.masked.slice(0, operator).includes("<<") ||
+            part[operator - 1] === "<" || syntax.masked.slice(operator, operator + 2) !== "<<" || part[operator - 1] === "\\") return undefined;
+        return { source: header[1]!, delimiter: header[4] ?? header[5] ?? header[6]!,
+          literal: header[4] !== undefined || header[5] !== undefined, stripTabs: header[2] === "<<-" };
+      });
+      if (parts.every(part => part !== undefined)) {
+        const parsed: ShellPathSegment[] = [];
+        let after = next;
+        let complete = true;
+        for (const part of parts) {
+          parsed.push({ source: part!.source });
+          if (part!.delimiter === undefined) continue;
+          const body = posixHeredocBody(remaining, after, part!.delimiter, part!.stripTabs === true);
+          if (!body.closed) { complete = false; break; }
+          if (!part!.literal) parsed.push(...shellPathSegments(body.body, dialect));
+          after = body.after;
+        }
+        if (complete) { result.push(...parsed); remaining = remaining.slice(after); continue; }
+      }
+    }
     const source = before.at(-1) ?? "";
-    const header = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u.exec(source);
+    const header = POSIX_HEREDOC_HEADER.exec(source);
     const head = header && unwrapEnvironmentCommand(words(header[1]!));
     const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
     const operator = header?.[1]?.length ?? -1;
@@ -611,7 +674,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     // heredocs, and a quoted body can still be executable stdin for a shell.
     // Skip literal data only for known data consumers; retain other bodies for inspection.
     if (!header || !head?.length || !patch && (!dataOnly || !literal || syntax.unsafeExpansion || syntax.activeBrace) ||
-        before.slice(0, -1).some(part => scanShellSyntax(part, dialect).masked.includes("<<")) ||
+        earlierHeredoc ||
         syntax.masked.slice(0, operator).includes("<<") || source[operator - 1] === "<" ||
         syntax.masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
       result.push(...before.map(part => ({ source: part })));
@@ -620,27 +683,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
     }
     result.push(...before.slice(0, -1).map(part => ({ source: part })));
     const delimiter = header[4] ?? header[5] ?? header[6]!;
-    const stripTabs = header[2] === "<<-";
-    const bodyStart = next;
-    let cursor = bodyStart;
-    let bodyEnd = remaining.length;
-    let after = remaining.length;
-    let closed = false;
-    while (cursor <= remaining.length) {
-      const end = remaining.indexOf("\n", cursor);
-      const lineEnd = end < 0 ? remaining.length : end;
-      const line = remaining.slice(cursor, lineEnd);
-      if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) {
-        bodyEnd = cursor;
-        after = end < 0 ? lineEnd : end + 1;
-        closed = true;
-        break;
-      }
-      if (end < 0) break;
-      cursor = end + 1;
-    }
-    let body = remaining.slice(bodyStart, bodyEnd);
-    if (stripTabs) body = body.replace(/^\t+/gmu, "");
+    const { body, after, closed } = posixHeredocBody(remaining, next, delimiter, header[2] === "<<-");
     result.push({ source: header[1]!, ...(patch ? { patchHeredoc: { body, literal, closed } } : {}) });
     remaining = remaining.slice(after);
   }

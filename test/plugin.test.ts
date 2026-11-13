@@ -7889,6 +7889,12 @@ test("the contract preflight reports gate defects without granting inspection", 
         defects: ["manifest /validation/0 artifact_directory_unprepared"] },
       { validation: ["cat <<EXPECTED\n$(\ntar -xzf archive.tar.gz\n)\nEXPECTED"],
         defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["cat <<FIRST | cat <<'SECOND'\n$(\ntar -xzf archive.tar.gz\n)\nFIRST\nliteral\nSECOND"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["cat <<'FIRST' | cat <<'SECOND'\nliteral\nFIRST\nliteral\nSECOND\ntar -xzf archive.tar.gz"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
+      { validation: ["cat <<'FIRST' | sh\ntar -xzf archive.tar.gz\nFIRST"],
+        defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ["bash <<'EOF'\ntar -xzf archive.tar.gz\nEOF"],
         defects: ["manifest /validation/0 artifact_command_unclassified"] },
       { validation: ["sh <<'EOF'\ntar -xzf archive.tar.gz -C temp/artifact/extracted\nEOF"],
@@ -7969,6 +7975,27 @@ for (const trailingArtifact of [false, true]) test(`declared literal heredoc pre
     assert.equal((await executeBindWriteGate(hooks, directory, "heredoc-worker")).status, "bound");
     const args = { command };
     const request = { tool: "bash", sessionID: "heredoc-worker", callID: "heredoc-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(result.stdout, "tar -xzf archive.tar.gz\n");
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "archive.tar.gz")).catch(() => undefined), undefined);
+  });
+});
+
+for (const first of ["'FIRST'", "FIRST"]) test(`declared multiple data heredocs preserve public Worker admission: ${first}`,
+  { skip: process.platform === "win32" }, async () => {
+  await withProject("multiple-data-heredocs", async directory => {
+    const firstBody = first === "FIRST" ? "$(printf safe)" : "literal";
+    const command = `cat <<${first} | cat <<'SECOND'\n${firstBody}\nFIRST\ntar -xzf archive.tar.gz\nSECOND`;
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "multiple-parent", "multiple-worker", "multiple-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "multiple-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "multiple-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "multiple-worker", callID: "multiple-validation" };
     await hooks["tool.execute.before"]!(request, { args });
     const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
     assert.equal(result.stdout, "tar -xzf archive.tar.gz\n");
