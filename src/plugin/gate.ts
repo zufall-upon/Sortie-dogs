@@ -612,6 +612,29 @@ function posixNestedHeredocDataOnly(source: string): boolean {
   return safe && sawHeredoc;
 }
 
+/** Recognize only literal stdin that is directly interpreted as POSIX shell source. */
+function posixNestedHeredocShellSource(source: string): boolean {
+  const { line } = posixCommandLine(source);
+  const syntax = scanShellSyntax(line, "posix");
+  if (syntax.unsafeExpansion || syntax.activeBrace || /[;&]/u.test(syntax.masked) || line.includes("\\")) return false;
+  const parts = shellSegments(line, "posix");
+  if (parts.length < 1 || parts.length > 2 || (syntax.masked.match(/\|/gu)?.length ?? 0) !== parts.length - 1) return false;
+  const header = POSIX_HEREDOC_HEADER.exec(parts[0]!);
+  if (!header) return false;
+  const operator = header[1]!.length;
+  if (/[<>|]/u.test(scanShellSyntax(header[1]!, "posix").masked) ||
+      syntax.masked.slice(operator, operator + 2) !== "<<") return false;
+  if (parts.length === 2) {
+    const consumer = unwrapEnvironmentCommand(words(header[1]!));
+    if (consumer.length !== 1 || consumer[0]?.split("/").at(-1) !== "cat") return false;
+  }
+  const shell = parts.length === 1 ? header[1]! : parts[1]!;
+  if (/[<>|]/u.test(scanShellSyntax(shell, "posix").masked)) return false;
+  const tokens = unwrapEnvironmentCommand(words(shell));
+  const executable = tokens[0]?.split("/").at(-1)?.toLowerCase();
+  return /^(?:bash|sh|dash|ksh|zsh)$/u.test(executable ?? "") && tokens.slice(1).every(token => token === "-s");
+}
+
 function posixHeredocBody(source: string, start: number, delimiter: string, stripTabs: boolean, literal: boolean): { body: string; after: number; closed: boolean } {
   let cursor = start;
   let bodyEnd = source.length;
@@ -778,18 +801,20 @@ function heredocSubstitutions(data: string, shellSource = false): { commands: st
         const dataOnly = posixNestedHeredocDataOnly(body.slice(lineStarts[current], end));
         for (const header of heredocs[current]!) {
           const nested = posixHeredocBody(body, after, header.delimiter, header.stripTabs, header.literal);
-          // Unquoted heredoc data expands regardless of shell quotes. Literal
-          // stdin reaching an interpreter is instead shell source: first retain
-          // its executable segments, then inspect substitutions with shell quotes.
-          const sources = !header.literal ? [{ source: nested.body }] : !dataOnly ? shellPathSegments(nested.body, "posix") : [];
+          // Unquoted data expands regardless of quotes. Only proven shell stdin
+          // can use shell-source quoting; unknown consumers retain conservative
+          // data scanning because another interpreter may execute quoted text.
+          const shellSource = header.literal && !dataOnly && posixNestedHeredocShellSource(body.slice(lineStarts[current], end));
+          const sources = shellSource ? shellPathSegments(nested.body, "posix") :
+            !header.literal || !dataOnly ? [{ source: nested.body }] : [];
           for (const source of sources) {
-            if (header.literal) result.push(source.source);
+            if (shellSource) result.push(source.source);
             if ("unresolvedHeredocExpansion" in source && source.unresolvedHeredocExpansion) {
               complete = false;
               unresolvedSource ??= source.source;
               continue;
             }
-            const expansion = heredocSubstitutions(source.source, header.literal);
+            const expansion = heredocSubstitutions(source.source, shellSource);
             result.push(...expansion.commands);
             if (!expansion.complete) {
               complete = false;

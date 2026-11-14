@@ -766,6 +766,7 @@ test("heredoc arithmetic and quoted interpreter input preserve native execution 
   const commands = [
     "cat <<END\n$((1 << $(printf changed > outside.txt; printf 2)))\nEND",
     "cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '$(printf literal > outside.txt)'\nprintf '%s' \"$(printf changed > outside.txt)\"\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(node <<'INNER'\nrequire('node:child_process').execSync('echo $(printf changed > outside.txt)')\nINNER\n)\nFIRST",
   ];
   for (const command of commands) {
     await writeFile(join(native, "outside.txt"), "unchanged\n");
