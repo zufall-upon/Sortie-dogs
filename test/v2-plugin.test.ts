@@ -1806,13 +1806,35 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
   try {
     assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
-    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" });
     assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6.1-terra", variant: "max" });
     assert.deepEqual(models.get("dog-luna-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
     assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-advisor-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-scout-v010"), { providerID: "anthropic", id: "custom", variant: "high" });
   } finally { if (typeof dispose === "function") dispose(); }
+});
+
+test("V2 Coordinator explicit models survive registry initialization", async () => {
+  for (const selected of [
+    { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" },
+    { providerID: "anthropic", id: "custom", variant: "high" },
+  ]) {
+    const fixture = contextFixture();
+    const models = new Map<string, typeof selected>([["dogs-coordinator", structuredClone(selected)]]);
+    const context: OpenCodeV2Context = { ...fixture.context, agent: { transform: async callback => {
+      callback({ update: (id, update) => {
+        if (!models.has(id)) return;
+        const agent = { model: models.get(id) };
+        update(agent);
+        models.set(id, agent.model!);
+      } });
+      return { dispose() {} };
+    } } };
+    const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
+    try { assert.deepEqual(models.get("dogs-coordinator"), selected); }
+    finally { if (typeof dispose === "function") dispose(); }
+  }
 });
 
 test("V2 subagent dispatch leaves role defaults structured and preserves explicit Task models", async () => {
@@ -2643,7 +2665,9 @@ test("V2 six child roles preserve structured defaults and explicit choices throu
   for (const role of roles) for (const wrapped of [false, true]) for (const explicit of [false, true]) {
     const fixture = contextFixture();
     fixture.history.length = 0;
-    const configured = { providerID: "openai", id: `${role}-configured`, variant: "high" };
+    const configured = role === "dogs-coordinator"
+      ? { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" }
+      : { providerID: "openai", id: `${role}-configured`, variant: "high" };
     const native = { providerID: "anthropic", id: "user-selected", variant: "max" };
     let selected = { ...native };
     fixture.context.agent!.get = async () => wrapped ? { data: { model: configured } } : { model: configured };

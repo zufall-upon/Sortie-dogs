@@ -146,7 +146,13 @@ test("v010 init reports a Coordinator model override without editing it", async 
     assert.deepEqual(await coordinatorModelOverride(global, true),
       { path: join(global, "opencode.jsonc"), model: "openai/gpt-6-sol#xhigh" }, "an explicit legacy Sol choice remains an override");
     await writeFile(join(global, "opencode.jsonc"), '{ "agents": { "dogs-coordinator": { "model": "openai/gpt-6.1-sol#xhigh" } } }');
+    assert.deepEqual(await coordinatorModelOverride(global, true),
+      { path: join(global, "opencode.jsonc"), model: "openai/gpt-6.1-sol#xhigh" });
+    const terra = '{ "agents": { "dogs-coordinator": { "model": "openai/gpt-6.1-terra#xhigh" }, "dog-reviewer-v010": { "model": "other/custom" } }, "plugins": ["sortie-dogs"], "experimental": { "subagent_depth": 2 } }';
+    await writeFile(join(global, "opencode.jsonc"), terra);
     assert.equal(await coordinatorModelOverride(global, true), undefined);
+    await initializeGlobal(global, "v010");
+    assert.equal(await readFile(join(global, "opencode.jsonc"), "utf8"), terra);
   } finally { await clean(project); }
 });
 

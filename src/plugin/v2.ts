@@ -644,7 +644,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     });
     for (const [name, id, variant] of [
       ["dog-operator", "gpt-6.1-sol", "xhigh"],
-      ["dogs-coordinator", "gpt-6.1-sol", "xhigh"],
+      ["dogs-coordinator", "gpt-6.1-terra", "xhigh"],
       ["dog-advisor-v010", "gpt-6.1-sol", "xhigh"],
       ["dog-reviewer-v010", "gpt-6.1-sol", "xhigh"],
       ["dog-scout-v010", "gpt-6-luna-fast", "max"],

@@ -167,6 +167,54 @@ test("exact native Task terminal repairs reservation and writer in the same Revi
   assert.equal((await f.tool("complete_mission")).status, "succeeded");
 }));
 
+test("a second loaded adapter observes the settled Worker before replanning without charging it twice", async () => fixture(async f => {
+  await f.start();
+  const { task, unit } = await f.dispatch();
+  const other = await f.create();
+  const tool = async (name: string, args: object = {}) => JSON.parse(await other.tool[`sortie_v010_${name}`].execute(args, { sessionID: "root" }));
+  const before = await tool("operator_status");
+  assert.equal(before.units[0].status, "running");
+  assert.equal(before.budget.reserved_units, 1);
+
+  // This Task finishes without the registered check: preserve the real process defect,
+  // not a synthetic validation pass. The other loaded adapter already saw it running.
+  f.history.root = [{ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "worker-call",
+    state: { status: "completed", input: task.args, metadata: { sessionId: "worker" } } }] }];
+  await f.finish();
+  const settled = await f.tool("operator_status");
+  assert.equal(settled.units[0].status, "failed");
+  assert.equal(settled.attempts[0].terminal.outcome, "completed");
+  assert.equal(settled.attempts[0].resultClass, "process-defect");
+  assert.equal(settled.budget.consumed_units, 1);
+  assert.equal(settled.budget.reserved_units, 0);
+
+  const seen = await tool("operator_status");
+  assert.equal(seen.units[0].status, "failed");
+  assert.equal(seen.units[0].result_class, "process-defect");
+  assert.deepEqual(seen.units[0].evidence, settled.units[0].evidence);
+  assert.deepEqual(seen.budget, settled.budget);
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "duplicate" },
+    { args: structuredClone(unit.task) }), /operator-unit-not-authorized|operator-grant-revoked/);
+  const replanned = await tool("plan_units", { units: [{ title: "Continue", objective: "Complete the unobserved check",
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }], reason: "The prior Worker ended without the registered check" });
+  assert.ok(replanned.task, JSON.stringify(replanned));
+  assert.deepEqual((await tool("operator_status")).budget, settled.budget);
+  await assert.rejects(other["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "old-run" },
+    { args: structuredClone(unit.task) }), /operator-unit-not-authorized/);
+  f.agents.worker2 = { agent: "dog-worker-v010", parentID: "root" };
+  const next = { args: structuredClone(replanned.task) };
+  await other["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "next-worker" }, next);
+  await other["chat.message"]({ sessionID: "worker2", messageID: "worker2-request", agent: "dog-worker-v010" }, {
+    message: { id: "worker2-request", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6.1-terra" } },
+    parts: [{ type: "text", text: next.args.prompt }],
+  });
+  const continued = await tool("operator_status");
+  assert.equal(continued.units[0].status, "running");
+  assert.equal(continued.units[0].child_session_id, "worker2");
+  assert.equal(continued.budget.consumed_units, 1);
+  assert.equal(continued.budget.reserved_units, 1);
+}));
+
 test("active descendants and unavailable terminal records remain distinct; an old call cannot close a new dispatch", async () => fixture(async f => {
   await f.start();
   const { task } = await f.dispatch();

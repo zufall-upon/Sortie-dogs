@@ -53,12 +53,8 @@ const SERIAL_OPTIONAL_ARGUMENTS = new Map<string, ReadonlySet<string>>([
 const PREVIEW_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6.1-terra", variant: "max" });
 const PREVIEW_LUNA_WORKER_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
 const PREVIEW_SCOUT_ROUTE = Object.freeze({ model: "openai/gpt-6-luna-fast", variant: "max" });
-/**
- * Contract authorship, not throughput. Qualification observed a cheaper operations model emit
- * structurally valid but under-scoped contracts: a write union narrower than the remediation the
- * review it also schedules demands, which strands an otherwise complete run on NEED_DECISION.
- */
-const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-6.1-sol", variant: "xhigh" });
+/** The Mission Coordinator route is separate from the root Operator and Reviewer routes. */
+const PREVIEW_OPERATIONS_ROUTE = Object.freeze({ model: "openai/gpt-6.1-terra", variant: "xhigh" });
 const PREVIEW_PRIMARY_ROUTE = Object.freeze({ model: "openai/gpt-6.1-sol", variant: "xhigh" });
 /** Review must be able to reject the worker's output, so it never shares the worker's model family. */
 const PREVIEW_REVIEW_ROUTE = Object.freeze({ model: "openai/gpt-6.1-sol", variant: "xhigh" });
@@ -4371,6 +4367,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const state = await operators.read(root);
         const delegated = request.tool === "task" && (args.subagent_type === profileAgent(profile, "dog-worker") || correctionTask) &&
           state !== undefined && ["prepared", "running"].includes(state.phase);
+        // An old Mission Task must not fall through as an unowned ordinary Task
+        // after its Worker settled. Only a newly admitted plan can authorize it.
+        if (!delegated && request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-worker") &&
+            mission && !["cancelled", "completed"].includes(mission.phase) && state && mission.runID === state.runID &&
+            state.units.some(unit => operators.matchesRecordedWorkerTask(state, unit.unit.id, args))) {
+          throw new Error("operator-unit-not-authorized");
+        }
         if (who.role === "dog-operator" && request.tool === "task" && !delegated) throw new Error("operator-worker-task-required");
         let expandedWorker: import("../core/operator-runtime.js").OperatorTask | undefined;
         if (delegated) {

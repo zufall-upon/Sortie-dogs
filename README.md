@@ -205,11 +205,12 @@ one. Required success checks, missing commands and active/unstarted operations s
 
 ## Default models
 
-- **Operator / Coordinator / Reviewer / Advisor:** GPT-6.1 Sol, `xhigh`.
+- **Mission Coordinator (OpenCode):** GPT-6.1 Terra, `xhigh`.
+- **Operator / Reviewer / Advisor:** GPT-6.1 Sol, `xhigh`.
 - **Worker:** GPT-6.1 Terra Standard, `max` (no Fast/priority).
 - **Scout / dedicated Luna Worker:** Luna Fast, `max`, unchanged.
-- **OpenCode:** ordinary Worker `openai/gpt-6.1-terra#max`; management/review
-  `openai/gpt-6.1-sol#xhigh`.
+- **OpenCode:** ordinary Worker `openai/gpt-6.1-terra#max`; Mission Coordinator
+  `openai/gpt-6.1-terra#xhigh`; Operator/review `openai/gpt-6.1-sol#xhigh`.
 - **Codex:** ordinary Worker native `gpt-6.1-terra` / `max`, Standard; management/review
   `gpt-6.1-sol` / `xhigh`. The retained Luna-fast alias maps to native
   `gpt-6-luna` / `max` with separate `serviceTier: "priority"` (Fast).

@@ -565,7 +565,7 @@ export function missionCoordinatorContent(profile: RuntimeProfile, version: stri
 description: Sortie-dogs ${version} Coordinator — investigation, unit dispatch, scope extension and correction loop.
 mode: subagent
 hidden: true
-model: openai/gpt-6.1-sol#xhigh
+model: openai/gpt-6.1-terra#xhigh
 permission:
   edit: allow
   write: allow
