@@ -385,7 +385,7 @@ native command、实际workdir、exit、耗时及保存的source binding共同�
 ### 默认route
 
 - `dog-operator`：`openai/gpt-6.1-sol` / `xhigh`
-- `dogs-coordinator`：`openai/gpt-6.1-sol` / `xhigh`
+- `dogs-coordinator`：`openai/gpt-6.1-terra` / `xhigh`
 - `dog-worker-v010`：`openai/gpt-6.1-terra` / `max`（Standard，无Fast/priority）
 - `dog-luna-worker-v010`：`openai/gpt-6-luna-fast` / `max`（保留专用route）
 - `dog-scout-v010`：`openai/gpt-6-luna-fast` / `max`

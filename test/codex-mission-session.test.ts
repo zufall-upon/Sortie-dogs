@@ -206,7 +206,7 @@ for (const mode of ["direct", "worker-advice", "handoff", "validated-handoff", "
     assert.equal(mission.id, missionID);
     assert.equal(mission.runID, runID);
     assert.equal(transports.length, mode === "handoff-retry" ? 4 : handoff ? 3 : 2);
-    assert.equal(transports[1]!.threadRequests[0].model, "gpt-6.1-sol");
+    assert.equal(transports[1]!.threadRequests[0].model, "gpt-6.1-terra");
     if (handoff) {
       assert.equal(transports[2]!.threadRequests[0].model, "gpt-6.1-terra");
       assert.equal(transports[2]!.threadRequests[0].serviceTier, undefined);
@@ -769,8 +769,8 @@ for (const unit of [false, true]) test(`packaged Codex ${unit ? "worker" : "coor
     assert.equal(transports[0].threadRequests[0].model, "gpt-6.1-sol");
     assert.equal(transports[0].turnRequests[0].effort, "xhigh");
     assert.equal(transports[0].turnRequests[0].serviceTier, undefined);
-    assert.equal(child.threadRequests[0].model, unit ? "gpt-6.1-terra" : "gpt-6.1-sol");
-    assert.equal(child.turnRequests[0].model, unit ? "gpt-6.1-terra" : "gpt-6.1-sol");
+    assert.equal(child.threadRequests[0].model, "gpt-6.1-terra");
+    assert.equal(child.turnRequests[0].model, "gpt-6.1-terra");
     assert.equal(child.turnRequests[0].effort, unit ? "max" : "xhigh");
     assert.equal(child.threadRequests[0].serviceTier, undefined);
     assert.equal(child.turnRequests[0].serviceTier, undefined);

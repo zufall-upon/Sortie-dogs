@@ -24,6 +24,68 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
+for (const grant of ["checkout", "location"] as const) test(`direct validation in a nested checkout keeps only configured scratch fresh and rejects real input changes (${grant} grant)`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/mission-nested-scratch-")), checkout = join(directory, "checkout");
+  try {
+    await mkdir(join(checkout, "scratch"), { recursive: true });
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await exec("git", ["init", "--quiet"], { cwd: checkout });
+    await writeFile(join(checkout, ".gitignore"), "ignored-input.txt\nscratch/fixture.txt\nscratch/run-*\n");
+    await writeFile(join(checkout, "source.txt"), "source");
+    await writeFile(join(checkout, "ignored-input.txt"), "ignored but real input");
+    await writeFile(join(checkout, "scratch/fixture.txt"), "explicit fixture");
+    await writeFile(join(checkout, "scratch/tracked.txt"), "tracked source");
+    await writeFile(join(checkout, "check.mjs"), `import { readFileSync, writeFileSync } from 'node:fs';
+for (const p of ['source.txt', 'ignored-input.txt', 'scratch/fixture.txt', 'scratch/tracked.txt']) readFileSync(p);
+writeFileSync(process.env.TMPDIR + '/run-' + process.argv[2], 'diagnostic output');\n`);
+    await exec("git", ["add", "--", ".gitignore", "source.txt", "scratch/tracked.txt", "check.mjs"], { cwd: checkout });
+    if (grant === "location") await exec("git", ["add", "-f", "--", "scratch/fixture.txt"], { cwd: checkout });
+    const commands = ["TMPDIR=./scratch node check.mjs first", "TMPDIR=./scratch node check.mjs second"];
+    const history: any[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator", outcome: "running" } }),
+      messages: async () => ({ data: history }), children: async () => ({ data: [] }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "prompt", agent: "dog-operator" }, {
+      message: { id: "prompt", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+      parts: [{ type: "text", text: "Validate the checkout and retain real inputs." }],
+    });
+    await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validate the checkout"] }, { sessionID: "root" });
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{
+      title: "Validate checkout", objective: "Run checks with their declared scratch",
+      read: [directory + "/**", ...(grant === "checkout" ? ["checkout/scratch/fixture.txt"] : [])],
+      write: [grant === "checkout" ? "checkout/**" : directory + "/**"], validation: commands,
+      validation_cwd: Object.fromEntries(commands.map(command => [command, checkout])),
+    }] }, { sessionID: "root" }));
+    assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+    for (const [index, command] of commands.entries()) {
+      const callID = `check-${index}`, args = { command, workdir: checkout }, start = Date.now();
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID }, { args });
+      await exec(command, { cwd: checkout, shell: true });
+      history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "bash", callID,
+        state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID, args }, { output: "PASS", metadata: { exit: 0, status: "completed" } });
+    }
+    const run = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    const checks = (await run()).units[0]!.directExecution!.checks;
+    assert.equal(checks.length, 2);
+    assert(checks.every(item => item.exitCode === 0 && item.fresh));
+    assert(checks.every(item => item.binding.freshness!.scratch_paths.includes(join(checkout, "scratch"))));
+    for (const [path, original] of [["ignored-input.txt", "ignored but real input"], ["scratch/fixture.txt", "explicit fixture"],
+      ["scratch/tracked.txt", "tracked source"]]) {
+      await writeFile(join(checkout, path!), "changed input");
+      const stale = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+      assert.equal(stale.status, "direct-unit-awaits-validation", path);
+      assert.match(stale.reason, /validation-stale/u);
+      await writeFile(join(checkout, path!), original!);
+    }
+    const result = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+    assert.equal((await run()).units[0]!.status, "succeeded", JSON.stringify(result));
+    assert.deepEqual((await run()).units[0]!.directExecution!.checks, checks, "retained native results and bindings are not rewritten");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("Worker Reviewer prompt observes the registered cwd and current admission", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/worker-review-root-"));

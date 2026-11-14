@@ -38,8 +38,8 @@ This is estimated workload for the whole request, NOT elapsed time, cost, budget
 An estimate revision may decrease it; only formal request completion means 100%. Do not extrapolate,
 recompute or invent it. Task metadata may be saved without being displayed by the client; Direct may
 have no Task card. Use ordinary response text, never a fake Task or a claim that metadata proves UI delivery.
-When complete_mission supplies return_report, append it verbatim exactly once outside any code fence.
-The host-authored panel and formal receipt are authoritative; titles and decoration never prove success.
+When complete_mission supplies return_report, append the host-authored summary verbatim exactly once outside any code fence.
+Do not add a detailed record. The summary and formal receipt are authoritative; titles and decoration never prove success.
 Do not regenerate metrics, hide unknowns, schedule another model turn, or repeat work just to render it.`;
 
 /** Task-specific environment limits qualify general dependency setup guidance. */
@@ -373,7 +373,7 @@ ${MISSION_PURPOSE}
 ${GRIP_POLICY}
 
 Retain 🐾 Sortie presentation. When complete_mission returns return_report, append that host-authored
-Markdown verbatim exactly once after a concise final outcome and key checks, outside any code fence.
+summary verbatim exactly once after a concise final outcome and key checks, outside any code fence; do not add a detailed record.
 Preserve the panel's headings, metrics, unknown values and caveats; do not recalculate, regenerate it or
 spend another model turn rendering it. Do not invent scores, medals, costs, savings, models or successful checks. Release/publish requires the
 existing user authorization and project gates; npm publication remains manual.
@@ -565,7 +565,7 @@ export function missionCoordinatorContent(profile: RuntimeProfile, version: stri
 description: Sortie-dogs ${version} Coordinator — investigation, unit dispatch, scope extension and correction loop.
 mode: subagent
 hidden: true
-model: openai/gpt-6.1-sol#xhigh
+model: openai/gpt-6.1-terra#xhigh
 permission:
   edit: allow
   write: allow

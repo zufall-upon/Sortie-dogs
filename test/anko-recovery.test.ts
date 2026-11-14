@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -165,6 +165,136 @@ test("exact native Task terminal repairs reservation and writer in the same Revi
   assert.equal((await f.tool("review_mission", { risk_tags: [] })).status, "review-recorded", "sufficient saved exact record needs no native re-fetch");
   assert.deepEqual((await f.tool("operator_status")).budget, budget, "no additional settlement, unit or spend on repeated reconciliation");
   assert.equal((await f.tool("complete_mission")).status, "succeeded");
+}));
+
+test("nested Coordinator Worker binds its registered native validation to the root Mission", async () => fixture(async f => {
+  f.agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+  f.agents.worker.parentID = "coordinator";
+  const started = await f.start();
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+    { args: structuredClone(started.task) });
+  await f.chat("coordinator", started.task.prompt);
+  const planned = await f.tool("plan_units", { units: [{ title: "Implement result", objective: "Implement and verify",
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"],
+    validation_cwd: { "node check.mjs": f.directory } }] }, "coordinator");
+  const task = { args: structuredClone(planned.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
+  await f.chat("worker", task.args.prompt);
+  const unit = (await f.runtime.required("root")).units[0];
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: unit.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(unit.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const other = await f.create();
+  const args = { command: "node check.mjs", workdir: f.directory };
+  await other["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "nested-check" }, { args });
+  await exec("bash", ["-lc", args.command], { cwd: f.directory });
+  await other["tool.execute.after"]({ tool: "bash", sessionID: "worker", callID: "nested-check", args },
+    { output: "PASS", metadata: { exit: 0, status: "completed" } });
+  const check = (await f.runtime.required("root")).units[0].validationRegistration.checks[0];
+  assert.equal(check.childSessionID, "worker");
+  assert.equal(check.dispatchCallID, "worker-call");
+  assert.equal(check.directory, f.directory);
+  assert.equal(check.fresh, true);
+  f.agents.worker.outcome = "succeeded";
+  await f.hooks["tool.execute.after"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+    { output: "Completed registered check", metadata: { sessionId: "worker" } });
+  const settled = (await f.runtime.required("root")).units[0];
+  assert.equal(settled.status, "succeeded", JSON.stringify(settled));
+  assert.equal((await f.tool("review_mission", { risk_tags: [] }, "coordinator")).status, "skipped-low-risk");
+}));
+
+test("a registered check reports an unavailable source binding before execution and can recover", async () => fixture(async f => {
+  await f.start();
+  await f.dispatch();
+  await rm(join(f.directory, "result.txt"));
+  await symlink(join(f.directory, "missing-target"), join(f.directory, "result.txt"));
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "unbound-check" },
+    { args: { command: "node check.mjs" } }), /mission-validation-snapshot-unavailable/);
+  assert.deepEqual((await f.runtime.required("root")).units[0].validationRegistration.checks, []);
+  await rm(join(f.directory, "result.txt"));
+  await writeFile(join(f.directory, "result.txt"), "fixed\n");
+  await f.validate();
+  assert.equal((await f.runtime.required("root")).units[0].validationRegistration.checks[0].fresh, true);
+  await f.finish();
+  assert.equal((await f.runtime.required("root")).units[0].status, "succeeded");
+}));
+
+test("another loaded adapter binds the same Worker's registered check after handoff", async () => fixture(async f => {
+  await f.start();
+  await f.dispatch();
+  const other = await f.create();
+  const args = { command: "node check.mjs", workdir: f.directory };
+  await other["tool.execute.before"]({ tool: "bash", sessionID: "worker", callID: "other-check" }, { args });
+  await exec("bash", ["-lc", args.command], { cwd: f.directory });
+  await other["tool.execute.after"]({ tool: "bash", sessionID: "worker", callID: "other-check", args },
+    { output: "PASS", metadata: { exit: 0, status: "completed" } });
+  const checks = (await f.runtime.required("root")).units[0].validationRegistration.checks;
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].callID, "other-check");
+  assert.equal(checks[0].fresh, true);
+}));
+
+test("a second loaded adapter observes the settled Worker before replanning without charging it twice", async () => fixture(async f => {
+  f.agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+  f.agents.worker.parentID = "coordinator";
+  const started = await f.start();
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+    { args: structuredClone(started.task) });
+  await f.chat("coordinator", started.task.prompt);
+  const planned = await f.tool("plan_units", { units: [{ title: "Implement result", objective: "Implement and verify",
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }] }, "coordinator");
+  const task = { args: structuredClone(planned.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
+  await f.chat("worker", task.args.prompt);
+  const unit = (await f.runtime.required("root")).units[0];
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: unit.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(unit.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: unit.manifestPath }, "worker")).status, "bound");
+  const other = await f.create();
+  const tool = async (name: string, args: object = {}, id = "root") => JSON.parse(await other.tool[`sortie_v010_${name}`].execute(args, { sessionID: id }));
+  const before = await tool("operator_status");
+  assert.equal(before.units[0].status, "running");
+  assert.equal(before.budget.reserved_units, 1);
+
+  // This Task finishes without the registered check: preserve the real process defect,
+  // not a synthetic validation pass. The other loaded adapter already saw it running.
+  f.history.coordinator = [{ info: { role: "assistant", sessionID: "coordinator" }, parts: [{ type: "tool", tool: "task", callID: "worker-call",
+    state: { status: "completed", input: task.args, metadata: { sessionId: "worker" } } }] }];
+  f.agents.worker.outcome = "succeeded";
+  await f.hooks["tool.execute.after"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+    { output: "Done without an observed registered check.", metadata: { sessionId: "worker" } });
+  const settled = await f.tool("operator_status");
+  assert.equal(settled.units[0].status, "failed");
+  assert.equal(settled.attempts[0].terminal.outcome, "completed");
+  assert.equal(settled.attempts[0].resultClass, "process-defect");
+  assert.equal(settled.budget.consumed_units, 1);
+  assert.equal(settled.budget.reserved_units, 0);
+
+  const seen = await tool("operator_status");
+  assert.equal(seen.units[0].status, "failed");
+  assert.equal(seen.units[0].result_class, "process-defect");
+  assert.deepEqual(seen.units[0].evidence, settled.units[0].evidence);
+  assert.deepEqual(seen.budget, settled.budget);
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "duplicate" },
+    { args: structuredClone(unit.task) }), /operator-unit-not-authorized|operator-grant-revoked/);
+  const replanned = await tool("plan_units", { units: [{ title: "Continue", objective: "Complete the unobserved check",
+    read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs"] }], reason: "The prior Worker ended without the registered check" }, "coordinator");
+  assert.ok(replanned.task, JSON.stringify(replanned));
+  assert.deepEqual((await tool("operator_status")).budget, settled.budget);
+  await assert.rejects(other["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "old-run" },
+    { args: structuredClone(unit.task) }), /operator-unit-not-authorized/);
+  f.agents.worker2 = { agent: "dog-worker-v010", parentID: "coordinator" };
+  const next = { args: structuredClone(replanned.task) };
+  await other["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "next-worker" }, next);
+  await other["chat.message"]({ sessionID: "worker2", messageID: "worker2-request", agent: "dog-worker-v010" }, {
+    message: { id: "worker2-request", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "gpt-6.1-terra" } },
+    parts: [{ type: "text", text: next.args.prompt }],
+  });
+  const continued = await tool("operator_status");
+  assert.equal(continued.units[0].status, "running");
+  assert.equal(continued.units[0].child_session_id, "worker2");
+  assert.equal(continued.budget.consumed_units, 1);
+  assert.equal(continued.budget.reserved_units, 1);
 }));
 
 test("active descendants and unavailable terminal records remain distinct; an old call cannot close a new dispatch", async () => fixture(async f => {

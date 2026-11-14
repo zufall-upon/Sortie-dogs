@@ -472,7 +472,7 @@ test("preview assets coexist with stable assets and markers", async () => fixtur
   assert.match(previewAssets.find(asset => asset.name === "dog-advisor-v010")!.content,
     /^model: openai\/gpt-6.1-sol#xhigh$/m);
   assert.match(previewAssets.find(asset => asset.name === "dog-scout-v010")!.content, /^model: openai\/gpt-6-luna-fast#max$/m);
-  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6.1-sol#xhigh$/m);
+  assert.match(previewAssets.find(asset => asset.name === "dogs-coordinator")!.content, /^model: openai\/gpt-6.1-terra#xhigh$/m);
   for (const tool of ["read", "glob", "grep", "list"]) {
     assert.match(reviewer, new RegExp(`^  ${tool}: allow$`, "m"));
     assert.match(reviewer, new RegExp(`^  ${tool}: true$`, "m"));
@@ -559,7 +559,7 @@ test("operations defaults do not overwrite an explicit native model variant", as
   });
   const defaults = { agent: { "dogs-coordinator": { mode: "subagent" } } };
   await hooks.config(defaults);
-  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6.1-sol", variant: "xhigh" });
+  assert.deepEqual(defaults.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6.1-terra", variant: "xhigh" });
   const otherRoles = { agent: { "dog-worker-v010": { mode: "subagent" }, "dog-scout-v010": { mode: "subagent" }, "dog-luna-worker-v010": { mode: "subagent" } } };
   await hooks.config(otherRoles);
   assert.deepEqual(otherRoles.agent["dog-worker-v010"], { mode: "subagent", model: "openai/gpt-6.1-terra", variant: "max" });
@@ -572,8 +572,11 @@ test("operations defaults do not overwrite an explicit native model variant", as
   const custom = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-5.6-terra" } } };
   await hooks.config(custom);
   assert.deepEqual(custom.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-5.6-terra" });
+  const explicitTerra = { agent: { "dogs-coordinator": { mode: "subagent", model: "openai/gpt-6.1-terra", variant: "xhigh" } } };
+  await hooks.config(explicitTerra);
+  assert.deepEqual(explicitTerra.agent["dogs-coordinator"], { mode: "subagent", model: "openai/gpt-6.1-terra", variant: "xhigh" });
   const asset = previewAssets.find(item => item.name === "dogs-coordinator")!.content;
-  assert.match(asset, /^model: openai\/gpt-6.1-sol#xhigh$/m);
+  assert.match(asset, /^model: openai\/gpt-6.1-terra#xhigh$/m);
 }));
 
 test("preview tools are denied globally and allowed only by profile agents", async () => fixture(async root => {
@@ -634,7 +637,8 @@ test("preview keeps canonical game-style guidance and does not decorate unproved
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission")));
   assert.doesNotMatch(primary, /do not transcribe the card/u, "the shipped system policy must not contradict verbatim return-report delivery");
-  assert.match(primary, /append that host-authored Markdown verbatim exactly once/u);
+  assert.match(primary, /append that host-authored summary verbatim exactly once/u);
+  assert.match(primary, /Do not add a detailed record/u);
   for (const icon of ["🎯", "📊", "🔍", "➡️", "🐾"]) assert.ok(primary.includes(icon));
   const unfinished = "## 確認結果\n検証は未完。";
   assert.equal(receiptBoundTerminalText(unfinished, undefined), unfinished);
@@ -2479,7 +2483,8 @@ test("root discards one exact diagnosed transient and resumes only remaining val
     acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^```text\n🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
-  assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
+  assert.ok(complete.return_report.endsWith("```"), "the report must not include duplicated terminal prose");
+  assert.doesNotMatch(complete.return_report, /<details>|詳細記録|Detailed record|⚑ MISSION|COST \/ PACK/u);
   assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
   assert.match(complete.return_report_instruction, /No host-side card will be appended/);
   assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
@@ -2491,7 +2496,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
       acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
     assert.equal(english.status, "succeeded");
     assert.match(english.return_report, /^```text\n🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
-    assert.match(english.return_report, /➡️ NEXT\n\nNone/u);
+    assert.match(english.return_report, /➡️ Next: None/u);
     assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.match(english.return_report_instruction, /Append return_report verbatim once/);
     assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore);
@@ -3611,11 +3616,13 @@ test("worker prompt claim is serialized, parent-bound, and first-child immutable
   await runtime.bindOperator("claim-root", "delegate", operator.prompt);
   const next = await runtime.next("claim-root", "delegate") as { task: OperatorTask };
   await runtime.admitWorker("claim-root", "delegate", "worker-call", next.task);
+  const second = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  await second.required("claim-root");
   await assert.rejects(runtime.claimAdmittedWorkerPrompt("claim-root", "claim-root", "nested", next.task.prompt), /parent-mismatch/);
   assert.equal((await runtime.required("claim-root")).units[0]!.childSessionID, null);
   const claims = await Promise.allSettled([
     runtime.claimAdmittedWorkerPrompt("claim-root", "delegate", "child-a", next.task.prompt),
-    runtime.claimAdmittedWorkerPrompt("claim-root", "delegate", "child-b", next.task.prompt),
+    second.claimAdmittedWorkerPrompt("claim-root", "delegate", "child-b", next.task.prompt),
   ]);
   assert.equal(claims.filter(result => result.status === "fulfilled").length, 1);
   const winner = claims[0]!.status === "fulfilled" ? "child-a" : "child-b";
@@ -3726,7 +3733,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
   };
   const client = { config: { providers: async () => ({ data: { providers: [{ id: "openai", models: {
     "gpt-6-astra": { id: "gpt-6-astra" }, "gpt-6-sol": { id: "gpt-6-sol" },
-    "gpt-5.6-sol": { id: "gpt-5.6-sol" },
+    "gpt-5.6-sol": { id: "gpt-5.6-sol" }, "gpt-6.1-terra": { id: "gpt-6.1-terra" },
   } }] } }) }, session: {
     get: async ({ path }: { path: { id: string } }) => ({ data: identities[path.id] }),
     messages: async () => ({ data: [] }),
@@ -3735,6 +3742,7 @@ test("preview reconciles native post-admission Task errors without treating pre-
     { model: "openai/gpt-6-astra", variants: ["high"] },
     { model: "openai/gpt-6-sol", variants: ["high", "xhigh"] },
     { model: "openai/gpt-5.6-sol", variants: ["low", "medium"] },
+    { model: "openai/gpt-6.1-terra", variants: ["xhigh"] },
   ] } });
   await hooks["chat.message"]!({ sessionID: "root", messageID: "root-user", agent: "dog-operator",
     model: { providerID: "openai", modelID: "gpt-6-astra" } }, {
@@ -4737,12 +4745,13 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const receipt = (await ledger.readGoal()).state.receipt!;
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
-  for (const symbol of ["```text", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  for (const symbol of ["```text", "🛡 確認", "🪙 使用量", "🟢 完了"]) assert.ok(report!.includes(symbol));
+  assert.doesNotMatch(returnReportPanel(report!)!, /<details>|詳細記録|PACK RECORD/u);
   const disclosure = "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>";
   const contextual = await control!.renderReturnReport("root",
     `${disclosure}\n\nstatus: DONE\n\n## 変更点\naccepted change\n\n## 次\ncontinue verification`, goalFingerprint(receipt));
   assert.ok(contextual?.includes(disclosure), "the actual report renderer preserves the preceding fenced disclosure");
-  assert.match(returnReportPanel(contextual!)!, /➡️ NEXT\n\ncontinue verification/u,
+  assert.match(returnReportPanel(contextual!)!, /➡️ 次: continue verification/u,
     "the real renderer-to-panel delivery path retains a panel after the fenced example");
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
   const priorLocale = process.env.SORTIE_REPORT_LOCALE;
@@ -4751,7 +4760,7 @@ test("recorded native validation can be reconciled without rerun only for the sa
     process.env.SORTIE_REPORT_LOCALE = "en";
     const english = await control!.renderReturnReport("root", "## Implementation\naccepted change\n\n## Next\nnone", goalFingerprint(receipt));
     assert.ok(english?.includes("Return Report"));
-    assert.match(english!, /Special insignia/u);
+    assert.match(english!, /Return Report/u);
     assert.doesNotMatch(english!, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.deepEqual((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore,
       "public bridge redisplay in another locale must not write another report");

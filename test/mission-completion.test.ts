@@ -13,6 +13,154 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const exec = promisify(execFile);
 
+for (const variant of ["exact", "no-reference", "wrong-command", "wrong-cwd", "missing-cwd", "foreign-owner", "wrong-run", "history-unavailable", "missing-exit", "failed-result", "conflicting-result", "time-conflict", "competing-call", "after-settlement", "declaration-race"] as const)
+test(`corrected operation recovers only the settled same-Mission Worker native call: ${variant}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/mission-predecessor-operation-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await mkdir(join(root, "build"));
+    await writeFile(join(root, "check.mjs"), 'console.log("auxiliary check");\n');
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
+      root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+      worker: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 10_000 } },
+    };
+    const history: Record<string, Record<string, unknown>[]> = {};
+    let unavailable = false;
+    let duringHistory: (() => Promise<void>) | undefined;
+    const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+    const hooks = await SortieDogsV010Plugin({ directory: root, returnReportTransport: "tool-result", client: { session: {
+      get: async ({ path }: { path: { id: string } }) => {
+        if (unavailable && path.id === "worker") throw new Error("native history unavailable");
+        return { data: { id: path.id, ...identities[path.id] } };
+      },
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      messages: async ({ path }: { path: { id: string } }) => {
+        if (path.id === "worker" && duringHistory) { const transition = duringHistory; duringHistory = undefined; await transition(); }
+        return { data: history[path.id] ?? [] };
+      },
+      abort: async () => { throw new Error("recovery must not abort or rerun the operation"); },
+    } } } as never);
+    let turn = 0;
+    const chat = (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-${++turn}`, agent: identities[id]!.agent }, {
+      message: { id: `${id}-${turn}`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text }],
+    });
+    const tool = async (name: string, id: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+    const build = "TMPDIR=/fixture/tmp XDG_CACHE_HOME=/fixture/cache /usr/bin/cmake --build build --target vdm_linux_readonly --parallel 4";
+    const initialBuild = build.replace("vdm_linux_readonly --parallel", "vdm_linux_readonly linux_readonly_test --parallel");
+    const launch = "node launch.mjs";
+    const declaration = { title: "Build and launch", objective: "Build the requested target and launch it once", read: ["check.mjs"],
+      write: ["build/**"], validation: ["node check.mjs"] };
+    await chat("root", "Build and launch the requested target once without replay.");
+    const started = await tool("start_mission", "root", { requirements: ["Build and launch the requested target once"], kind: "operation" });
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+    const first = await tool("plan_units", "coordinator", { units: [declaration], execution: { commands: [initialBuild, launch], directory: root } });
+    const workerTask = { args: structuredClone(first.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
+    await chat("worker", workerTask.args.prompt);
+    const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+    const original = await operators.required("root"), unit = original.units[0]!;
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: unit.handoffPath } });
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { output: "inspected" });
+    await tool("bind_write_gate", "worker", { project_root: root, manifest_path: unit.manifestPath });
+
+    // The original Worker did a single-target native shell call, not the two-target declaration.
+    // This is fixture history: neither CMake nor the GUI is started by the regression.
+    const actualStart = Date.now();
+    const part = { type: "tool", tool: "shell", callID: "original-build", state: { status: "completed",
+      input: { command: variant === "wrong-command" ? `${build} extra` : build,
+        workdir: variant === "wrong-cwd" ? join(root, "other") : root, timeout: 240_000 },
+      output: "[100%] Built target vdm_linux_readonly", metadata: { status: "completed", ...(variant === "missing-exit" ? {} : { exit: variant === "failed-result" ? 1 : 0 }) },
+      time: { start: actualStart, end: actualStart } } };
+    history.worker = [{ info: { role: "assistant", sessionID: "worker" }, parts: [part] }];
+    if (variant === "missing-cwd") delete (part.state.input as { workdir?: string }).workdir;
+    if (variant === "time-conflict") part.state.time.end = actualStart - 1;
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "original-launch" }, { args: { command: launch, workdir: root } });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "original-launch" },
+      { output: "launched", metadata: { status: "completed", exit: 0 } });
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "auxiliary-check" }, { args: { command: "node check.mjs", workdir: root } });
+    const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "auxiliary-check" },
+      { output: checked.stdout, metadata: { status: "completed", exit: 0 } });
+    identities.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+      { output: "completed", metadata: { sessionId: "worker" } });
+    assert.equal((await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "succeeded");
+    const before = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(before.status, "not-started");
+    assert.deepEqual(before.observations.map((item: { callID: string }) => item.callID), ["original-launch"]);
+
+    const corrected = await tool("plan_units", "coordinator", { executor: "self", units: [{ ...declaration, title: "Correct the declaration",
+      objective: "Recover the existing call without starting the operation again" }],
+      execution: { commands: [build, launch], directory: root }, reason: "The actual build used only the GUI target" });
+    assert.equal(corrected.status, "direct-unit-running");
+    const budgetBefore = (await tool("operator_status", "root")).budget;
+    if (variant === "foreign-owner") identities.worker!.parentID = "another-coordinator";
+    if (variant === "history-unavailable") unavailable = true;
+    if (variant === "declaration-race") duringHistory = async () => { await missions.update("root", current => {
+      current.execution!.commands = [`${build} changed`, launch];
+    }); };
+    if (variant === "after-settlement") {
+      const settled = (await missions.required("root")).progress.find(item => item.unit === `${original.runID}/unit-1`)!;
+      part.state.time = { start: Date.parse(settled.at) + 100, end: Date.parse(settled.at) + 100 };
+    }
+    if (variant === "conflicting-result") {
+      const contradiction = structuredClone(part);
+      contradiction.state.metadata.exit = 1;
+      (history.worker![0]!.parts as unknown[]).push(contradiction);
+    }
+    if (variant === "competing-call") {
+      const competitor = structuredClone(part);
+      competitor.callID = "another-build";
+      (history.worker![0]!.parts as unknown[]).push(competitor);
+    }
+    if (variant !== "no-reference") {
+      if (variant === "exact") await assert.rejects(tool("plan_units", "root", { execution: {
+        commands: [`${build} changed`, launch], directory: root, recover_call: { run_id: original.runID,
+          unit_id: "unit-1", session_id: "worker", call_id: "original-build" } } }), /mission-operation-recovery-declaration-mismatch/u);
+      const recovery = await tool("plan_units", "root", { execution: { commands: [build, launch], directory: root, recover_call: {
+        run_id: variant === "wrong-run" ? "foreign-run" : original.runID,
+        unit_id: "unit-1", session_id: "worker", call_id: "original-build" } } });
+      assert.equal(recovery.status, "operation-reconciled");
+      assert.equal(recovery.run_id, corrected.run_id, "recover in the current run without creating another unit");
+      assert.deepEqual(recovery.budget, budgetBefore, "native result recovery spends no new unit");
+    }
+    const observed = (await tool("operator_status", "root")).acceptance_summary.operation;
+    const expected = variant === "exact" ? "executed" : variant === "failed-result" ? "execution-failed"
+      : ["history-unavailable", "wrong-command", "wrong-cwd", "missing-cwd", "foreign-owner", "wrong-run", "after-settlement", "declaration-race"].includes(variant) ? "recovery-unavailable"
+      : ["missing-exit", "conflicting-result", "time-conflict", "competing-call"].includes(variant) ? "recovery-blocked" : "not-started";
+    assert.equal(observed.status, expected);
+    const result = observed.observations.find((item: { callID: string }) => item.callID === "original-build");
+    if (["exact", "failed-result", "missing-exit", "conflicting-result", "time-conflict", "competing-call"].includes(variant)) {
+      assert.equal(result.sourceRunID, original.runID);
+      assert.equal(result.sourceUnitID, "unit-1");
+      assert.equal(result.sessionID, "worker");
+      assert.equal(result.nativeTimeoutMs, 240_000);
+      assert.equal(result.nativeStartedAt, new Date(actualStart).toISOString());
+      assert.equal(result.completedAt, new Date(actualStart - (variant === "time-conflict" ? 1 : 0)).toISOString());
+    } else assert.equal(result, undefined);
+    const repeated = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(repeated.status, expected);
+    assert.equal(repeated.observations.filter((item: { callID: string }) => item.callID === "original-build").length,
+      result ? 1 : 0, "reconciliation is idempotent and does not launch a new call");
+    if (variant === "exact") {
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "duplicate-build" },
+        { args: { command: build, workdir: root } }), /mission-operation-already-admitted/u);
+      assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.status, "executed",
+        "a refused duplicate does not replace the original terminal result");
+      part.state.input.timeout = 180_000;
+      const changedInput = (await tool("operator_status", "root")).acceptance_summary.operation;
+      assert.equal(changedInput.status, "recovery-blocked", "a later conflicting native timeout cannot replace the original call");
+      assert.equal(changedInput.observations.find((item: { callID: string }) => item.callID === "original-build").nativeTimeoutMs, 240_000,
+        "the original per-call timeout remains unchanged");
+    }
+    assert.notEqual((await missions.required("root")).phase, "completed", "operation recovery is not formal validation or acceptance");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 for (const owner of ["ended", "live", "unknown", "background-tool"] as const)
 test(`Operator method correction reaches only the ended retained direct owner: ${owner}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -510,6 +658,8 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
     assert.equal(typeof completed.return_report, "string", "the real profiled completion transport must still deliver the host panel");
+    assert.doesNotMatch(completed.return_report, /\n<details>\n<summary>📜|詳細記録|Detailed record|⚑ MISSION|COST \/ PACK/u);
+    for (const field of [/🛡 確認:/u, /🪙 使用量:/u, /host計上費用:/u, /⏳ 未実施:/u, /➡️ 次:/u]) assert.match(completed.return_report, field);
     assert.match(completed.return_report_instruction, /Append return_report verbatim once/u);
     assert.match(completed.return_report_instruction, /unknown values and caveats/u);
     const delivered = { text: `Result collected.\n\n${completed.return_report}` };
@@ -529,21 +679,21 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     }
     if (mode === "implementation") {
       assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
-      assert.match(completed.return_report, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
-      assert.match(completed.return_report, /レビュー補足\s+The decisive return line is not visible/u);
-      assert.match(completed.return_report, /➡️ NEXT\n\nなし/u);
+      assert.match(completed.return_report.replace(/\n/gu, ""), /Review: 🟡 補足あり（非ブロッキング・PASSではない）/u);
+      assert.match(completed.return_report.replace(/\n/gu, ""), /レビュー補足: The decisive return line is not visible/u);
+      assert.match(completed.return_report, /➡️ 次: なし/u);
       const visible = { text: `✅ **DONE** — validated result\n\n**次:** なし\n\n${completed.return_report}` };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final", partID: "final-text" }, visible);
-      assert.match(visible.text, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u,
+      assert.match(visible.text.replace(/\n/gu, ""), /Review: 🟡 補足あり（非ブロッキング・PASSではない）/u,
         "the final user-facing renderer must retain the native Review verdict, not only the completion tool result");
-      assert.match(visible.text, /レビュー補足\s+The decisive return line is not visible/u);
-      assert.doesNotMatch(visible.text, /SourceReview\s+未記録/u);
+      assert.match(visible.text.replace(/\n/gu, ""), /レビュー補足: The decisive return line is not visible/u);
+      assert.doesNotMatch(visible.text, /Review: 未記録/u);
       assert.match(visible.text, /\*\*次:\*\* なし/u);
     }
     if (mode === "executed") {
       const visible = { text: "✅ **DONE** — validated operation\n\n**次:** なし" };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final-pass", partID: "final-text" }, visible);
-      assert.match(visible.text, /SourceReview\s+🟢 PASS（独立Reviewer）/u);
+      assert.match(visible.text, /Review: 🟢 PASS（独立Reviewer）/u);
       assert.doesNotMatch(visible.text, /EVIDENCE_GAPS/u);
     }
     const final = await status();
