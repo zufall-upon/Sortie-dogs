@@ -66,7 +66,7 @@ import {
   ROLLOVER_MARKER,
   STEP_CONTINUE_PREFIX,
 } from "../dist/plugin/continuation.js";
-import { createProjectPaths, createWriteGate, extractWritePaths, isGitMutation, isKnownReadOnlyTool } from "../dist/plugin/gate.js";
+import { createProjectPaths, createWriteGate, extractWritePaths, isGitMutation, isKnownReadOnlyTool, WriteDeniedError } from "../dist/plugin/gate.js";
 import { reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
 import type { ReviewerCorrectionCheck } from "../dist/plugin/runtime-bridge.js";
 import { STABLE_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
@@ -8367,7 +8367,14 @@ test("shell command substitution scoped write is denied at the public Worker too
     assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
     await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
     await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
-    const hooks = await SortieDogsPlugin({ directory });
+    const observedPaths: string[][] = [];
+    const hooks = await SortieDogsPlugin({ directory, runtimeBridge: {
+      allowsInvestigativeShell: async (sessionID: string) => sessionID === "write-code-worker",
+      assertMissionWrite: async (_sessionID: string, paths: readonly string[]) => {
+        observedPaths.push([...paths]);
+        if (paths.includes(join(directory, "outside.txt"))) throw new WriteDeniedError("manifest-scope", "outside.txt");
+      },
+    } as never });
     await beginTrackedTaskChild(hooks, directory, "write-code-parent", "write-code-worker", "write-code-task");
     await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "write-code-worker");
     assert.equal((await executeBindWriteGate(hooks, directory, "write-code-worker")).status, "bound");
@@ -8375,8 +8382,9 @@ test("shell command substitution scoped write is denied at the public Worker too
     await assert.rejects((async () => {
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "write-code-worker", callID: "write-code" }, { args: { command } });
       calls += 1;
-    })(), /operation manifest write scope|unclassified command/u);
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
     assert.equal(calls, 0);
+    assert.deepEqual(observedPaths, [[join(directory, "outside.txt")]]);
     assert.equal(await readFile(join(directory, "outside.txt"), "utf8"), "unchanged\n");
   });
 });
