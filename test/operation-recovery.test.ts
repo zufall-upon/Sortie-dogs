@@ -615,6 +615,82 @@ test("heredoc pipelines and shell stdin retain executable output checks", { skip
   assert.equal((await exec("bash", ["-c", data], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
 }));
 
+test("unquoted heredoc comments and continuations retain native substitution destinations", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const native = join(root, "native");
+  await mkdir(native);
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-comment-continuation", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const commands = [
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\n# step 1)\nprintf changed > outside.txt\n)\nIGNORE\nFIRST",
+    "cat <<FIRST | cat <<'SECOND'\ntext\\\nFIRST\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND",
+    `cat <<FIRST\ncat <<'IGNORE'\n$(printf '%s' "$(\n# nested )\nprintf changed > outside.txt\n)")\nIGNORE\nFIRST`,
+    "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$\\\n(printf changed > outside.txt)\nIGNORE\nFIRST\nliteral\nSECOND",
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\nprintf '%s' '# not a comment )'; printf changed > outside.txt\n)\nIGNORE\nFIRST",
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\nprintf '%s' escaped\\#word; printf changed > outside.txt\n)\nIGNORE\nFIRST",
+  ];
+  let adapterCalls = 0;
+  for (const [index, command] of commands.entries()) {
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    const result = await exec("bash", ["-c", command], { cwd: native });
+    assert.equal(result.stderr, "", command);
+    if (index === 0) assert.equal(result.stdout, "cat <<'IGNORE'\n\nIGNORE\n");
+    if (index === 1) assert.equal(result.stdout, "literal\n");
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed", command);
+    assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")), command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+      ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)), command);
+  }
+  const unterminated = "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(printf changed > outside.txt)\nIGNORE";
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const unterminatedResult = await exec("bash", ["-c", unterminated], { cwd: native });
+  assert.notEqual(unterminatedResult.stderr, "");
+  assert.equal(unterminatedResult.stdout, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.ok(extractWritePaths("shell", { command: unterminated, workdir: root }, root).paths.includes(join(root, "outside.txt")));
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(unterminated, mode);
+    adapterCalls += 1;
+  })(), WriteDeniedError);
+  const caseClause = "cat <<FIRST\ncat <<'IGNORE'\n$(case x in x) printf changed > outside.txt ;; esac)\nIGNORE\nFIRST";
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const caseResult = await exec("bash", ["-c", caseClause], { cwd: native });
+  assert.equal(caseResult.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(caseClause, mode);
+    adapterCalls += 1;
+  })(), WriteDeniedError);
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // Literal delimiters and escaped backslashes still terminate on physical lines.
+  for (const command of [
+    "cat <<'FIRST' | cat <<'SECOND'\ntext\\\nFIRST\ntar -xzf archive.tar.gz\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\necho safe\\\\\nFIRST\ntar -xzf archive.tar.gz\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\necho safe\nFI\\\nRST\ntar -xzf archive.tar.gz\nSECOND",
+  ]) {
+    assert.equal((await exec("bash", ["-c", command], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [], command);
+    for (const mode of [false, true]) await check(command, mode);
+  }
+
+  const hashWord = "cat <<FIRST | cat <<'SECOND'\n$(printf '%s' word#value)\nFIRST\nliteral\nSECOND";
+  assert.equal((await exec("bash", ["-c", hashWord], { cwd: root })).stdout, "literal\n");
+  assert.deepEqual(extractWritePaths("shell", { command: hashWord, workdir: root }, root).unresolvedPaths, undefined);
+  await check(hashWord, true);
+
+  const incomplete = "cat <<FIRST | cat <<'SECOND'\n$(\nprintf changed > outside.txt\nFIRST\nliteral\nSECOND";
+  for (const mode of [false, true]) await assert.rejects(check(incomplete, mode), WriteDeniedError);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
   await mkdir(join(root, "routes"));
   await writeFile(join(root, "routes/outside.tsx"), "unchanged\n");
