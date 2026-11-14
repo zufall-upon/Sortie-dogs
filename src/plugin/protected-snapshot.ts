@@ -199,12 +199,16 @@ export function snapshotScratchExclusion(binding: Binding, currentProtection: re
 }
 
 /** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
-export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">): Promise<string[]> {
+export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">,
+  directory?: string): Promise<string[]> {
   const actual = (entry: string) => resolve(projectRoot, normalizeManifestScope(entry).path);
   // The Location may contain a separately checked-out repository. Discover only
-  // ancestors of declared paths, never unrelated nested trees or filename patterns.
+  // ancestors of declared paths and the fixed validation cwd, never unrelated
+  // nested trees or filename patterns. A whole-Location grant need not name the
+  // checkout explicitly, but its tracked scratch inputs still require protection.
   const roots = new Set<string>(), markers = new Map<string, Promise<boolean>>();
-  for (const start of new Set([resolve(projectRoot), ...manifest.read.map(actual), ...manifest.write.map(actual)])) {
+  for (const start of new Set([resolve(projectRoot), ...(directory ? [resolve(projectRoot, directory)] : []),
+    ...manifest.read.map(actual), ...manifest.write.map(actual)])) {
     let path = start;
     for (;;) {
       let marker = markers.get(path);
@@ -379,7 +383,8 @@ export async function validationInputSnapshot(projectRoot: string, binding: Bind
   // A tracked file or exact output promoted since capture must stop being scratch
   // during the check as well as during the later source/candidate refresh.
   if (binding.freshness) binding = { ...binding, freshness: { ...binding.freshness,
-    protected_paths: [...new Set([...binding.freshness.protected_paths, ...await currentSnapshotProtection(projectRoot, manifest)])] } };
+    protected_paths: [...new Set([...binding.freshness.protected_paths,
+      ...await currentSnapshotProtection(projectRoot, manifest, binding.freshness.toolchain?.directory)])] } };
   return binding.source_policy === "declared-paths-v1"
     ? declaredScopeDigest(projectRoot, paths, hash, true, [], binding)
     : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, [], binding);
@@ -394,7 +399,7 @@ export async function validatedSourceSnapshot(projectRoot: string, binding: Bind
   const scopes = [...binding.source_paths.map(path => resolve(projectRoot, path)),
     ...current.manifest.write.map(path => resolve(projectRoot, normalizeManifestScope(path).path))];
   const protection = [...new Set([...(binding.freshness?.protected_paths ?? []),
-    ...await currentSnapshotProtection(projectRoot, current.manifest)])];
+    ...await currentSnapshotProtection(projectRoot, current.manifest, binding.freshness?.toolchain?.directory)])];
   const reads = current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path));
   const currentBinding = binding.freshness ? { ...binding, freshness: { ...binding.freshness, protected_paths: protection } } : binding;
   // A populated directory grant can contain real untracked or ignored inputs.
@@ -440,7 +445,7 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   if (options.captureFreshness !== false && Array.isArray(manifest.validation) && manifest.validation.length && manifest.task_id) {
     // New evidence pins validation inputs/outputs independently of the execution manifest hash.
     // Existing records keep their original recipe and cannot acquire exclusions retroactively.
-    const protection = await currentSnapshotProtection(authorization.projectRoot, manifest);
+    const protection = await currentSnapshotProtection(authorization.projectRoot, manifest, options.directory);
     const { "@runtime": _runtime, "@executable": _executable, ...capturedEnvironment } = environment(manifest);
     const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
@@ -504,7 +509,7 @@ export async function refreshProtectedSnapshot(projectRoot: string, binding: Bin
   const sourcePaths = binding.source_paths.map(path => resolve(projectRoot, path));
   const candidatePaths = binding.candidate_paths.map(path => resolve(projectRoot, path));
   if (binding.freshness) {
-    const protection = await currentSnapshotProtection(projectRoot, current.manifest);
+    const protection = await currentSnapshotProtection(projectRoot, current.manifest, binding.freshness.toolchain?.directory);
     binding = { ...binding, freshness: { ...binding.freshness,
       protected_paths: [...new Set([...binding.freshness.protected_paths, ...protection])] } };
     // A compatible scope-only revision does not change old proof. Newly materialized outputs

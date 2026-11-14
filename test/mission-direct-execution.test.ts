@@ -24,7 +24,7 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
-test("direct validation in a nested checkout keeps only configured scratch fresh and rejects real input changes", async () => {
+for (const grant of ["checkout", "location"] as const) test(`direct validation in a nested checkout keeps only configured scratch fresh and rejects real input changes (${grant} grant)`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-nested-scratch-")), checkout = join(directory, "checkout");
   try {
@@ -40,6 +40,7 @@ test("direct validation in a nested checkout keeps only configured scratch fresh
 for (const p of ['source.txt', 'ignored-input.txt', 'scratch/fixture.txt', 'scratch/tracked.txt']) readFileSync(p);
 writeFileSync(process.env.TMPDIR + '/run-' + process.argv[2], 'diagnostic output');\n`);
     await exec("git", ["add", "--", ".gitignore", "source.txt", "scratch/tracked.txt", "check.mjs"], { cwd: checkout });
+    if (grant === "location") await exec("git", ["add", "-f", "--", "scratch/fixture.txt"], { cwd: checkout });
     const commands = ["TMPDIR=./scratch node check.mjs first", "TMPDIR=./scratch node check.mjs second"];
     const history: any[] = [];
     const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
@@ -53,7 +54,8 @@ writeFileSync(process.env.TMPDIR + '/run-' + process.argv[2], 'diagnostic output
     await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validate the checkout"] }, { sessionID: "root" });
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{
       title: "Validate checkout", objective: "Run checks with their declared scratch",
-      read: [directory + "/**", "checkout/scratch/fixture.txt"], write: ["checkout/**"], validation: commands,
+      read: [directory + "/**", ...(grant === "checkout" ? ["checkout/scratch/fixture.txt"] : [])],
+      write: [grant === "checkout" ? "checkout/**" : directory + "/**"], validation: commands,
       validation_cwd: Object.fromEntries(commands.map(command => [command, checkout])),
     }] }, { sessionID: "root" }));
     assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));

@@ -389,6 +389,39 @@ test("nested checkout scratch is relative to the actual check cwd and still prot
   assert.notEqual((await refreshProtectedSnapshot(root, differentCall.binding))?.source, differentCall.source);
 }));
 
+test("a whole-Location grant protects tracked scratch inputs from the fixed validation cwd", async () => fixture(async root => {
+  const checkout = join(root, "checkout"), scratch = join(checkout, "scratch");
+  await mkdir(scratch, { recursive: true });
+  await exec("git", ["init", "--quiet"], { cwd: checkout });
+  const source = join(scratch, "tracked.txt");
+  await writeFile(source, "tracked input");
+  await exec("git", ["add", "--", "scratch/tracked.txt"], { cwd: checkout });
+  const command = "TMPDIR=./scratch node check.mjs", manifestPath = join(root, "manifest.json");
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**"],
+    write: [root + "/**"], validation: [command] });
+  await writeFile(manifestPath, bytes);
+  const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) }, { directory: checkout, command });
+  assert.ok(pinned?.binding.freshness);
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  const concrete = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const concreteSource = await validatedSourceSnapshot(root, concrete);
+  assert.ok(concreteSource);
+  await writeFile(join(scratch, "generated.log"), "output only");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(source, "changed real input");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource);
+  await writeFile(source, "tracked input");
+  await writeFile(join(scratch, "promoted.txt"), "new source");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs, "untracked scratch remains output-only");
+  await exec("git", ["add", "--", "scratch/promoted.txt"], { cwd: checkout });
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, "newly tracked input tightens the old recipe");
+  assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource);
+  assert.equal(JSON.stringify(pinned.binding), saved, "the fixed cwd tightens protection without rewriting the saved binding");
+}));
+
 test("a broad project read excludes inherited compiler outputs, but source and configured environment stay bound", async () => fixture(async root => {
   const previous = process.env.GOCACHE;
   process.env.GOCACHE = join(root, "compiler-output");
