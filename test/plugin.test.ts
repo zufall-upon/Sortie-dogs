@@ -11146,6 +11146,21 @@ test("git identity commit follows public classification and native whole-index c
     assert.equal((await execFileAsync("git", ["-C", clone, "show", "--format=", "--name-only", "HEAD"])).stdout.trim(), "src/allowed.txt");
     assert.equal((await execFileAsync("git", ["-C", clone, "diff", "--cached", "--name-only"])).stdout, "");
     assert.equal(await index(directory), unrelatedIndex, "real execution never consumes the Location index");
+    // The shell concatenates an unquoted assignment prefix and a quoted value
+    // into one argv element. Gate classification must match that native argv.
+    await writeFile(allowed, "next candidate");
+    await execFileAsync("git", ["-C", clone, "add", "src/allowed.txt"]);
+    const inline = `git -c user.name='Sortie Dogs' -c user.email='sortie-dogs@localhost' commit -m candidate`;
+    for (const tool of ["shell", "bash"]) {
+      const extracted = extractWritePaths(tool, { command: inline });
+      assert.equal(extracted.gitCommit, true, tool);
+      assert.equal(extracted.ambiguous, false, tool);
+    }
+    for (const investigativeShell of [false, true]) await check(inline, investigativeShell);
+    await execFileAsync(inline, { cwd: clone, shell: true });
+    assert.equal((await execFileAsync("git", ["-C", clone, "show", "-s", "--format=%an <%ae>"])).stdout.trim(),
+      "Sortie Dogs <sortie-dogs@localhost>");
+    assert.equal(await index(directory), unrelatedIndex);
   }));
 });
 

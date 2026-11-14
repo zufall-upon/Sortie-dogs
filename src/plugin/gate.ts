@@ -1292,13 +1292,15 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
     const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
-    const tokenMatches = [...source.matchAll(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)];
+    const tokenMatches = [...source.matchAll(/user\.(?:name|email)=(?:"[^"\\]*"|'[^']*')(?=\s|$)|"(?:\\.|[^"])*"|'[^']*'|[^\s]+/giu)];
     const tokenSources = tokenMatches.map(match => match[0]);
     const rawTokens = tokenSources.map((token, index) => {
       // Strip syntax quotes once, while the original token still distinguishes an
       // inline quoted value from literal quotes inside a wholly quoted argument.
       const inlinePath = /^(--(?:output|directory)=)(.+)$/u.exec(token);
-      const value = inlinePath ? inlinePath[1]! + unquote(inlinePath[2]!) : unquote(token);
+      const inlineIdentity = /^(user\.(?:name|email)=)("[^"\\]*"|'[^']*')$/iu.exec(token);
+      const value = inlinePath ? inlinePath[1]! + unquote(inlinePath[2]!)
+        : inlineIdentity ? inlineIdentity[1]! + unquote(inlineIdentity[2]!) : unquote(token);
       return index > 0 && safePathUse && !token.startsWith("'") && /^\$[A-Za-z_][A-Za-z0-9_]*$/u.test(value)
         ? pathValues.get(value.toLowerCase()) ?? value : value;
     });
