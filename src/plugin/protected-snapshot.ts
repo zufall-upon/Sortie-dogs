@@ -397,9 +397,9 @@ export async function validatedSourceSnapshot(projectRoot: string, binding: Bind
     ...await currentSnapshotProtection(projectRoot, current.manifest)])];
   const reads = current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path));
   const currentBinding = binding.freshness ? { ...binding, freshness: { ...binding.freshness, protected_paths: protection } } : binding;
-  // A directory grant can contain real untracked or ignored inputs and newly created
-  // deliverables. Tracked files alone are not a complete inventory. Unless the whole
-  // directory is already a read input or configured scratch, retain the full recipe.
+  // A populated directory grant can contain real untracked or ignored inputs.
+  // Tracked files alone are not a complete inventory. Unless the whole directory
+  // is already a read input or configured scratch, retain the full recipe.
   for (const entry of binding.validation_policy === undefined ? current.manifest.write : []) {
     const output = resolve(projectRoot, normalizeManifestScope(entry).path);
     if (reads.some(input => !outside(input, output)) || snapshotScratchExcluded(currentBinding, output)) continue;
@@ -407,7 +407,7 @@ export async function validatedSourceSnapshot(projectRoot: string, binding: Bind
       if (error.code !== "ENOENT") throw error;
       return undefined;
     });
-    if (entry.endsWith("/**") || stat?.isDirectory()) return undefined;
+    if (stat?.isDirectory() && (await readdir(output)).length) return undefined;
   }
   const paths = [...new Set([...reads,
     ...protection.filter(path => scopes.some(scope => !outside(scope, path)))])];
