@@ -8008,11 +8008,36 @@ for (const first of ["'FIRST'", "FIRST"]) test(`declared multiple data heredocs 
   });
 });
 
+test("declared nested literal heredoc preserves public Worker admission", { skip: process.platform === "win32" }, async () => {
+  await withProject("nested-literal-heredoc-worker", async directory => {
+    const command = "cat <<FIRST\n$(cat <<'INNER'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST";
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "nested-parent", "nested-worker", "nested-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "nested-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "nested-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "nested-worker", callID: "nested-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(result.stdout, "$(tar -xzf archive.tar.gz -C missing-data-directory)\n");
+    assert.equal(result.stderr, "");
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "missing-data-directory")).catch(() => undefined), undefined);
+  });
+});
+
 for (const [name, command] of [
   ["comment", "cat <<FIRST\ncat <<'IGNORE'\n$(\n# step 1)\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nIGNORE\nFIRST"],
   ["continuation", "cat <<FIRST | cat <<'SECOND'\ntext\\\nFIRST\n$(\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST\nliteral\nSECOND"],
   ["tab-continuation", "cat <<-FIRST | cat <<'SECOND'\nFI\\\n\tRST\n$(\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST\nliteral\nSECOND"],
   ["unterminated", "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nIGNORE"],
+  ["nested-expansion", "cat <<FIRST\n$(cat <<INNER\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
+  ["nested-literal-suffix", "cat <<FIRST\n$(cat <<'INNER'\n$(tar -xzf archive.tar.gz -C ignored-data-directory)\nINNER\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST"],
+  ["nested-pipeline", "cat <<FIRST\n$(cat <<'INNER' | bash\ntar -xzf archive.tar.gz -C missing-data-directory\nINNER\n)\nFIRST"],
+  ["nested-multiple", "cat <<FIRST\n$(cat <<'A' | cat <<B\n$(tar -xzf archive.tar.gz -C ignored-data-directory)\nA\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nB\n)\nFIRST"],
+  ["process-substitution", "cat <<'FIRST' | tee >(bash) > /dev/null | cat <<'SECOND'\ntar -xzf archive.tar.gz -C missing-data-directory\nFIRST\nliteral\nSECOND"],
 ] as const) test(`declared heredoc ${name} retains artifact prerequisites at Worker admission`,
   { skip: process.platform === "win32" }, async () => {
   await withProject(`heredoc-${name}-artifact`, async directory => {
@@ -8075,6 +8100,22 @@ test("an unparsed case substitution cannot conceal a declared artifact", { skip:
     assert.equal(dispatched, false);
     assert.equal(await stat(join(directory, "missing-data-directory")).catch(() => undefined), undefined);
     assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+  });
+});
+
+test("a time-prefixed case substitution cannot conceal a declared artifact", { skip: process.platform === "win32" }, async () => {
+  await withProject("time-case-heredoc-artifact", async directory => {
+    const command = "cat <<FIRST\n$(time case x in x) tar -xzf archive.tar.gz -C missing-data-directory ;; esac)\nFIRST";
+    await writeFile(join(directory, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: directory });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.match(result.stderr, /missing-data-directory/u);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await assert.rejects(beginTrackedTaskChild(hooks, directory, "time-case-parent", "time-case-worker", "time-case-task"),
+      /artifact_command_unclassified/u);
+    assert.equal(await stat(join(directory, "missing-data-directory")).catch(() => undefined), undefined);
   });
 });
 
