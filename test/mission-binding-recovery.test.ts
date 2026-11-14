@@ -171,7 +171,15 @@ for (const actor of ["root", "coordinator"]) for (const interruption of ["none",
         await chat("holder", "Hold the fixture output", "holder-request");
         await tool("holder", "start_mission", { requirements: ["Hold the fixture output"] });
         await tool("holder", "plan_units", { ...plan, executor: "self" });
-        await assert.rejects(tool(actor, "start_direct_unit"), /mission-direct-activation:manifest-overlap/);
+        await assert.rejects(tool(actor, "start_direct_unit"), (error: Error) => {
+          const prefix = "mission-direct-activation:manifest-overlap:";
+          assert.ok(error.message.startsWith(prefix));
+          const conflicts = JSON.parse(error.message.slice(prefix.length));
+          assert.ok(conflicts.some((conflict: { session_id: string; requested: string; held: string; access: string }) =>
+            conflict.session_id === "holder" && conflict.requested.endsWith("result.txt") &&
+            conflict.held.endsWith("result.txt") && conflict.access === "write/write"));
+          return true;
+        });
         assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("holder")).units[0]!.status, "running");
         await tool("holder", "submit_mission", { status: "blocked", summary: "Fixture holder releases its own unvalidated unit" });
       }
@@ -423,6 +431,43 @@ for (const readOnly of [false, true]) test(`returned recoverable mission Worker 
     assert.deepEqual((await ledger()).records.filter(({ event }) => event.kind === "unit.settled"),
       settled.records.filter(({ event }) => event.kind === "unit.settled"));
   } finally { Date.now = clock; await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a different Mission can recover a deferred writer only after its exact native tool terminal", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/cross-mission-release-"));
+  try {
+    await writeFile(join(directory, "result.txt"), "before\n");
+    const history: Record<string, object[]> = {};
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator" } }),
+      children: async () => ({ data: [] }),
+      messages: async ({ path }: any) => ({ data: history[path.id] ?? [] }),
+    } } } as never);
+    const chat = async (id: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-request`, agent: "dog-operator" }, {
+      message: { id: `${id}-request`, agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-terra" } },
+      parts: [{ type: "text", text: "Update result and validate it" }],
+    });
+    const tool = async (id: string, name: string, args: object = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: id }));
+    const unit = { title: "Update", objective: "Update and validate result", read: [], write: ["result.txt"], validation: ["node check.mjs"] };
+    for (const id of ["first", "second"]) {
+      await chat(id);
+      await tool(id, "start_mission", { requirements: ["Update and validate result"] });
+    }
+    await tool("first", "plan_units", { executor: "self", units: [unit] });
+    const args = { command: "node check.mjs" }, callID = "delayed-shell";
+    await hooks["tool.execute.before"]!({ sessionID: "first", tool: "bash", callID }, { args });
+    const part = { type: "tool", tool: "bash", callID, state: { status: "error", input: args, metadata: { status: "unknown" } as any } };
+    history.first = [{ info: { role: "assistant", sessionID: "first" }, parts: [part] }];
+    await assert.rejects(tool("first", "cancel_operator", { reason: "plain" }), /mission-direct-release:tools-in-flight/);
+    await assert.rejects(tool("second", "plan_units", { executor: "self", units: [unit] }), /mission-direct-activation:manifest-overlap/);
+    part.state.status = "completed";
+    part.state.metadata = { exit: 0 };
+    assert.equal((await tool("second", "start_direct_unit")).status, "direct-unit-running");
+    const first = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("first");
+    assert.equal(first.units[0]!.status, "cancelled");
+    assert.deepEqual(first.units[0]!.evidence, []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 for (const actor of ["second", "coordinator"]) for (const action of ["handoff", "cancel", "blocked", "needs-decision"]) test(`${actor} overlapping direct writer manages ${action} without evicting a live owner`, async () => {

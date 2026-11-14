@@ -772,10 +772,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const validation = await remainingRegisteredValidation(root, unit);
           if (!validation.length && unitValidation(unit).length) return { ready: true, matched: [] };
           const nativeWorker = !unit.reviewerCorrection && !unit.directExecution && !!unit.validationRegistration?.startedAt;
-          return await reviewerCorrectionValidationFresh(validation, child, nativeWorker ? [] : await reviewMessages(child, new Date(startedAt).toISOString()),
+          const checks = unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? unit.validationRegistration?.checks ?? [];
+          const result = await reviewerCorrectionValidationFresh(validation, child, nativeWorker ? [] : await reviewMessages(child, new Date(startedAt).toISOString()),
           startedAt,
-          unit.reviewerCorrection?.checks ?? unit.directExecution?.checks ?? unit.validationRegistration?.checks ?? [], input.directory,
-          unitValidationCwd(unit), unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt, nativeWorker); }
+          checks, input.directory,
+          unitValidationCwd(unit), unit.reviewerCorrection?.validationRegisteredAt ?? unit.directExecution?.validationRegisteredAt ?? unit.validationRegistration?.registeredAt, nativeWorker);
+          const verifiedChecks = nativeWorker && result.ready ? checks.filter(check => check.dispatchCallID === callID && check.childSessionID === child)
+            .flatMap(check => {
+              const matchedOccurrences = result.matched?.filter(item => item.callID === check.callID)
+                .map(({ member, occurrence }) => ({ member, occurrence })) ?? [];
+              return matchedOccurrences.length ? [{ ...check, matchedOccurrences }] : [];
+            }) : [];
+          return { ...result, verifiedChecks }; }
         catch { return { ready: false, reason: "mission-review-correction-validation-history-unavailable" }; }
       },
       ownsReviewerCorrectionDispatch: async (root, callID, taskID) => {
@@ -4176,6 +4184,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const state = await operators.read(root);
           if (!state?.units.some(unit => unit.status === "running" && unit.childSessionID === request.sessionID)) {
             throw new Error("operator-worker-owner-mismatch");
+          }
+          if (who.role === "dog-worker" && (await missions.read(root))?.runID === state.runID) {
+            const unit = state.units.find(item => item.status === "running" && item.childSessionID === request.sessionID);
+            if (unit?.callID && unit.repairValidation === null && !unit.reviewerCorrection) {
+              const taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+              if (!taskID) throw new Error("mission-activation-grant-stale");
+              await control!.activateMissionWorker(root, request.sessionID, unit.handoffPath, {
+                runID: state.runID, generation: state.generation, unitID: unit.unit.id, taskID, callID: unit.callID,
+              }, true);
+            }
           }
         }
         const args = record(output.args) ? output.args : {};

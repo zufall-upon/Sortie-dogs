@@ -110,6 +110,7 @@ export interface RuntimeBridge {
   reviewerCorrectionValidation?(rootSessionID: string, callID: string, childSessionID: string, startedAt: number): Promise<{
     ready: boolean; reason?: string; failure?: SerialDispatchSettlement["failure"];
     matched?: readonly { callID: string; member: number; occurrence: number }[];
+    verifiedChecks?: readonly DirectHandoffValidationCheck[];
     next_action?: string;
   } | undefined>;
   /** Durable operator dispatch identity survives adapter reload and missed after hooks. */
@@ -202,7 +203,7 @@ export interface RuntimeBridge {
       writeScopes: readonly string[]): Promise<{ ready: boolean; reason?: string }>;
     restoreReviewerCorrectionChild(rootSessionID: string, childSessionID: string, callID: string, taskID: string): Promise<void>;
     activateMissionWorker(rootSessionID: string, childSessionID: string, handoffPath: string,
-      admission: MissionImplementationAdmission): Promise<void>;
+      admission: MissionImplementationAdmission, retainBound?: boolean): Promise<void>;
     activateDirectUnit(rootSessionID: string, actorSessionID: string, prompt: string, handoffPath: string): Promise<void>;
     finishDirectUnit(rootSessionID: string, actorSessionID: string, checks: readonly ReviewerCorrectionCheck[]): Promise<SerialDispatchSettlement>;
     /** Settle an unfinished direct unit against its actual actor, never a fabricated child Task. */
