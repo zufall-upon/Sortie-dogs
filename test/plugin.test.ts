@@ -8306,6 +8306,68 @@ test(`shell command substitution heredoc enforces artifact prerequisites at publ
   });
 });
 
+for (const [name, prefix] of [["composed", "bash -c ''"], ["post-option", "bash -c -e "], ["option-value", "bash -c -o errexit "]] as const)
+test(`opaque shell code argument ${name} is rejected before public Worker execution`, { skip: process.platform === "win32" }, async () => {
+  await withProject(`opaque-code-${name}`, async directory => {
+    const native = join(directory, "native");
+    await mkdir(native);
+    await writeFile(join(native, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: native });
+    const archive = await readFile(join(native, "archive.tar.gz"));
+    const command = `${prefix}"$(cat <<FIRST\ntar -xzf archive.tar.gz -C target\nFIRST\n)"`;
+    await assert.rejects(execFileAsync("bash", ["-c", command], { cwd: native }), (error: unknown) =>
+      (error as { code?: number; stderr?: string }).code === 2 && /target/u.test((error as { stderr?: string }).stderr ?? ""));
+    await writeFile(join(directory, "archive.tar.gz"), archive);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await assert.rejects(beginTrackedTaskChild(hooks, directory, "opaque-arg-parent", "opaque-arg-worker", "opaque-arg-task"),
+      /artifact_command_unclassified/u);
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+
+    await writeFile(join(directory, "outside.txt"), "unchanged\n");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    const writing = await SortieDogsPlugin({ directory, runtimeBridge: {
+      allowsInvestigativeShell: async (sessionID: string) => sessionID === "opaque-arg-write-worker",
+    } as never });
+    await beginTrackedTaskChild(writing, directory, "opaque-arg-write-parent", "opaque-arg-write-worker", "opaque-arg-write-task");
+    await inspectHandoffWithRead(writing, join(directory, "handoff.json"), "opaque-arg-write-worker");
+    assert.equal((await executeBindWriteGate(writing, directory, "opaque-arg-write-worker")).status, "bound");
+    let calls = 0;
+    await assert.rejects((async () => {
+      await writing["tool.execute.before"]!({ tool: "bash", sessionID: "opaque-arg-write-worker", callID: "opaque-arg-write" },
+        { args: { command: `${prefix}"$(cat <<FIRST\nprintf changed > outside.txt\nFIRST\n)"` } });
+      calls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+    assert.equal(calls, 0);
+    assert.equal(await readFile(join(directory, "outside.txt"), "utf8"), "unchanged\n");
+  });
+});
+
+for (const [name, command, stdout] of [
+  ["variable-option", `OPT=errexit; bash -c -o "$OPT" 'printf ok'`, "ok"],
+  ["literal-composition", `bash -c ''"printf ok"`, "ok"],
+  ["positional-data", `bash -c -e 'printf %s "$1"' unused "$(cat <<FIRST\ntar -xzf archive.tar.gz -C target\nFIRST\n)"`, "tar -xzf archive.tar.gz -C target"],
+] as const) test(`literal shell code keeps ${name} out of artifact preflight`, { skip: process.platform === "win32" }, async () => {
+  await withProject(`literal-code-${name}`, async directory => {
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "literal-code-parent", "literal-code-worker", "literal-code-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "literal-code-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "literal-code-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "literal-code-worker", callID: "literal-code-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(result.stdout, stdout);
+    assert.equal(result.stderr, "");
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+  });
+});
+
 test("shell command substitution data display and opaque code stay distinct at the public Worker entrance", { skip: process.platform === "win32" }, async () => {
   await withProject("shell-command-substitution-display", async directory => {
     const body = "tar -xzf archive.tar.gz -C target";

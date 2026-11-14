@@ -796,6 +796,27 @@ test("shell command substitution heredoc retains native write boundaries", { ski
   assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
 }));
 
+test("composed and option-prefixed shell code arguments retain unresolved write authority", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "composed-shell-code", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  for (const prefix of ["bash -c ''", "bash -c -e ", "bash -c -o errexit "]) {
+    const command = `${prefix}"$(cat <<FIRST\nprintf changed > outside.txt\nFIRST\n)"`;
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    const result = await exec("bash", ["-c", command], { cwd: native });
+    assert.equal(result.stderr, "");
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+    assert.ok(extractWritePaths("shell", { command, workdir: root }, root).unresolvedPaths?.includes("<shell-code-unresolved>"), prefix);
+    for (const mode of [false, true]) await assert.rejects(gate.check(
+      { tool: "shell", sessionID: "worker", callID: `${mode}-${prefix}` },
+      { args: { command, workdir: root } }, { investigativeShell: mode }), WriteDeniedError);
+  }
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
 test("heredoc arithmetic and quoted interpreter input preserve native execution boundaries", { skip: process.platform === "win32" }, async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "heredoc-arithmetic-interpreter", read: [], write: ["allowed.txt"], validation: [],
