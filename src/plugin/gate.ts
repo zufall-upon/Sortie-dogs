@@ -552,6 +552,7 @@ function shellSegments(command: string, dialect: ShellDialect): string[] {
 interface ShellPathSegment {
   source: string;
   patchHeredoc?: { body: string; literal: boolean; closed: boolean };
+  unresolvedHeredocExpansion?: boolean;
 }
 
 /** Remove POSIX line continuations, preserving quoted data and comment boundaries. */
@@ -586,7 +587,319 @@ function posixCommandLine(source: string): { line: string; next?: number } {
   return { line };
 }
 
-/** Keep a direct patch heredoc together: its body is data, not shell statements. */
+const POSIX_HEREDOC_HEADER = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u;
+
+/** Only discard nested literal data when every possible header consumer is known to be data-only. */
+function posixNestedHeredocDataOnly(source: string): boolean {
+  const { line } = posixCommandLine(source);
+  let sawHeredoc = false;
+  const safe = shellSegments(line, "posix").every(part => {
+    const syntax = scanShellSyntax(part, "posix");
+    if (syntax.unsafeExpansion || syntax.activeBrace) return false;
+    const hasHeredoc = syntax.masked.includes("<<");
+    const header = hasHeredoc ? POSIX_HEREDOC_HEADER.exec(part) : undefined;
+    const head = unwrapEnvironmentCommand(words(header ? header[1]! : part));
+    const executable = head[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+    if (!head.length || !(READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee")) return false;
+    if (!hasHeredoc) return true;
+    if (!header) return false;
+    const operator = header[1]!.length;
+    if (syntax.masked.slice(0, operator).includes("<<") || part[operator - 1] === "<" ||
+        syntax.masked.slice(operator, operator + 2) !== "<<" || part[operator - 1] === "\\") return false;
+    sawHeredoc = true;
+    return true;
+  });
+  return safe && sawHeredoc;
+}
+
+/** Recognize only literal stdin that is directly interpreted as POSIX shell source. */
+function posixNestedHeredocShellSource(source: string): boolean {
+  const { line } = posixCommandLine(source);
+  const syntax = scanShellSyntax(line, "posix");
+  if (syntax.unsafeExpansion || syntax.activeBrace || /[;&]/u.test(syntax.masked) || line.includes("\\")) return false;
+  const parts = shellSegments(line, "posix");
+  if (parts.length < 1 || parts.length > 2 || (syntax.masked.match(/\|/gu)?.length ?? 0) !== parts.length - 1) return false;
+  const header = POSIX_HEREDOC_HEADER.exec(parts[0]!);
+  if (!header) return false;
+  const operator = header[1]!.length;
+  if (/[<>|]/u.test(scanShellSyntax(header[1]!, "posix").masked) ||
+      syntax.masked.slice(operator, operator + 2) !== "<<") return false;
+  if (parts.length === 2) {
+    const consumer = unwrapEnvironmentCommand(words(header[1]!));
+    if (consumer.length !== 1 || consumer[0]?.split("/").at(-1) !== "cat") return false;
+  }
+  const shell = parts.length === 1 ? header[1]! : parts[1]!;
+  if (/[<>|]/u.test(scanShellSyntax(shell, "posix").masked)) return false;
+  const tokens = unwrapEnvironmentCommand(words(shell));
+  const executable = tokens[0]?.split("/").at(-1)?.toLowerCase();
+  return /^(?:bash|sh|dash|ksh|zsh)$/u.test(executable ?? "") && tokens.slice(1).every(token => token === "-s");
+}
+
+/** A shell may reinterpret quoted strings through eval, a pipe, or another executable. */
+function posixShellDataConsumersOnly(segments: readonly ShellPathSegment[]): boolean {
+  return segments.every(({ source, patchHeredoc, unresolvedHeredocExpansion }) => {
+    if (patchHeredoc || unresolvedHeredocExpansion) return false;
+    const syntax = scanShellSyntax(source, "posix");
+    if (syntax.activeBrace || /[<>]\(/u.test(syntax.masked)) return false;
+    const tokens = unwrapEnvironmentCommand(words(source));
+    if (!tokens.length) return true;
+    const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+    return READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee";
+  });
+}
+
+function posixHeredocBody(source: string, start: number, delimiter: string, stripTabs: boolean, literal: boolean): { body: string; after: number; closed: boolean } {
+  let cursor = start;
+  let bodyEnd = source.length;
+  let after = source.length;
+  let closed = false;
+  let foldedBody = "";
+  while (cursor <= source.length) {
+    const lineStart = cursor;
+    let line = "";
+    let end: number;
+    do {
+      end = source.indexOf("\n", cursor);
+      const part = source.slice(cursor, end < 0 ? source.length : end);
+      const trailingSlashes = /\\+$/u.exec(part)?.[0].length ?? 0;
+      const continued = !literal && end >= 0 && trailingSlashes % 2 === 1;
+      line += continued ? part.slice(0, -1) : part;
+      cursor = end < 0 ? source.length + 1 : end + 1;
+      if (!continued) break;
+    } while (cursor <= source.length);
+    // Bash folds unquoted continuations before <<- removes leading tabs. Tabs
+    // at the start of a continuation fragment may therefore be interior data.
+    const logicalLine = stripTabs ? line.replace(/^\t+/u, "") : line;
+    if (logicalLine === delimiter) {
+      bodyEnd = lineStart;
+      after = end < 0 ? source.length : end + 1;
+      closed = true;
+      break;
+    }
+    if (stripTabs && !literal) foldedBody += logicalLine + (end < 0 ? "" : "\n");
+    if (end < 0) break;
+  }
+  const body = stripTabs && !literal ? foldedBody : source.slice(start, bodyEnd);
+  return { body: stripTabs && literal ? body.replace(/^\t+/gmu, "") : body, after, closed };
+}
+
+/** Unquoted heredocs remove unescaped backslash-newline before expanding their data. */
+function foldHeredocContinuations(body: string): string {
+  let folded = "";
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] === "\\" && body[index + 1] === "\n") { index += 1; continue; }
+    folded += body[index];
+    if (body[index] === "\\" && index + 1 < body.length) folded += body[++index];
+  }
+  return folded;
+}
+
+const POSIX_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "do", "while", "until"]);
+const POSIX_UNPARSED_CONTROL_WORDS = new Set(["for", "select", "function", "case", "time", "coproc", "in", "fi", "esac", "done"]);
+// This narrow arithmetic form contains no shell words or substitutions. More
+// complex arithmetic keeps the existing conservative substitution handling.
+const POSIX_LITERAL_ARITHMETIC = /^\$\(\([ \t\r\n0-9+\-*/%<>=!&|^~?:]+\)\)/u;
+
+/** Quotes suppress substitutions in shell source, but not in unquoted heredoc data. */
+function heredocSubstitutions(data: string, shellSource = false, dataOnlyContext = false): { commands: string[]; complete: boolean; unresolvedSource?: string } {
+  const body = foldHeredocContinuations(data);
+  const result: string[] = [];
+  let complete = true;
+  let unresolvedSource: string | undefined;
+  let sourceQuote: "'" | "\"" | undefined;
+  let sourceWordStart = true;
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index]!;
+    if (character === "\\" && sourceQuote !== "'") {
+      if (sourceQuote === undefined) sourceWordStart = false;
+      index += 1;
+      continue;
+    }
+    if (shellSource) {
+      if (character === sourceQuote) { sourceQuote = undefined; continue; }
+      if (sourceQuote === "'") continue;
+      if (sourceQuote === undefined && (character === "'" || character === "\"")) {
+        sourceQuote = character;
+        sourceWordStart = false;
+        continue;
+      }
+      if (character === "#" && sourceQuote === undefined && sourceWordStart) {
+        const newline = body.indexOf("\n", index);
+        if (newline < 0) break;
+        index = newline;
+        sourceWordStart = true;
+        continue;
+      }
+    }
+    if (body[index] === "`") {
+      let end = index + 1;
+      for (; end < body.length; end += 1) {
+        if (body[end] === "\\") { end += 1; continue; }
+        if (body[end] === "`") break;
+      }
+      if (end < body.length) { result.push(body.slice(index + 1, end)); index = end; }
+      else complete = false;
+      sourceWordStart = false;
+      continue;
+    }
+    if (body[index] !== "$" || body[index + 1] !== "(") {
+      if (sourceQuote === undefined) sourceWordStart = /[\s;|&()<>]/u.test(character);
+      continue;
+    }
+    const arithmetic = POSIX_LITERAL_ARITHMETIC.exec(body.slice(index));
+    if (arithmetic) { index += arithmetic[0].length - 1; sourceWordStart = false; continue; }
+    const quotes: Array<"'" | "\"" | undefined> = [undefined];
+    const starts: Array<number | undefined> = [index + 2];
+    const wordStarts = [true];
+    const commandPositions: Array<"command" | "argument" | "uncertain"> = ["command"];
+    const heredocs: Array<Array<{ delimiter: string; literal: boolean; stripTabs: boolean }>> = [[]];
+    const lineStarts = [index + 2];
+    let end = index + 2;
+    for (; end < body.length && quotes.length; end += 1) {
+      const character = body[end]!;
+      const quote = quotes.at(-1);
+      const current = wordStarts.length - 1;
+      if (character === "\\" && quote !== "'") {
+        if (quote === undefined) wordStarts[current] = false;
+        end += 1;
+        continue;
+      }
+      if (character === quote) { quotes[quotes.length - 1] = undefined; continue; }
+      if (quote === "'") continue;
+      if (character === "`") {
+        let close = end + 1;
+        for (; close < body.length; close += 1) {
+          if (body[close] === "\\") { close += 1; continue; }
+          if (body[close] === "`") break;
+        }
+        if (close < body.length) { result.push(body.slice(end + 1, close)); end = close; }
+        else complete = false;
+        if (quote === undefined) wordStarts[current] = false;
+        continue;
+      }
+      if (character === "$" && body[end + 1] === "(") {
+        const arithmetic = POSIX_LITERAL_ARITHMETIC.exec(body.slice(end));
+        if (arithmetic) { end += arithmetic[0].length - 1; wordStarts[current] = false; continue; }
+        if (quote === undefined) wordStarts[current] = false;
+        quotes.push(undefined); starts.push(end + 2); wordStarts.push(true);
+        commandPositions.push("command"); heredocs.push([]); lineStarts.push(end + 2); end += 1; continue;
+      }
+      if (quote === "\"") continue;
+      // As in posixCommandLine, # is a comment only at an unquoted word start.
+      // Parentheses and quotes in that comment cannot end the substitution.
+      if (character === "#" && wordStarts[current]) {
+        const newline = body.indexOf("\n", end);
+        if (newline < 0) { end = body.length; break; }
+        end = newline - 1;
+        wordStarts[current] = true;
+        continue;
+      }
+      // A substitution may itself contain heredocs. Their bodies are parsed by
+      // that inner shell, not as words or nested substitutions in its command
+      // line. In particular, quoted bodies must not expose literal `$()` here.
+      if (character === "<" && body[end + 1] === "<" && body[end - 1] !== "<") {
+        const header = /^<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))(?=$|[ \t\n;|&<>()])/u.exec(body.slice(end));
+        if (header) {
+          heredocs[current]!.push({ delimiter: header[2] ?? header[3] ?? header[4]!,
+            literal: header[2] !== undefined || header[3] !== undefined, stripTabs: header[1] === "-" });
+          end += header[0].length - 1;
+          wordStarts[current] = true;
+          continue;
+        }
+        complete = false;
+        unresolvedSource ??= body.slice(index + 2);
+      }
+      if (character === "\n" && heredocs[current]!.length) {
+        let after = end + 1;
+        const dataOnly = posixNestedHeredocDataOnly(body.slice(lineStarts[current], end));
+        for (const header of heredocs[current]!) {
+          const nested = posixHeredocBody(body, after, header.delimiter, header.stripTabs, header.literal);
+          // Unquoted data expands regardless of quotes. Only proven shell stdin
+          // can use shell-source quoting; unknown consumers retain conservative
+          // data scanning because another interpreter may execute quoted text.
+          const shellParts = header.literal && !dataOnly && dataOnlyContext && current === 0 &&
+            posixNestedHeredocShellSource(body.slice(lineStarts[current], end)) ? shellPathSegments(nested.body, "posix") : undefined;
+          const shellSource = shellParts !== undefined && posixShellDataConsumersOnly(shellParts);
+          const sources = shellSource ? shellParts :
+            !header.literal || !dataOnly ? [{ source: nested.body }] : [];
+          for (const source of sources) {
+            if (shellSource) result.push(source.source);
+            if ("unresolvedHeredocExpansion" in source && source.unresolvedHeredocExpansion) {
+              complete = false;
+              unresolvedSource ??= source.source;
+              continue;
+            }
+            const expansion = heredocSubstitutions(source.source, shellSource);
+            result.push(...expansion.commands);
+            if (!expansion.complete) {
+              complete = false;
+              unresolvedSource ??= expansion.unresolvedSource ?? nested.body;
+            }
+          }
+          if (!nested.closed) {
+            complete = false;
+            unresolvedSource ??= body.slice(index + 2);
+            after = body.length;
+            break;
+          }
+          after = nested.after;
+        }
+        heredocs[current] = [];
+        end = after - 1;
+        wordStarts[current] = true;
+        commandPositions[current] = "command";
+        lineStarts[current] = after;
+        continue;
+      }
+      // A case pattern's ')' is not the end of the surrounding substitution.
+      // This scanner does not parse case clauses, so retain an unresolved marker.
+      if (character === "c" && wordStarts[current] && commandPositions[current] !== "argument" &&
+          /^case\s+[^;]*?\s+in(?:\s|\(|$)/u.test(body.slice(end))) {
+        complete = false;
+        unresolvedSource ??= body.slice(index + 2);
+      }
+      if (wordStarts[current] && commandPositions[current] === "command" && !/[\s;|&()<>]/u.test(character)) {
+        const rest = body.slice(end);
+        const assignment = /^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./-]*(?=$|[\s;|&()<>])/u.test(rest);
+        const word = /^[A-Za-z_][A-Za-z0-9_./-]*(?=$|[\s;|&()<>])/u.exec(rest)?.[0] ??
+          /^(['"])([A-Za-z_][A-Za-z0-9_./-]*)\1(?=$|[\s;|&()<>])/u.exec(rest)?.[2];
+        commandPositions[current] = assignment ? "command" : word === undefined ? "uncertain" :
+          POSIX_COMMAND_PREFIXES.has(word) ? "command" : POSIX_UNPARSED_CONTROL_WORDS.has(word) ? "uncertain" : "argument";
+      }
+      if (character === "'" || character === "\"") { quotes[quotes.length - 1] = character; wordStarts[current] = false; }
+      else if (character === "(") {
+        quotes.push(undefined); starts.push(undefined); wordStarts.push(true);
+        commandPositions.push("command"); heredocs.push([]); lineStarts.push(end + 1);
+      }
+      else if (character === ")") {
+        if (heredocs[current]!.length) { complete = false; unresolvedSource ??= body.slice(index + 2); }
+        quotes.pop();
+        const start = starts.pop();
+        wordStarts.pop(); commandPositions.pop(); heredocs.pop(); lineStarts.pop();
+        if (wordStarts.length) wordStarts[wordStarts.length - 1] = start === undefined;
+        if (start !== undefined) result.push(body.slice(start, end));
+      } else {
+        if (character === "\n") lineStarts[current] = end + 1;
+        if (/[\n;|&]/u.test(character)) commandPositions[current] = "command";
+        else if ((character === "<" || character === ">") && commandPositions[current] === "command") commandPositions[current] = "uncertain";
+        wordStarts[current] = /[\s;|&<>]/u.test(character);
+      }
+    }
+    if (quotes.length === 0) index = end - 1;
+    else complete = false;
+    sourceWordStart = false;
+  }
+  return { commands: result, complete, ...(unresolvedSource === undefined ? {} : { unresolvedSource }) };
+}
+
+function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOnlyContext = false): ShellPathSegment[] {
+  const { commands, complete, unresolvedSource } = heredocSubstitutions(body, false, dataOnlyContext);
+  const segments = commands.flatMap(command => shellPathSegments(command, dialect));
+  if (!complete) segments.push({ source: unresolvedSource ?? "", unresolvedHeredocExpansion: true });
+  return segments;
+}
+
+/** Keep direct literal stdin data out of shell statements; retain patch bodies for path extraction. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
   const result: ShellPathSegment[] = [];
@@ -598,41 +911,93 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
       break;
     }
     const before = shellSegments(line, dialect);
+    const earlierHeredoc = before.slice(0, -1).some(part => scanShellSyntax(part, dialect).masked.includes("<<"));
+    if (earlierHeredoc) {
+      // Handle direct data consumers in header order. Unquoted bodies still need
+      // inspection for substitutions; a later literal body must not hide them. A
+      // downstream executable can consume an earlier heredoc as a script via a pipe.
+      let sawHeredoc = false;
+      const parts = before.map((part): { source: string; delimiter?: string; literal?: boolean; stripTabs?: boolean } | undefined => {
+        const syntax = scanShellSyntax(part, dialect);
+        if (!syntax.masked.includes("<<")) {
+          const head = unwrapEnvironmentCommand(words(part));
+          const executable = head[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+          return !sawHeredoc || !syntax.unsafeExpansion && (READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee")
+            ? { source: part } : undefined;
+        }
+        sawHeredoc = true;
+        const header = POSIX_HEREDOC_HEADER.exec(part);
+        const head = header && unwrapEnvironmentCommand(words(header[1]!));
+        const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+        const operator = header?.[1]?.length ?? -1;
+        if (!header || !head?.length || !(READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee") ||
+            syntax.unsafeExpansion || syntax.activeBrace || syntax.masked.slice(0, operator).includes("<<") ||
+            part[operator - 1] === "<" || syntax.masked.slice(operator, operator + 2) !== "<<" || part[operator - 1] === "\\") return undefined;
+        return { source: header[1]!, delimiter: header[4] ?? header[5] ?? header[6]!,
+          literal: header[4] !== undefined || header[5] !== undefined, stripTabs: header[2] === "<<-" };
+      });
+      if (parts.every(part => part !== undefined)) {
+        const parsed: ShellPathSegment[] = [];
+        let after = next;
+        let complete = true;
+        for (const part of parts) {
+          parsed.push({ source: part!.source });
+          if (part!.delimiter === undefined) continue;
+          const body = posixHeredocBody(remaining, after, part!.delimiter, part!.stripTabs === true, part!.literal === true);
+          if (!body.closed) { complete = false; break; }
+          if (!part!.literal) {
+            parsed.push(...shellPathSegments(body.body, dialect));
+            // The raw data can resemble a quoted heredoc even though its own
+            // substitutions still execute before the consumer receives it.
+            parsed.push(...heredocSubstitutionSegments(body.body, dialect, true));
+          }
+          after = body.after;
+        }
+        if (complete) { result.push(...parsed); remaining = remaining.slice(after); continue; }
+      }
+      // If a later consumer is opaque, keep the ordinary fallback while still
+      // inspecting substitutions in any preceding, independently parsed bodies.
+      let after = next;
+      for (const part of parts) {
+        if (part === undefined) break;
+        if (part.delimiter === undefined) continue;
+        const body = posixHeredocBody(remaining, after, part.delimiter, part.stripTabs === true, part.literal === true);
+        if (!part.literal) result.push(...heredocSubstitutionSegments(body.body, dialect));
+        // Bash expands an unterminated unquoted body at EOF too.
+        if (!body.closed) break;
+        after = body.after;
+      }
+    }
     const source = before.at(-1) ?? "";
-    const header = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u.exec(source);
+    const header = POSIX_HEREDOC_HEADER.exec(source);
     const head = header && unwrapEnvironmentCommand(words(header[1]!));
-    const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1);
+    const executable = head?.[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
     const operator = header?.[1]?.length ?? -1;
-    if (!header || head?.length !== 1 || !/^(?:apply_?patch)$/iu.test(executable ?? "") ||
-        scanShellSyntax(source, dialect).masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
+    const patch = head?.length === 1 && /^(?:apply_?patch)$/iu.test(executable ?? "");
+    const dataOnly = READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee";
+    const literal = header?.[4] !== undefined || header?.[5] !== undefined;
+    const syntax = scanShellSyntax(source, dialect);
+    if (!earlierHeredoc && header && head?.length && dataOnly && !literal &&
+        !syntax.unsafeExpansion && !syntax.activeBrace && !syntax.masked.slice(0, operator).includes("<<") &&
+        source[operator - 1] !== "<" && syntax.masked.slice(operator, operator + 2) === "<<" && source[operator - 1] !== "\\") {
+      const body = posixHeredocBody(remaining, next, header[6]!, header[2] === "<<-", false);
+      result.push(...heredocSubstitutionSegments(body.body, dialect, true));
+    }
+    // Only one direct heredoc is modeled. Earlier pipeline segments may own other
+    // heredocs, and a quoted body can still be executable stdin for a shell.
+    // Skip literal data only for known data consumers; retain other bodies for inspection.
+    if (!header || !head?.length || !patch && (!dataOnly || !literal || syntax.unsafeExpansion || syntax.activeBrace) ||
+        earlierHeredoc ||
+        syntax.masked.slice(0, operator).includes("<<") || source[operator - 1] === "<" ||
+        syntax.masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
       result.push(...before.map(part => ({ source: part })));
       remaining = remaining.slice(next);
       continue;
     }
     result.push(...before.slice(0, -1).map(part => ({ source: part })));
     const delimiter = header[4] ?? header[5] ?? header[6]!;
-    const stripTabs = header[2] === "<<-";
-    const bodyStart = next;
-    let cursor = bodyStart;
-    let bodyEnd = remaining.length;
-    let after = remaining.length;
-    let closed = false;
-    while (cursor <= remaining.length) {
-      const end = remaining.indexOf("\n", cursor);
-      const lineEnd = end < 0 ? remaining.length : end;
-      const line = remaining.slice(cursor, lineEnd);
-      if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) {
-        bodyEnd = cursor;
-        after = end < 0 ? lineEnd : end + 1;
-        closed = true;
-        break;
-      }
-      if (end < 0) break;
-      cursor = end + 1;
-    }
-    let body = remaining.slice(bodyStart, bodyEnd);
-    if (stripTabs) body = body.replace(/^\t+/gmu, "");
-    result.push({ source: header[1]!, patchHeredoc: { body, literal: header[4] !== undefined || header[5] !== undefined, closed } });
+    const { body, after, closed } = posixHeredocBody(remaining, next, delimiter, header[2] === "<<-", literal);
+    result.push({ source: header[1]!, ...(patch ? { patchHeredoc: { body, literal, closed } } : {}) });
     remaining = remaining.slice(after);
   }
   return result;
@@ -647,7 +1012,11 @@ function usesPowerShell(name: string, command: string): boolean {
 /** Non-authorizing preflight view, using the same dialect and segments as path extraction. */
 export function artifactInspectionSegments(command: string): { source: string; tool: string; artifact: boolean }[] {
   const inspect = (body: string, powershell: boolean, depth: number): { source: string; tool: string; artifact: boolean }[] =>
-    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source }) => {
+    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source, unresolvedHeredocExpansion }) => {
+      // An unsupported case clause can hide an artifact behind a pattern ')'.
+      // Classify its actual uncertain source conservatively instead of skipping it.
+      if (unresolvedHeredocExpansion) return /(?:^|[\s;()])(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)(?=$|[\s;()])/iu.test(source)
+        ? [{ source, tool: "bash", artifact: true }] : [];
       // Match the same literal, depth-one envelope accepted by shellPaths; an
       // unresolved sibling output must not hide its inner artifact commands.
       const literal = depth === 0 ? depthOnePowerShellLiteral(source) : undefined;
@@ -758,7 +1127,14 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
   }
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
-    const { source: segment, patchHeredoc } = segments[segmentIndex]!;
+    const { source: segment, patchHeredoc, unresolvedHeredocExpansion } = segments[segmentIndex]!;
+    if (unresolvedHeredocExpansion) {
+      applies = true;
+      ambiguous = true;
+      unresolvedPaths.push("<heredoc-substitution-unresolved>");
+      issue ??= commandIssue("<heredoc-substitution>", "active-expansion", "use a complete, inspectable substitution");
+      continue;
+    }
     let source = segment.trim();
     let assignment = false;
     const syntax = scanShellSyntax(source, dialect);

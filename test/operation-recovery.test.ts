@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import test from "node:test";
-import { createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths, isKnownReadOnlyTool, WriteDeniedError } from "../dist/plugin/gate.js";
+import { artifactInspectionSegments, createProjectPaths, createWriteGate, canonicalManifestWriteScopes, extractWritePaths, isKnownReadOnlyTool, WriteDeniedError } from "../dist/plugin/gate.js";
 import { protectedSnapshot, refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { missionDeliveryObservation, missionReviewSource } from "../dist/plugin/mission-review.js";
 import { missionOperationCommandMatch, OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
@@ -540,6 +540,318 @@ test("POSIX comments end at newline without hiding writes or changing literal ha
   await exec("bash", ["-c", `apply_patch() { patch -p1 -s; }; ${heredoc}`], { cwd: root });
   assert.equal(await readFile(join(root, "allowed#patch"), "utf8"), "literal # \\\ntail\n");
   assert.equal(await readFile(join(root, "outside"), "utf8"), "outside original\n");
+}));
+
+test("literal heredoc stdin does not mask known header or following output destinations", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "literal-heredoc-known-outputs", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const data = "<<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED";
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  for (const command of [`cat > outside.txt ${data}`, `cat ${data}\nprintf changed > outside.txt`]) {
+    for (const mode of [false, true]) await assert.rejects(check(command, mode),
+      (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+  }
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+  const allowed = `cat > allowed.txt ${data}`;
+  for (const mode of [false, true]) await check(allowed, mode);
+  await exec("bash", ["-c", allowed], { cwd: root });
+  assert.equal(await readFile(join(root, "allowed.txt"), "utf8"), "tar -xzf archive.tar.gz\n");
+}));
+
+test("heredoc pipelines and shell stdin retain executable output checks", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-executable-stdin", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const pipeline = "cat <<FIRST | cat <<'SECOND'\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND";
+  const scriptPipe = "cat <<'FIRST' | bash\nprintf changed > outside.txt\nFIRST";
+  const commands = [
+    pipeline,
+    pipeline.replace("\nliteral\nSECOND", "\ntar -xzf archive.tar.gz\nSECOND"),
+    pipeline.replace(" | ", "; "),
+    "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(printf changed > outside.txt)\nIGNORE\nFIRST\nliteral\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\n'$(printf changed > outside.txt)'\nFIRST\nliteral\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n`printf changed > outside.txt`\nIGNORE\nFIRST\nliteral\nSECOND",
+    `cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(printf '%s' "$(printf changed > outside.txt)")\nIGNORE\nFIRST\nliteral\nSECOND`,
+    "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(printf '%s' \"`printf changed > outside.txt`\")\nIGNORE\nFIRST\nliteral\nSECOND",
+    "cat <<FIRST\ncat <<'IGNORE'\n$(printf changed > outside.txt)\nIGNORE\nFIRST",
+    "cat <<FIRST | bash\ncat <<'IGNORE'\n$(printf changed > outside.txt)\nIGNORE\nFIRST",
+    scriptPipe,
+    scriptPipe.replace(" | bash", " | env -u UNUSED /bin/sh"),
+    "bash <<'EOF'\nprintf changed > outside.txt\nEOF",
+    "env -u UNUSED /bin/sh -s <<'EOF'\nprintf changed > outside.txt\nEOF",
+  ];
+  let adapterCalls = 0;
+  for (const command of commands) {
+    assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")), command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+      ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)), command);
+  }
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // The same native input is run only in a separate owned fixture, not the gated project.
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const result = await exec("bash", ["-c", pipeline], { cwd: native });
+  assert.equal(result.stdout, "literal\n");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  await exec("bash", ["-c", scriptPipe], { cwd: native });
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  const data = "printf '%s' '<<NOT_A_HEREDOC' | cat <<'EXPECTED'\ntar -xzf archive.tar.gz\nEXPECTED";
+  for (const mode of [false, true]) await check(data, mode);
+  assert.equal((await exec("bash", ["-c", data], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+}));
+
+test("unquoted heredoc comments and continuations retain native substitution destinations", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const native = join(root, "native");
+  await mkdir(native);
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-comment-continuation", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const commands = [
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\n# step 1)\nprintf changed > outside.txt\n)\nIGNORE\nFIRST",
+    "cat <<FIRST | cat <<'SECOND'\ntext\\\nFIRST\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND",
+    `cat <<FIRST\ncat <<'IGNORE'\n$(printf '%s' "$(\n# nested )\nprintf changed > outside.txt\n)")\nIGNORE\nFIRST`,
+    "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$\\\n(printf changed > outside.txt)\nIGNORE\nFIRST\nliteral\nSECOND",
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\nprintf '%s' '# not a comment )'; printf changed > outside.txt\n)\nIGNORE\nFIRST",
+    "cat <<FIRST\ncat <<'IGNORE'\n$(\nprintf '%s' escaped\\#word; printf changed > outside.txt\n)\nIGNORE\nFIRST",
+  ];
+  let adapterCalls = 0;
+  for (const [index, command] of commands.entries()) {
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    const result = await exec("bash", ["-c", command], { cwd: native });
+    assert.equal(result.stderr, "", command);
+    if (index === 0) assert.equal(result.stdout, "cat <<'IGNORE'\n\nIGNORE\n");
+    if (index === 1) assert.equal(result.stdout, "literal\n");
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed", command);
+    assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")), command);
+    for (const mode of [false, true]) await assert.rejects((async () => {
+      await check(command, mode);
+      adapterCalls += 1;
+    })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+      ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)), command);
+  }
+  const unterminated = "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(printf changed > outside.txt)\nIGNORE";
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const unterminatedResult = await exec("bash", ["-c", unterminated], { cwd: native });
+  assert.notEqual(unterminatedResult.stderr, "");
+  assert.equal(unterminatedResult.stdout, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.ok(extractWritePaths("shell", { command: unterminated, workdir: root }, root).paths.includes(join(root, "outside.txt")));
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(unterminated, mode);
+    adapterCalls += 1;
+  })(), WriteDeniedError);
+  const caseClause = "cat <<FIRST\ncat <<'IGNORE'\n$(case x in x) printf changed > outside.txt ;; esac)\nIGNORE\nFIRST";
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const caseResult = await exec("bash", ["-c", caseClause], { cwd: native });
+  assert.equal(caseResult.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(caseClause, mode);
+    adapterCalls += 1;
+  })(), WriteDeniedError);
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // Literal delimiters and escaped backslashes still terminate on physical lines.
+  for (const command of [
+    "cat <<'FIRST' | cat <<'SECOND'\ntext\\\nFIRST\ntar -xzf archive.tar.gz\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\necho safe\\\\\nFIRST\ntar -xzf archive.tar.gz\nSECOND",
+    "cat <<FIRST | cat <<'SECOND'\necho safe\nFI\\\nRST\ntar -xzf archive.tar.gz\nSECOND",
+  ]) {
+    assert.equal((await exec("bash", ["-c", command], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+    assert.deepEqual(extractWritePaths("shell", { command, workdir: root }, root).paths, [], command);
+    for (const mode of [false, true]) await check(command, mode);
+  }
+
+  const hashWord = "cat <<FIRST | cat <<'SECOND'\n$(printf '%s' word#value)\nFIRST\nliteral\nSECOND";
+  assert.equal((await exec("bash", ["-c", hashWord], { cwd: root })).stdout, "literal\n");
+  assert.deepEqual(extractWritePaths("shell", { command: hashWord, workdir: root }, root).unresolvedPaths, undefined);
+  await check(hashWord, true);
+
+  const incomplete = "cat <<FIRST | cat <<'SECOND'\n$(\nprintf changed > outside.txt\nFIRST\nliteral\nSECOND";
+  for (const mode of [false, true]) await assert.rejects(check(incomplete, mode), WriteDeniedError);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
+test("nested literal heredocs and case arguments preserve substitution boundaries", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "nested-heredoc-data", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const nested = "cat <<FIRST\n$(cat <<'INNER'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST";
+  const argumentsAsData = ["printf", "'printf'", "FLAG=1 printf"].map(head => `cat <<END\n$(${head} '%s' case x in y)\nEND`);
+  for (const [command, stdout] of [[nested, "$(tar -xzf archive.tar.gz -C missing-data-directory)\n"],
+    ...argumentsAsData.map(command => [command, "casexiny\n"] as const)] as const) {
+    const result = await exec("bash", ["-c", command], { cwd: root });
+    assert.equal(result.stdout, stdout);
+    assert.equal(result.stderr, "");
+    const extraction = extractWritePaths("shell", { command, workdir: root }, root);
+    assert.deepEqual(extraction.paths, []);
+    assert.equal(extraction.unresolvedPaths, undefined);
+    assert.equal(artifactInspectionSegments(command).some(segment => segment.artifact), false);
+    await assert.rejects(check(command, false), (error: unknown) =>
+      error instanceof WriteDeniedError && error.reason === "unclassified-command");
+    await check(command, true);
+  }
+
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  for (const command of [
+    "cat <<FIRST\n$(cat <<INNER\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(cat <<'INNER' # comment )\n$(printf literal > outside.txt)\nINNER\nprintf changed > outside.txt\n)\nFIRST",
+    "cat <<FIRST\n$(cat <<'INNER' | bash\nprintf changed > outside.txt\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(bash <<'INNER'\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(cat <<'INNER' | bash\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(if case x in x) printf changed > outside.txt ;; esac; then :; fi)\nFIRST",
+    "cat <<FIRST\n$(time case x in x) printf changed > outside.txt ;; esac)\nFIRST",
+  ]) {
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    const result = await exec("bash", ["-c", command], { cwd: native });
+    if (!command.includes("time case")) assert.equal(result.stderr, "", command);
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed", command);
+    for (const mode of [false, true]) await assert.rejects(check(command, mode), WriteDeniedError, command);
+    assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+  }
+}));
+
+test("heredoc arithmetic and quoted interpreter input preserve native execution boundaries", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-arithmetic-interpreter", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const literal = "$(tar -xzf archive.tar.gz -C missing-data-directory)";
+  for (const [command, output] of [
+    ["cat <<END\n$((1 << 2))\nEND", "4\n"],
+    ["cat <<END\n$(printf '%s' \"$((1 << 2))\")\nEND", "4\n"],
+    [`cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '${literal}'\nINNER\n)\nFIRST`, `${literal}\n`],
+    [`cat <<FIRST\n$(cat <<'INNER' | bash\nprintf '%s' '${literal}'\nINNER\n)\nFIRST`, `${literal}\n`],
+    [`cat <<FIRST\n$(bash <<'INNER'\ncat <<'DATA'\n${literal}\nDATA\nINNER\n)\nFIRST`, `${literal}\n`],
+  ]) {
+    const native = await exec("bash", ["-c", command!], { cwd: root });
+    assert.equal(native.stdout, output);
+    assert.equal(native.stderr, "");
+    const extracted = extractWritePaths("shell", { command, workdir: root }, root);
+    assert.deepEqual(extracted.paths, [], command);
+    assert.equal(extracted.unresolvedPaths, undefined, command);
+    assert.equal(artifactInspectionSegments(command!).some(segment => segment.artifact), false, command);
+    await assert.rejects(check(command!, false), (error: unknown) =>
+      error instanceof WriteDeniedError && error.reason === "unclassified-command", command);
+    await check(command!, true);
+  }
+
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const commands = [
+    "cat <<END\n$((1 << $(printf changed > outside.txt; printf 2)))\nEND",
+    "cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '$(printf literal > outside.txt)'\nprintf '%s' \"$(printf changed > outside.txt)\"\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(node <<'INNER'\nrequire('node:child_process').execSync('echo $(printf changed > outside.txt)')\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(bash <<'INNER'\neval '$(printf changed > outside.txt)'\nINNER\n)\nFIRST",
+    "cat <<FIRST | bash\n$(bash <<'INNER'\nprintf '%s' '$(printf changed > outside.txt)'\nINNER\n)\nFIRST",
+  ];
+  for (const command of commands) {
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    await exec("bash", ["-c", command], { cwd: native });
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed", command);
+    for (const mode of [false, true]) await assert.rejects(check(command, mode), WriteDeniedError, command);
+    assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+  }
+}));
+
+test("heredoc pipelines inspect data forwarded through process substitution", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const command = "cat <<'FIRST' | tee >(bash) > /dev/null | cat <<'SECOND'\nprintf changed > outside.txt\nFIRST\nliteral\nSECOND";
+  const result = await exec("bash", ["-c", command], { cwd: native });
+  assert.equal(result.stdout, "literal\n");
+  assert.equal(result.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")));
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "process-substitution-heredoc", read: [], write: ["allowed.txt"], validation: [],
+  });
+  for (const investigativeShell of [false, true]) await assert.rejects(gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell }), WriteDeniedError);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
+test("tab-stripping heredocs preserve interior tabs across continued logical lines", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-continuation-tabs", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const command = "cat <<-FIRST | cat <<'SECOND'\nFI\\\n\tRST\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND";
+  const nativeResult = await exec("bash", ["-c", command], { cwd: native });
+  assert.equal(nativeResult.stdout, "literal\n");
+  assert.equal(nativeResult.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")));
+  let adapterCalls = 0;
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(command, mode);
+    adapterCalls += 1;
+  })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+    ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)));
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // Leading tabs after folding do not stop a split delimiter from closing.
+  const splitDelimiter = "cat <<-FIRST | cat <<'SECOND'\n\tFI\\\nRST\ntar -xzf archive.tar.gz\nSECOND";
+  assert.equal((await exec("bash", ["-c", splitDelimiter], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+  assert.deepEqual(extractWritePaths("shell", { command: splitDelimiter, workdir: root }, root).paths, []);
+  for (const mode of [false, true]) await check(splitDelimiter, mode);
+
+  // Continued data keeps interior tabs but strips tabs that remain at the start.
+  for (const [data, output, literal] of [
+    ["cat <<-END\n\tAL\\\n\tPHA\nEND", "AL\tPHA\n", false],
+    ["cat <<-END\n\t\\\n\tALPHA\nEND", "ALPHA\n", false],
+    ["cat <<-'END'\n\tAL\\\n\tPHA\nEND", "AL\\\nPHA\n", true],
+  ] as const) {
+    assert.equal((await exec("bash", ["-c", data], { cwd: root })).stdout, output);
+    await check(data, true);
+    if (literal) await check(data, false);
+    else await assert.rejects(check(data, false), (error: unknown) =>
+      error instanceof WriteDeniedError && error.reason === "unclassified-command");
+  }
+
+  // A continuation's interior tab also separates words inside a substitution.
+  const wordBoundary = "cat <<-FIRST | cat <<'SECOND'\n$(printf '%s' changed > allowed.txt\\\n\tignored)\nFIRST\nliteral\nSECOND";
+  assert.equal((await exec("bash", ["-c", wordBoundary], { cwd: native })).stdout, "literal\n");
+  assert.equal(await readFile(join(native, "allowed.txt"), "utf8"), "changedignored");
+  assert.ok(extractWritePaths("shell", { command: wordBoundary, workdir: root }, root).paths.includes(join(root, "allowed.txt")));
+  await assert.rejects(check(wordBoundary, false), (error: unknown) =>
+    error instanceof WriteDeniedError && error.reason === "unclassified-command");
+  await check(wordBoundary, true);
+  assert.equal(existsSync(join(root, "allowed.txt")), false);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
 }));
 
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
