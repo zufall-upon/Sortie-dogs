@@ -907,6 +907,21 @@ function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOn
   return segments;
 }
 
+/** Detect substitutions in one shell word, including concatenated quoted fragments. */
+function posixCodeWordSubstitution(source: string): boolean {
+  let quote: "'" | "\"" | undefined;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (character === "\\" && quote !== "'") { index += 1; continue; }
+    if (character === quote) { quote = undefined; continue; }
+    if (quote === "'") continue;
+    if (quote === undefined && (character === "'" || character === "\"")) { quote = character; continue; }
+    if (quote === undefined && /\s/u.test(character)) return false;
+    if (character === "`" || character === "$" && source[index + 1] === "(") return true;
+  }
+  return false;
+}
+
 /** Inspect the data a shell -c actually consumes, not just the cat producing it. */
 function posixCommandCodeSegments(source: string): ShellPathSegment[] {
   const original = { source };
@@ -918,8 +933,28 @@ function posixCommandCodeSegments(source: string): ShellPathSegment[] {
   const executable = tokens[0]?.split("/").at(-1)?.toLowerCase();
   if (!/^(?:bash|sh|dash|ksh|zsh)$/u.test(executable ?? "")) return [original];
   const argument = invocation[2]!;
-  // Single-quoted scripts and ordinary literal arguments keep their existing handling.
-  if (!/^(?:"[\s\S]*?(?:\$\(|`)|\$\(|`)/u.test(argument)) return [original];
+  // Shells can continue consuming options after -c. Locate the code word without
+  // treating expansions in later positional arguments as executable code.
+  let code = argument;
+  for (;;) {
+    const option = /^(--|[-+][A-Za-z]+)[ \t]+/u.exec(code);
+    if (!option) break;
+    code = code.slice(option[0].length);
+    if (option[1] === "--") break;
+    if (/[oO]/u.test(option[1]!)) {
+      const value = /^([A-Za-z][A-Za-z0-9_-]*|'[^']*'|"[^"`\\]*")[ \t]+/u.exec(code);
+      if (!value) {
+        const expansion = heredocSubstitutions(code, true);
+        return !expansion.complete || expansion.commands.length
+          ? [original, { source, unresolvedShellCode: true }] : [original];
+      }
+      if (posixCodeWordSubstitution(value[1]!)) return [original, { source, unresolvedShellCode: true }];
+      code = code.slice(value[0].length);
+    }
+  }
+  // Literal scripts keep their existing handling; quote concatenation cannot
+  // hide an active substitution in the actual code word.
+  if (!posixCodeWordSubstitution(code)) return [original];
   if (!tokens.slice(1).every(token => /^--?[A-Za-z][A-Za-z0-9-]*$/u.test(token))) {
     return [original, { source, unresolvedShellCode: true }];
   }
