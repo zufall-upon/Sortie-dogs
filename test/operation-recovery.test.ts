@@ -734,6 +734,48 @@ test("nested literal heredocs and case arguments preserve substitution boundarie
   }
 }));
 
+test("heredoc arithmetic and quoted interpreter input preserve native execution boundaries", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-arithmetic-interpreter", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const literal = "$(tar -xzf archive.tar.gz -C missing-data-directory)";
+  for (const [command, output] of [
+    ["cat <<END\n$((1 << 2))\nEND", "4\n"],
+    ["cat <<END\n$(printf '%s' \"$((1 << 2))\")\nEND", "4\n"],
+    [`cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '${literal}'\nINNER\n)\nFIRST`, `${literal}\n`],
+    [`cat <<FIRST\n$(cat <<'INNER' | bash\nprintf '%s' '${literal}'\nINNER\n)\nFIRST`, `${literal}\n`],
+    [`cat <<FIRST\n$(bash <<'INNER'\ncat <<'DATA'\n${literal}\nDATA\nINNER\n)\nFIRST`, `${literal}\n`],
+  ]) {
+    const native = await exec("bash", ["-c", command!], { cwd: root });
+    assert.equal(native.stdout, output);
+    assert.equal(native.stderr, "");
+    const extracted = extractWritePaths("shell", { command, workdir: root }, root);
+    assert.deepEqual(extracted.paths, [], command);
+    assert.equal(extracted.unresolvedPaths, undefined, command);
+    assert.equal(artifactInspectionSegments(command!).some(segment => segment.artifact), false, command);
+    await assert.rejects(check(command!, false), (error: unknown) =>
+      error instanceof WriteDeniedError && error.reason === "unclassified-command", command);
+    await check(command!, true);
+  }
+
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const commands = [
+    "cat <<END\n$((1 << $(printf changed > outside.txt; printf 2)))\nEND",
+    "cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '$(printf literal > outside.txt)'\nprintf '%s' \"$(printf changed > outside.txt)\"\nINNER\n)\nFIRST",
+  ];
+  for (const command of commands) {
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    await exec("bash", ["-c", command], { cwd: native });
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed", command);
+    for (const mode of [false, true]) await assert.rejects(check(command, mode), WriteDeniedError, command);
+    assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+  }
+}));
+
 test("heredoc pipelines inspect data forwarded through process substitution", { skip: process.platform === "win32" }, async () => fixture(async root => {
   const native = join(root, "native");
   await mkdir(native);

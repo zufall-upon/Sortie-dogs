@@ -660,15 +660,41 @@ function foldHeredocContinuations(body: string): string {
 
 const POSIX_COMMAND_PREFIXES = new Set(["if", "then", "elif", "else", "do", "while", "until"]);
 const POSIX_UNPARSED_CONTROL_WORDS = new Set(["for", "select", "function", "case", "time", "coproc", "in", "fi", "esac", "done"]);
+// This narrow arithmetic form contains no shell words or substitutions. More
+// complex arithmetic keeps the existing conservative substitution handling.
+const POSIX_LITERAL_ARITHMETIC = /^\$\(\([ \t\r\n0-9+\-*/%<>=!&|^~?:]+\)\)/u;
 
-/** Quotes in unquoted heredoc data do not suppress command substitution. */
-function heredocSubstitutions(data: string): { commands: string[]; complete: boolean; unresolvedSource?: string } {
+/** Quotes suppress substitutions in shell source, but not in unquoted heredoc data. */
+function heredocSubstitutions(data: string, shellSource = false): { commands: string[]; complete: boolean; unresolvedSource?: string } {
   const body = foldHeredocContinuations(data);
   const result: string[] = [];
   let complete = true;
   let unresolvedSource: string | undefined;
+  let sourceQuote: "'" | "\"" | undefined;
+  let sourceWordStart = true;
   for (let index = 0; index < body.length; index += 1) {
-    if (body[index] === "\\") { index += 1; continue; }
+    const character = body[index]!;
+    if (character === "\\" && sourceQuote !== "'") {
+      if (sourceQuote === undefined) sourceWordStart = false;
+      index += 1;
+      continue;
+    }
+    if (shellSource) {
+      if (character === sourceQuote) { sourceQuote = undefined; continue; }
+      if (sourceQuote === "'") continue;
+      if (sourceQuote === undefined && (character === "'" || character === "\"")) {
+        sourceQuote = character;
+        sourceWordStart = false;
+        continue;
+      }
+      if (character === "#" && sourceQuote === undefined && sourceWordStart) {
+        const newline = body.indexOf("\n", index);
+        if (newline < 0) break;
+        index = newline;
+        sourceWordStart = true;
+        continue;
+      }
+    }
     if (body[index] === "`") {
       let end = index + 1;
       for (; end < body.length; end += 1) {
@@ -677,9 +703,15 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
       }
       if (end < body.length) { result.push(body.slice(index + 1, end)); index = end; }
       else complete = false;
+      sourceWordStart = false;
       continue;
     }
-    if (body[index] !== "$" || body[index + 1] !== "(") continue;
+    if (body[index] !== "$" || body[index + 1] !== "(") {
+      if (sourceQuote === undefined) sourceWordStart = /[\s;|&()<>]/u.test(character);
+      continue;
+    }
+    const arithmetic = POSIX_LITERAL_ARITHMETIC.exec(body.slice(index));
+    if (arithmetic) { index += arithmetic[0].length - 1; sourceWordStart = false; continue; }
     const quotes: Array<"'" | "\"" | undefined> = [undefined];
     const starts: Array<number | undefined> = [index + 2];
     const wordStarts = [true];
@@ -710,6 +742,8 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
         continue;
       }
       if (character === "$" && body[end + 1] === "(") {
+        const arithmetic = POSIX_LITERAL_ARITHMETIC.exec(body.slice(end));
+        if (arithmetic) { end += arithmetic[0].length - 1; wordStarts[current] = false; continue; }
         if (quote === undefined) wordStarts[current] = false;
         quotes.push(undefined); starts.push(end + 2); wordStarts.push(true);
         commandPositions.push("command"); heredocs.push([]); lineStarts.push(end + 2); end += 1; continue;
@@ -744,9 +778,18 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
         const dataOnly = posixNestedHeredocDataOnly(body.slice(lineStarts[current], end));
         for (const header of heredocs[current]!) {
           const nested = posixHeredocBody(body, after, header.delimiter, header.stripTabs, header.literal);
-          // A literal body is still a script if it can reach an interpreter.
-          if (!header.literal || !dataOnly) {
-            const expansion = heredocSubstitutions(nested.body);
+          // Unquoted heredoc data expands regardless of shell quotes. Literal
+          // stdin reaching an interpreter is instead shell source: first retain
+          // its executable segments, then inspect substitutions with shell quotes.
+          const sources = !header.literal ? [{ source: nested.body }] : !dataOnly ? shellPathSegments(nested.body, "posix") : [];
+          for (const source of sources) {
+            if (header.literal) result.push(source.source);
+            if ("unresolvedHeredocExpansion" in source && source.unresolvedHeredocExpansion) {
+              complete = false;
+              unresolvedSource ??= source.source;
+              continue;
+            }
+            const expansion = heredocSubstitutions(source.source, header.literal);
             result.push(...expansion.commands);
             if (!expansion.complete) {
               complete = false;
@@ -804,6 +847,7 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
     }
     if (quotes.length === 0) index = end - 1;
     else complete = false;
+    sourceWordStart = false;
   }
   return { commands: result, complete, ...(unresolvedSource === undefined ? {} : { unresolvedSource }) };
 }
