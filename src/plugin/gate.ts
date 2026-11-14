@@ -589,6 +589,29 @@ function posixCommandLine(source: string): { line: string; next?: number } {
 
 const POSIX_HEREDOC_HEADER = /^([\s\S]*?)(<<-?)[ \t]*('([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*$/u;
 
+/** Only discard nested literal data when every possible header consumer is known to be data-only. */
+function posixNestedHeredocDataOnly(source: string): boolean {
+  const { line } = posixCommandLine(source);
+  let sawHeredoc = false;
+  const safe = shellSegments(line, "posix").every(part => {
+    const syntax = scanShellSyntax(part, "posix");
+    if (syntax.unsafeExpansion || syntax.activeBrace) return false;
+    const hasHeredoc = syntax.masked.includes("<<");
+    const header = hasHeredoc ? POSIX_HEREDOC_HEADER.exec(part) : undefined;
+    const head = unwrapEnvironmentCommand(words(header ? header[1]! : part));
+    const executable = head[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+    if (!head.length || !(READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee")) return false;
+    if (!hasHeredoc) return true;
+    if (!header) return false;
+    const operator = header[1]!.length;
+    if (syntax.masked.slice(0, operator).includes("<<") || part[operator - 1] === "<" ||
+        syntax.masked.slice(operator, operator + 2) !== "<<" || part[operator - 1] === "\\") return false;
+    sawHeredoc = true;
+    return true;
+  });
+  return safe && sawHeredoc;
+}
+
 function posixHeredocBody(source: string, start: number, delimiter: string, stripTabs: boolean, literal: boolean): { body: string; after: number; closed: boolean } {
   let cursor = start;
   let bodyEnd = source.length;
@@ -662,6 +685,7 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
     const wordStarts = [true];
     const commandPositions: Array<"command" | "argument" | "uncertain"> = ["command"];
     const heredocs: Array<Array<{ delimiter: string; literal: boolean; stripTabs: boolean }>> = [[]];
+    const lineStarts = [index + 2];
     let end = index + 2;
     for (; end < body.length && quotes.length; end += 1) {
       const character = body[end]!;
@@ -688,7 +712,7 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
       if (character === "$" && body[end + 1] === "(") {
         if (quote === undefined) wordStarts[current] = false;
         quotes.push(undefined); starts.push(end + 2); wordStarts.push(true);
-        commandPositions.push("command"); heredocs.push([]); end += 1; continue;
+        commandPositions.push("command"); heredocs.push([]); lineStarts.push(end + 2); end += 1; continue;
       }
       if (quote === "\"") continue;
       // As in posixCommandLine, # is a comment only at an unquoted word start.
@@ -717,9 +741,11 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
       }
       if (character === "\n" && heredocs[current]!.length) {
         let after = end + 1;
+        const dataOnly = posixNestedHeredocDataOnly(body.slice(lineStarts[current], end));
         for (const header of heredocs[current]!) {
           const nested = posixHeredocBody(body, after, header.delimiter, header.stripTabs, header.literal);
-          if (!header.literal) {
+          // A literal body is still a script if it can reach an interpreter.
+          if (!header.literal || !dataOnly) {
             const expansion = heredocSubstitutions(nested.body);
             result.push(...expansion.commands);
             if (!expansion.complete) {
@@ -739,6 +765,7 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
         end = after - 1;
         wordStarts[current] = true;
         commandPositions[current] = "command";
+        lineStarts[current] = after;
         continue;
       }
       // A case pattern's ')' is not the end of the surrounding substitution.
@@ -759,16 +786,17 @@ function heredocSubstitutions(data: string): { commands: string[]; complete: boo
       if (character === "'" || character === "\"") { quotes[quotes.length - 1] = character; wordStarts[current] = false; }
       else if (character === "(") {
         quotes.push(undefined); starts.push(undefined); wordStarts.push(true);
-        commandPositions.push("command"); heredocs.push([]);
+        commandPositions.push("command"); heredocs.push([]); lineStarts.push(end + 1);
       }
       else if (character === ")") {
         if (heredocs[current]!.length) { complete = false; unresolvedSource ??= body.slice(index + 2); }
         quotes.pop();
         const start = starts.pop();
-        wordStarts.pop(); commandPositions.pop(); heredocs.pop();
+        wordStarts.pop(); commandPositions.pop(); heredocs.pop(); lineStarts.pop();
         if (wordStarts.length) wordStarts[wordStarts.length - 1] = start === undefined;
         if (start !== undefined) result.push(body.slice(start, end));
       } else {
+        if (character === "\n") lineStarts[current] = end + 1;
         if (/[\n;|&]/u.test(character)) commandPositions[current] = "command";
         else if ((character === "<" || character === ">") && commandPositions[current] === "command") commandPositions[current] = "uncertain";
         wordStarts[current] = /[\s;|&<>]/u.test(character);

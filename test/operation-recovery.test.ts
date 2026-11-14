@@ -720,6 +720,8 @@ test("nested literal heredocs and case arguments preserve substitution boundarie
     "cat <<FIRST\n$(cat <<INNER\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
     "cat <<FIRST\n$(cat <<'INNER' # comment )\n$(printf literal > outside.txt)\nINNER\nprintf changed > outside.txt\n)\nFIRST",
     "cat <<FIRST\n$(cat <<'INNER' | bash\nprintf changed > outside.txt\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(bash <<'INNER'\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
+    "cat <<FIRST\n$(cat <<'INNER' | bash\n$(printf changed > outside.txt)\nINNER\n)\nFIRST",
     "cat <<FIRST\n$(if case x in x) printf changed > outside.txt ;; esac; then :; fi)\nFIRST",
     "cat <<FIRST\n$(time case x in x) printf changed > outside.txt ;; esac)\nFIRST",
   ]) {

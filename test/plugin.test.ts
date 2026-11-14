@@ -8036,6 +8036,8 @@ for (const [name, command] of [
   ["nested-expansion", "cat <<FIRST\n$(cat <<INNER\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
   ["nested-literal-suffix", "cat <<FIRST\n$(cat <<'INNER'\n$(tar -xzf archive.tar.gz -C ignored-data-directory)\nINNER\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST"],
   ["nested-pipeline", "cat <<FIRST\n$(cat <<'INNER' | bash\ntar -xzf archive.tar.gz -C missing-data-directory\nINNER\n)\nFIRST"],
+  ["nested-script-substitution", "cat <<FIRST\n$(bash <<'INNER'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
+  ["nested-pipeline-substitution", "cat <<FIRST\n$(cat <<'INNER' | bash\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
   ["nested-multiple", "cat <<FIRST\n$(cat <<'A' | cat <<B\n$(tar -xzf archive.tar.gz -C ignored-data-directory)\nA\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nB\n)\nFIRST"],
   ["process-substitution", "cat <<'FIRST' | tee >(bash) > /dev/null | cat <<'SECOND'\ntar -xzf archive.tar.gz -C missing-data-directory\nFIRST\nliteral\nSECOND"],
 ] as const) test(`declared heredoc ${name} retains artifact prerequisites at Worker admission`,
