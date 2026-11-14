@@ -8011,6 +8011,7 @@ for (const first of ["'FIRST'", "FIRST"]) test(`declared multiple data heredocs 
 for (const [name, command] of [
   ["comment", "cat <<FIRST\ncat <<'IGNORE'\n$(\n# step 1)\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nIGNORE\nFIRST"],
   ["continuation", "cat <<FIRST | cat <<'SECOND'\ntext\\\nFIRST\n$(\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST\nliteral\nSECOND"],
+  ["tab-continuation", "cat <<-FIRST | cat <<'SECOND'\nFI\\\n\tRST\n$(\ntar -xzf archive.tar.gz -C missing-data-directory\n)\nFIRST\nliteral\nSECOND"],
   ["unterminated", "cat <<FIRST | cat <<'SECOND'\ncat <<'IGNORE'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nIGNORE"],
 ] as const) test(`declared heredoc ${name} retains artifact prerequisites at Worker admission`,
   { skip: process.platform === "win32" }, async () => {

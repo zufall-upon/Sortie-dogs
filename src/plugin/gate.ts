@@ -594,6 +594,7 @@ function posixHeredocBody(source: string, start: number, delimiter: string, stri
   let bodyEnd = source.length;
   let after = source.length;
   let closed = false;
+  let foldedBody = "";
   while (cursor <= source.length) {
     const lineStart = cursor;
     let line = "";
@@ -601,23 +602,26 @@ function posixHeredocBody(source: string, start: number, delimiter: string, stri
     do {
       end = source.indexOf("\n", cursor);
       const part = source.slice(cursor, end < 0 ? source.length : end);
-      const fragment = stripTabs ? part.replace(/^\t+/u, "") : part;
-      const trailingSlashes = /\\+$/u.exec(fragment)?.[0].length ?? 0;
+      const trailingSlashes = /\\+$/u.exec(part)?.[0].length ?? 0;
       const continued = !literal && end >= 0 && trailingSlashes % 2 === 1;
-      line += continued ? fragment.slice(0, -1) : fragment;
+      line += continued ? part.slice(0, -1) : part;
       cursor = end < 0 ? source.length + 1 : end + 1;
       if (!continued) break;
     } while (cursor <= source.length);
-    if (line === delimiter) {
+    // Bash folds unquoted continuations before <<- removes leading tabs. Tabs
+    // at the start of a continuation fragment may therefore be interior data.
+    const logicalLine = stripTabs ? line.replace(/^\t+/u, "") : line;
+    if (logicalLine === delimiter) {
       bodyEnd = lineStart;
       after = end < 0 ? source.length : end + 1;
       closed = true;
       break;
     }
+    if (stripTabs && !literal) foldedBody += logicalLine + (end < 0 ? "" : "\n");
     if (end < 0) break;
   }
-  const body = source.slice(start, bodyEnd);
-  return { body: stripTabs ? body.replace(/^\t+/gmu, "") : body, after, closed };
+  const body = stripTabs && !literal ? foldedBody : source.slice(start, bodyEnd);
+  return { body: stripTabs && literal ? body.replace(/^\t+/gmu, "") : body, after, closed };
 }
 
 /** Unquoted heredocs remove unescaped backslash-newline before expanding their data. */

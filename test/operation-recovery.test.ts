@@ -691,6 +691,62 @@ test("unquoted heredoc comments and continuations retain native substitution des
   assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
 }));
 
+test("tab-stripping heredocs preserve interior tabs across continued logical lines", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "heredoc-continuation-tabs", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (command: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: command }, { args: { command, workdir: root } }, { investigativeShell });
+  const command = "cat <<-FIRST | cat <<'SECOND'\nFI\\\n\tRST\n$(\nprintf changed > outside.txt\n)\nFIRST\nliteral\nSECOND";
+  const nativeResult = await exec("bash", ["-c", command], { cwd: native });
+  assert.equal(nativeResult.stdout, "literal\n");
+  assert.equal(nativeResult.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  assert.ok(extractWritePaths("shell", { command, workdir: root }, root).paths.includes(join(root, "outside.txt")));
+  let adapterCalls = 0;
+  for (const mode of [false, true]) await assert.rejects((async () => {
+    await check(command, mode);
+    adapterCalls += 1;
+  })(), (error: unknown) => error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+    ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)));
+  assert.equal(adapterCalls, 0);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+
+  // Leading tabs after folding do not stop a split delimiter from closing.
+  const splitDelimiter = "cat <<-FIRST | cat <<'SECOND'\n\tFI\\\nRST\ntar -xzf archive.tar.gz\nSECOND";
+  assert.equal((await exec("bash", ["-c", splitDelimiter], { cwd: root })).stdout, "tar -xzf archive.tar.gz\n");
+  assert.deepEqual(extractWritePaths("shell", { command: splitDelimiter, workdir: root }, root).paths, []);
+  for (const mode of [false, true]) await check(splitDelimiter, mode);
+
+  // Continued data keeps interior tabs but strips tabs that remain at the start.
+  for (const [data, output, literal] of [
+    ["cat <<-END\n\tAL\\\n\tPHA\nEND", "AL\tPHA\n", false],
+    ["cat <<-END\n\t\\\n\tALPHA\nEND", "ALPHA\n", false],
+    ["cat <<-'END'\n\tAL\\\n\tPHA\nEND", "AL\\\nPHA\n", true],
+  ] as const) {
+    assert.equal((await exec("bash", ["-c", data], { cwd: root })).stdout, output);
+    await check(data, true);
+    if (literal) await check(data, false);
+    else await assert.rejects(check(data, false), (error: unknown) =>
+      error instanceof WriteDeniedError && error.reason === "unclassified-command");
+  }
+
+  // A continuation's interior tab also separates words inside a substitution.
+  const wordBoundary = "cat <<-FIRST | cat <<'SECOND'\n$(printf '%s' changed > allowed.txt\\\n\tignored)\nFIRST\nliteral\nSECOND";
+  assert.equal((await exec("bash", ["-c", wordBoundary], { cwd: native })).stdout, "literal\n");
+  assert.equal(await readFile(join(native, "allowed.txt"), "utf8"), "changedignored");
+  assert.ok(extractWritePaths("shell", { command: wordBoundary, workdir: root }, root).paths.includes(join(root, "allowed.txt")));
+  await assert.rejects(check(wordBoundary, false), (error: unknown) =>
+    error instanceof WriteDeniedError && error.reason === "unclassified-command");
+  await check(wordBoundary, true);
+  assert.equal(existsSync(join(root, "allowed.txt")), false);
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
 test("shell patch bodies retain literal path provenance without trusting expansions", { skip: process.platform === "win32" }, async () => fixture(async root => {
   await mkdir(join(root, "routes"));
   await writeFile(join(root, "routes/outside.tsx"), "unchanged\n");
