@@ -2028,6 +2028,88 @@ test("V2 report accounting traverses native pages and retains child model, tool 
   } finally { cleanup?.(); }
 });
 
+test("V2 reconciles the explicitly selected predecessor shell after a corrected operation declaration", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-predecessor-operation-"));
+  const fixture = contextFixture();
+  const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 10_000 } },
+  };
+  const history: Record<string, Record<string, unknown>[]> = {};
+  let hooks!: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+  const cleanup = await createSortieDogsV2Plugin(async input => { hooks = await SortieDogsV010Plugin(input); return {}; }).setup({
+    ...fixture.context, location: { directory }, session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, ...identities[sessionID] }),
+      list: async ({ parentID }) => ({ data: Object.entries(identities).filter(([, info]) => info.parentID === parentID)
+        .map(([id, info]) => ({ id, ...info })), cursor: {} }),
+      context: async ({ sessionID }) => history[sessionID] ?? [] },
+    message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
+      : history[sessionID] ?? [], cursor: {} }) },
+  });
+  let turn = 0;
+  const chat = async (sessionID: string, text: string) => hooks["chat.message"]!(
+    { sessionID, messageID: `${sessionID}-${++turn}`, agent: identities[sessionID]!.agent },
+    { message: { id: `${sessionID}-${turn}`, agent: identities[sessionID]!.agent,
+      model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }] });
+  const tool = async (name: string, sessionID: string, input: object = {}) =>
+    JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(input, { sessionID }));
+  try {
+    await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "build"));
+    await writeFile(join(directory, "check.mjs"), 'console.log("auxiliary");\n');
+    const build = "TMPDIR=/fixture/tmp XDG_CACHE_HOME=/fixture/cache /usr/bin/cmake --build build --target vdm_linux_readonly --parallel 4";
+    const initialBuild = build.replace("vdm_linux_readonly --parallel", "vdm_linux_readonly linux_readonly_test --parallel");
+    const launch = "node launch.mjs";
+    const unit = { title: "Build and launch", objective: "Build the requested target and launch once",
+      read: ["check.mjs"], write: ["build/**"], validation: ["node check.mjs"] };
+    await chat("root", "Build and launch once; retain the real result without replay.");
+    const started = await tool("start_mission", "root", { requirements: ["Build and launch once"], kind: "operation" });
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+    const planned = await tool("plan_units", "coordinator", { units: [unit], execution: { commands: [initialBuild, launch], directory } });
+    const workerTask = { args: structuredClone(planned.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
+    await chat("worker", workerTask.args.prompt);
+    const original = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), worker = original.units[0]!;
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: worker.handoffPath } });
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { output: "inspected" });
+    await tool("bind_write_gate", "worker", { project_root: directory, manifest_path: worker.manifestPath });
+    const ran = Date.now();
+    history.worker = [{ id: "msg_original", type: "assistant", agent: "dog-worker-v010", time: { created: ran, completed: ran },
+      content: [{ type: "tool", id: "call_original_build", name: "shell", time: { created: ran, ran, completed: ran },
+        state: { status: "completed", input: { command: build, workdir: directory, timeout: 240_000 },
+          metadata: { status: "completed", exit: 0 }, content: [{ type: "text", text: "[100%] Built target vdm_linux_readonly" }] } }] }];
+    // Only synthetic host events represent the build/launch; no CMake or GUI process is started.
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "launch" }, { args: { command: launch, workdir: directory } });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "launch" }, { output: "launched", metadata: { status: "completed", exit: 0 } });
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "check" }, { args: { command: "node check.mjs", workdir: directory } });
+    const checked = await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: directory });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "check" }, { output: checked.stdout, metadata: { status: "completed", exit: 0 } });
+    identities.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "done", metadata: { sessionId: "worker" } });
+    assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "succeeded");
+    assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.status, "not-started");
+    const corrected = await tool("plan_units", "coordinator", { executor: "self", reason: "Correct the target without replay",
+      units: [{ ...unit, title: "Retain native result", objective: "Reconcile the existing call" }],
+      execution: { commands: [build, launch], directory } });
+    const recovery = await tool("plan_units", "root", { execution: { commands: [build, launch], directory,
+      recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: "call_original_build" } } });
+    assert.equal(recovery.status, "operation-reconciled");
+    assert.equal(recovery.run_id, corrected.run_id);
+    const recovered = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(recovered.status, "executed");
+    const observation = recovered.observations.find((item: { callID: string }) => item.callID === "call_original_build");
+    assert.equal(observation.sourceRunID, original.runID);
+    assert.equal(observation.sessionID, "worker");
+    assert.equal(observation.nativeTimeoutMs, 240_000);
+    assert.equal(observation.nativeStartedAt, new Date(ran).toISOString());
+    assert.equal(observation.exit, 0);
+    assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 2);
+    assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const mode of ["success", "failure", "no-start", "structured-failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
   "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "redeclared-node-pin", "unobserved-redeclared-run"] as const) {
   test(`V2 timed native operation recovery through Mission APIs: ${mode}`, async () => {
@@ -2825,6 +2907,12 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.equal(validate({ ...capturedHandoff, parallel: "true" }), false);
     assert.equal(validate({ ...capturedHandoff, units: "invented-plan" }), false);
     assert.equal(validate({ ...capturedHandoff, units: [] }), false, "empty units cannot masquerade as a new plan");
+    const execution = { commands: ["cmake --build build --target gui"], directory: "/fixture" };
+    assert.equal(validate({ ...capturedHandoff, execution }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, execution: { ...execution, recover_call: {
+      run_id: "previous-run", unit_id: "unit-1", session_id: "worker", call_id: "call-build" } } }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, execution: { ...execution, recover_call: {
+      run_id: "previous-run", unit_id: "unit-1", session_id: "worker" } } }), false, "a partial native call reference is not a recovery proof");
     const review = tools.find(tool => tool.name === "sortie_v010_review_mission")!;
     const validateReview = new Ajv({ strict: false }).compile(review.input);
     const capturedReview = { risk_tags: [], mode: "", reviewer_session_id: "", evidence: "", traces: "", purpose_decision: "" };
