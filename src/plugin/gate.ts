@@ -553,6 +553,7 @@ interface ShellPathSegment {
   source: string;
   patchHeredoc?: { body: string; literal: boolean; closed: boolean };
   unresolvedHeredocExpansion?: boolean;
+  isolatedCasePrintfData?: boolean;
 }
 
 /** Remove POSIX line continuations, preserving quoted data and comment boundaries. */
@@ -892,10 +893,16 @@ function heredocSubstitutions(data: string, shellSource = false, dataOnlyContext
   return { commands: result, complete, ...(unresolvedSource === undefined ? {} : { unresolvedSource }) };
 }
 
-function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOnlyContext = false): ShellPathSegment[] {
+// This is deliberately not a case parser: only a complete literal printf in the
+// entire stdin of a direct, isolated cat is recognized as artifact data. The
+// substitution remains unresolved for write authorization.
+const POSIX_CASE_PRINTF_DATA = /^[ \t\n]*\$\([ \t\n]*case[ \t\n]+[A-Za-z0-9_./-]+[ \t\n]+in[ \t\n]+[A-Za-z0-9_./-]+[ \t\n]*\)[ \t\n]*printf(?:[ \t\n]+'[^']*')+[ \t\n]*;;[ \t\n]*esac[ \t\n]*\)[ \t\n]*$/u;
+
+function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOnlyContext = false, isolatedCat = false): ShellPathSegment[] {
   const { commands, complete, unresolvedSource } = heredocSubstitutions(body, false, dataOnlyContext);
   const segments = commands.flatMap(command => shellPathSegments(command, dialect));
-  if (!complete) segments.push({ source: unresolvedSource ?? "", unresolvedHeredocExpansion: true });
+  if (!complete) segments.push({ source: unresolvedSource ?? "", unresolvedHeredocExpansion: true,
+    ...(isolatedCat && POSIX_CASE_PRINTF_DATA.test(body) ? { isolatedCasePrintfData: true } : {}) });
   return segments;
 }
 
@@ -981,7 +988,9 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
         !syntax.unsafeExpansion && !syntax.activeBrace && !syntax.masked.slice(0, operator).includes("<<") &&
         source[operator - 1] !== "<" && syntax.masked.slice(operator, operator + 2) === "<<" && source[operator - 1] !== "\\") {
       const body = posixHeredocBody(remaining, next, header[6]!, header[2] === "<<-", false);
-      result.push(...heredocSubstitutionSegments(body.body, dialect, true));
+      const isolatedCat = before.length === 1 && header[1]!.trim() === "cat" && body.closed &&
+        !remaining.slice(body.after).trim();
+      result.push(...heredocSubstitutionSegments(body.body, dialect, true, isolatedCat));
     }
     // Only one direct heredoc is modeled. Earlier pipeline segments may own other
     // heredocs, and a quoted body can still be executable stdin for a shell.
@@ -1012,10 +1021,10 @@ function usesPowerShell(name: string, command: string): boolean {
 /** Non-authorizing preflight view, using the same dialect and segments as path extraction. */
 export function artifactInspectionSegments(command: string): { source: string; tool: string; artifact: boolean }[] {
   const inspect = (body: string, powershell: boolean, depth: number): { source: string; tool: string; artifact: boolean }[] =>
-    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source, unresolvedHeredocExpansion }) => {
+    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source, unresolvedHeredocExpansion, isolatedCasePrintfData }) => {
       // An unsupported case clause can hide an artifact behind a pattern ')'.
       // Classify its actual uncertain source conservatively instead of skipping it.
-      if (unresolvedHeredocExpansion) return /(?:^|[\s;()])(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)(?=$|[\s;()])/iu.test(source)
+      if (unresolvedHeredocExpansion) return !isolatedCasePrintfData && /(?:^|[\s;()])(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)(?=$|[\s;()])/iu.test(source)
         ? [{ source, tool: "bash", artifact: true }] : [];
       // Match the same literal, depth-one envelope accepted by shellPaths; an
       // unresolved sibling output must not hide its inner artifact commands.

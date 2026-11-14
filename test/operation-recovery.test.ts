@@ -734,6 +734,33 @@ test("nested literal heredocs and case arguments preserve substitution boundarie
   }
 }));
 
+test("case printf artifact data stays unresolved for write authority", { skip: process.platform === "win32" }, async () => fixture(async root => {
+  const command = "cat <<END\n$(case x in x) printf '%s' ' tar -xzf archive.tar.gz';; esac)\nEND";
+  const gate = await createWriteGate(await createProjectPaths(root), {
+    version: "0.1.0", task_id: "case-printf-data", read: [], write: ["allowed.txt"], validation: [],
+  });
+  const check = (input: string, investigativeShell: boolean) => gate.check(
+    { tool: "shell", sessionID: "worker", callID: input }, { args: { command: input, workdir: root } }, { investigativeShell });
+  const extraction = extractWritePaths("shell", { command, workdir: root }, root);
+  assert.ok(extraction.unresolvedPaths?.includes("<heredoc-substitution-unresolved>"));
+  assert.equal(artifactInspectionSegments(command).some(segment => segment.artifact), false);
+  for (const mode of [false, true]) await assert.rejects(check(command, mode), WriteDeniedError);
+
+  const native = join(root, "native");
+  await mkdir(native);
+  await writeFile(join(root, "outside.txt"), "unchanged\n");
+  await writeFile(join(native, "outside.txt"), "unchanged\n");
+  const write = "cat <<FIRST\n$(case x in x) printf changed > outside.txt ;; esac)\nFIRST";
+  const result = await exec("bash", ["-c", write], { cwd: native });
+  assert.equal(result.stdout, "\n");
+  assert.equal(result.stderr, "");
+  assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+  for (const mode of [false, true]) await assert.rejects(check(write, mode), (error: unknown) =>
+    error instanceof WriteDeniedError && (mode ? error.reason === "manifest-scope" :
+      ["manifest-scope", "unclassified-command", "path-required"].includes(error.reason)));
+  assert.equal(await readFile(join(root, "outside.txt"), "utf8"), "unchanged\n");
+}));
+
 test("heredoc arithmetic and quoted interpreter input preserve native execution boundaries", { skip: process.platform === "win32" }, async () => fixture(async root => {
   const gate = await createWriteGate(await createProjectPaths(root), {
     version: "0.1.0", task_id: "heredoc-arithmetic-interpreter", read: [], write: ["allowed.txt"], validation: [],

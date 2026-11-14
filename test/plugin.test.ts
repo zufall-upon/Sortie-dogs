@@ -8152,6 +8152,62 @@ test("an unparsed case substitution cannot conceal a declared artifact", { skip:
   });
 });
 
+test("declared case printf artifact text preserves public Worker admission", { skip: process.platform === "win32" }, async () => {
+  await withProject("case-printf-data-worker", async directory => {
+    const command = "cat <<END\n$(case x in x) printf '%s' ' tar -xzf archive.tar.gz';; esac)\nEND";
+    const native = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(native.stdout, " tar -xzf archive.tar.gz\n");
+    assert.equal(native.stderr, "");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "case-data-parent", "case-data-worker", "case-data-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "case-data-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "case-data-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "case-data-worker", callID: "case-data-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const result = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(result.stdout, native.stdout);
+    assert.equal(result.stderr, "");
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "archive.tar.gz")).catch(() => undefined), undefined);
+  });
+});
+
+for (const [name, command] of [
+  ["executed", "cat <<FIRST\n$(case x in x) tar -xzf archive.tar.gz -C missing-data-directory ;; esac)\nFIRST"],
+  ["eval", "cat <<FIRST\n$(case x in x) eval ' tar -xzf archive.tar.gz -C missing-data-directory';; esac)\nFIRST"],
+  ["script-consumer", "cat <<FIRST | bash\n$(case x in x) printf '%s' ' tar -xzf archive.tar.gz -C missing-data-directory';; esac)\nFIRST"],
+  ["suffix", "cat <<FIRST\n$(case x in x) printf '%s' ' tar -xzf archive.tar.gz';; esac)\nFIRST\ntar -xzf archive.tar.gz"],
+] as const) test(`declared case artifact ${name} remains rejected at public Worker admission`, { skip: process.platform === "win32" }, async () => {
+  await withProject(`case-artifact-${name}`, async directory => {
+    await writeFile(join(directory, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: directory });
+    const archive = await readFile(join(directory, "archive.tar.gz"));
+    if (name === "script-consumer") {
+      await assert.rejects(execFileAsync("bash", ["-c", command], { cwd: directory }), (error: unknown) =>
+        (error as { code?: number }).code === 2 && /missing-data-directory/u.test((error as { stderr?: string }).stderr ?? ""));
+    } else {
+      const native = await execFileAsync("bash", ["-c", command], { cwd: directory });
+      if (name === "suffix") {
+        assert.equal(native.stdout, " tar -xzf archive.tar.gz\n");
+        assert.equal(native.stderr, "");
+      } else {
+        assert.equal(native.stdout, "\n");
+        assert.match(native.stderr, /missing-data-directory/u);
+      }
+    }
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await assert.rejects(beginTrackedTaskChild(hooks, directory, `${name}-parent`, `${name}-worker`, `${name}-task`),
+      /artifact_command_unclassified/u);
+    assert.equal(await stat(join(directory, "missing-data-directory")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+  });
+});
+
 test("a time-prefixed case substitution cannot conceal a declared artifact", { skip: process.platform === "win32" }, async () => {
   await withProject("time-case-heredoc-artifact", async directory => {
     const command = "cat <<FIRST\n$(time case x in x) tar -xzf archive.tar.gz -C missing-data-directory ;; esac)\nFIRST";
