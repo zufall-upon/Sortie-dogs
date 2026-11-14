@@ -8270,6 +8270,117 @@ test("declared shell heredoc runs after its artifact directory is prepared", { s
   });
 });
 
+for (const [shell, delimiter] of [["bash -c", "FIRST"], ["env -u UNUSED /bin/sh -c", "'FIRST'"]] as const)
+test(`shell command substitution heredoc enforces artifact prerequisites at public Worker admission: ${shell}`, { skip: process.platform === "win32" }, async () => {
+  await withProject("shell-command-substitution-artifact", async directory => {
+    const command = `${shell} "$(cat <<${delimiter}\ntar -xzf archive.tar.gz -C target\nFIRST\n)"`;
+    const native = join(directory, "native");
+    await mkdir(native);
+    await writeFile(join(native, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: native });
+    const archive = await readFile(join(native, "archive.tar.gz"));
+    await assert.rejects(execFileAsync("bash", ["-c", command], { cwd: native }), (error: unknown) =>
+      (error as { code?: number; stderr?: string }).code === 2 && /target/u.test((error as { stderr?: string }).stderr ?? ""));
+    assert.equal(await stat(join(native, "target")).catch(() => undefined), undefined);
+    await writeFile(join(directory, "archive.tar.gz"), archive);
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [command] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await assert.rejects(beginTrackedTaskChild(hooks, directory, "code-parent", "code-worker", "code-task"), /artifact_directory_unprepared/u);
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+
+    await mkdir(join(directory, "target"));
+    const prepared = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(prepared, directory, "prepared-code-parent", "prepared-code-worker", "prepared-code-task");
+    await inspectHandoffWithRead(prepared, join(directory, "handoff.json"), "prepared-code-worker");
+    assert.equal((await executeBindWriteGate(prepared, directory, "prepared-code-worker")).status, "bound");
+    const args = { command };
+    const request = { tool: "bash", sessionID: "prepared-code-worker", callID: "prepared-code-validation" };
+    await prepared["tool.execute.before"]!(request, { args });
+    const executed = await execFileAsync("bash", ["-c", command], { cwd: directory });
+    assert.equal(executed.stderr, "");
+    await prepared["tool.execute.after"]!({ ...request, args }, { output: executed.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await readFile(join(directory, "target/source.txt"), "utf8"), "fixture\n");
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+  });
+});
+
+test("shell command substitution data display and opaque code stay distinct at the public Worker entrance", { skip: process.platform === "win32" }, async () => {
+  await withProject("shell-command-substitution-display", async directory => {
+    const body = "tar -xzf archive.tar.gz -C target";
+    const display = `cat <<FIRST\n${body}\nFIRST`;
+    const native = await execFileAsync("bash", ["-c", display], { cwd: directory });
+    assert.equal(native.stdout, `${body}\n`);
+    assert.equal(native.stderr, "");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [display] }));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "display-code-parent", "display-code-worker", "display-code-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "display-code-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "display-code-worker")).status, "bound");
+    const args = { command: display };
+    const request = { tool: "bash", sessionID: "display-code-worker", callID: "display-code-validation" };
+    await hooks["tool.execute.before"]!(request, { args });
+    const executed = await execFileAsync("bash", ["-c", display], { cwd: directory });
+    await hooks["tool.execute.after"]!({ ...request, args }, { output: executed.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(executed.stdout, native.stdout);
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+
+    const printedCode = `bash -c "$(cat <<FIRST\nprintf '%s' '${body}'\nFIRST\n)"`;
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [printedCode] }));
+    const printing = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(printing, directory, "print-code-parent", "print-code-worker", "print-code-task");
+    await inspectHandoffWithRead(printing, join(directory, "handoff.json"), "print-code-worker");
+    assert.equal((await executeBindWriteGate(printing, directory, "print-code-worker")).status, "bound");
+    const printArgs = { command: printedCode };
+    const printRequest = { tool: "bash", sessionID: "print-code-worker", callID: "print-code-validation" };
+    await printing["tool.execute.before"]!(printRequest, { args: printArgs });
+    const printResult = await execFileAsync("bash", ["-c", printedCode], { cwd: directory });
+    assert.equal(printResult.stdout, body);
+    assert.equal(printResult.stderr, "");
+    await printing["tool.execute.after"]!({ ...printRequest, args: printArgs }, { output: printResult.stdout, metadata: { exit: 0, status: "completed" } });
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+
+    const opaque = `SCRIPT='${body}'; bash -c "$(cat <<FIRST\n$SCRIPT\nFIRST\n)"`;
+    await writeFile(join(directory, "source.txt"), "fixture\n");
+    await execFileAsync("tar", ["-czf", "archive.tar.gz", "source.txt"], { cwd: directory });
+    const archive = await readFile(join(directory, "archive.tar.gz"));
+    await assert.rejects(execFileAsync("bash", ["-c", opaque], { cwd: directory }), (error: unknown) =>
+      (error as { code?: number; stderr?: string }).code === 2 && /target/u.test((error as { stderr?: string }).stderr ?? ""));
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify({ ...fixture.manifest, validation: [opaque] }));
+    const uncertain = await SortieDogsPlugin({ directory });
+    await assert.rejects(beginTrackedTaskChild(uncertain, directory, "opaque-code-parent", "opaque-code-worker", "opaque-code-task"), /artifact_command_unclassified/u);
+    assert.equal(await stat(join(directory, "target")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, "archive.tar.gz")), archive);
+  });
+});
+
+test("shell command substitution scoped write is denied at the public Worker tool entrance", { skip: process.platform === "win32" }, async () => {
+  await withProject("shell-command-substitution-write", async directory => {
+    const native = join(directory, "native");
+    await mkdir(native);
+    await writeFile(join(native, "outside.txt"), "unchanged\n");
+    await writeFile(join(directory, "outside.txt"), "unchanged\n");
+    const command = "bash -c \"$(cat <<FIRST\nprintf changed > outside.txt\nFIRST\n)\"";
+    await execFileAsync("bash", ["-c", command], { cwd: native });
+    assert.equal(await readFile(join(native, "outside.txt"), "utf8"), "changed");
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(fixture.manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const hooks = await SortieDogsPlugin({ directory });
+    await beginTrackedTaskChild(hooks, directory, "write-code-parent", "write-code-worker", "write-code-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "write-code-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "write-code-worker")).status, "bound");
+    let calls = 0;
+    await assert.rejects((async () => {
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "write-code-worker", callID: "write-code" }, { args: { command } });
+      calls += 1;
+    })(), /operation manifest write scope|unclassified command/u);
+    assert.equal(calls, 0);
+    assert.equal(await readFile(join(directory, "outside.txt"), "utf8"), "unchanged\n");
+  });
+});
+
 test("a denied bind carries the same defect evidence the coordinator must repair", async () => {
   await withProject("bind-denial-defects", async (directory) => {
     const hooks = await configuredHooks(directory);

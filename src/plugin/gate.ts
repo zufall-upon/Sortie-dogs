@@ -553,6 +553,7 @@ interface ShellPathSegment {
   source: string;
   patchHeredoc?: { body: string; literal: boolean; closed: boolean };
   unresolvedHeredocExpansion?: boolean;
+  unresolvedShellCode?: boolean;
   isolatedCasePrintfData?: boolean;
 }
 
@@ -638,8 +639,8 @@ function posixNestedHeredocShellSource(source: string): boolean {
 
 /** A shell may reinterpret quoted strings through eval, a pipe, or another executable. */
 function posixShellDataConsumersOnly(segments: readonly ShellPathSegment[]): boolean {
-  return segments.every(({ source, patchHeredoc, unresolvedHeredocExpansion }) => {
-    if (patchHeredoc || unresolvedHeredocExpansion) return false;
+  return segments.every(({ source, patchHeredoc, unresolvedHeredocExpansion, unresolvedShellCode }) => {
+    if (patchHeredoc || unresolvedHeredocExpansion || unresolvedShellCode) return false;
     const syntax = scanShellSyntax(source, "posix");
     if (syntax.activeBrace || /[<>]\(/u.test(syntax.masked)) return false;
     const tokens = unwrapEnvironmentCommand(words(source));
@@ -906,6 +907,38 @@ function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOn
   return segments;
 }
 
+/** Inspect the data a shell -c actually consumes, not just the cat producing it. */
+function posixCommandCodeSegments(source: string): ShellPathSegment[] {
+  const original = { source };
+  const invocation = /^([\s\S]*?[ \t]-[A-Za-z]*c[A-Za-z]*[ \t]+)([\s\S]*)$/u.exec(source);
+  if (!invocation) return [original];
+  let tokens = words(invocation[1]!);
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[0] ?? "")) tokens = tokens.slice(1);
+  tokens = [...unwrapEnvironmentCommand(tokens)];
+  const executable = tokens[0]?.split("/").at(-1)?.toLowerCase();
+  if (!/^(?:bash|sh|dash|ksh|zsh)$/u.test(executable ?? "")) return [original];
+  const argument = invocation[2]!;
+  // Single-quoted scripts and ordinary literal arguments keep their existing handling.
+  if (!/^(?:"[\s\S]*?(?:\$\(|`)|\$\(|`)/u.test(argument)) return [original];
+  if (!tokens.slice(1).every(token => /^--?[A-Za-z][A-Za-z0-9-]*$/u.test(token))) {
+    return [original, { source, unresolvedShellCode: true }];
+  }
+  const header = /^"\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_-]*)'|"([A-Za-z_][A-Za-z0-9_-]*)"|([A-Za-z_][A-Za-z0-9_-]*))[ \t]*\n/u.exec(argument);
+  if (header) {
+    const literal = header[2] !== undefined || header[3] !== undefined;
+    const body = posixHeredocBody(argument, header[0].length, header[2] ?? header[3] ?? header[4]!, header[1] === "-", literal);
+    if (body.closed && /^[ \t\r\n]*\)"[ \t]*$/u.test(argument.slice(body.after)) && !/[$`\\]/u.test(body.body)) {
+      // The existing extractor must understand the resulting shell source. An
+      // opaque script cannot establish either artifact or write authority.
+      const extraction = shellPaths(body.body, false);
+      if (!extraction.ambiguous && !extraction.unresolvedPaths?.length) {
+        return [original, ...shellPathSegments(body.body, "posix")];
+      }
+    }
+  }
+  return [original, { source, unresolvedShellCode: true }];
+}
+
 /** Keep direct literal stdin data out of shell statements; retain patch bodies for path extraction. */
 function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSegment[] {
   if (dialect !== "posix") return shellSegments(command, dialect).map(source => ({ source }));
@@ -914,7 +947,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
   while (remaining.length > 0) {
     const { line, next } = posixCommandLine(remaining);
     if (next === undefined) {
-      result.push(...shellSegments(line, dialect).map(source => ({ source })));
+      result.push(...shellSegments(line, dialect).flatMap(posixCommandCodeSegments));
       break;
     }
     const before = shellSegments(line, dialect);
@@ -948,7 +981,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
         let after = next;
         let complete = true;
         for (const part of parts) {
-          parsed.push({ source: part!.source });
+          parsed.push(...posixCommandCodeSegments(part!.source));
           if (part!.delimiter === undefined) continue;
           const body = posixHeredocBody(remaining, after, part!.delimiter, part!.stripTabs === true, part!.literal === true);
           if (!body.closed) { complete = false; break; }
@@ -990,6 +1023,12 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
       const body = posixHeredocBody(remaining, next, header[6]!, header[2] === "<<-", false);
       const isolatedCat = before.length === 1 && header[1]!.trim() === "cat" && body.closed &&
         !remaining.slice(body.after).trim();
+      if (body.closed && !/[$`\\]/u.test(remaining.slice(next, body.after))) {
+        // Unquoted data without expansions is still data for this consumer.
+        result.push(...before.slice(0, -1).flatMap(posixCommandCodeSegments), { source: header[1]! });
+        remaining = remaining.slice(body.after);
+        continue;
+      }
       result.push(...heredocSubstitutionSegments(body.body, dialect, true, isolatedCat));
     }
     // Only one direct heredoc is modeled. Earlier pipeline segments may own other
@@ -999,11 +1038,11 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
         earlierHeredoc ||
         syntax.masked.slice(0, operator).includes("<<") || source[operator - 1] === "<" ||
         syntax.masked.slice(operator, operator + 2) !== "<<" || source[operator - 1] === "\\") {
-      result.push(...before.map(part => ({ source: part })));
+      result.push(...before.flatMap(posixCommandCodeSegments));
       remaining = remaining.slice(next);
       continue;
     }
-    result.push(...before.slice(0, -1).map(part => ({ source: part })));
+    result.push(...before.slice(0, -1).flatMap(posixCommandCodeSegments));
     const delimiter = header[4] ?? header[5] ?? header[6]!;
     const { body, after, closed } = posixHeredocBody(remaining, next, delimiter, header[2] === "<<-", literal);
     result.push({ source: header[1]!, ...(patch ? { patchHeredoc: { body, literal, closed } } : {}) });
@@ -1021,7 +1060,9 @@ function usesPowerShell(name: string, command: string): boolean {
 /** Non-authorizing preflight view, using the same dialect and segments as path extraction. */
 export function artifactInspectionSegments(command: string): { source: string; tool: string; artifact: boolean }[] {
   const inspect = (body: string, powershell: boolean, depth: number): { source: string; tool: string; artifact: boolean }[] =>
-    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source, unresolvedHeredocExpansion, isolatedCasePrintfData }) => {
+    shellPathSegments(body, powershell ? "powershell" : "posix").flatMap(({ source, unresolvedHeredocExpansion, unresolvedShellCode, isolatedCasePrintfData }) => {
+      // An unknown command-substitution result is itself executable shell code.
+      if (unresolvedShellCode) return [{ source, tool: "bash", artifact: true }];
       // An unsupported case clause can hide an artifact behind a pattern ')'.
       // Classify its actual uncertain source conservatively instead of skipping it.
       if (unresolvedHeredocExpansion) return !isolatedCasePrintfData && /(?:^|[\s;()])(?:curl(?:\.exe)?|invoke-webrequest|iwr|tar|find)(?=$|[\s;()])/iu.test(source)
@@ -1136,12 +1177,12 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     if (name) assignments.set(name, (assignments.get(name) ?? 0) + 1);
   }
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
-    const { source: segment, patchHeredoc, unresolvedHeredocExpansion } = segments[segmentIndex]!;
-    if (unresolvedHeredocExpansion) {
+    const { source: segment, patchHeredoc, unresolvedHeredocExpansion, unresolvedShellCode } = segments[segmentIndex]!;
+    if (unresolvedHeredocExpansion || unresolvedShellCode) {
       applies = true;
       ambiguous = true;
-      unresolvedPaths.push("<heredoc-substitution-unresolved>");
-      issue ??= commandIssue("<heredoc-substitution>", "active-expansion", "use a complete, inspectable substitution");
+      unresolvedPaths.push(unresolvedShellCode ? "<shell-code-unresolved>" : "<heredoc-substitution-unresolved>");
+      issue ??= commandIssue(unresolvedShellCode ? "<shell-code>" : "<heredoc-substitution>", "active-expansion", "use a complete, inspectable substitution");
       continue;
     }
     let source = segment.trim();
