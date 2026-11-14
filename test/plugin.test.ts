@@ -8064,6 +8064,7 @@ for (const [name, command] of [
   ["nested-script-substitution", "cat <<FIRST\n$(bash <<'INNER'\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
   ["nested-script-quoted-and-active", "cat <<FIRST\n$(bash <<'INNER'\nprintf '%s' '$(tar -xzf archive.tar.gz -C ignored-data-directory)'\nprintf '%s' \"$(tar -xzf archive.tar.gz -C missing-data-directory)\"\nINNER\n)\nFIRST"],
   ["nested-non-shell-interpreter", "cat <<FIRST\n$(node <<'INNER'\nrequire('node:child_process').execSync('echo $(tar -xzf archive.tar.gz -C missing-data-directory)', {stdio:'inherit'})\nINNER\n)\nFIRST"],
+  ["nested-shell-eval", "cat <<FIRST\n$(bash <<'INNER'\neval '$(tar -xzf archive.tar.gz -C missing-data-directory)'\nINNER\n)\nFIRST"],
   ["nested-pipeline-substitution", "cat <<FIRST\n$(cat <<'INNER' | bash\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nINNER\n)\nFIRST"],
   ["nested-multiple", "cat <<FIRST\n$(cat <<'A' | cat <<B\n$(tar -xzf archive.tar.gz -C ignored-data-directory)\nA\n$(tar -xzf archive.tar.gz -C missing-data-directory)\nB\n)\nFIRST"],
   ["process-substitution", "cat <<'FIRST' | tee >(bash) > /dev/null | cat <<'SECOND'\ntar -xzf archive.tar.gz -C missing-data-directory\nFIRST\nliteral\nSECOND"],

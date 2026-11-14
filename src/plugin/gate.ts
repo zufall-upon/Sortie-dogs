@@ -635,6 +635,19 @@ function posixNestedHeredocShellSource(source: string): boolean {
   return /^(?:bash|sh|dash|ksh|zsh)$/u.test(executable ?? "") && tokens.slice(1).every(token => token === "-s");
 }
 
+/** A shell may reinterpret quoted strings through eval, a pipe, or another executable. */
+function posixShellDataConsumersOnly(segments: readonly ShellPathSegment[]): boolean {
+  return segments.every(({ source, patchHeredoc, unresolvedHeredocExpansion }) => {
+    if (patchHeredoc || unresolvedHeredocExpansion) return false;
+    const syntax = scanShellSyntax(source, "posix");
+    if (syntax.activeBrace || /[<>]\(/u.test(syntax.masked)) return false;
+    const tokens = unwrapEnvironmentCommand(words(source));
+    if (!tokens.length) return true;
+    const executable = tokens[0]?.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+    return READ_ONLY_COMMANDS.has(executable ?? "") || executable === "tee";
+  });
+}
+
 function posixHeredocBody(source: string, start: number, delimiter: string, stripTabs: boolean, literal: boolean): { body: string; after: number; closed: boolean } {
   let cursor = start;
   let bodyEnd = source.length;
@@ -688,7 +701,7 @@ const POSIX_UNPARSED_CONTROL_WORDS = new Set(["for", "select", "function", "case
 const POSIX_LITERAL_ARITHMETIC = /^\$\(\([ \t\r\n0-9+\-*/%<>=!&|^~?:]+\)\)/u;
 
 /** Quotes suppress substitutions in shell source, but not in unquoted heredoc data. */
-function heredocSubstitutions(data: string, shellSource = false): { commands: string[]; complete: boolean; unresolvedSource?: string } {
+function heredocSubstitutions(data: string, shellSource = false, dataOnlyContext = false): { commands: string[]; complete: boolean; unresolvedSource?: string } {
   const body = foldHeredocContinuations(data);
   const result: string[] = [];
   let complete = true;
@@ -804,8 +817,10 @@ function heredocSubstitutions(data: string, shellSource = false): { commands: st
           // Unquoted data expands regardless of quotes. Only proven shell stdin
           // can use shell-source quoting; unknown consumers retain conservative
           // data scanning because another interpreter may execute quoted text.
-          const shellSource = header.literal && !dataOnly && posixNestedHeredocShellSource(body.slice(lineStarts[current], end));
-          const sources = shellSource ? shellPathSegments(nested.body, "posix") :
+          const shellParts = header.literal && !dataOnly && dataOnlyContext && current === 0 &&
+            posixNestedHeredocShellSource(body.slice(lineStarts[current], end)) ? shellPathSegments(nested.body, "posix") : undefined;
+          const shellSource = shellParts !== undefined && posixShellDataConsumersOnly(shellParts);
+          const sources = shellSource ? shellParts :
             !header.literal || !dataOnly ? [{ source: nested.body }] : [];
           for (const source of sources) {
             if (shellSource) result.push(source.source);
@@ -877,8 +892,8 @@ function heredocSubstitutions(data: string, shellSource = false): { commands: st
   return { commands: result, complete, ...(unresolvedSource === undefined ? {} : { unresolvedSource }) };
 }
 
-function heredocSubstitutionSegments(body: string, dialect: ShellDialect): ShellPathSegment[] {
-  const { commands, complete, unresolvedSource } = heredocSubstitutions(body);
+function heredocSubstitutionSegments(body: string, dialect: ShellDialect, dataOnlyContext = false): ShellPathSegment[] {
+  const { commands, complete, unresolvedSource } = heredocSubstitutions(body, false, dataOnlyContext);
   const segments = commands.flatMap(command => shellPathSegments(command, dialect));
   if (!complete) segments.push({ source: unresolvedSource ?? "", unresolvedHeredocExpansion: true });
   return segments;
@@ -934,7 +949,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
             parsed.push(...shellPathSegments(body.body, dialect));
             // The raw data can resemble a quoted heredoc even though its own
             // substitutions still execute before the consumer receives it.
-            parsed.push(...heredocSubstitutionSegments(body.body, dialect));
+            parsed.push(...heredocSubstitutionSegments(body.body, dialect, true));
           }
           after = body.after;
         }
@@ -966,7 +981,7 @@ function shellPathSegments(command: string, dialect: ShellDialect): ShellPathSeg
         !syntax.unsafeExpansion && !syntax.activeBrace && !syntax.masked.slice(0, operator).includes("<<") &&
         source[operator - 1] !== "<" && syntax.masked.slice(operator, operator + 2) === "<<" && source[operator - 1] !== "\\") {
       const body = posixHeredocBody(remaining, next, header[6]!, header[2] === "<<-", false);
-      result.push(...heredocSubstitutionSegments(body.body, dialect));
+      result.push(...heredocSubstitutionSegments(body.body, dialect, true));
     }
     // Only one direct heredoc is modeled. Earlier pipeline segments may own other
     // heredocs, and a quoted body can still be executable stdin for a shell.
