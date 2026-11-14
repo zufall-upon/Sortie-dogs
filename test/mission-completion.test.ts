@@ -658,6 +658,8 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
     assert.equal(completed.receipt.status, "succeeded");
     assert.equal(typeof completed.return_report, "string", "the real profiled completion transport must still deliver the host panel");
+    assert.doesNotMatch(completed.return_report, /\n<details>\n<summary>📜|詳細記録|Detailed record|⚑ MISSION|COST \/ PACK/u);
+    for (const field of [/🛡 確認:/u, /🪙 使用量:/u, /host計上費用:/u, /⏳ 未実施:/u, /➡️ 次:/u]) assert.match(completed.return_report, field);
     assert.match(completed.return_report_instruction, /Append return_report verbatim once/u);
     assert.match(completed.return_report_instruction, /unknown values and caveats/u);
     const delivered = { text: `Result collected.\n\n${completed.return_report}` };
@@ -677,21 +679,21 @@ for (const mode of ["implementation", "executed", "live-history-clock", "executi
     }
     if (mode === "implementation") {
       assert.match(completed.review_evidence_gaps, /decisive return line is not visible/u);
-      assert.match(completed.return_report, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u);
-      assert.match(completed.return_report, /レビュー補足\s+The decisive return line is not visible/u);
-      assert.match(completed.return_report, /➡️ NEXT\n\nなし/u);
+      assert.match(completed.return_report.replace(/\n/gu, ""), /Review: 🟡 補足あり（非ブロッキング・PASSではない）/u);
+      assert.match(completed.return_report.replace(/\n/gu, ""), /レビュー補足: The decisive return line is not visible/u);
+      assert.match(completed.return_report, /➡️ 次: なし/u);
       const visible = { text: `✅ **DONE** — validated result\n\n**次:** なし\n\n${completed.return_report}` };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final", partID: "final-text" }, visible);
-      assert.match(visible.text, /SourceReview\s+🟡 補足あり（非ブロッキング・PASSではない）/u,
+      assert.match(visible.text.replace(/\n/gu, ""), /Review: 🟡 補足あり（非ブロッキング・PASSではない）/u,
         "the final user-facing renderer must retain the native Review verdict, not only the completion tool result");
-      assert.match(visible.text, /レビュー補足\s+The decisive return line is not visible/u);
-      assert.doesNotMatch(visible.text, /SourceReview\s+未記録/u);
+      assert.match(visible.text.replace(/\n/gu, ""), /レビュー補足: The decisive return line is not visible/u);
+      assert.doesNotMatch(visible.text, /Review: 未記録/u);
       assert.match(visible.text, /\*\*次:\*\* なし/u);
     }
     if (mode === "executed") {
       const visible = { text: "✅ **DONE** — validated operation\n\n**次:** なし" };
       await cold["experimental.text.complete"]!({ sessionID: "root", messageID: "final-pass", partID: "final-text" }, visible);
-      assert.match(visible.text, /SourceReview\s+🟢 PASS（独立Reviewer）/u);
+      assert.match(visible.text, /Review: 🟢 PASS（独立Reviewer）/u);
       assert.doesNotMatch(visible.text, /EVIDENCE_GAPS/u);
     }
     const final = await status();

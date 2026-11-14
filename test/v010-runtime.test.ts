@@ -637,7 +637,8 @@ test("preview keeps canonical game-style guidance and does not decorate unproved
   const primary = previewAssets.find(asset => asset.name === "dog-operator")!.content;
   assert.ok(primary.includes(PREVIEW_PRESENTATION_POLICY.replaceAll("complete_operator", "complete_mission")));
   assert.doesNotMatch(primary, /do not transcribe the card/u, "the shipped system policy must not contradict verbatim return-report delivery");
-  assert.match(primary, /append that host-authored Markdown verbatim exactly once/u);
+  assert.match(primary, /append that host-authored summary verbatim exactly once/u);
+  assert.match(primary, /Do not add a detailed record/u);
   for (const icon of ["🎯", "📊", "🔍", "➡️", "🐾"]) assert.ok(primary.includes(icon));
   const unfinished = "## 確認結果\n検証は未完。";
   assert.equal(receiptBoundTerminalText(unfinished, undefined), unfinished);
@@ -2482,7 +2483,8 @@ test("root discards one exact diagnosed transient and resumes only remaining val
     acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
   assert.equal(complete.status, "succeeded");
   assert.match(complete.return_report, /^```text\n🐾 SORTIE DOGS — 帰還報告｜🟢 完了/u);
-  assert.ok(complete.return_report.endsWith("</details>"), "the report must not include duplicated terminal prose");
+  assert.ok(complete.return_report.endsWith("```"), "the report must not include duplicated terminal prose");
+  assert.doesNotMatch(complete.return_report, /<details>|詳細記録|Detailed record|⚑ MISSION|COST \/ PACK/u);
   assert.match(complete.return_report_instruction, /Append return_report verbatim once/);
   assert.match(complete.return_report_instruction, /No host-side card will be appended/);
   assert.match(complete.return_report_instruction, /do not recalculate or regenerate/);
@@ -2494,7 +2496,7 @@ test("root discards one exact diagnosed transient and resumes only remaining val
       acceptance_fingerprint: prepared.acceptance_fingerprint }, { sessionID: "root" }));
     assert.equal(english.status, "succeeded");
     assert.match(english.return_report, /^```text\n🐾 SORTIE DOGS — Return Report｜🟢 Complete/u);
-    assert.match(english.return_report, /➡️ NEXT\n\nNone/u);
+    assert.match(english.return_report, /➡️ Next: None/u);
     assert.doesNotMatch(english.return_report, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.match(english.return_report_instruction, /Append return_report verbatim once/);
     assert.deepEqual((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore);
@@ -4743,12 +4745,13 @@ test("recorded native validation can be reconciled without rerun only for the sa
   const receipt = (await ledger.readGoal()).state.receipt!;
   const report = await control!.renderReturnReport("root", "## 変更点\naccepted change\n\n## 次\nnone", goalFingerprint(receipt));
   assert.ok(report?.includes("🐾 SORTIE DOGS — 帰還報告"));
-  for (const symbol of ["```text", "⚑ MISSION", "🪙 COST / PACK", "📜 PACK RECORD", "🟢 COMPLETED"]) assert.ok(report!.includes(symbol));
+  for (const symbol of ["```text", "🛡 確認", "🪙 使用量", "🟢 完了"]) assert.ok(report!.includes(symbol));
+  assert.doesNotMatch(returnReportPanel(report!)!, /<details>|詳細記録|PACK RECORD/u);
   const disclosure = "<details><summary>HTML example</summary>\n\n```html\n</details>\n```\n\n</details>";
   const contextual = await control!.renderReturnReport("root",
     `${disclosure}\n\nstatus: DONE\n\n## 変更点\naccepted change\n\n## 次\ncontinue verification`, goalFingerprint(receipt));
   assert.ok(contextual?.includes(disclosure), "the actual report renderer preserves the preceding fenced disclosure");
-  assert.match(returnReportPanel(contextual!)!, /➡️ NEXT\n\ncontinue verification/u,
+  assert.match(returnReportPanel(contextual!)!, /➡️ 次: continue verification/u,
     "the real renderer-to-panel delivery path retains a panel after the fenced example");
   assert.equal(await control!.renderReturnReport("root", "untrusted", goalFingerprint("wrong receipt")), undefined);
   const priorLocale = process.env.SORTIE_REPORT_LOCALE;
@@ -4757,7 +4760,7 @@ test("recorded native validation can be reconciled without rerun only for the sa
     process.env.SORTIE_REPORT_LOCALE = "en";
     const english = await control!.renderReturnReport("root", "## Implementation\naccepted change\n\n## Next\nnone", goalFingerprint(receipt));
     assert.ok(english?.includes("Return Report"));
-    assert.match(english!, /Special insignia/u);
+    assert.match(english!, /Return Report/u);
     assert.doesNotMatch(english!, /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u);
     assert.deepEqual((await ledger.readGoal()).records.filter(({ event }) => event.kind === "goal.reported"), reportsBefore,
       "public bridge redisplay in another locale must not write another report");

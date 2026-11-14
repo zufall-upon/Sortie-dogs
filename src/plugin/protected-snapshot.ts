@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, open, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { basename, delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { goalFingerprint, type GoalEvidence } from "../core/goal-bound.js";
 import { normalizeManifestScope } from "../core/path.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
@@ -201,8 +201,21 @@ export function snapshotScratchExclusion(binding: Binding, currentProtection: re
 /** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
 export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">): Promise<string[]> {
   const actual = (entry: string) => resolve(projectRoot, normalizeManifestScope(entry).path);
-  const tracked = await exec("git", ["ls-files", "-z"], { cwd: projectRoot, maxBuffer: 16 * 1024 * 1024 })
-    .then(value => value.stdout.split("\0").filter(Boolean).map(path => resolve(projectRoot, path))).catch(() => []);
+  // The Location may contain a separately checked-out repository. Discover only
+  // ancestors of declared paths, never unrelated nested trees or filename patterns.
+  const roots = new Set<string>(), markers = new Map<string, Promise<boolean>>();
+  for (const start of new Set([resolve(projectRoot), ...manifest.read.map(actual), ...manifest.write.map(actual)])) {
+    let path = start;
+    for (;;) {
+      let marker = markers.get(path);
+      if (!marker) { marker = lstat(join(path, ".git")).then(() => true).catch(() => false); markers.set(path, marker); }
+      if (await marker) { roots.add(path); break; }
+      if (path === resolve(projectRoot) || dirname(path) === path) break;
+      path = dirname(path);
+    }
+  }
+  const tracked = (await Promise.all([...roots].map(root => exec("git", ["ls-files", "-z"], { cwd: root, maxBuffer: 16 * 1024 * 1024 })
+    .then(value => value.stdout.split("\0").filter(Boolean).map(path => resolve(root, path))).catch(() => [])))).flat();
   const outputs = manifest.write.filter(path => !path.endsWith("/**")).map(actual);
   // An absent execution grant is not a newly delivered artifact. Initial missing paths remain
   // protected by the immutable binding, while new outputs become protected when materialized.
@@ -363,6 +376,10 @@ export async function validationInputSnapshot(projectRoot: string, binding: Bind
     return path.kind === "relative" ? resolve(projectRoot, path.path) : resolve(path.path);
   });
   const hash = current.hash;
+  // A tracked file or exact output promoted since capture must stop being scratch
+  // during the check as well as during the later source/candidate refresh.
+  if (binding.freshness) binding = { ...binding, freshness: { ...binding.freshness,
+    protected_paths: [...new Set([...binding.freshness.protected_paths, ...await currentSnapshotProtection(projectRoot, manifest)])] } };
   return binding.source_policy === "declared-paths-v1"
     ? declaredScopeDigest(projectRoot, paths, hash, true, [], binding)
     : protectedScopeDigest(projectRoot, paths, hash, binding.source_policy, [], binding);
@@ -380,17 +397,17 @@ export async function validatedSourceSnapshot(projectRoot: string, binding: Bind
     ...await currentSnapshotProtection(projectRoot, current.manifest)])];
   const reads = current.manifest.read.map(entry => resolve(projectRoot, normalizeManifestScope(entry).path));
   const currentBinding = binding.freshness ? { ...binding, freshness: { ...binding.freshness, protected_paths: protection } } : binding;
-  // A populated directory grant without a concrete output/input inventory cannot safely
-  // acquire the report-only recipe. Keep the original full-candidate freshness instead.
+  // A directory grant can contain real untracked or ignored inputs and newly created
+  // deliverables. Tracked files alone are not a complete inventory. Unless the whole
+  // directory is already a read input or configured scratch, retain the full recipe.
   for (const entry of binding.validation_policy === undefined ? current.manifest.write : []) {
     const output = resolve(projectRoot, normalizeManifestScope(entry).path);
-    if (reads.some(input => !outside(input, output)) || snapshotScratchExcluded(currentBinding, output) ||
-        protection.some(path => path !== output && !outside(output, path) && !reads.includes(path))) continue;
+    if (reads.some(input => !outside(input, output)) || snapshotScratchExcluded(currentBinding, output)) continue;
     const stat = await lstat(output).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
       return undefined;
     });
-    if (stat?.isDirectory() && (await readdir(output)).length) return undefined;
+    if (entry.endsWith("/**") || stat?.isDirectory()) return undefined;
   }
   const paths = [...new Set([...reads,
     ...protection.filter(path => scopes.some(scope => !outside(scope, path)))])];
@@ -423,18 +440,18 @@ export async function protectedSnapshot(authorization: { manifestPath: string; m
   if (options.captureFreshness !== false && Array.isArray(manifest.validation) && manifest.validation.length && manifest.task_id) {
     // New evidence pins validation inputs/outputs independently of the execution manifest hash.
     // Existing records keep their original recipe and cannot acquire exclusions retroactively.
-    const tracked = await exec("git", ["ls-files", "-z"], { cwd: authorization.projectRoot, maxBuffer: 16 * 1024 * 1024 }).then(value => value.stdout.split("\0").filter(Boolean)).catch(() => []);
+    const protection = await currentSnapshotProtection(authorization.projectRoot, manifest);
     const { "@runtime": _runtime, "@executable": _executable, ...capturedEnvironment } = environment(manifest);
     const binding: Binding = { manifest_hash: `sha256:${manifestHash}`, project_root: authorization.projectRoot,
       manifest_path: relativePath, source_policy: external ? "declared-paths-v1" : "project-files-v1",
       candidate_policy: "project-root-artifacts-v1",
       source_paths: sourcePaths.map(evidencePath),
       candidate_paths: candidatePaths.map(evidencePath),
-      freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot, manifest.validation, process.env),
+      freshness: { contract_hash: validationContractHash(manifest), scratch_paths: validationScratchPaths(authorization.projectRoot,
+          options.command ? [options.command] : manifest.validation, process.env, resolve(authorization.projectRoot, options.directory ?? ".")),
         incidental_control_paths: [".opencode"],
         toolchain: await validationToolchain(resolve(authorization.projectRoot, options.directory ?? "."), options.command ? [options.command] : manifest.validation),
-        protected_paths: [...new Set([...actualPaths(manifest.read).filter(path => path !== resolve(authorization.projectRoot)),
-          ...tracked.map(path => resolve(authorization.projectRoot, path)),
+        protected_paths: [...new Set([...protection,
            ...actualPaths(manifest.write.filter(path => !path.endsWith("/**")))] )], environment: capturedEnvironment } };
     const current = await refreshProtectedSnapshot(authorization.projectRoot, binding);
     return current && { binding, ...current };

@@ -1,8 +1,8 @@
 import type { GoalFlightState, GoalTerminalReceipt, GoalFlightEventRecord } from "../core/goal-bound.js";
-import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, renderDebriefTraitEvidence, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
+import { buildDebrief, renderDebrief, renderDebriefProof, renderDebriefTraits, observeDebriefSession, type Debrief, type DebriefObservation } from "./sortie-debrief.ts";
 import { goalFingerprint } from "../core/goal-bound.ts";
 import { validGoalReport, type GoalReport } from "../core/goal-report.ts";
-import { renderCareer, type SortieCareer } from "./sortie-career.ts";
+import type { SortieCareer } from "./sortie-career.ts";
 import { estimateModelUsageCost } from "./model-cost.ts";
 import { reportText, resolveReportLocale } from "./report-locale.ts";
 
@@ -515,20 +515,6 @@ export interface SortieResultPresentation {
   readonly reviewNote?: string;
 }
 
-/** Literal display text, not Markdown supplied by the model/user. Entities are
- * decoded by the renderer after Markdown tokenization. wbr supplies layout-only
- * breaks for long IDs without adding characters to their text/copy value.
- */
-const reportLiteral = (text: string): string => {
-  const escape = (value: string) => value.replace(/[&<>\\`*_~\[\]#!|]/gu,
-    character => `&#${character.codePointAt(0)};`);
-  return text.replace(/[^\s]+/gu, token => {
-    const chunks = /^[\x21-\x7e]{33,}$/u.test(token) ? token.match(/.{1,24}/gu)! : [token];
-    return chunks.map(escape).join("<wbr>");
-  }).replace(/^([ ]*)([-+])/u, (_match, space: string, bullet: string) => `${space}&#${bullet.codePointAt(0)};`)
-    .replace(/^(\d+)([.)])(?=\s)/u, (_match, count: string, delimiter: string) => `${count}&#${delimiter.codePointAt(0)};`);
-};
-
 /** Locate a top-level compact host panel, not an example nested in another fence. */
 export function compactReturnReportRange(text: string): { start: number; end: number } | undefined {
   return findReturnReportRange(text, false);
@@ -622,8 +608,7 @@ const reportPair = (first: string, second: string): string[] => {
   return reportGraphemes(joined).reduce((sum, part) => sum + reportColumns(part), 0) <= 48 ? [joined] : [first, second];
 };
 
-// Break long display lines without cutting grapheme clusters. The full original
-// values remain in the detailed record; these are presentation-only line breaks.
+// Break long display lines without cutting grapheme clusters or dropping values.
 function wrapReportLine(line: string, width = 48): string[] {
   let rest = reportGraphemes(line);
   const output: string[] = [];
@@ -651,9 +636,6 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
     const passing = entries.filter(({ status }) => status === "PASS").length;
     return `${passing}/${entries.length}`;
   });
-  const achievement = result.mission.status === "COMPLETED" ? "COMPLETED"
-    : result.mission.status === "INTERRUPTED" ? "INTERRUPTED"
-      : result.mission.status === "EXTERNAL_BLOCKER" ? "EXTERNAL_BLOCKER" : "USER_DECISION";
   const summaryLabel = result.mission.status === "COMPLETED" ? t("完了", "Complete")
     : result.mission.status === "INTERRUPTED" ? t("中断（未完了）", "Interrupted (unfinished)")
       : result.mission.status === "EXTERNAL_BLOCKER" ? t("外部要因で未完了", "External blocker (unfinished)") : t("ユーザー判断待ち（未完了）", "Awaiting user decision (unfinished)");
@@ -671,68 +653,19 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
   const tokenText = result.cost.total_tokens.availability === "unavailable" && measuredTokens !== undefined && measuredTokens > 0
     ? `${measuredTokens.toLocaleString(locale)} ${locale === "en" && measuredTokens === 1 ? "token" : "tokens"}${t("（観測分）", " (observed)")}`
     : metric(result.cost.total_tokens, (value) => `${value.toLocaleString(locale)} ${locale === "en" && value === 1 ? "token" : "tokens"}`);
-  const detail = [
-    result.result_id[0],
-    "",
-    `${color} ${achievement} — ${display(presentation.statusSummary)}`,
-    "",
-    ...renderDebriefTraits(result.debrief, result.mission.status === "COMPLETED", locale),
-    "",
-    "⚑ MISSION",
-    `${t("経過", "Elapsed")}          ⏱ ${metric(result.speed.goal_wall_ms, duration)} ${t("※待機含む", "※Includes waiting")}`,
-    `${t("最終達成条件", "Final criteria")}  ◔ ${criteria}`,
-    `${t("対象検証", "Target validation")}      ${proof.validation}`,
-    `SourceReview  ${review}`,
-    ...(presentation.reviewNote ? [`${t("レビュー補足", "Review note")}  ${display(presentation.reviewNote)}`] : []),
-    `Commit        ${display(presentation.commit)}`,
-    "",
-    t("🔧 実装", "🔧 Implementation"),
-    display(presentation.implementation),
-    "",
-    t("⏳ 未実施", "⏳ Pending"),
-    presentation.pending?.trim() ? display(presentation.pending) : t("未確認（未実施なしを確認した意味ではありません）", "Unconfirmed (does not mean nothing remains)"),
-    "",
-    "🪙 COST / PACK",
-    `${t("使用量", "Usage")}        ${tokenText}`,
-    `${t("予測費用", "Estimated cost")}      ${estimatedCost} ${t("※予測概算", "※Estimate only")}`,
-    `${t("host計上費用", "Host-recorded cost")}  ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : t("unknown（全体の計上額未取得）", "unknown (total host cost unavailable)")}`,
-    t("※換算済み予測費用・host計上費用は請求総額ではありません。未換算・未取得を$0扱いしません", "※Priced estimates and host-recorded costs are not the total bill. Unpriced or missing amounts are not $0."),
-    "",
-    ...renderDebrief(result.debrief, locale),
-    "",
-    ...renderCareer(result.career, locale),
-    "",
-    ...renderDebriefTraitEvidence(result.debrief, result.mission.status === "COMPLETED", locale),
-    "",
-    "🛑 STOP REASON",
-    display(presentation.stopReason ?? result.mission.stop_reason),
-    "",
-    "➡️ NEXT",
-    display(presentation.next),
-    ...(result.mission.status === "COMPLETED" ? ["", t("└─ 記録を閉じる。次の作戦へ。", "└─ Record closed. On to the next operation.")] : []),
-    "",
-    t("※使用量は最終応答生成前の計測", "※Usage measured before final response generation"),
-  ].filter(line => line !== "").map(line => reportLiteral(line.trim())).join("\n\n");
-
   const modelLines = renderDebrief(result.debrief, locale);
   const modelNames = [...(result.debrief?.mix ?? []).map(entry => entry.model.replace(/[\r\n\t]/gu, " ")),
     t("その他", "Other"), t("未分類", "Unclassified")].sort((a, b) => b.length - a.length);
   const modelRows = modelLines.filter(line => line.startsWith("🐕 ")).flatMap(line => {
     const name = modelNames.find(value => line.startsWith(`🐕 ${value} `));
     if (name === undefined) return [line];
-    const characters = reportGraphemes(name);
-    const shortName = characters.length > 32
-      ? `${characters.slice(0, 20).join("")}…${characters.slice(-8).join("")} [${modelNames.indexOf(name) + 1}]` : name;
-    return [`🐕 ${shortName}`, `  ${line.slice(3 + name.length + 1)}`];
+    return [`🐕 ${name}`, `  ${line.slice(3 + name.length + 1)}`];
   });
-  const implementation = display(presentation.implementation);
-  const implementationChars = reportGraphemes(implementation);
-  const shortImplementation = implementationChars.length > 100
-    ? `${implementationChars.slice(0, 100).join("")}… ${t("（詳細記録）", "(see details)")}` : implementation;
   const summary = [
     `${t("🐾 SORTIE DOGS — 帰還報告", "🐾 SORTIE DOGS — Return Report")}｜${color} ${summaryLabel}`,
     ...(presentation.statusSummary?.trim() ? [`📌 ${display(presentation.statusSummary)}`] : []),
-    `🔧 ${t("成果", "Result")}: ${shortImplementation}`,
+    `🔧 ${t("成果", "Result")}: ${display(presentation.implementation)}`,
+    ...(presentation.commit?.trim() ? [`Commit: ${display(presentation.commit)}`] : []),
     `🛡 ${t("確認", "Validation")}: ${proof.validation} · ◔ ${criteria}`,
     `🔍 Review: ${review}`,
     ...(presentation.reviewNote ? [`${t("レビュー補足", "Review note")}: ${display(presentation.reviewNote)}`] : []),
@@ -752,7 +685,7 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
   const body = summary.join("\n");
   const longestFence = [...body.matchAll(/`+/gu)].reduce((longest, match) => Math.max(longest, match[0].length), 2);
   const fence = "`".repeat(longestFence + 1);
-  return `${fence}text\n${body}\n${fence}\n\n<details>\n<summary>📜 ${t("詳細記録", "Detailed record")}</summary>\n\n${detail}\n\n</details>`;
+  return `${fence}text\n${body}\n${fence}`;
 }
 
 export function formatRunMetrics(metrics: RunMetrics): string {

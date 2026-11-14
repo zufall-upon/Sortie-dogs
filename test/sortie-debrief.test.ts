@@ -116,11 +116,11 @@ test("one missing usage record preserves measured tokens without inventing cost 
   assert.deepEqual(result.debrief?.mixCoverage, { complete: false, observedTokens: 36 });
   assert.equal(result.debrief?.mix?.find(row => row.model === "provider/cheap")?.tokens, 24);
   const text = insertSortieResult("status: DONE", result);
-  assert.match(text, /使用量\s+36 tokens（観測分）/u);
-  assert.match(text, /モデル内訳\s+予測費用未換算（モデル別token数）/u);
-  assert.match(text, /🐕 provider\/cheap 費用未換算 · 24 tokens/u);
-  assert.match(text, /🐕 provider\/strong 費用未換算 · 12 tokens/u);
-  assert.doesNotMatch(text, /モデル内訳\s+usage未取得/u);
+  assert.match(text, /使用量: 36 tokens（観測分）/u);
+  assert.match(text, /モデル内訳: 予測費用未換算（モデル別token数）/u);
+  assert.match(text, /🐕 provider\/cheap\s+費用未換算 · 24 tokens/u);
+  assert.match(text, /🐕 provider\/strong\s+費用未換算 · 12 tokens/u);
+  assert.doesNotMatch(text, /モデル内訳: usage未取得/u);
   assert.equal(insertSortieResult(text, result), text);
 });
 
@@ -253,7 +253,7 @@ test("adding a wrapping collapsed report preserves detailed explanation headings
     "<details><summary>設計の詳細</summary>\n**Sortie Result** は表示名の例。\n```yaml\nmanifest: example.json\n```\n</details>";
   const output = insertSortieResult(`status: DONE\n\n${explanation}`, result);
   assert.ok(output.endsWith(explanation));
-  assert.equal((output.match(/<details>/gu) ?? []).length, 2);
+  assert.equal((output.match(/<details>/gu) ?? []).length, 1);
   assert.equal(insertSortieResult(output, result), output);
   assert.equal(terminalRunOutcome("<details><summary>Example</summary>\nstatus: DONE\n</details>"), undefined);
 });
@@ -301,15 +301,13 @@ test("cost bars use priced shares rather than token shares, group the tail, and 
       estimatedCost: { usd, pricedRequests: 1, unpricedRequests: 0, complete: true } })),
     validation: "未確認", review: "未確認", traits: [] } } as typeof result;
   const text = insertSortieResult("status: DONE", populated);
-  const [main, detail] = text.split("\n\n<details>\n");
-  assert.ok(main && detail);
+  const main = text;
+  assert.doesNotMatch(text, /\n<details>\n|詳細記録|PACK RECORD/u);
   assert.equal((main.match(/^🐕 /gmu) ?? []).length, 5);
-  assert.equal((detail.match(/^🐕 /gmu) ?? []).length, 5);
-  assert.match(detail, /モデル内訳\s+予測費用比率/u);
-  assert.match(detail, /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
-  assert.match(detail, /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
-  assert.match(detail, /↺未取得/u);
-  assert.match(detail, /⚡ 実行重複率 稼働区間の記録不足\n\n※worker区間・速度倍率ではありません/u);
+  assert.match(main, /モデル内訳: 予測費用比率/u);
+  assert.match(main.replace(/\n\s*/gu, " "), /🐕 fixture\/0 █████\s+50\.0% · \$0\.5000 · 1 tokens/u);
+  assert.match(main.replace(/\n\s*/gu, " "), /🐕 その他 ▊\s+7\.0% · \$0\.0700 · 50 tokens/u);
+  assert.match(main, /↺未取得/u);
   assert.equal(insertSortieResult(text, populated), text);
 
   const partial = { ...populated.debrief, mix: populated.debrief.mix.map(entry => entry.model === "fixture/5"
@@ -348,13 +346,13 @@ test("return report renders request estimates without replacing unknown prices w
   } }, "root", undefined, 5);
   const partial = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([priced, unknown]));
   const partialText = insertSortieResult("status: DONE", partial);
-  assert.match(partialText, /予測費用\s+\$0\.0001（一部未換算） ※予測概算/u);
-  assert.match(partialText, /モデル内訳\s+換算済み予測費用の比率（一部未換算）/u);
-  assert.match(partialText, /🐕 openai\/gpt-5\.6-sol ██████████ 100\.0% · \$0\.0001 · 12 tokens/u);
-  assert.match(partialText, /🐕 private\/private-model 費用未換算 · 12 tokens/u);
+  assert.match(partialText, /予測費用（概算）: \$0\.0001（一部未換算）/u);
+  assert.match(partialText, /モデル内訳: 換算済み予測費用の比率（一部未換算）/u);
+  assert.match(partialText, /🐕 openai\/gpt-5\.6-sol\s+██████████ 100\.0% · \$0\.0001 · 12 tokens/u);
+  assert.match(partialText, /🐕 private\/private-model\s+費用未換算 · 12 tokens/u);
   assert.doesNotMatch(partialText, /🐕 private\/private-model[^\n]*0\.0%/u);
   const unpriced = createSortieResult(receipt, { acceptance_contract: null, consumed_time_ms: null, satisfied_criteria: [] }, await collect([unknown]));
-  assert.match(insertSortieResult("status: DONE", unpriced), /予測費用\s+未換算 ※予測概算/u);
+  assert.match(insertSortieResult("status: DONE", unpriced), /予測費用（概算）: 未換算/u);
 });
 
 test("a partially priced model shows only its known cost and never treats missing usage as free", async () => {
