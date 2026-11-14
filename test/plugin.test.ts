@@ -1210,7 +1210,8 @@ test("generated coordinator keeps proof internal and renders concise Japanese te
   assert.match(semantics[1], /process_defect: gate \| routing \| handoff \| local tool defect -> autonomous repair; never terminal BLOCKED/);
   assert.match(semantics[1], /interruption_marker: TRUE_INTERRUPTION: user: <condition> \| TRUE_INTERRUPTION: internal: <condition>/);
   assert.match(semantics[1], /continuation_not_interruption: local process defect \| step boundary \| continuation request \| recoverable limit/);
-  assert.match(coordinator.content, /plugin replaces that exact persisted card in place with a compact visible text panel/i);
+  assert.match(coordinator.content, /plugin replaces that exact persisted card in place with a compact summary/i);
+  assert.match(coordinator.content, /Do not add a detailed record/i);
   assert.match(coordinator.content, /Do not estimate or fabricate them/i);
   assert.match(coordinator.content, /LUNA_FABRIC_CONTRACT_SHAPE_FIXTURE/);
   assert.match(coordinator.content, /"version": "0\.8\.0"/);
@@ -5261,12 +5262,15 @@ test("Career persistence failure preserves the terminal outcome and retry record
     const successful = { text: "status: INTERRUPTED — incomplete\nTRUE_INTERRUPTION: user: fixture telemetry interruption\n\n**次:** resume" };
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
     assert.match(successful.text, /^status: INTERRUPTED/u);
-    assert.match(successful.text, /中断 1/u);
+    assert.doesNotMatch(successful.text, /保存履歴を取得できません|\n<details>\n<summary>📜/u);
     await hooks["experimental.text.complete"]!({ sessionID: "career-root" }, successful);
     const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("career-root").digest("hex")}.json`);
     const snapshot = await RunFlightLedger.readGoalFile(path);
     assert.equal(snapshot.state.phase, "stopped");
     assert.equal(snapshot.records.filter(({ event }) => event.kind === "goal.reported").length, 1);
+    const { summarizeCareer } = await import("../dist/plugin/sortie-career.js");
+    assert.equal(summarizeCareer([snapshot.records], { files: 1, included: 1, unavailable: 0, truncated: false }).interrupted, 1,
+      "saved history is retained internally without reproducing its detailed panel");
   });
 });
 

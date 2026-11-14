@@ -674,6 +674,9 @@ export function formatSortieResult(result: SortieResult, presentation: SortieRes
       `🪙 ${t("使用量", "Usage")}: ${tokenText}`),
     `🪙 ${t("予測費用（概算）", "Estimated cost")}: ${estimatedCost}`,
     `${t("host計上費用", "Host-recorded cost")}: ${result.cost.cost_usd.availability === "available" ? `$${result.cost.cost_usd.value.toFixed(4)}` : "unknown"} ${t("（請求総額ではない）", "(not the total bill)")}`,
+    ...(result.career === undefined ? [t("📜 保存履歴を取得できません", "📜 Saved history unavailable")]
+      : result.career.coverage.unavailable || result.career.coverage.truncated
+        ? [t("📜 保存履歴は部分集計", "📜 Saved history is partial")] : []),
     ...modelLines.filter(line => line.startsWith(t("モデル内訳", "Model breakdown"))).map(line => line.replace(/\s{2,}/gu, ": ")),
     ...modelRows,
     ...(modelLines.some(line => line.includes("†host") || line.includes("†Some host"))
