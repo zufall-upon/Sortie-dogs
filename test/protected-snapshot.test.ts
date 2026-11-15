@@ -85,11 +85,19 @@ test("a populated directory without concrete source outputs keeps full-candidate
 
 test("tracked nested checkout files cannot hide ignored inputs or new outputs from a broad directory grant", async () => fixture(async root => {
   const checkout = join(root, "checkout"); await mkdir(checkout);
+  await exec("git", ["init", "--quiet"], { cwd: root });
   await exec("git", ["init", "--quiet"], { cwd: checkout });
   await writeFile(join(checkout, ".gitignore"), "ignored-input.txt\n");
   await writeFile(join(checkout, "tracked.txt"), "tracked");
   await writeFile(join(checkout, "ignored-input.txt"), "input");
   await exec("git", ["add", "--", ".gitignore", "tracked.txt"], { cwd: checkout });
+  const sentinel = join(root, "nested-hook-fired"), hook = join(checkout, ".git", "probe-fsmonitor");
+  const shellPath = sentinel.replaceAll("\\", "/").replaceAll("'", "'\\''");
+  await executable(hook, `#!/bin/sh\nprintf fired > '${shellPath}'\n`);
+  await exec("git", ["config", "core.fsmonitor", hook], { cwd: checkout });
+  await exec("git", ["ls-files", "-z"], { cwd: checkout });
+  assert.equal(await readFile(sentinel, "utf8"), "fired", "the nested hook is runnable");
+  await rm(sentinel);
   const pinned = await validationPin(root, ["checkout/tracked.txt"], ["checkout/**"], ["node check.mjs"]);
   assert.equal(await validatedSourceSnapshot(root, pinned.binding), undefined, "tracked files do not prove that an ignored file is output-only");
   await writeFile(join(checkout, "ignored-input.txt"), "changed real input");
@@ -97,6 +105,37 @@ test("tracked nested checkout files cannot hide ignored inputs or new outputs fr
   await writeFile(join(checkout, "ignored-input.txt"), "input");
   await writeFile(join(checkout, "new-output.txt"), "unverified deliverable");
   assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.candidate, pinned.candidate);
+  await assert.rejects(readFile(sentinel), { code: "ENOENT" }, "snapshot must not execute the nested checkout's fsmonitor hook");
+}));
+
+test("tracked input scans do not execute root or nested Git fsmonitor hooks", async () => fixture(async root => {
+  const nested = join(root, "nested"), scratch = join(nested, "scratch");
+  await mkdir(scratch, { recursive: true });
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await exec("git", ["init", "--quiet"], { cwd: nested });
+  const tracked = [join(root, "root.txt"), join(scratch, "input.txt")];
+  for (const path of tracked) await writeFile(path, "tracked input");
+  await exec("git", ["add", "--", "root.txt"], { cwd: root });
+  await exec("git", ["add", "--", "scratch/input.txt"], { cwd: nested });
+  const sentinels = [join(root, "root-hook-fired"), join(root, "nested-hook-fired")];
+  for (const [index, repository] of [root, nested].entries()) {
+    const hook = join(repository, ".git", "probe-fsmonitor"), sentinel = sentinels[index]!;
+    const shellPath = sentinel.replaceAll("\\", "/").replaceAll("'", "'\\''");
+    await executable(hook, `#!/bin/sh\nprintf fired > '${shellPath}'\n`);
+    await exec("git", ["config", "core.fsmonitor", hook], { cwd: repository });
+    await exec("git", ["ls-files", "-z"], { cwd: repository });
+    assert.equal(await readFile(sentinel, "utf8"), "fired", "the configured hook is runnable by an ordinary Git scan");
+    await rm(sentinel);
+  }
+  const protection = await currentSnapshotProtection(root, { read: [], write: ["nested/**"] });
+  for (const path of tracked) assert.ok(protection.includes(path), `tracked input remains protected: ${path}`);
+  const pinned = await validationPin(root, [root + "/**"], ["nested/**"], ["TMPDIR=./nested/scratch node check.mjs"]);
+  const before = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(before);
+  await writeFile(tracked[1]!, "changed tracked input");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), before);
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  for (const sentinel of sentinels) await assert.rejects(readFile(sentinel), { code: "ENOENT" });
 }));
 
 test("tracked input scans do not execute root or nested Git fsmonitor hooks", async () => fixture(async root => {
@@ -434,6 +473,7 @@ test("a whole-Location grant protects tracked scratch inputs from the fixed vali
   await writeFile(manifestPath, bytes);
   const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) }, { directory: checkout, command });
   assert.ok(pinned?.binding.freshness);
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [scratch]);
   const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
   const concrete = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
   const concreteSource = await validatedSourceSnapshot(root, concrete);

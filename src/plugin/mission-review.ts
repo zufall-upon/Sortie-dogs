@@ -703,7 +703,11 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
   const manifestScope = (path: string) => path === "." ? `${resolve(directory)}/**` : path;
-  const protection = await currentSnapshotProtection(directory, { read: scope.read.map(manifestScope), write: scope.write.map(manifestScope) });
+  // Revisit every captured validation cwd, not only scope roots: a broad Location
+  // grant can contain a nested checkout whose newly tracked scratch is real input.
+  const manifest = { read: scope.read.map(manifestScope), write: scope.write.map(manifestScope) };
+  const directories = new Set(bindings.flatMap(binding => binding.freshness?.toolchain?.directory ? [binding.freshness.toolchain.directory] : []));
+  const protection = [...new Set((await Promise.all([undefined, ...directories].map(cwd => currentSnapshotProtection(directory, manifest, cwd)))).flat())];
   const scratch = bindings.map(binding => ({ binding, excludes: snapshotScratchExclusion(binding, protection) }));
   const controls = bindings.map(binding => ({ binding, excludes: snapshotControlExclusion(directory, binding, protection) }));
   const scopes = [...scope.read, ...scope.write].map(path => resolve(directory, normalizeManifestScope(manifestScope(path)).path));

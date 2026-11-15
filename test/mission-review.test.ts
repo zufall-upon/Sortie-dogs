@@ -1248,20 +1248,24 @@ for (const promotion of ["exact-output", "tracked-source"]) test(`Review include
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Review includes tracked scratch promoted under a Git subdirectory Location", async () => {
+for (const layout of ["subdirectory Location", "nested validation checkout"] as const) test(`Review includes tracked scratch promoted under a ${layout}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const repository = await mkdtemp(resolve("_testenv/mission-review-subdir-"));
-  const root = join(repository, "package"), scratch = join(root, ".tmp");
+  const root = layout === "subdirectory Location" ? join(repository, "package") : repository;
+  const checkout = layout === "subdirectory Location" ? root : join(root, "package"), scratch = join(checkout, ".tmp");
   try {
     await mkdir(scratch, { recursive: true });
     await git("git", ["init", "--quiet"], { cwd: repository });
+    if (layout === "nested validation checkout") await git("git", ["init", "--quiet"], { cwd: checkout });
     await writeFile(join(scratch, "tracked.txt"), "tracked input");
-    await git("git", ["add", "--", "package/.tmp/tracked.txt"], { cwd: repository });
+    await git("git", ["add", "--", layout === "subdirectory Location" ? "package/.tmp/tracked.txt" : ".tmp/tracked.txt"],
+      { cwd: layout === "subdirectory Location" ? repository : checkout });
     const command = "TMPDIR=./.tmp node check.mjs", manifestPath = join(root, "manifest.json");
-    const value = { version: "0.1.0", task_id: "unit", read: [root + "/**"], write: [".tmp/**"], validation: [command] };
+    const value = { version: "0.1.0", task_id: "unit", read: [root + "/**"],
+      write: [layout === "subdirectory Location" ? ".tmp/**" : root + "/**"], validation: [command] };
     const bytes = JSON.stringify(value); await writeFile(manifestPath, bytes);
     const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(bytes).digest("hex") },
-      { directory: root, command });
+      { directory: checkout, command });
     assert.ok(snapshot);
     const run = { units: [{ unit: { id: "unit", ...value, acceptance_indices: [0] }, hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
     const first = await missionReviewSource(root, run);
@@ -1273,7 +1277,8 @@ test("Review includes tracked scratch promoted under a Git subdirectory Location
     await writeFile(join(scratch, "tracked.txt"), "tracked input");
     await writeFile(join(scratch, "promoted.txt"), "new input");
     assert.equal((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
-    await git("git", ["add", "--", "package/.tmp/promoted.txt"], { cwd: repository });
+    await git("git", ["add", "--", layout === "subdirectory Location" ? "package/.tmp/promoted.txt" : ".tmp/promoted.txt"],
+      { cwd: layout === "subdirectory Location" ? repository : checkout });
     const changed = await missionReviewSource(root, run);
     assert.notEqual(changed.fingerprint, first.fingerprint);
     assert.match(changed.excerpt, /promoted\.txt/u);
