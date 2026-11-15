@@ -23,8 +23,8 @@ evidence-backed result, not more agents for their own sake.
 · [GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases)
 · [Execution vision](docs/v0.14.0-execution-vision.md)
 
-The npm examples below target v0.16.25, the published npm version at release preparation time.
-Publication of v0.16.26 to npm is a separate manual step; use its fixed GitHub Release archive once available.
+The npm examples below target v0.16.26. npm publication remains a separate manual
+release step; installing a package does not imply a running host has reloaded it.
 
 [When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
 [Measured results](#measured-results) · [Configuration](#configuration) · [Documentation](#documentation)
@@ -81,7 +81,7 @@ Use an existing Codex CLI signed in with **ChatGPT**. On Windows, PowerShell **7
 available; POSIX uses bash. Sortie does not install Codex, start login or use a metered API fallback.
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.25
+npm install --save-dev sortie-dogs@0.16.26
 npx --no-install sortie-dogs codex init .
 ```
 
@@ -110,7 +110,7 @@ bridge. [Codex guide: SDK, permissions, progress, resume and manifest route](doc
 Use **OpenCode V2**. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.25
+npm install --save-dev sortie-dogs@0.16.26
 npx --no-install sortie-dogs init .
 ```
 
@@ -130,7 +130,7 @@ v0.10 is installed. [OpenCode setup and configuration](docs/configuration.md) ·
 
 ### Project Memory (OpenCode v010, opt-in)
 
-With v0.16.25 installed, run `sortie-dogs memory on .` once and reload
+With v0.16.26 installed, run `sortie-dogs memory on .` once and reload
 the project plugin. Ordinary public turns then become pending sources; the existing
 Operator records semantic additions, corrections, withdrawals and decisions without
 another save request or a dedicated model call per turn. New sessions recall the
@@ -203,6 +203,34 @@ one. Required success checks, missing commands and active/unstarted operations s
 [Mission tools and validation policy](docs/configuration.md#mission-tools) ·
 [Operation efficiency](docs/mission-operation-efficiency.md) ·
 [Review policy](docs/quality-first-review.md)
+
+## Test optimization vision
+
+The v0.17.x direction is to make test optimization part of ordinary Missions, without
+requiring a separate cleanup Mission or an additional request from the user. This is a
+**future vision, not yet implemented**. Its effects on test count, execution time and
+defect detection have not been measured.
+
+- **Test Gate:** during normal test changes, prefer improving or combining existing
+  checks when they provide the needed regression value. Keep essential behavior,
+  boundaries, public API and security coverage; review test value as part of the
+  existing workflow rather than adding an agent or review round for every test.
+- **Test Debt Audit:** at suitable milestones or signs of test growth, inventory tests,
+  identify evidence-backed cleanup candidates and protect important checks. Safely
+  consolidating or removing tests includes applying and validating the changes, not
+  merely producing a report. Work should normally be lightweight and deepen when needed.
+- **Full Test Guard:** immediately before managed long-running tests, assess whether
+  execution is needed, a narrower check is sufficient, or compatible current evidence
+  can be reused. Equivalent in-flight executions should be joined instead of started
+  twice. Required platform, integration, security and release checks remain in place.
+
+The intended order is cleanup, candidate freeze, then the guard and required
+validation. Changed candidates need their own applicable evidence; neither stale PASS
+results nor unchecked reuse establish success. Avoid self-triggering audit loops and
+unconditional repeated full runs. Existing focused-testing guidance and validation
+evidence handling are useful foundations, but they do not implement this vision by
+themselves. Compatibility, licensing and suitability of possible external tools remain
+to be verified; no specific tool or performance improvement is promised.
 
 ## Default models
 
