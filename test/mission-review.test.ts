@@ -691,6 +691,35 @@ test("Review uses the fixed old or new config recipe and never weakens mixed leg
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("review source scans do not execute root or nested Git fsmonitor hooks", async () => {
+  const root = await mkdtemp(resolve("_testenv/review-fsmonitor-"));
+  try {
+    const nested = join(root, "nested"); await mkdir(nested);
+    for (const repository of [root, nested]) {
+      await git("git", ["init", "--quiet"], { cwd: repository });
+      await writeFile(join(repository, "output.txt"), "reviewed output");
+      await git("git", ["add", "--", "output.txt"], { cwd: repository });
+    }
+    const sentinels = [join(root, "root-hook-fired"), join(root, "nested-hook-fired")];
+    for (const [index, repository] of [root, nested].entries()) {
+      const hook = join(repository, ".git", "probe-fsmonitor"), sentinel = sentinels[index]!;
+      const shellPath = sentinel.replaceAll("\\", "/").replaceAll("'", "'\\''");
+      await writeFile(hook, `#!/bin/sh\nprintf fired > '${shellPath}'\n`); await chmod(hook, 0o755);
+      await git("git", ["config", "core.fsmonitor", hook], { cwd: repository });
+      await git("git", ["ls-files", "-z"], { cwd: repository });
+      assert.equal(await fs.readFile(sentinel, "utf8"), "fired", "the configured hook is runnable by an ordinary Git scan");
+      await rm(sentinel);
+    }
+    const run = { units: [{ unit: { read: [], write: ["output.txt", "nested/**"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.match(first.excerpt, /output\.txt/u);
+    assert.match(first.excerpt, /nested\/output\.txt/u);
+    await writeFile(join(nested, "output.txt"), "changed output");
+    assert.notEqual((await missionReviewSource(root, run)).candidateFingerprint, first.candidateFingerprint);
+    for (const sentinel of sentinels) await assert.rejects(fs.readFile(sentinel), { code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a non-Git mission reviews scoped nested repositories without a new root or grant", async () => {
   const area = await mkdtemp(join(tmpdir(), "mission-review-non-git-"));
   const directory = join(area, "mission"), repository = join(directory, "candidate");

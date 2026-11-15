@@ -703,7 +703,9 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     else rootLocal.push(path);
   }
   const gitScopes = [...rootLocal, ...(toolInput ? [] : [`:(exclude)${TOOL_ENVIRONMENT}`])];
-  const git = async (args: string[]) => (await exec("git", args, { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
+  // Review inventories can enter Worker-writable repositories. Do not execute their
+  // configured fsmonitor hooks while gathering review source outside native permissions.
+  const git = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", ...args], { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
   let names = "", ignored = "", repository = true, scopedDiff = "";
   const directoryChildren = async (absolute: string, path: string) => {
     if (unreadableLocal.has(path)) return undefined;
@@ -721,7 +723,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     }
   };
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
-    const scopedGit = async (args: string[]) => (await exec("git", args, { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
+    const scopedGit = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", ...args], { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
     const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
     const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
     for (const name of tracked.split("\0").filter(Boolean)) { collected.add(prefix(name)); currentFiles.add(prefix(name)); }
