@@ -886,6 +886,12 @@ test("Review and snapshot reject redirected tracked submodule metadata", async (
         return true;
       });
     }
+    // Native Git can inspect a submodule HEAD even with ignore=dirty.
+    await git("git", ["config", "submodule.nested.ignore", "dirty"], { cwd: root });
+    assert.equal(await missionDeliveryObservation(root, "redirected-dirty"), undefined);
+    const broad = { units: [{ unit: { read: [], write: ["."] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, broad), /untrusted Git submodule metadata/);
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
     // A staged .gitmodules edit must not make a different protected module trusted.
     await git("git", ["config", "--file", ".gitmodules", "submodule.nested.path", "not-nested"], { cwd: root });
     await git("git", ["config", "--file", ".gitmodules", "submodule.other.path", "nested"], { cwd: root });

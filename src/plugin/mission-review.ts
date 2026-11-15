@@ -127,11 +127,11 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
     // own attributes. Inspect dirty submodules separately through this same boundary.
     const safeGit: FilterlessGit = Object.assign(async (args: string[]) => {
       const command = args[0] === "diff" || args[0] === "status" ? args[0] : undefined;
-      const suppressDirty = (mode: SubmoduleIgnore) => mode === "all" ? "all" : "dirty";
-      // Override only worktree recursion, retaining opt-out modes and staged gitlinks.
-      // A global --ignore-submodules flag would erase per-submodule settings.
-      const submodules = command ? ["-c", `diff.ignoreSubmodules=${suppressDirty(ignoreMode(configuration.get("diff.ignoresubmodules") ?? "none"))}`,
-        ...[...moduleNames].flatMap(([path, name]) => ["-c", `submodule.${name}.ignore=${suppressDirty(submoduleIgnore(relative(directory, path), command))}`])] : [];
+      // Even ignore=dirty can cause Git to read a submodule's writable .git file to
+      // compare HEAD. Suppress all implicit recursion and inspect HEAD separately
+      // through the verified gitdir below; staged gitlinks remain visible to Git.
+      const submodules = command ? ["-c", "diff.ignoreSubmodules=all",
+        ...[...moduleNames].flatMap(([, name]) => ["-c", `submodule.${name}.ignore=all`])] : [];
       return (await exec("git", ["--no-optional-locks", `--git-dir=${privateGit}`, `--work-tree=${root}`,
         ...effective, ...submodules, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...args], { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
     }, { submoduleIgnore, originalGitdir: gitdir });
@@ -154,14 +154,15 @@ async function currentGitDiff(git: (args: string[]) => Promise<string>, paths: s
 async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: string[], command: GitComparison = "diff",
   ignoreUntracked = false): Promise<{ path: string; diff: string }[]> {
   const tracked = await git(["ls-files", "--stage", "-z", "--", ...paths]);
-  const names = [...new Set(tracked.split("\0").flatMap(entry => {
-    const match = /^160000 [a-f0-9]{40,64} [0-3]\t([\s\S]+)$/u.exec(entry);
-    return match ? [match[1]!] : [];
-  }))];
+  const names = new Map<string, string>();
+  for (const entry of tracked.split("\0")) {
+    const match = /^160000 ([a-f0-9]{40,64}) ([0-3])\t([\s\S]+)$/u.exec(entry);
+    if (match && (match[2] === "0" || !names.has(match[3]!))) names.set(match[3]!, match[1]!);
+  }
   const dirty: { path: string; diff: string }[] = [];
-  for (const path of names) {
+  for (const [path, indexedHead] of names) {
     const ignore = git.submoduleIgnore(path, command);
-    if (ignore === "all" || ignore === "dirty") continue;
+    if (ignore === "all") continue;
     const untracked = ignoreUntracked || ignore === "untracked";
     let root = resolve(directory), accessible = true;
     for (const part of path.split("/")) {
@@ -176,10 +177,13 @@ async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: 
     const gitdir = await trustedSubmoduleGitdir(directory, root, git.originalGitdir);
     if (!gitdir) throw new Error(`untrusted Git submodule metadata: ${path}`);
     const found = await withFilterlessGit(root, async subGit => {
+      const head = (await subGit(["rev-parse", "--verify", "HEAD"])).trim();
+      const headDiff = head === indexedHead ? "" : `Subproject commit ${indexedHead}\nSubproject commit ${head}\n`;
+      if (ignore === "dirty") return headDiff || undefined;
       const status = await subGit(["status", "--porcelain=v2", `--untracked-files=${untracked ? "no" : "all"}`, "-z"]);
       const nested = await dirtyGitSubmodules(root, subGit, ["."], "status", untracked);
-      if (!status && !nested.length) return undefined;
-      return (await currentGitDiff(subGit, ["."])) + submoduleDiff(nested);
+      if (!headDiff && !status && !nested.length) return undefined;
+      return headDiff + (await currentGitDiff(subGit, ["."])) + submoduleDiff(nested);
     }, gitdir);
     if (found !== undefined) dirty.push({ path, diff: found });
   }
