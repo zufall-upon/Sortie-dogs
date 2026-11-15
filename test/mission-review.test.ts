@@ -14,7 +14,7 @@ import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
-import { protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { currentSnapshotProtection, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const git = promisify(execFile);
@@ -840,6 +840,65 @@ for (const location of ["root", "nested"] as const) for (const filter of ["clean
     } finally { await rm(area, { recursive: true, force: true }); }
   });
 }
+
+test("Review and delivery preserve non-filter info attributes in the private index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-info-attributes-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    // No terminal newline: the filter override must not join the existing attribute rule.
+    await writeFile(join(root, ".git", "info", "attributes"), "file.txt text eol=crlf");
+    await writeFile(join(root, "file.txt"), "before\r\n");
+    await git("git", ["add", "file.txt"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    await writeFile(join(root, "file.txt"), "before\r\n");
+    assert.equal((await git("git", ["status", "--porcelain"], { cwd: root })).stdout, "");
+    assert.equal((await missionDeliveryObservation(root, "attributes"))?.clean, true);
+    await writeFile(join(root, "file.txt"), "after!\r\n");
+    const expected = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "file.txt"], { cwd: root })).stdout;
+    const run = { units: [{ unit: { read: [], write: ["file.txt"] }, hashes: [] }] } as never;
+    assert.ok((await missionReviewSource(root, run)).excerpt.includes(expected));
+    assert.equal((await missionDeliveryObservation(root, "changed"))?.clean, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review and snapshot reject redirected tracked submodule metadata", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-submodule-redirect-"));
+  const root = join(area, "root"), source = join(area, "source"), secret = join(area, "private"), nested = join(root, "nested");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    for (const directory of [root, source, secret]) { await mkdir(directory); await git("git", ["init", "--quiet"], { cwd: directory }); }
+    await writeFile(join(source, "normal.txt"), "normal\n");
+    await git("git", ["add", "."], { cwd: source }); await commit(source);
+    await writeFile(join(secret, "private.txt"), "PR384_PRIVATE_SENTINEL\n");
+    await git("git", ["add", "."], { cwd: secret }); await commit(secret);
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", secret, "other"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root }); await commit(root);
+    assert.equal((await missionDeliveryObservation(root, "legitimate"))?.clean, true);
+    await writeFile(join(nested, ".git"), `gitdir: ${join(secret, ".git")}\n`);
+    assert.equal(await missionDeliveryObservation(root, "redirected"), undefined);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    for (const output of [".", "nested/**"]) {
+      const run = { units: [{ unit: { read: [], write: [output] }, hashes: [] }] } as never;
+      await assert.rejects(missionReviewSource(root, run), error => {
+        assert.match(String(error), /untrusted Git submodule metadata/);
+        assert.doesNotMatch(String(error), /PR384_PRIVATE_SENTINEL/);
+        return true;
+      });
+    }
+    // A staged .gitmodules edit must not make a different protected module trusted.
+    await git("git", ["config", "--file", ".gitmodules", "submodule.nested.path", "not-nested"], { cwd: root });
+    await git("git", ["config", "--file", ".gitmodules", "submodule.other.path", "nested"], { cwd: root });
+    await git("git", ["add", ".gitmodules"], { cwd: root });
+    await writeFile(join(nested, ".git"), "gitdir: ../.git/modules/other\n");
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+    const foreign = join(root, "foreign"); await mkdir(foreign);
+    await writeFile(join(foreign, ".git"), `gitdir: ${join(secret, ".git")}\n`);
+    const untracked = { units: [{ unit: { read: [], write: ["foreign/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, untracked), /untrusted nested Git metadata/);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
 
 test("public Review and delivery inspect dirty Git submodules without executing their filters", async () => {
   const area = await mkdtemp(join(tmpdir(), "review-submodule-filter-"));

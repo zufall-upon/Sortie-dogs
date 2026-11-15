@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, copyFile, lstat, mkdir, mkdtemp, readlink, readdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -18,6 +18,7 @@ import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers,
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
+import { pinnedGitArguments, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -27,20 +28,21 @@ type SubmoduleIgnore = "none" | "untracked" | "dirty" | "all";
 type GitComparison = "diff" | "status";
 type FilterlessGit = ((args: string[]) => Promise<string>) & {
   submoduleIgnore(path: string, command: GitComparison): SubmoduleIgnore;
+  originalGitdir?: string;
 };
 
 /** Run worktree comparisons with a private index and an overriding attributes file.
  * Git's --no-ext-diff/--no-textconv do not disable clean or process filters. */
-async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>): Promise<T> {
+async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>, gitdir?: string): Promise<T> {
   // Missing promised objects are unavailable input, not permission to fetch or run a remote helper.
   const readEnv = gitReadEnvironment();
-  const original = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", ...args],
+  const original = async (args: string[]) => (await exec("git", [...pinnedGitArguments(directory, gitdir), "-c", "core.fsmonitor=false", ...args],
     { cwd: directory, env: readEnv, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const line = (value: string) => value.replace(/\r?\n$/u, "");
   const path = async (name: string) => resolve(directory, line(await original(["rev-parse", "--git-path", name])));
   const root = line(await original(["rev-parse", "--show-toplevel"]));
   const objects = await path("objects"), index = await path("index"), config = await path("config");
-  const worktreeConfig = await path("config.worktree");
+  const worktreeConfig = await path("config.worktree"), attributes = await path("info/attributes");
   const objectFormat = line(await original(["rev-parse", "--show-object-format"]));
   // Gitdir-conditional settings otherwise resolve against the temporary repository.
   // Carry the effective worktree and diff settings, but not executable drivers.
@@ -92,8 +94,7 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
     for (const key of ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) delete initEnv[key];
     await exec("git", ["init", "--quiet", "--bare", "--template=", ...(objectFormat === "sha256" ? ["--object-format=sha256"] : []), privateGit],
       { cwd: directory, env: initEnv });
-    // Load repository and worktree settings while keeping the real info/attributes
-    // and index out of the comparison.
+    // Load repository and worktree settings while keeping the real index out of the comparison.
     const include = async (file: string) => { await exec("git", ["config", "--file", join(privateGit, "config"), "--add", "include.path", file],
       { cwd: directory, env: initEnv }); };
     await include(config);
@@ -103,7 +104,12 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
     });
     if (worktreeEnabled) await include(worktreeConfig);
     await mkdir(join(privateGit, "info"), { recursive: true });
-    await writeFile(join(privateGit, "info", "attributes"), "* -filter\n");
+    const originalAttributes = await readFile(attributes).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return Buffer.alloc(0);
+    });
+    const separator = originalAttributes.length && originalAttributes.at(-1) !== 10 ? "\n" : "";
+    await writeFile(join(privateGit, "info", "attributes"), Buffer.concat([originalAttributes, Buffer.from(`${separator}* -filter\n`)]));
     // Retain the symbolic branch for status and includeIf.onbranch settings.
     if (headRef) {
       if (head) {
@@ -128,7 +134,7 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
         ...[...moduleNames].flatMap(([path, name]) => ["-c", `submodule.${name}.ignore=${suppressDirty(submoduleIgnore(relative(directory, path), command))}`])] : [];
       return (await exec("git", ["--no-optional-locks", `--git-dir=${privateGit}`, `--work-tree=${root}`,
         ...effective, ...submodules, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...args], { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
-    }, { submoduleIgnore });
+    }, { submoduleIgnore, originalGitdir: gitdir });
     return await action(safeGit);
   } finally { await rm(privateGit, { recursive: true, force: true }); }
 }
@@ -167,12 +173,14 @@ async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: 
     if (!accessible) continue;
     const marker = await lstat(join(root, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     if (!marker) continue; // An uninitialized submodule has no worktree to inspect.
+    const gitdir = await trustedSubmoduleGitdir(directory, root, git.originalGitdir);
+    if (!gitdir) throw new Error(`untrusted Git submodule metadata: ${path}`);
     const found = await withFilterlessGit(root, async subGit => {
       const status = await subGit(["status", "--porcelain=v2", `--untracked-files=${untracked ? "no" : "all"}`, "-z"]);
       const nested = await dirtyGitSubmodules(root, subGit, ["."], "status", untracked);
       if (!status && !nested.length) return undefined;
       return (await currentGitDiff(subGit, ["."])) + submoduleDiff(nested);
-    });
+    }, gitdir);
     if (found !== undefined) dirty.push({ path, diff: found });
   }
   return dirty;
@@ -880,7 +888,9 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     }
   };
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
-    const scopedGit = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", ...args], { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
+    const marker = await lstat(join(absolute, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    const gitdir = marker ? await trustedNestedGitdir(directory, absolute) : undefined;
+    const scopedGit = async (args: string[]) => (await exec("git", [...pinnedGitArguments(absolute, gitdir), "-c", "core.fsmonitor=false", ...args], { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
     const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
     const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
     for (const name of tracked.split("\0").filter(Boolean)) { collected.add(prefix(name)); currentFiles.add(prefix(name)); }
@@ -894,7 +904,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       const dirty = await dirtyGitSubmodules(absolute, git, pathspec);
       for (const item of dirty) currentFiles.add(prefix(item.path));
       return (await currentGitDiff(git, pathspec)) + submoduleDiff(dirty);
-    });
+    }, gitdir);
     if (delta) scopedDiff += `\n--- repository output: ${path} ---\n${delta}`;
   };
   for (const [absolute, paths] of nested) {
