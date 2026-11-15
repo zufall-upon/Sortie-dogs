@@ -438,6 +438,15 @@ function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
   return paths;
 }
 
+/** Git path permission must describe the argv Bash sends, not an expanded shell word. */
+function isLiteralPosixGitAddPath(source: string): boolean {
+  // Escapes are not decoded here; even quoted backslashes cannot safely become
+  // platform-independent manifest separators. PowerShell keeps its native paths.
+  if (source.includes("\\") || hasUnresolvedOutputQuoting(source)) return false;
+  if (/^'[^']*'$/u.test(source) || /^"[^"$`]*"$/u.test(source)) return true;
+  return !/["'$`{}]/u.test(source) && !source.startsWith("~");
+}
+
 /** A single, literal absolute index assignment on a direct POSIX git add. */
 function gitAddIndexAssignment(source: string): { path: string; command: string } | undefined {
   const match = /^GIT_INDEX_FILE=(?:'([^'\\\r\n]*)'|"([^"\\$`\r\n]*)"|([^\s'"\\$`~*?\[\]{}()<>;&|]+))(?=\s)/u.exec(source);
@@ -515,7 +524,8 @@ function scanShellSyntax(source: string, dialect: ShellDialect): ShellSyntax {
         continue;
       }
       if (quote === "\"" &&
-          (((character === "$" || character === "<") && source[index + 1] === "(") ||
+          ((dialect === "posix" && character === "`") ||
+            ((character === "$" || character === "<") && source[index + 1] === "(") ||
             (character === "$" && source[index + 1] === "{"))) unsafeExpansion = true;
       continue;
     }
@@ -1569,8 +1579,10 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       applies = true;
       gitMutation = true;
       const selected = exactGitAddPaths(tokens);
-      if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
-      else {
+      if (selected === undefined || !powershell && selected.some((_, index) =>
+        !isLiteralPosixGitAddPath(tokenSources[rawTokens.length - selected.length + index]!))) {
+        ambiguous = true; gitAmbiguous = true;
+      } else {
         if (indexAssignment !== undefined) {
           alternateIndexAdd = true;
           gitIndexPaths.push(paths.length);

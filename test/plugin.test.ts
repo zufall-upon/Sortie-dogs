@@ -11016,7 +11016,12 @@ test("git add requires exact explicit paths and rejects broad or undeclared path
     await invoke("git add allowed.txt second.txt");
     await invoke("git add allowed.txt second.txt && git diff --cached --stat");
     await invoke("git add -- allowed.txt second.txt && git diff --cached --stat");
-    await invoke("git add -- nested\\file.txt");
+    await before(
+      { tool: "powershell", sessionID: "git-add", callID: "windows-path" },
+      { args: { command: "git add -- nested\\file.txt" } },
+    );
+    await assert.rejects(invoke("git add -- nested\\file.txt"), /Write denied/,
+      "POSIX backslashes escape characters instead of denoting directory separators");
     for (const command of ["git add", "git add --", "git add -A", "git add --all allowed.txt", "git add *.txt", "git add :/allowed.txt"]) {
       await assert.rejects(invoke(command), /missing-path|repeated-command/, command);
     }
@@ -11533,6 +11538,99 @@ test("git native alternate index add rejects unscoped destinations, expansion, o
     await execFileAsync("git", ["-C", directory, "add", "--", "allowed.txt"], { env: { ...process.env, GIT_INDEX_FILE: link } });
     assert.equal((await lstat(link)).isSymbolicLink(), true, "native Git retains the index symlink");
     assert.notDeepEqual(await readFile(nativeIndex), realIndex, "native Git follows the index symlink and writes its target");
+  });
+});
+
+test("git native literal pathspec checks match POSIX argv for native and alternate indexes", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-native-literal-pathspec", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, "nested"));
+    await mkdir(join(directory, "~+"));
+    const literalBacktick = "allowed`touch outside-marker`.txt";
+    for (const path of ["existing.txt", "allowed.txt", "outside.txt", "nestedfile.txt", "nested/file.txt",
+      "{allowed,outside}.txt", "~+/outside.txt", literalBacktick, "literal $ file.txt"]) {
+      await writeFile(join(directory, path), `${path}\n`);
+    }
+    const index = join(directory, "candidate.index"), oracle = join(directory, "oracle.index");
+    await execFileAsync("git", ["-C", directory, "add", "--", "existing.txt"]);
+    await execFileAsync("git", ["-C", directory, "add", "--", "existing.txt"], { env: { ...process.env, GIT_INDEX_FILE: index } });
+    const nativeIndex = join(directory, ".git", "index");
+    const nativeBefore = await readFile(nativeIndex), alternateBefore = await readFile(index);
+    const marker = join(directory, "outside-marker");
+    const cases = [
+      { word: "nested\\file.txt", scoped: "nested/file.txt", actual: "nestedfile.txt\0" },
+      { word: "{allowed,outside}.txt", scoped: "{allowed,outside}.txt", actual: "allowed.txt\0outside.txt\0" },
+      { word: "~+/outside.txt", scoped: "~+/outside.txt", actual: "outside.txt\0" },
+      { word: `"${literalBacktick}"`, scoped: literalBacktick, actual: "allowed.txt\0" },
+    ];
+    for (const { word, scoped, actual } of cases) {
+      // Native Git establishes the oracle, independently of the extractor's spelling.
+      await execFileAsync("bash", ["-c", `GIT_INDEX_FILE='${oracle}' git add -- ${word}`], { cwd: directory });
+      assert.equal((await execFileAsync("git", ["-C", directory, "ls-files", "-z"], {
+        env: { ...process.env, GIT_INDEX_FILE: oracle },
+      })).stdout, actual);
+      await rm(oracle);
+      if (scoped === literalBacktick) { assert.equal((await stat(marker)).isFile(), true); await rm(marker); }
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest([scoped, index]));
+      for (const prefix of ["", `GIT_INDEX_FILE='${index}' `]) {
+        const command = `${prefix}git add -- ${word}`;
+        for (const investigativeShell of [false, true]) await assert.rejects(gate.check(
+          { tool: "shell", sessionID: "literal-pathspec", callID: command }, { args: { command } },
+          { investigativeShell }), /Write denied/, command);
+      }
+    }
+    assert.deepEqual(await readFile(nativeIndex), nativeBefore);
+    assert.deepEqual(await readFile(index), alternateBefore);
+    assert.equal(await stat(marker).catch(() => undefined), undefined, "rejected preflights execute no substitutions");
+
+    // Quotes that really suppress expansion remain usable, in both index modes.
+    for (const [path, words] of [
+      ["{allowed,outside}.txt", ["'{allowed,outside}.txt'", '"{allowed,outside}.txt"']],
+      ["~+/outside.txt", ["'~+/outside.txt'", '"~+/outside.txt"']],
+      [literalBacktick, [`'${literalBacktick}'`]],
+      ["literal $ file.txt", ["'literal $ file.txt'"]],
+    ] as const) {
+      const gate = await createWriteGate(await createProjectPaths(directory), operationManifest([path, index]));
+      for (const word of words) for (const prefix of ["", `GIT_INDEX_FILE='${index}' `]) {
+        const command = `${prefix}git add -- ${word}`;
+        for (const investigativeShell of [false, true]) await gate.check(
+          { tool: "shell", sessionID: "literal-pathspec", callID: command }, { args: { command } }, { investigativeShell });
+        await execFileAsync("bash", ["-c", `GIT_INDEX_FILE='${oracle}' git add -- ${word}`], { cwd: directory });
+        assert.equal((await execFileAsync("git", ["-C", directory, "ls-files", "-z"], {
+          env: { ...process.env, GIT_INDEX_FILE: oracle },
+        })).stdout, `${path}\0`);
+        await rm(oracle);
+      }
+    }
+    const windowsGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["nested/file.txt"]));
+    for (const investigativeShell of [false, true]) await windowsGate.check(
+      { tool: "powershell", sessionID: "literal-pathspec", callID: "windows-path" },
+      { args: { command: "git add -- nested\\file.txt" } }, { investigativeShell });
+    assert.deepEqual(await readFile(nativeIndex), nativeBefore);
+    assert.deepEqual(await readFile(index), alternateBefore);
+    assert.equal(await stat(marker).catch(() => undefined), undefined);
+  });
+});
+
+test("git commit rejects double-quoted POSIX backtick substitution but retains literal messages", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-commit-backtick-message", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await writeFile(join(directory, "allowed.txt"), "candidate\n");
+    await execFileAsync("git", ["-C", directory, "add", "--", "allowed.txt"]);
+    const index = join(directory, ".git", "index"), before = await readFile(index);
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt"]));
+    for (const identity of ["git", "git -c user.name=fixture -c user.email=fixture@example.invalid"]) {
+      for (const investigativeShell of [false, true]) {
+        await assert.rejects(gate.check({ tool: "shell", sessionID: "message-backtick", callID: "substitution" }, {
+          args: { command: `${identity} commit -m "candidate\`touch outside-marker\`"` },
+        }, { investigativeShell }), /Write denied/);
+        await gate.check({ tool: "shell", sessionID: "message-backtick", callID: "literal" }, {
+          args: { command: `${identity} commit -m 'candidate\`touch outside-marker\`'` },
+        }, { investigativeShell });
+      }
+    }
+    assert.deepEqual(await readFile(index), before);
+    assert.equal(await stat(join(directory, "outside-marker")).catch(() => undefined), undefined);
   });
 });
 
