@@ -804,6 +804,13 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
   ensure(digest(packageBytes) === candidate.sha256, "candidate-package-sha256-mismatch");
+  // Pin a relative TMPDIR to this caller's cwd before child commands change cwd.
+  const temporaryPrefix = join(resolve(tmpdir()), "sd-swe-");
+  // Reserve 32 bytes for Python's pymp-*/listener-* suffix and one for the
+  // terminator even on systems with a 104-byte Unix socket pathname field.
+  // mkdtemp appends six ASCII characters. Do not silently bypass the selected TMPDIR.
+  ensure(Buffer.byteLength(temporaryPrefix) + 6 <= 71,
+    "candidate-temporary-path-too-long: choose a shorter TMPDIR (sd-swe-* path must be at most 71 bytes)");
   const candidateRoot = join(runRoot, "candidate-runtime");
   let temporaryRoot;
   try {
@@ -816,7 +823,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const homeRoot = join(candidateRoot, "home");
   // Older Python multiprocessing creates Unix sockets beneath TMPDIR. Campaign
   // paths can exceed the socket limit before the socket's filename is appended.
-  temporaryRoot = await mkdtemp(join(tmpdir(), "sd-swe-"));
+  temporaryRoot = await mkdtemp(temporaryPrefix);
   await mkdir(configRoot, { recursive: true });
   await mkdir(join(xdgRoot, "opencode"), { recursive: true });
   await mkdir(join(dataRoot, "opencode"), { recursive: true });

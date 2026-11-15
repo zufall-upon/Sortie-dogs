@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { syncBuiltinESMExports } from "node:module";
+import { createServer } from "node:net";
 import fsPromises from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import test from "node:test";
@@ -18,7 +19,7 @@ import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-
 import { runtimeAssets } from "../src/runtime-assets-v010.ts";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const instance = (instance_id: string, extra: Record<string, unknown> = {}) => ({
   instance_id,
@@ -1090,12 +1091,21 @@ test("candidate setup uses a short owned temporary directory and removes it on f
         assert.equal((await stat(temporaryRoot!)).isDirectory(), true);
         assert.equal(options.env.PYTHONDONTWRITEBYTECODE, "1");
         assert.match(options.env.PYTEST_ADDOPTS!, /candidate-runtime.*cache/u);
+        const socketDir = join(temporaryRoot!, "pymp-12345678");
+        await mkdir(socketDir);
+        const server = createServer();
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(join(socketDir, "listener-12345678"), resolve);
+        });
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
         throw new Error("setup-stop-before-provider-or-install");
       },
     }), /setup-stop-before-provider-or-install/u);
     assert.ok(temporaryRoot);
+    assert.equal(dirname(temporaryRoot!), join(tmpdir()), "honor the selected temporary directory");
     // Python 3.9 adds pymp-*/listener-* below TMPDIR when Black starts its manager.
-    assert.ok(Buffer.byteLength(temporaryRoot!) < 60, "leave space for a Unix socket pathname");
+    assert.ok(Buffer.byteLength(temporaryRoot!) <= 71, "leave space for a Unix socket pathname");
     await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
     await assert.rejects(stat(join(runRoot, "candidate-runtime")), { code: "ENOENT" });
     assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
@@ -1103,6 +1113,161 @@ test("candidate setup uses a short owned temporary directory and removes it on f
     if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousDataHome;
     if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate setup pins relative TMPDIR to the caller before checking length or changing command cwd", { skip: process.platform === "win32" }, async t => {
+  const selectedParent = resolve(tmpdir());
+  const root = await mkdtemp(join(selectedParent, "swebench-relative-tmp-"));
+  const previousCwd = process.cwd(), previousTmpdir = process.env.TMPDIR, previousDataHome = process.env.XDG_DATA_HOME;
+  try {
+    const hostData = join(root, "host-data"), packagePath = join(root, "candidate.tgz");
+    const bytes = Buffer.from("relative temporary directory fixture");
+    const fixtureCandidate = { ...candidate, sha256: createHash("sha256").update(bytes).digest("hex") };
+    await mkdir(join(hostData, "opencode"), { recursive: true });
+    await writeFile(join(hostData, "opencode", "auth.json"), "{}\n");
+    await writeFile(packagePath, bytes);
+    process.env.XDG_DATA_HOME = hostData;
+    await t.test("short relative selection remains the same owned directory in the child cwd", async () => {
+      process.chdir(selectedParent);
+      process.env.TMPDIR = ".";
+      let temporaryRoot: string | undefined;
+      try {
+        await assert.rejects(prepareCandidateRuntime(fixtureCandidate, packagePath, join(root, "short"), {
+          execute: async (_command: string, _args: string[], options: { cwd: string; env: Record<string, string> }) => {
+            temporaryRoot = options.env.TMPDIR;
+            assert.equal(dirname(temporaryRoot!), selectedParent);
+            assert.equal(resolve(options.cwd, temporaryRoot!), temporaryRoot, "child cwd must not change the selected directory");
+            await execFileAsync(process.execPath, ["-e", "require('node:fs').writeFileSync(require('node:path').join(process.env.TMPDIR, 'relative-tmp-probe.txt'), 'owned\\n')"], options);
+            assert.equal(await readFile(join(temporaryRoot!, "relative-tmp-probe.txt"), "utf8"), "owned\n");
+            throw new Error("setup-stop-after-relative-tmpdir-probe");
+          },
+        }), /setup-stop-after-relative-tmpdir-probe/u);
+        assert.ok(temporaryRoot);
+        await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
+        await assert.rejects(stat(join(root, "short", "candidate-runtime")), { code: "ENOENT" });
+      } finally {
+        // A failed regression assertion must not leak its separately owned directory.
+        if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+        process.chdir(previousCwd);
+      }
+    });
+    await t.test("overlong resolved relative selection fails before commands and preserves existing state", async () => {
+      const caller = join(root, "long-campaign-".repeat(6)), runRoot = join(root, "long");
+      const sentinel = join(runRoot, "candidate-runtime", "preexisting.txt");
+      await mkdir(caller);
+      await mkdir(dirname(sentinel), { recursive: true });
+      await writeFile(sentinel, "untouched\n");
+      assert.ok(Buffer.byteLength(join(caller, "sd-swe-XXXXXX")) > 71);
+      process.chdir(caller);
+      process.env.TMPDIR = ".";
+      let commands = 0;
+      try {
+        await assert.rejects(prepareCandidateRuntime(fixtureCandidate, packagePath, runRoot, {
+          execute: async () => { commands++; throw new Error("unexpected-relative-tmpdir-command"); },
+        }), /candidate-temporary-path-too-long.*TMPDIR/u);
+        assert.equal(commands, 0);
+        assert.deepEqual(await readdir(caller), []);
+        assert.equal(await readFile(sentinel, "utf8"), "untouched\n");
+      } finally { process.chdir(previousCwd); }
+    });
+    assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
+  } finally {
+    process.chdir(previousCwd);
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousDataHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate setup rejects an overlong explicitly selected TMPDIR before starting commands", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-long-tmp-"));
+  const previousTmpdir = process.env.TMPDIR, previousDataHome = process.env.XDG_DATA_HOME;
+  let commands = 0;
+  try {
+    const rootBytes = Buffer.byteLength(join(root, "sd-swe-XXXXXX"));
+    // Exercise byte length rather than character count; when space permits, this
+    // selects exactly one byte beyond the supported temporary path length.
+    const longTmp = join(root, `é${"x".repeat(Math.max(0, 72 - rootBytes - 3))}`);
+    assert.ok(Buffer.byteLength(join(longTmp, "sd-swe-XXXXXX")) >= 72);
+    const hostData = join(root, "host-data"), runRoot = join(root, "run");
+    const sentinel = join(runRoot, "candidate-runtime", "preexisting.txt");
+    await mkdir(longTmp, { recursive: true });
+    await mkdir(join(hostData, "opencode"), { recursive: true });
+    await mkdir(dirname(sentinel), { recursive: true });
+    await writeFile(sentinel, "untouched\n");
+    await writeFile(join(hostData, "opencode", "auth.json"), "{}\n");
+    process.env.TMPDIR = longTmp;
+    process.env.XDG_DATA_HOME = hostData;
+    const packagePath = join(root, "candidate.tgz"), bytes = Buffer.from("setup-only fixture");
+    await writeFile(packagePath, bytes);
+    await assert.rejects(prepareCandidateRuntime({ ...candidate,
+      sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, runRoot, {
+      execute: async () => { commands++; throw new Error("unexpected-setup-command"); },
+    }), /candidate-temporary-path-too-long.*TMPDIR/u);
+    assert.equal(commands, 0);
+    assert.deepEqual(await readdir(longTmp), []);
+    assert.equal(await readFile(sentinel, "utf8"), "untouched\n");
+    assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
+    // Native Windows retains its established WSL precondition.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    try {
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+      await assert.rejects(prepareCandidateRuntime({ ...candidate,
+        sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, join(root, "windows"), {
+        execute: async () => { throw new Error("unexpected-windows-setup"); },
+      }), /live-mode-requires-wsl-login-shell/u);
+      assert.deepEqual(await readdir(longTmp), []);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+    const preflightRoot = join(root, "preflight"), manifestPath = join(root, "manifest.json");
+    await writeFile(manifestPath, "{}\n");
+    await assert.rejects(runCandidatePreflight(manifestPath, preflightRoot, {
+      createPlan: () => ({ candidate: { ...candidate, package_tgz: "candidate.tgz",
+        sha256: createHash("sha256").update(bytes).digest("hex") } }),
+      prepareCandidate: (value: unknown, archive: string, target: string) => prepareCandidateRuntime(value, archive, target, {
+        execute: async () => { commands++; throw new Error("unexpected-preflight-command"); },
+      }),
+    }), /candidate-temporary-path-too-long.*TMPDIR/u);
+    await assert.rejects(stat(preflightRoot), { code: "ENOENT" });
+    assert.equal(commands, 0);
+    assert.deepEqual(await readdir(longTmp), []);
+    if (rootBytes <= 69) {
+      const boundaryTmp = join(root, "b".repeat(71 - rootBytes - 1));
+      await mkdir(boundaryTmp);
+      process.env.TMPDIR = boundaryTmp;
+      let boundaryRoot: string | undefined;
+      await assert.rejects(prepareCandidateRuntime({ ...candidate,
+        sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, join(root, "boundary"), {
+        execute: async (_command: string, _args: string[], options: { env: Record<string, string> }) => {
+          boundaryRoot = options.env.TMPDIR;
+          throw new Error("setup-stop-at-tmpdir-boundary");
+        },
+      }), /setup-stop-at-tmpdir-boundary/u);
+      assert.equal(Buffer.byteLength(boundaryRoot!), 71);
+      assert.equal(dirname(boundaryRoot!), boundaryTmp);
+      await assert.rejects(stat(boundaryRoot!), { code: "ENOENT" });
+    }
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    if (Buffer.byteLength(join(tmpdir(), "sd-swe-XXXXXX")) <= 71) {
+      let retryTmp: string | undefined;
+      await assert.rejects(prepareCandidateRuntime({ ...candidate,
+        sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, join(root, "retry"), {
+        execute: async (_command: string, _args: string[], options: { env: Record<string, string> }) => {
+          commands++;
+          retryTmp = options.env.TMPDIR;
+          throw new Error("setup-stop-after-tmpdir-change");
+        },
+      }), /setup-stop-after-tmpdir-change/u);
+      assert.equal(commands, 1);
+      assert.equal(dirname(retryTmp!), join(tmpdir()));
+      await assert.rejects(stat(retryTmp!), { code: "ENOENT" });
+    }
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousDataHome;
     await rm(root, { recursive: true, force: true });
   }
 });
