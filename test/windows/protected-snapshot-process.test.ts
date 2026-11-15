@@ -44,7 +44,10 @@ test("snapshot inventory hides Git subprocesses without changing tracked inputs 
         assert.equal(call.options.maxBuffer, 16 * 1024 * 1024);
         assert.equal(call.options.shell, undefined, "keep direct execution rather than introducing a shell");
       }
-      for (const call of inventory) assert.deepEqual(call.args, ["-c", "core.fsmonitor=false", "ls-files", "-z"]);
+      for (const call of inventory) assert.deepEqual(call.args, [
+        ...(call.options.cwd === nested ? [`--git-dir=${join(nested, ".git")}`, `--work-tree=${nested}`] : []),
+        "-c", "core.fsmonitor=false", "ls-files", "-z",
+      ]);
     };
     await t.test("successful queries retain tracked paths and materialized outputs", async () => {
       const result = await currentSnapshotProtection(root, manifest, "nested");
