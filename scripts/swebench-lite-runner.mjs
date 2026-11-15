@@ -808,7 +808,7 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   // Reserve 32 bytes for Python's pymp-*/listener-* suffix and one for the
   // terminator even on systems with a 104-byte Unix socket pathname field.
   // mkdtemp appends six ASCII characters. Do not silently bypass the selected TMPDIR.
-  ensure(Buffer.byteLength(temporaryPrefix) + 6 <= 71,
+  ensure(process.platform === "win32" || Buffer.byteLength(temporaryPrefix) + 6 <= 71,
     "candidate-temporary-path-too-long: choose a shorter TMPDIR (sd-swe-* path must be at most 71 bytes)");
   const candidateRoot = join(runRoot, "candidate-runtime");
   let temporaryRoot;

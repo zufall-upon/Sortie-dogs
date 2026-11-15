@@ -1146,6 +1146,18 @@ test("candidate setup rejects an overlong explicitly selected TMPDIR before star
     assert.deepEqual(await readdir(longTmp), []);
     assert.equal(await readFile(sentinel, "utf8"), "untouched\n");
     assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
+    // The Unix socket pathname limit must not reject Windows candidates.
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    try {
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+      await assert.rejects(prepareCandidateRuntime({ ...candidate,
+        sha256: createHash("sha256").update(bytes).digest("hex") }, packagePath, join(root, "windows"), {
+        execute: async () => { throw new Error("windows-setup-reached"); },
+      }), /windows-setup-reached/u);
+      assert.deepEqual(await readdir(longTmp), []);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
     const preflightRoot = join(root, "preflight"), manifestPath = join(root, "manifest.json");
     await writeFile(manifestPath, "{}\n");
     await assert.rejects(runCandidatePreflight(manifestPath, preflightRoot, {
