@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile, symlink } from "node:fs/promises";
+import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, utimes, writeFile, symlink } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -859,6 +859,45 @@ test("Review and delivery preserve non-filter info attributes in the private ind
     const run = { units: [{ unit: { read: [], write: ["file.txt"] }, hashes: [] }] } as never;
     assert.ok((await missionReviewSource(root, run)).excerpt.includes(expected));
     assert.equal((await missionDeliveryObservation(root, "changed"))?.clean, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review and delivery preserve racy-clean detection when copying the private Git index", async t => {
+  const root = await mkdtemp(join(tmpdir(), "review-info-attributes-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await git("git", ["config", "core.trustctime", "false"], { cwd: root });
+    await writeFile(join(root, ".git", "info", "attributes"), "file.txt text eol=crlf");
+    await writeFile(join(root, "file.txt"), "before\r\n");
+    const timestamp = new Date(Date.now() - 10_000);
+    await utimes(join(root, "file.txt"), timestamp, timestamp);
+    await git("git", ["add", "file.txt"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    assert.equal((await missionDeliveryObservation(root, "attributes"))?.clean, true);
+    await writeFile(join(root, "file.txt"), "after!\r\n");
+    await utimes(join(root, "file.txt"), timestamp, timestamp);
+    await utimes(join(root, ".git", "index"), timestamp, timestamp);
+    const expected = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "file.txt"], { cwd: root })).stdout;
+    assert.match(expected, /\+after!/u);
+    const run = { units: [{ unit: { read: [], write: ["file.txt"] }, hashes: [] }] } as never;
+    const index = join(root, ".git", "index"), indexBytes = await fs.readFile(index);
+    assert.ok((await missionReviewSource(root, run)).excerpt.includes(expected));
+    // Simulate an index replacement between the source stat and the copy. The
+    // original timestamp is restored during the copy, so only the fallback is safe.
+    await utimes(index, new Date(timestamp.getTime() + 5_000), new Date(timestamp.getTime() + 5_000));
+    const copy = fs.copyFile;
+    let replaced = false;
+    const mock = t.mock.method(fs, "copyFile", async (...args: Parameters<typeof fs.copyFile>) => {
+      if (args[0] === index && !replaced) { replaced = true; await utimes(index, timestamp, timestamp); }
+      return copy(...args);
+    });
+    syncBuiltinESMExports();
+    try {
+      assert.ok((await missionReviewSource(root, run)).excerpt.includes(expected));
+      assert.equal(replaced, true);
+    } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+    assert.equal((await missionDeliveryObservation(root, "changed"))?.clean, false);
+    assert.deepEqual(await fs.readFile(index), indexBytes);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

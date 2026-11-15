@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -30,6 +30,30 @@ type FilterlessGit = ((args: string[]) => Promise<string>) & {
   submoduleIgnore(path: string, command: GitComparison): SubmoduleIgnore;
   originalGitdir?: string;
 };
+
+async function copyGitIndex(source: string, destination: string, optional = false): Promise<void> {
+  const before = await stat(source).catch((error: NodeJS.ErrnoException) => {
+    if (optional && error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!before) return;
+  try { await copyFile(source, destination); }
+  catch (error) {
+    if (optional && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const after = await stat(source).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  const stable = after && before.dev === after.dev && before.ino === after.ino && before.size === after.size &&
+    before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs;
+  // A newer copy timestamp can turn Git's racy-clean entries into false clean
+  // entries. If the original changed during the copy, force a conservative scan;
+  // use a nonzero time because Git treats a zero index timestamp specially.
+  const modified = stable ? before.mtime : new Date(1_000);
+  await utimes(destination, modified, modified);
+}
 
 /** Run worktree comparisons with a private index and an overriding attributes file.
  * Git's --no-ext-diff/--no-textconv do not disable clean or process filters. */
@@ -126,8 +150,8 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
       await writeFile(join(privateGit, "HEAD"), `ref: ${headRef}\n`);
     } else if (head) await writeFile(join(privateGit, "HEAD"), `${head}\n`);
     else throw new Error("mission-review-git: missing HEAD and symbolic reference");
-    await copyFile(index, join(privateGit, "index")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-    if (shared && shared !== "--shared-index-path") await copyFile(resolve(directory, shared), join(privateGit, basename(shared)));
+    await copyGitIndex(index, join(privateGit, "index"), true);
+    if (shared && shared !== "--shared-index-path") await copyGitIndex(resolve(directory, shared), join(privateGit, basename(shared)));
     const env: NodeJS.ProcessEnv = { ...readEnv, GIT_INDEX_FILE: join(privateGit, "index"), GIT_OBJECT_DIRECTORY: objects, GIT_OPTIONAL_LOCKS: "0" };
     delete env.GIT_COMMON_DIR;
     // Git otherwise spawns a second status in each submodule, using that repository's
