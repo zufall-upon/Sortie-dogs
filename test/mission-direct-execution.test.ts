@@ -24,7 +24,7 @@ import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
-for (const grant of ["checkout", "location"] as const) test(`direct validation in a nested checkout retains unexempted scratch and rejects stale evidence (${grant} grant)`, async () => {
+for (const grant of ["checkout", "location"] as const) test(`direct validation in a nested checkout keeps only configured scratch fresh and rejects real input changes (${grant} grant)`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-nested-scratch-")), checkout = join(directory, "checkout");
   try {
@@ -70,13 +70,18 @@ writeFileSync(process.env.TMPDIR + '/run-' + process.argv[2], 'diagnostic output
     const run = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     const checks = (await run()).units[0]!.directExecution!.checks;
     assert.equal(checks.length, 2);
-    assert(checks.every(item => item.exitCode === 0));
-    assert(checks.every(item => !item.binding.freshness!.scratch_paths.includes(join(checkout, "scratch"))));
+    assert(checks.every(item => item.exitCode === 0 && item.fresh));
+    assert(checks.every(item => item.binding.freshness!.scratch_paths.includes(join(checkout, "scratch"))));
+    for (const [path, original] of [["ignored-input.txt", "ignored but real input"], ["scratch/fixture.txt", "explicit fixture"],
+      ["scratch/tracked.txt", "tracked source"]]) {
+      await writeFile(join(checkout, path!), "changed input");
+      const stale = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+      assert.equal(stale.status, "direct-unit-awaits-validation", path);
+      assert.match(stale.reason, /validation-stale/u);
+      await writeFile(join(checkout, path!), original!);
+    }
     const result = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
-    assert.equal(result.status, "direct-unit-awaits-validation", JSON.stringify(result));
-    assert.match(result.reason, /validation-binding-unavailable/u);
-    assert(checks.some(item => item.fresh === false), "output created during validation invalidates its input binding");
-    assert.notEqual((await run()).units[0]!.status, "succeeded");
+    assert.equal((await run()).units[0]!.status, "succeeded", JSON.stringify(result));
     assert.deepEqual((await run()).units[0]!.directExecution!.checks, checks, "retained native results and bindings are not rewritten");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
