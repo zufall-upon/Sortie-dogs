@@ -1,14 +1,19 @@
 # Sortie-dogs
 
+**Keep AI-assisted work focused on your goal, with evidence before calling it done.**
+
+When agents lose context, repeat work or declare victory too early, Sortie-dogs helps
+carry the original request through implementation, validation, review and delivery.
+It is an adaptive execution harness for OpenCode and Codex that works with your existing
+host setup and permissions, rather than taking them over. Use your host normally and
+invoke Sortie when a task needs coordinated execution and an evidence-backed result.
+
+[Quick start](#quick-start) · [Recorded Mission result](#codex-end-to-end-completion) ·
+[Evidence and limitations](#measured-results)
+
 <p align="center">
   <img src="docs/assets/sortie-dogs-logo.jpg" alt="Sortie-dogs logo" width="640">
 </p>
-
-**An adaptive execution harness for OpenCode and Codex: preserve the goal,
-implement, validate, review, and deliver without taking over your setup.**
-
-Use your host normally. Invoke Sortie when a task needs coordinated execution and an
-evidence-backed result, not more agents for their own sake.
 
 [![GitHub Release](https://img.shields.io/github/v/release/zufall-upon/Sortie-dogs)](https://github.com/zufall-upon/Sortie-dogs/releases/latest)
 [![npm](https://img.shields.io/npm/v/sortie-dogs?label=npm)](https://www.npmjs.com/package/sortie-dogs)
@@ -26,7 +31,7 @@ evidence-backed result, not more agents for their own sake.
 The npm examples below target v0.16.27. npm publication remains a separate manual
 release step; installing a package does not imply a running host has reloaded it.
 
-[When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
+[When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Vision history](#vision-history) · [Workflow](#mission-workflow) · [Models](#default-models) ·
 [Measured results](#measured-results) · [Configuration](#configuration) · [Documentation](#documentation)
 
 > **Beta:** the package is still stabilizing before 1.0. Both host integrations are
@@ -130,7 +135,7 @@ v0.10 is installed. [OpenCode setup and configuration](docs/configuration.md) ·
 
 ### Project Memory (OpenCode v010, opt-in)
 
-With v0.16.26 installed, run `sortie-dogs memory on .` once and reload
+After installing the version above, run `sortie-dogs memory on .` once and reload
 the project plugin. Ordinary public turns then become pending sources; the existing
 Operator records semantic additions, corrections, withdrawals and decisions without
 another save request or a dedicated model call per turn. New sessions recall the
@@ -139,6 +144,24 @@ current project vision and constraints as well as relevant decisions and source 
 This is not a Codex natural-capture feature, execution permission, Review PASS or proof
 of completion. Existing reflection defaults and explicit settings are unchanged.
 [Scope, attachment retrieval, limits and recovery](docs/v0150-project-memory.md).
+
+## Vision History
+
+These milestones show how the project has pursued useful outcomes without losing the
+original goal. They describe the direction of each release, not a guarantee of results.
+
+- **v0.14.0 — Judgment at entry, autonomy in execution:** Reduce routing-only investigation,
+  repeated work and handoffs by starting useful work from known context, while keeping the
+  original requirements, validation and review. [Vision](docs/v0.14.0-execution-vision.md) · [Release](docs/release-v0.14.0.md)
+- **v0.15.0 — Project Memory:** Help carry project vision, constraints and decisions into later
+  sessions, without reviving withdrawn choices or treating memory as authority. This is opt-in
+  for OpenCode v010. [Design](docs/v0150-project-memory.md) · [Release](docs/release-v0.15.0.md)
+- **v0.16.x — Purpose-aligned autonomy:** When a chosen method stalls or creates unnecessary
+  work, compare the goal with actual outcomes and remaining work; continue, change or stop that
+  method without discarding required checks. [Design](docs/purpose-aligned-autonomy.md) · [v0.16.0](docs/releases/v0.16.0.md) · [Recovery](docs/releases/v0.16.3.md)
+- **v0.17.x — Test optimization (planned):** Make preventing unnecessary test growth, actually
+  organizing existing test debt and guarding long test runs part of ordinary Missions, without
+  another user request. This is not implemented or measured. [Vision](docs/v0.17.x-test-optimization-vision.md)
 
 ## Mission workflow
 
@@ -231,6 +254,7 @@ unconditional repeated full runs. Existing focused-testing guidance and validati
 evidence handling are useful foundations, but they do not implement this vision by
 themselves. Compatibility, licensing and suitability of possible external tools remain
 to be verified; no specific tool or performance improvement is promised.
+[Full planned scope and evaluation](docs/v0.17.x-test-optimization-vision.md).
 
 ## Default models
 
