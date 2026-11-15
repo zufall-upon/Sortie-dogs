@@ -174,6 +174,33 @@ and resuming at granular completed test phases instead of rerunning target tests
 Use the command block printed by prepare. It runs `whoami`, browser login only if needed, then manual
 `npm publish` and optional interactive OTP. No credential values are saved in the receipt.
 
+When a maintainer already has a suitable npm token in a private file, an isolated userconfig can be
+used instead of changing the existing npm login. Set `NPM_TOKEN_FILE` and `TGZ` to the private token
+file and the already validated, fixed archive respectively. Disable shell tracing, restrict access to
+the token file, and never print or commit the token. The following Linux shell example keeps the
+credential out of command arguments and uses a temporary config and cache:
+
+```sh
+(
+set +x
+set -e
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+printf '%s\n' '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > "$tmpdir/npmrc"
+chmod 600 "$tmpdir/npmrc"
+NPM_TOKEN="$(cat "$NPM_TOKEN_FILE")" \
+  NPM_CONFIG_USERCONFIG="$tmpdir/npmrc" NPM_CONFIG_CACHE="$tmpdir/cache" NPM_CONFIG_LOGS_MAX=0 \
+  npm publish "$TGZ" --access public --tag latest
+)
+```
+
+Before publishing, check whether the exact version already exists; if so, compare its integrity with
+the fixed archive and do not publish again. Record the publish command's result separately from the
+subsequent registry version, `latest`, and integrity checks. A successful publish followed by a 404
+can be registry propagation delay, not permission to retry publication. If the response is lost,
+reconcile the existing operation and registry before deciding how to resume. Keep local machine paths
+and credentials out of shared documents and version control.
+
 ```powershell
 .\scripts\release.ps1 verify-publish -Version 0.9.7 -Manifest .opencode/release.json
 ```

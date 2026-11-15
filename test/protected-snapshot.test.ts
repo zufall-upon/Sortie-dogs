@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile }
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { currentSnapshotProtection, operationInputSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -105,7 +105,37 @@ test("tracked nested checkout files cannot hide ignored inputs or new outputs fr
   await writeFile(join(checkout, "ignored-input.txt"), "input");
   await writeFile(join(checkout, "new-output.txt"), "unverified deliverable");
   assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.candidate, pinned.candidate);
-  await assert.rejects(readFile(sentinel), { code: "ENOENT" }, "snapshot must not run Git in the nested checkout");
+  await assert.rejects(readFile(sentinel), { code: "ENOENT" }, "snapshot must not execute the nested checkout's fsmonitor hook");
+}));
+
+test("tracked input scans do not execute root or nested Git fsmonitor hooks", async () => fixture(async root => {
+  const nested = join(root, "nested"), scratch = join(nested, "scratch");
+  await mkdir(scratch, { recursive: true });
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await exec("git", ["init", "--quiet"], { cwd: nested });
+  const tracked = [join(root, "root.txt"), join(scratch, "input.txt")];
+  for (const path of tracked) await writeFile(path, "tracked input");
+  await exec("git", ["add", "--", "root.txt"], { cwd: root });
+  await exec("git", ["add", "--", "scratch/input.txt"], { cwd: nested });
+  const sentinels = [join(root, "root-hook-fired"), join(root, "nested-hook-fired")];
+  for (const [index, repository] of [root, nested].entries()) {
+    const hook = join(repository, ".git", "probe-fsmonitor"), sentinel = sentinels[index]!;
+    const shellPath = sentinel.replaceAll("\\", "/").replaceAll("'", "'\\''");
+    await executable(hook, `#!/bin/sh\nprintf fired > '${shellPath}'\n`);
+    await exec("git", ["config", "core.fsmonitor", hook], { cwd: repository });
+    await exec("git", ["ls-files", "-z"], { cwd: repository });
+    assert.equal(await readFile(sentinel, "utf8"), "fired", "the configured hook is runnable by an ordinary Git scan");
+    await rm(sentinel);
+  }
+  const protection = await currentSnapshotProtection(root, { read: [], write: ["nested/**"] });
+  for (const path of tracked) assert.ok(protection.includes(path), `tracked input remains protected: ${path}`);
+  const pinned = await validationPin(root, [root + "/**"], ["nested/**"], ["TMPDIR=./nested/scratch node check.mjs"]);
+  const before = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(before);
+  await writeFile(tracked[1]!, "changed tracked input");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), before);
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  for (const sentinel of sentinels) await assert.rejects(readFile(sentinel), { code: "ENOENT" });
 }));
 
 test("concrete validation sees materialized exact outputs after an authorized scope addition", async () => fixture(async root => {
@@ -364,7 +394,7 @@ test("fixed validation scratch ignores generation/cleanup but protects read, tra
   assert.equal(JSON.stringify(pinned.binding), original, "freshness never rewrites the old execution binding");
 }));
 
-test("nested checkout scratch without the published Location exemption retains tracked and explicit inputs", async () => fixture(async root => {
+test("nested checkout scratch is relative to the actual check cwd and still protects its tracked and explicit inputs", async () => fixture(async root => {
   const checkout = join(root, "checkout"), scratch = join(checkout, "scratch");
   await mkdir(scratch, { recursive: true });
   await exec("git", ["init", "--quiet"], { cwd: checkout });
@@ -379,12 +409,11 @@ test("nested checkout scratch without the published Location exemption retains t
   const auth = { projectRoot: root, manifestPath, manifestHash: hash(bytes) };
   const pinned = await protectedSnapshot(auth, { directory: checkout, command });
   assert.ok(pinned?.binding.freshness);
-  assert.deepEqual(pinned.binding.freshness.scratch_paths, [], "a new nested cwd exclusion is deferred");
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [scratch]);
   const original = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
   await writeFile(join(scratch, "generated.log"), "output only");
-  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
-  assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
-  await rm(join(scratch, "generated.log"));
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
   for (const [path, value] of [["scratch/tracked.txt", "tracked"], ["scratch/fixture.txt", "explicit input"], ["source.txt", "source"]]) {
     await writeFile(join(checkout, path!), "changed");
     assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, path);
@@ -399,7 +428,7 @@ test("nested checkout scratch without the published Location exemption retains t
   assert.notEqual((await refreshProtectedSnapshot(root, differentCall.binding))?.source, differentCall.source);
 }));
 
-test("a whole-Location grant conservatively retains nested cwd scratch inputs", async () => fixture(async root => {
+test("a whole-Location grant protects tracked scratch inputs from the fixed validation cwd", async () => fixture(async root => {
   const checkout = join(root, "checkout"), scratch = join(checkout, "scratch");
   await mkdir(scratch, { recursive: true });
   await exec("git", ["init", "--quiet"], { cwd: checkout });
@@ -412,26 +441,25 @@ test("a whole-Location grant conservatively retains nested cwd scratch inputs", 
   await writeFile(manifestPath, bytes);
   const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) }, { directory: checkout, command });
   assert.ok(pinned?.binding.freshness);
-  assert.deepEqual(pinned.binding.freshness.scratch_paths, []);
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [scratch]);
   const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
   const concrete = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
   const concreteSource = await validatedSourceSnapshot(root, concrete);
   assert.ok(concreteSource);
   await writeFile(join(scratch, "generated.log"), "output only");
-  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
-  assert.notDeepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
-  await rm(join(scratch, "generated.log"));
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
   await writeFile(source, "changed real input");
   assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
   assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
   assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource);
   await writeFile(source, "tracked input");
   await writeFile(join(scratch, "promoted.txt"), "new source");
-  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, "nested scratch remains part of the input snapshot");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs, "untracked scratch remains output-only");
   await exec("git", ["add", "--", "scratch/promoted.txt"], { cwd: checkout });
   assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, "newly tracked input tightens the old recipe");
   assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource);
-  assert.equal(JSON.stringify(pinned.binding), saved, "current protection does not rewrite the saved binding");
+  assert.equal(JSON.stringify(pinned.binding), saved, "the fixed cwd tightens protection without rewriting the saved binding");
 }));
 
 test("a Git subdirectory Location protects tracked scratch and retains per-call exclusions", async () => fixture(async repository => {
