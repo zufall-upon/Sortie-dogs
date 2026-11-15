@@ -22,12 +22,20 @@ import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./ru
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
   .test(String((error as { stderr?: string }).stderr ?? ""));
+const gitReadEnvironment = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" });
+type SubmoduleIgnore = "none" | "untracked" | "dirty" | "all";
+type GitComparison = "diff" | "status";
+type FilterlessGit = ((args: string[]) => Promise<string>) & {
+  submoduleIgnore(path: string, command: GitComparison): SubmoduleIgnore;
+};
 
 /** Run worktree comparisons with a private index and an overriding attributes file.
  * Git's --no-ext-diff/--no-textconv do not disable clean or process filters. */
-async function withFilterlessGit<T>(directory: string, action: (git: (args: string[]) => Promise<string>) => Promise<T>): Promise<T> {
+async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>): Promise<T> {
+  // Missing promised objects are unavailable input, not permission to fetch or run a remote helper.
+  const readEnv = gitReadEnvironment();
   const original = async (args: string[]) => (await exec("git", ["-c", "core.fsmonitor=false", ...args],
-    { cwd: directory, maxBuffer: 8 * 1024 * 1024 })).stdout;
+    { cwd: directory, env: readEnv, maxBuffer: 8 * 1024 * 1024 })).stdout;
   const line = (value: string) => value.replace(/\r?\n$/u, "");
   const path = async (name: string) => resolve(directory, line(await original(["rev-parse", "--git-path", name])));
   const root = line(await original(["rev-parse", "--show-toplevel"]));
@@ -39,12 +47,33 @@ async function withFilterlessGit<T>(directory: string, action: (git: (args: stri
   const coreSettings = new Set(["core.filemode", "core.ignorecase", "core.symlinks", "core.autocrlf", "core.eol", "core.safecrlf",
     "core.checkstat", "core.trustctime", "core.ignorestat", "core.sparsecheckout", "core.sparsecheckoutcone", "core.untrackedcache",
     "core.excludesfile", "core.quotepath", "core.attributesfile"]);
-  const effective = (await original(["config", "--null", "--list", "--includes"])).split("\0").filter(Boolean).flatMap(entry => {
-    const separator = entry.indexOf("\n"), key = separator < 0 ? entry : entry.slice(0, separator);
+  const configEntries = (value: string) => value.split("\0").filter(Boolean).map(entry => {
+    const separator = entry.indexOf("\n");
+    return [separator < 0 ? entry : entry.slice(0, separator), separator < 0 ? "true" : entry.slice(separator + 1)] as const;
+  });
+  const configuration = new Map(configEntries(await original(["config", "--null", "--list", "--includes"])));
+  const modulesPath = join(root, ".gitmodules"), modulesInfo = await lstat(modulesPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  const modules = new Map(modulesInfo?.isFile() ? configEntries(await original(["config", "--null", "--file", modulesPath, "--list"])) : []);
+  const moduleNames = new Map([...modules].flatMap(([key, value]) => {
+    const match = /^submodule\.([\s\S]+)\.path$/u.exec(key);
+    return match ? [[resolve(root, value), match[1]!] as const] : [];
+  }));
+  const ignoreMode = (value: string): SubmoduleIgnore => {
+    if (!["none", "untracked", "dirty", "all"].includes(value)) throw new Error(`mission-review-git: invalid submodule ignore mode: ${value}`);
+    return value as SubmoduleIgnore;
+  };
+  const submoduleIgnore = (path: string, command: GitComparison): SubmoduleIgnore => {
+    const name = moduleNames.get(resolve(directory, path)), key = `submodule.${name}.ignore`;
+    return ignoreMode((name === undefined ? undefined : configuration.get(key) ?? modules.get(key)) ??
+      configuration.get("diff.ignoresubmodules") ?? (command === "status" ? "none" : "untracked"));
+  };
+  const effective = [...configuration].flatMap(([key, value]) => {
     const lower = key.toLowerCase();
     if (!coreSettings.has(lower) && !(lower.startsWith("diff.") && lower !== "diff.external" &&
         !lower.endsWith(".command") && !lower.endsWith(".textconv"))) return [];
-    return ["-c", `${key}=${separator < 0 ? "true" : entry.slice(separator + 1)}`];
+    return ["-c", `${key}=${value}`];
   });
   let head: string | undefined;
   try { head = line(await original(["rev-parse", "--verify", "HEAD"])); }
@@ -59,7 +88,7 @@ async function withFilterlessGit<T>(directory: string, action: (git: (args: stri
   const shared = line(await original(["rev-parse", "--shared-index-path"]));
   const privateGit = await mkdtemp(join(tmpdir(), "sortie-review-git-"));
   try {
-    const initEnv: NodeJS.ProcessEnv = { ...process.env, GIT_DEFAULT_HASH: objectFormat === "sha256" ? "sha256" : "sha1" };
+    const initEnv: NodeJS.ProcessEnv = { ...readEnv, GIT_DEFAULT_HASH: objectFormat === "sha256" ? "sha256" : "sha1" };
     for (const key of ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) delete initEnv[key];
     await exec("git", ["init", "--quiet", "--bare", "--template=", ...(objectFormat === "sha256" ? ["--object-format=sha256"] : []), privateGit],
       { cwd: directory, env: initEnv });
@@ -86,15 +115,20 @@ async function withFilterlessGit<T>(directory: string, action: (git: (args: stri
     else throw new Error("mission-review-git: missing HEAD and symbolic reference");
     await copyFile(index, join(privateGit, "index")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     if (shared && shared !== "--shared-index-path") await copyFile(resolve(directory, shared), join(privateGit, basename(shared)));
-    const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: join(privateGit, "index"), GIT_OBJECT_DIRECTORY: objects, GIT_OPTIONAL_LOCKS: "0" };
+    const env: NodeJS.ProcessEnv = { ...readEnv, GIT_INDEX_FILE: join(privateGit, "index"), GIT_OBJECT_DIRECTORY: objects, GIT_OPTIONAL_LOCKS: "0" };
     delete env.GIT_COMMON_DIR;
     // Git otherwise spawns a second status in each submodule, using that repository's
     // own attributes. Inspect dirty submodules separately through this same boundary.
-    const safeGit = async (args: string[]) => {
-      const command = args[0] === "diff" || args[0] === "status" ? [args[0], "--ignore-submodules=dirty", ...args.slice(1)] : args;
+    const safeGit: FilterlessGit = Object.assign(async (args: string[]) => {
+      const command = args[0] === "diff" || args[0] === "status" ? args[0] : undefined;
+      const suppressDirty = (mode: SubmoduleIgnore) => mode === "all" ? "all" : "dirty";
+      // Override only worktree recursion, retaining opt-out modes and staged gitlinks.
+      // A global --ignore-submodules flag would erase per-submodule settings.
+      const submodules = command ? ["-c", `diff.ignoreSubmodules=${suppressDirty(ignoreMode(configuration.get("diff.ignoresubmodules") ?? "none"))}`,
+        ...[...moduleNames].flatMap(([path, name]) => ["-c", `submodule.${name}.ignore=${suppressDirty(submoduleIgnore(relative(directory, path), command))}`])] : [];
       return (await exec("git", ["--no-optional-locks", `--git-dir=${privateGit}`, `--work-tree=${root}`,
-        ...effective, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...command], { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
-    };
+        ...effective, ...submodules, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...args], { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
+    }, { submoduleIgnore });
     return await action(safeGit);
   } finally { await rm(privateGit, { recursive: true, force: true }); }
 }
@@ -111,7 +145,8 @@ async function currentGitDiff(git: (args: string[]) => Promise<string>, paths: s
   }
 }
 
-async function dirtyGitSubmodules(directory: string, git: (args: string[]) => Promise<string>, paths: string[]): Promise<{ path: string; diff: string }[]> {
+async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: string[], command: GitComparison = "diff",
+  ignoreUntracked = false): Promise<{ path: string; diff: string }[]> {
   const tracked = await git(["ls-files", "--stage", "-z", "--", ...paths]);
   const names = [...new Set(tracked.split("\0").flatMap(entry => {
     const match = /^160000 [a-f0-9]{40,64} [0-3]\t([\s\S]+)$/u.exec(entry);
@@ -119,6 +154,9 @@ async function dirtyGitSubmodules(directory: string, git: (args: string[]) => Pr
   }))];
   const dirty: { path: string; diff: string }[] = [];
   for (const path of names) {
+    const ignore = git.submoduleIgnore(path, command);
+    if (ignore === "all" || ignore === "dirty") continue;
+    const untracked = ignoreUntracked || ignore === "untracked";
     let root = resolve(directory), accessible = true;
     for (const part of path.split("/")) {
       if (!part || part === "." || part === "..") { accessible = false; break; }
@@ -130,8 +168,8 @@ async function dirtyGitSubmodules(directory: string, git: (args: string[]) => Pr
     const marker = await lstat(join(root, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     if (!marker) continue; // An uninitialized submodule has no worktree to inspect.
     const found = await withFilterlessGit(root, async subGit => {
-      const status = await subGit(["status", "--porcelain=v2", "--untracked-files=all", "-z"]);
-      const nested = await dirtyGitSubmodules(root, subGit, ["."]);
+      const status = await subGit(["status", "--porcelain=v2", `--untracked-files=${untracked ? "no" : "all"}`, "-z"]);
+      const nested = await dirtyGitSubmodules(root, subGit, ["."], "status", untracked);
       if (!status && !nested.length) return undefined;
       return (await currentGitDiff(subGit, ["."])) + submoduleDiff(nested);
     });
@@ -570,7 +608,7 @@ function visibleLineCount(lines: readonly string[], allowance: number): number {
 
 export async function missionReviewBaseline(directory: string): Promise<string | undefined> {
   try {
-    const { stdout } = await exec("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: directory });
+    const { stdout } = await exec("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: directory, env: gitReadEnvironment() });
     const oid = stdout.trim();
     return /^[a-f0-9]{40,64}$/u.test(oid) ? oid : undefined;
   } catch { return undefined; } // A mission can start before Git is initialized.
@@ -582,7 +620,7 @@ export async function missionDeliveryObservation(directory: string, runID: strin
     // Status may refresh same-sized files through their clean filter too.
     const { stdout, submodules } = await withFilterlessGit(directory, async git => ({
       stdout: await git(["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"]),
-      submodules: await dirtyGitSubmodules(directory, git, ["."]),
+      submodules: await dirtyGitSubmodules(directory, git, ["."], "status"),
     }));
     const entries = stdout.split("\0").filter(Boolean);
     const head = entries.find(line => line.startsWith("# branch.oid "))?.slice(13);

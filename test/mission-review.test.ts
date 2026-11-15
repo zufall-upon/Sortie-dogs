@@ -899,6 +899,47 @@ test("public Review and delivery inspect dirty Git submodules without executing 
     assert.notEqual((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).candidateFingerprint, first.candidateFingerprint);
     await writeFile(join(nested, "file.txt"), "before\n");
     assert.equal((await missionDeliveryObservation(root, "restored"))?.clean, true, "a restored submodule is not permanently dirty");
+    for (const ignore of ["all", "dirty", "untracked", "none"]) {
+      await git("git", ["config", "submodule.nested.ignore", ignore], { cwd: root });
+      await writeFile(join(nested, "file.txt"), "changed tracked input\n");
+      const ordinary = await git("git", ["-c", "core.fsmonitor=false", "-c", "filter.probe.clean=", "-c", "filter.probe.process=",
+        "status", "--porcelain=v2", "--untracked-files=all"], { cwd: root });
+      const trackedIgnored = ignore === "all" || ignore === "dirty";
+      assert.equal(ordinary.stdout.length === 0, trackedIgnored, `native Git oracle: tracked, ignore=${ignore}`);
+      assert.equal((await missionDeliveryObservation(root, ignore))?.clean, trackedIgnored, `delivery: tracked, ignore=${ignore}`);
+      assert.equal((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).excerpt.includes("dirty submodule: nested"),
+        !trackedIgnored, `Review: tracked, ignore=${ignore}`);
+      await writeFile(join(nested, "file.txt"), "before\n");
+      await writeFile(join(nested, "untracked.txt"), "untracked input\n");
+      const untrackedIgnored = ignore !== "none";
+      assert.equal((await missionDeliveryObservation(root, ignore))?.clean, untrackedIgnored, `delivery: untracked, ignore=${ignore}`);
+      await rm(join(nested, "untracked.txt"));
+    }
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
+    await git("git", ["config", "--file", join(root, ".gitmodules"), "submodule.nested.ignore", "dirty"], { cwd: root });
+    await git("git", ["add", ".gitmodules"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Ignore submodule worktree"], { cwd: root });
+    await writeFile(join(nested, "file.txt"), "changed tracked input\n");
+    assert.equal((await missionDeliveryObservation(root, "gitmodules"))?.clean, true, ".gitmodules supplies the fallback ignore mode");
+    const conditional = join(area, "submodule-settings"), includeKey = `includeIf.gitdir:${root.replaceAll("\\", "/")}/.git.path`;
+    await writeFile(conditional, '[submodule "nested"]\n\tignore = none\n');
+    await git("git", ["config", includeKey, conditional], { cwd: root });
+    assert.equal((await missionDeliveryObservation(root, "conditional"))?.clean, false, "effective local includes override .gitmodules");
+    assert.match((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).excerpt, /dirty submodule: nested/u);
+    await git("git", ["config", "--unset", includeKey], { cwd: root });
+    await git("git", ["config", "submodule.nested.ignore", "all"], { cwd: root });
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" }, "automatic Review and delivery never ran the filter");
+    await git("git", ["-c", "filter.probe.clean=", "-c", "filter.probe.process=", "add", "file.txt"], { cwd: nested });
+    // Commit can recheck a racy index entry too; fixture delivery must not fire the probe itself.
+    await git("git", ["-c", "filter.probe.clean=", "-c", "filter.probe.process=", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "commit", "--quiet", "-m", "New submodule HEAD"], { cwd: nested });
+    assert.equal((await git("git", ["status", "--porcelain=v2"], { cwd: root })).stdout, "", "native ignore=all hides an unstaged gitlink HEAD change");
+    assert.equal((await missionDeliveryObservation(root, "ignored-head"))?.clean, true);
+    const ignoredHead = await missionReviewSource(root, run);
+    assert.doesNotMatch(ignoredHead.excerpt, /Subproject commit|dirty submodule:/u);
+    await git("git", ["add", "nested"], { cwd: root });
+    assert.notEqual((await git("git", ["status", "--porcelain=v2"], { cwd: root })).stdout, "", "native ignore=all still reports staged gitlinks");
+    assert.equal((await missionDeliveryObservation(root, "staged-head"))?.clean, false, "ignore=all must not hide a staged gitlink from delivery");
     await assert.rejects(fs.readFile(marker), { code: "ENOENT" });
   } finally { await rm(area, { recursive: true, force: true }); }
 });
@@ -916,6 +957,35 @@ test("Review reports missing Git objects instead of manufacturing an empty diff"
     await assert.rejects(missionReviewSource(root, run), /bad object|unknown revision|bad revision/u);
     assert.equal(await missionDeliveryObservation(root, "missing"), undefined);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review does not execute a remote helper for a missing promised Git object", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-promisor-boundary-")), root = join(area, "root"), marker = join(area, "remote-fired");
+  try {
+    await mkdir(root);
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "source.txt"), "base\n");
+    await git("git", ["add", "."], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const blob = (await git("git", ["rev-parse", "HEAD:source.txt"], { cwd: root })).stdout.trim();
+    const head = (await git("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const probe = join(area, "remote.cjs");
+    await writeFile(probe, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'fired');process.exit(1);\n`);
+    const extWord = (value: string) => value.replaceAll("\\", "/").replaceAll("%", "%%").replaceAll(" ", "% ");
+    for (const [key, value] of [["core.repositoryformatversion", "1"], ["extensions.partialClone", "origin"],
+      ["remote.origin.promisor", "true"], ["remote.origin.url", `ext::${extWord(process.execPath)} ${extWord(probe)}`], ["protocol.ext.allow", "always"]]) {
+      await git("git", ["config", key!, value!], { cwd: root });
+    }
+    await rm(join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+    await writeFile(join(root, "source.txt"), "changed\n");
+    const run = { units: [{ unit: { read: [], write: ["source.txt"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run));
+    await missionDeliveryObservation(root, "partial");
+    await rm(join(root, ".git", "objects", head.slice(0, 2), head.slice(2)));
+    assert.equal(await missionReviewBaseline(root), undefined, "baseline capture cannot fetch a missing promised commit");
+    assert.equal(await missionDeliveryObservation(root, "missing-head"), undefined);
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" }, "missing objects must fail without an implicit fetch outside native permissions");
+  } finally { await rm(area, { recursive: true, force: true }); }
 });
 
 test("a non-Git mission reviews scoped nested repositories without a new root or grant", async () => {
