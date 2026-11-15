@@ -428,6 +428,93 @@ test("nested checkout scratch is relative to the actual check cwd and still prot
   assert.notEqual((await refreshProtectedSnapshot(root, differentCall.binding))?.source, differentCall.source);
 }));
 
+test("failed nested Git inventories conservatively pin scratch without changing the public declared-path fallback", async () => fixture(async root => {
+  const checkout = join(root, "checkout"), scratch = join(checkout, "scratch"), tracked = join(scratch, "tracked.txt");
+  await mkdir(scratch, { recursive: true });
+  for (const repository of [root, checkout]) await exec("git", ["init", "--quiet"], { cwd: repository });
+  await writeFile(tracked, "tracked input");
+  await exec("git", ["add", "--", "scratch/tracked.txt"], { cwd: checkout });
+  const command = "TMPDIR=./scratch node check.mjs";
+  const manifest = { version: "0.1.0", task_id: "unit", read: [root + "/**"], write: ["checkout/**"], validation: [command] };
+  const bytes = JSON.stringify(manifest), manifestPath = join(root, "manifest.json");
+  await writeFile(manifestPath, bytes);
+  const auth = { projectRoot: root, manifestPath, manifestHash: hash(bytes) };
+  const capture = () => protectedSnapshot(auth, { directory: checkout, command });
+  assert.ok((await currentSnapshotProtection(root, manifest, checkout)).includes(tracked));
+  await exec("git", ["config", "core.repositoryformatversion", "999"], { cwd: checkout });
+  assert.ok(!(await currentSnapshotProtection(root, manifest, checkout)).includes(tracked),
+    "the public inventory retains its established declared-path fallback on Git failure");
+  const pinned = await capture();
+  assert.ok(pinned?.binding.freshness, "a failed inventory does not itself forbid non-Git validation");
+  // Old failed-inventory bindings have no tracked paths. Tighten them dynamically,
+  // without rewriting their saved recipe or changing their failure-result contract.
+  const older = { ...structuredClone(pinned.binding), freshness: { ...pinned.binding.freshness,
+    protected_paths: pinned.binding.freshness.protected_paths.filter(path => path !== checkout) } };
+  const saved = JSON.stringify(older), before = await refreshProtectedSnapshot(root, older);
+  const inputs = await validationInputSnapshot(root, older);
+  const concrete = { ...older, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const source = await validatedSourceSnapshot(root, concrete);
+  assert.ok(before && inputs && source);
+  await writeFile(tracked, "changed tracked input");
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source,
+    "capture must not exclude potential tracked inputs when inventory is unavailable");
+  assert.notDeepEqual(await refreshProtectedSnapshot(root, older), before,
+    "refresh must tighten old incomplete inventories instead of preserving stale proof");
+  assert.notEqual(await validationInputSnapshot(root, older), inputs);
+  assert.notEqual(await validatedSourceSnapshot(root, concrete), source);
+  assert.equal(JSON.stringify(older), saved);
+
+  // Recovery restores ordinary per-call scratch handling for new captures.
+  await exec("git", ["config", "--file", join(checkout, ".git", "config"), "core.repositoryformatversion", "0"], { cwd: root });
+  const recovered = await capture();
+  assert.ok(recovered?.binding.freshness);
+  assert.ok(recovered.binding.freshness.protected_paths.includes(tracked));
+  await writeFile(join(scratch, "generated.log"), "incidental scratch");
+  assert.deepEqual(await refreshProtectedSnapshot(root, recovered.binding), { source: recovered.source, candidate: recovered.candidate });
+  await writeFile(tracked, "another tracked change");
+  assert.notEqual((await refreshProtectedSnapshot(root, recovered.binding))?.source, recovered.source);
+}));
+
+test("linked worktree validation preserves tracked scratch protection and per-call freshness", async () => fixture(async area => {
+  const repository = join(area, "repository"), root = join(area, "location"), checkout = join(root, "checkout");
+  await mkdir(repository); await mkdir(root);
+  await exec("git", ["init", "--quiet"], { cwd: repository });
+  await mkdir(join(repository, "scratch"));
+  await writeFile(join(repository, "scratch", "tracked.txt"), "tracked input");
+  await exec("git", ["add", "."], { cwd: repository });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repository });
+  await exec("git", ["worktree", "add", "--detach", checkout], { cwd: repository });
+  const command = "TMPDIR=./scratch node check.mjs", other = "node another-check.mjs";
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**"], write: ["checkout/**"], validation: [command, other] });
+  const manifestPath = join(root, "manifest.json"); await writeFile(manifestPath, bytes);
+  const auth = { projectRoot: root, manifestPath, manifestHash: hash(bytes) };
+  const pinned = await protectedSnapshot(auth, { directory: checkout, command });
+  assert.ok(pinned?.binding.freshness);
+  const tracked = join(checkout, "scratch", "tracked.txt"), generated = join(checkout, "scratch", "generated.log");
+  assert.ok(pinned.binding.freshness.protected_paths.includes(tracked));
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(inputs);
+  await writeFile(generated, "incidental scratch");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(tracked, "changed tracked input");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.source, pinned.source);
+  await writeFile(tracked, "tracked input");
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  const promoted = join(checkout, "scratch", "promoted.txt");
+  await writeFile(promoted, "newly tracked input");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  await exec("git", ["add", "scratch/promoted.txt"], { cwd: checkout });
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+  const otherCall = await protectedSnapshot(auth, { directory: checkout, command: other });
+  assert.ok(otherCall?.binding.freshness);
+  assert.deepEqual(otherCall.binding.freshness.scratch_paths, []);
+  await writeFile(generated, "changed scratch");
+  assert.notEqual((await refreshProtectedSnapshot(root, otherCall.binding))?.source, otherCall.source);
+  assert.equal(JSON.stringify(pinned.binding), saved);
+}));
+
 test("a whole-Location grant protects tracked scratch inputs from the fixed validation cwd", async () => fixture(async root => {
   const checkout = join(root, "checkout"), scratch = join(checkout, "scratch");
   await mkdir(scratch, { recursive: true });

@@ -16,7 +16,8 @@ test("snapshot inventory hides Git subprocesses without changing tracked inputs 
   childProcess.execFile = ((file: string, args: string[], options: childProcess.ExecFileOptions,
     callback: (error: Error | null, stdout: string, stderr: string) => void) => {
     calls.push({ file, args: [...args], options });
-    callback(failure, options.cwd === root ? "root source.txt\0" : "nested source.txt\0", "");
+    if (args.includes("--stage")) callback(null, "", "");
+    else callback(failure, options.cwd === root ? "root source.txt\0" : "nested source.txt\0", "");
     return {} as childProcess.ChildProcess;
   }) as typeof childProcess.execFile;
   // execFile's custom promisifier returns both streams, unlike a generic callback wrapper.
@@ -32,15 +33,21 @@ test("snapshot inventory hides Git subprocesses without changing tracked inputs 
     const { currentSnapshotProtection } = await import("../../dist/plugin/protected-snapshot.js");
     const manifest = { read: ["nested/**"], write: ["output.txt", "missing.txt"] };
     const assertCalls = () => {
-      assert.equal(calls.length, 2, "query both the Location and its declared nested repository");
-      assert.deepEqual(calls.map(call => call.options.cwd).sort(), [root, nested].sort());
+      const inventory = calls.filter(call => !call.args.includes("--stage"));
+      const safety = calls.filter(call => call.args.includes("--stage"));
+      assert.equal(inventory.length, 2, "query both the Location and its declared nested repository");
+      assert.deepEqual(inventory.map(call => call.options.cwd).sort(), [root, nested].sort());
+      assert.equal(safety.length, 1, "check whether the nested repository is a tracked submodule");
       for (const call of calls) {
         assert.equal(call.file, "git");
-        assert.deepEqual(call.args, ["-c", "core.fsmonitor=false", "ls-files", "-z"]);
         assert.equal(call.options.windowsHide, true, "background inventory must not open a Windows console");
         assert.equal(call.options.maxBuffer, 16 * 1024 * 1024);
         assert.equal(call.options.shell, undefined, "keep direct execution rather than introducing a shell");
       }
+      for (const call of inventory) assert.deepEqual(call.args, [
+        ...(call.options.cwd === nested ? [`--git-dir=${join(nested, ".git")}`, `--work-tree=${nested}`] : []),
+        "-c", "core.fsmonitor=false", "ls-files", "-z",
+      ]);
     };
     await t.test("successful queries retain tracked paths and materialized outputs", async () => {
       const result = await currentSnapshotProtection(root, manifest, "nested");

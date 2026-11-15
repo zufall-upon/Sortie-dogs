@@ -86,6 +86,8 @@ interface Extraction {
   gitCommit?: boolean;
   gitCommitAdds?: string[][];
   gitMutation?: boolean;
+  /** Path indices for explicitly overridden Git index destinations. */
+  gitIndexPaths?: number[];
   /** Ambiguity in the Git mutation itself, not another native shell segment. */
   gitAmbiguous?: boolean;
   remoteMutation?: boolean;
@@ -436,6 +438,27 @@ function exactGitAddPaths(tokens: readonly string[]): string[] | undefined {
   return paths;
 }
 
+/** Git path permission must describe the argv Bash sends, not an expanded shell word. */
+function isLiteralPosixGitAddPath(source: string): boolean {
+  // Escapes are not decoded here; even quoted backslashes cannot safely become
+  // platform-independent manifest separators. PowerShell keeps its native paths.
+  if (source.includes("\\") || hasUnresolvedOutputQuoting(source)) return false;
+  if (/^'[^']*'$/u.test(source) || /^"[^"$`]*"$/u.test(source)) return true;
+  return !/["'$`{}]/u.test(source) && !source.startsWith("~");
+}
+
+/** A single, literal absolute index assignment on a direct POSIX git add. */
+function gitAddIndexAssignment(source: string): { path: string; command: string } | undefined {
+  const match = /^GIT_INDEX_FILE=(?:'([^'\\\r\n]*)'|"([^"\\$`\r\n]*)"|([^\s'"\\$`~*?\[\]{}()<>;&|]+))(?=\s)/u.exec(source);
+  if (match === null) return undefined;
+  const path = match[1] ?? match[2] ?? match[3]!;
+  const command = source.slice(match[0].length).trimStart();
+  // Git may resolve a relative index after changing to the repository root, unlike
+  // ordinary shell outputs. Extraction cannot safely infer that root synchronously.
+  if (!isAbsolute(path) || !/^git[ \t]+add(?=[ \t]|$)/u.test(command)) return undefined;
+  return { path, command };
+}
+
 function gitCommitArguments(tokens: readonly string[]): readonly string[] | undefined {
   let index = 1;
   // Only invocation-local identity settings preserve the native repository/index context.
@@ -501,7 +524,8 @@ function scanShellSyntax(source: string, dialect: ShellDialect): ShellSyntax {
         continue;
       }
       if (quote === "\"" &&
-          (((character === "$" || character === "<") && source[index + 1] === "(") ||
+          ((dialect === "posix" && character === "`") ||
+            ((character === "$" || character === "<") && source[index + 1] === "(") ||
             (character === "$" && source[index + 1] === "{"))) unsafeExpansion = true;
       continue;
     }
@@ -1189,6 +1213,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
   let gitAdds: string[] = [];
   const gitCommitAdds: string[][] = [];
   let gitMutation = false;
+  let alternateIndexAdd = false;
+  const gitIndexPaths: number[] = [];
   let gitAmbiguous = false;
   let gitContextChanged = false;
   let unresolvedExpansion = false;
@@ -1291,6 +1317,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (/^\$env:[A-Za-z_][A-Za-z0-9_]*$/iu.test(source) ||
           (assignment && isLiteralPowerShellAssignment(source))) continue;
     }
+    const indexAssignment = powershell ? undefined : gitAddIndexAssignment(source);
+    if (indexAssignment !== undefined) source = indexAssignment.command;
     const safePathUse = straightLine && !/[()[\]@`]/u.test(syntax.masked);
     const tokenMatches = [...source.matchAll(/user\.(?:name|email)=(?:"[^"\\]*"|'[^']*')(?=\s|$)|"(?:\\.|[^"])*"|'[^']*'|[^\s]+/giu)];
     const tokenSources = tokenMatches.map(match => match[0]);
@@ -1551,12 +1579,22 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       applies = true;
       gitMutation = true;
       const selected = exactGitAddPaths(tokens);
-      if (selected === undefined) { ambiguous = true; gitAmbiguous = true; }
-      else {
+      if (selected === undefined || !powershell && selected.some((_, index) =>
+        !isLiteralPosixGitAddPath(tokenSources[rawTokens.length - selected.length + index]!))) {
+        ambiguous = true; gitAmbiguous = true;
+      } else {
+        if (indexAssignment !== undefined) {
+          alternateIndexAdd = true;
+          gitIndexPaths.push(paths.length);
+          // The assignment parser has already proven the complete value literal,
+          // including a dollar sign inside a single-quoted pathname.
+          literalDollarPaths.add(paths.length);
+          paths.push(indexAssignment.path);
+        }
         entryPaths.push(...selected.map((_, index) => paths.length + index));
         // Preserve the existing Git index-path contract, distinct from native outputs.
         selected.forEach((path, index) => appendTokenPath(path, tokens.length - selected.length + index, false));
-        gitAdds.push(...selected);
+        if (indexAssignment === undefined) gitAdds.push(...selected);
       }
     } else if (commitArguments !== undefined) {
       applies = true;
@@ -1632,7 +1670,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     ...(gitCommit ? { gitCommit: true } : {}),
     ...(gitCommitAdds.length > 0 ? { gitCommitAdds } : {}),
     ...(gitMutation ? { gitMutation: true } : {}),
-    ...(gitAmbiguous || gitMutation && (unresolvedExpansion || gitContextChanged) ? { gitAmbiguous: true } : {}),
+    ...(gitIndexPaths.length > 0 ? { gitIndexPaths } : {}),
+    ...(gitAmbiguous || gitMutation && (unresolvedExpansion || gitContextChanged) || gitCommit && alternateIndexAdd ? { gitAmbiguous: true } : {}),
     ...(remoteMutation ? { remoteMutation: true } : {}),
     ...(issue ? { issue } : {}),
   };
@@ -1705,6 +1744,7 @@ export function extractWritePaths(tool: string, args: unknown, toolDirectory?: s
       // Preserve operand kind: Git resolves relative adds from the physical native cwd.
       ...(extracted.gitCommitAdds ? { gitCommitAdds: extracted.gitCommitAdds } : {}),
       ...(extracted.gitMutation ? { gitMutation: true } : {}),
+      ...(extracted.gitIndexPaths ? { gitIndexPaths: extracted.gitIndexPaths.map(index => paths.length + index) } : {}),
       ...(extracted.gitAmbiguous ? { gitAmbiguous: true } : {}),
       ...(extracted.remoteMutation ? { remoteMutation: true } : {}),
       ...(extracted.issue ? { issue: extracted.issue } : {}),
@@ -2342,11 +2382,21 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
         catch (error) { throw new WriteDeniedError("project-boundary", path, { cause: error }); }
         try {
           const absolute = resolve(nativeFileTool ? toolDirectory : project.root, path);
+          // Git can follow an index symlink to a different file, while the caller
+          // initially sees only the spelled path. Do not authorize that indirection.
+          if (extracted.gitIndexPaths?.includes(index) && await isSymbolicLink(absolute)) {
+            throw new WriteDeniedError("manifest-scope", path);
+          }
           const anchor = linkEntries.get(absolute);
           const entryOnly = !nativeFileTool && extracted.entryPaths?.includes(index) &&
             !/[\\/]$/u.test(path) && !extracted.ambiguous;
           if (entryOnly && anchor !== undefined && await realpath(dirname(absolute)) === anchor) continue;
           await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path);
+          if (extracted.gitIndexPaths?.includes(index) && options?.assertWritePaths) {
+            // A parent directory can also be an alias. Preserve caller prohibitions
+            // on both the supplied spelling and the current physical destination.
+            await options.assertWritePaths([...new Set([absolute, await canonicalPotentialPath(absolute)])]);
+          }
         }
         catch (error) {
           if (options?.investigativeShell && error instanceof WriteDeniedError && error.reason === "manifest-scope") {

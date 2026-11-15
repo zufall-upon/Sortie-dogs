@@ -1,20 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile, symlink } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import test from "node:test";
-import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionReviewBaseline, missionReviewSource,
+import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
   observedMissionValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
 import { MISSION_REVIEW_REFERENCE, OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
 import { declaredArtifacts } from "../dist/plugin/declared-artifacts.js";
-import { protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
+import { currentSnapshotProtection, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 
 const git = promisify(execFile);
@@ -689,6 +690,562 @@ test("Review uses the fixed old or new config recipe and never weakens mixed leg
     await writeFile(join(root, ".opencode/opencode.json"), "changed tracked plugin source\n");
     assert.notEqual((await missionReviewSource(root, modern)).fingerprint, tracked.fingerprint);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("review source scans do not execute root or nested Git fsmonitor hooks", async () => {
+  const root = await mkdtemp(resolve("_testenv/review-fsmonitor-"));
+  try {
+    const nested = join(root, "nested"); await mkdir(nested);
+    for (const repository of [root, nested]) {
+      await git("git", ["init", "--quiet"], { cwd: repository });
+      await writeFile(join(repository, "output.txt"), "reviewed output");
+      await git("git", ["add", "--", "output.txt"], { cwd: repository });
+    }
+    const sentinels = [join(root, "root-hook-fired"), join(root, "nested-hook-fired")];
+    for (const [index, repository] of [root, nested].entries()) {
+      const hook = join(repository, ".git", "probe-fsmonitor"), sentinel = sentinels[index]!;
+      const shellPath = sentinel.replaceAll("\\", "/").replaceAll("'", "'\\''");
+      await writeFile(hook, `#!/bin/sh\nprintf fired > '${shellPath}'\n`); await chmod(hook, 0o755);
+      await git("git", ["config", "core.fsmonitor", hook], { cwd: repository });
+      await git("git", ["ls-files", "-z"], { cwd: repository });
+      assert.equal(await fs.readFile(sentinel, "utf8"), "fired", "the configured hook is runnable by an ordinary Git scan");
+      await rm(sentinel);
+    }
+    const run = { units: [{ unit: { read: [], write: ["output.txt", "nested/**"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.match(first.excerpt, /output\.txt/u);
+    assert.match(first.excerpt, /nested\/output\.txt/u);
+    await writeFile(join(nested, "output.txt"), "changed output");
+    assert.notEqual((await missionReviewSource(root, run)).candidateFingerprint, first.candidateFingerprint);
+    for (const sentinel of sentinels) await assert.rejects(fs.readFile(sentinel), { code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const location of ["root", "nested"] as const) for (const filter of ["clean", "process"] as const) {
+  test(`public Review and delivery avoid Git ${filter} filters and fsmonitor in ${location} checkout`, async () => {
+    const area = await mkdtemp(join(tmpdir(), "review-filter-boundary-"));
+    const root = join(area, "root"), nested = join(root, "nested"), repositories = [root, nested];
+    const sentinels = repositories.map((_, index) => ({ filter: join(area, `filter-${index}`), monitor: join(area, `monitor-${index}`) }));
+    try {
+      await mkdir(nested, { recursive: true });
+      for (const [index, repository] of repositories.entries()) {
+        await git("git", ["init", "--quiet", "-b", `review-${index}`], { cwd: repository });
+        await writeFile(join(repository, ".gitignore"), ".sortie-dogs-v010/\nnested/\n");
+        await writeFile(join(repository, ".gitattributes"), "*.txt filter=probe\n");
+        await writeFile(join(repository, "output.txt"), "before\n");
+        await writeFile(join(repository, "staged.txt"), "before\n");
+        await writeFile(join(repository, "deleted.txt"), "before\n");
+        await writeFile(join(repository, "check.mjs"), "process.exit(0);\n");
+        await git("git", ["add", ".gitignore", ".gitattributes", "output.txt", "staged.txt", "deleted.txt", "check.mjs"], { cwd: repository });
+        await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repository });
+        if (process.platform !== "win32") {
+          const conditional = join(area, `gitdir-config-${index}`);
+          await writeFile(conditional, "[core]\n\tfilemode = false\n");
+          await git("git", ["config", `includeIf.gitdir:${repository.replaceAll("\\", "/")}/.git.path`, conditional], { cwd: repository });
+          assert.equal((await git("git", ["config", "--includes", "--bool", "core.filemode"], { cwd: repository })).stdout.trim(), "false");
+          await chmod(join(repository, "staged.txt"), 0o755);
+        }
+        if (filter === "process") await git("git", ["update-index", "--split-index"], { cwd: repository });
+        // The real repository's highest-precedence attributes must not override the private one.
+        await writeFile(join(repository, ".git", "info", "attributes"), "*.txt filter=probe\n");
+        const probe = join(area, `filter-${index}.cjs`), hook = join(area, `monitor-${index}.cjs`);
+        await writeFile(probe, `require('node:fs').writeFileSync(${JSON.stringify(sentinels[index]!.filter)},'fired');` +
+          (filter === "clean" ? "process.stdin.pipe(process.stdout);\n" : "process.exit(1);\n"));
+        await writeFile(hook, `require('node:fs').writeFileSync(${JSON.stringify(sentinels[index]!.monitor)},'fired');\n`);
+        const command = `"${process.execPath.replaceAll("\\", "/")}" "${probe.replaceAll("\\", "/")}"`;
+        const monitor = `"${process.execPath.replaceAll("\\", "/")}" "${hook.replaceAll("\\", "/")}"`;
+        await git("git", ["config", `filter.probe.${filter}`, command], { cwd: repository });
+        await git("git", ["config", "filter.probe.required", "true"], { cwd: repository });
+        await git("git", ["config", "core.fsmonitor", monitor], { cwd: repository });
+        await writeFile(join(repository, "staged.txt"), "staged\n");
+        await git("git", ["-c", "core.fsmonitor=false", "-c", "filter.probe.clean=", "-c", "filter.probe.process=",
+          "-c", "filter.probe.required=false", "add", "staged.txt"], { cwd: repository });
+        await writeFile(join(repository, "output.txt"), "after!\n"); // Same size forces content comparison.
+        await rm(join(repository, "deleted.txt"));
+        await git("git", ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "output.txt"],
+          { cwd: repository }).catch(() => undefined); // A failing process filter is still an executable probe.
+        assert.equal(await fs.readFile(sentinels[index]!.filter, "utf8"), "fired");
+        await rm(sentinels[index]!.filter);
+        await git("git", ["-c", "filter.probe.clean=", "-c", "filter.probe.process=", "-c", "filter.probe.required=false", "status", "--short"],
+          { cwd: repository });
+        assert.equal(await fs.readFile(sentinels[index]!.monitor, "utf8"), "fired");
+        await rm(sentinels[index]!.monitor);
+      }
+      const directory = location === "root" ? root : nested;
+      const writes = ["output.txt", "staged.txt", "deleted.txt", ...(location === "root" ? ["nested/**"] : [])];
+      const history: unknown[] = [];
+      const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+        get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+        children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+      } } } as never);
+      const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+      await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+        message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+        parts: [{ type: "text", text: "Review the scoped Git outputs" }],
+      });
+      await tool("start_mission", { requirements: ["Review the scoped Git outputs"] });
+      await tool("plan_units", { executor: "self", units: [{ title: "Proof", objective: "Review outputs",
+        read: ["check.mjs"], write: writes, validation: ["node check.mjs"] }] });
+      const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: directory };
+      const started = Date.now();
+      await hooks["tool.execute.before"]!(input, { args });
+      const checked = await git(process.execPath, ["check.mjs"], { cwd: directory });
+      await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+      history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: "proof",
+        state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+      const finished = await tool("finish_direct_unit");
+      assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
+      const delivery = (await tool("operator_status")).acceptance_summary.delivery.observation;
+      assert.equal(delivery.branch, location === "root" ? "review-0" : "review-1");
+      assert.equal(delivery.head, (await git("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim());
+      assert.equal(delivery.clean, false, "delivery still observes staged, unstaged and deleted files");
+      const review = await tool("review_mission", { risk_tags: ["public-logic"] });
+      assert.equal(review.status, "review-required", JSON.stringify(review));
+      const mission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const run = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.match(mission.review!.task!.prompt, /after!/u);
+      assert.match(mission.review!.task!.prompt, /staged\.txt/u);
+      assert.match(mission.review!.task!.prompt, /\+staged/u);
+      assert.match(mission.review!.task!.prompt, /deleted\.txt/u);
+      if (location === "root") assert.match(mission.review!.task!.prompt, /repository output: nested/u);
+      const first = await missionReviewSource(directory, run, [], mission.reviewBaseline, mission.reviewScope);
+      const unbased = await missionReviewSource(directory, run, [], undefined, mission.reviewScope);
+      const ordinaryDiff = async (repository: string, paths: string[]) => (await git("git", ["-c", "core.fsmonitor=false",
+        "-c", "filter.probe.clean=", "-c", "filter.probe.process=", "-c", "filter.probe.required=false",
+        "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...paths], { cwd: repository })).stdout;
+      const expected = await ordinaryDiff(directory, writes.filter(path => path !== "nested/**"));
+      assert.match(expected, /\+after!/u);
+      assert.ok(unbased.excerpt.includes(expected), "ordinary staged, unstaged and deleted Git diff remains intact");
+      if (location === "root") assert.ok(unbased.excerpt.includes(await ordinaryDiff(nested, ["."])));
+      // Git settings can change after the plugin and its Review are created. Each
+      // subsequent call must suppress the current commands, not just captured ones.
+      const late: string[] = [];
+      for (const [index, repository] of repositories.entries()) {
+        for (const kind of ["filter", "monitor"] as const) {
+          const marker = join(area, `late-${kind}-${index}`), script = join(area, `late-${kind}-${index}.cjs`);
+          await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'fired');process.exit(1);\n`);
+          const command = `"${process.execPath.replaceAll("\\", "/")}" "${script.replaceAll("\\", "/")}"`;
+          await git("git", ["config", kind === "filter" ? `filter.probe.${filter}` : "core.fsmonitor", command], { cwd: repository });
+          late.push(marker);
+        }
+      }
+      await writeFile(join(directory, "output.txt"), "later!\n");
+      assert.notEqual((await missionReviewSource(directory, run, [], mission.reviewBaseline, mission.reviewScope)).candidateFingerprint,
+        first.candidateFingerprint, "normal tracked changes still invalidate the Review");
+      assert.equal((await missionDeliveryObservation(directory, "late"))?.clean, false);
+      for (const sentinel of sentinels) {
+        await assert.rejects(fs.readFile(sentinel.filter), { code: "ENOENT" });
+        await assert.rejects(fs.readFile(sentinel.monitor), { code: "ENOENT" });
+      }
+      for (const marker of late) await assert.rejects(fs.readFile(marker), { code: "ENOENT" });
+    } finally { await rm(area, { recursive: true, force: true }); }
+  });
+}
+
+test("Review and delivery preserve non-filter info attributes in the private index", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-info-attributes-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    // No terminal newline: the filter override must not join the existing attribute rule.
+    await writeFile(join(root, ".git", "info", "attributes"), "file.txt text eol=crlf");
+    await writeFile(join(root, "file.txt"), "before\r\n");
+    await git("git", ["add", "file.txt"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    await writeFile(join(root, "file.txt"), "before\r\n");
+    assert.equal((await git("git", ["status", "--porcelain"], { cwd: root })).stdout, "");
+    assert.equal((await missionDeliveryObservation(root, "attributes"))?.clean, true);
+    await writeFile(join(root, "file.txt"), "after!\r\n");
+    const expected = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "file.txt"], { cwd: root })).stdout;
+    const run = { units: [{ unit: { read: [], write: ["file.txt"] }, hashes: [] }] } as never;
+    assert.ok((await missionReviewSource(root, run)).excerpt.includes(expected));
+    assert.equal((await missionDeliveryObservation(root, "changed"))?.clean, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review and snapshot reject redirected tracked submodule metadata", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-submodule-redirect-"));
+  const root = join(area, "root"), source = join(area, "source"), secret = join(area, "private"), nested = join(root, "nested");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    for (const directory of [root, source, secret]) { await mkdir(directory); await git("git", ["init", "--quiet"], { cwd: directory }); }
+    await writeFile(join(source, "normal.txt"), "normal\n");
+    await git("git", ["add", "."], { cwd: source }); await commit(source);
+    await writeFile(join(secret, "private.txt"), "PR384_PRIVATE_SENTINEL\n");
+    await git("git", ["add", "."], { cwd: secret }); await commit(secret);
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", secret, "other"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root }); await commit(root);
+    assert.equal((await missionDeliveryObservation(root, "legitimate"))?.clean, true);
+    await writeFile(join(nested, ".git"), `gitdir: ${join(secret, ".git")}\n`);
+    assert.equal(await missionDeliveryObservation(root, "redirected"), undefined);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    for (const output of [".", "nested/**"]) {
+      const run = { units: [{ unit: { read: [], write: [output] }, hashes: [] }] } as never;
+      await assert.rejects(missionReviewSource(root, run), error => {
+        assert.match(String(error), /untrusted Git submodule metadata/);
+        assert.doesNotMatch(String(error), /PR384_PRIVATE_SENTINEL/);
+        return true;
+      });
+    }
+    // Native Git can inspect a submodule HEAD even with ignore=dirty.
+    await git("git", ["config", "submodule.nested.ignore", "dirty"], { cwd: root });
+    assert.equal(await missionDeliveryObservation(root, "redirected-dirty"), undefined);
+    const broad = { units: [{ unit: { read: [], write: ["."] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, broad), /untrusted Git submodule metadata/);
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
+    // A staged .gitmodules edit must not make a different protected module trusted.
+    await git("git", ["config", "--file", ".gitmodules", "submodule.nested.path", "not-nested"], { cwd: root });
+    await git("git", ["config", "--file", ".gitmodules", "submodule.other.path", "nested"], { cwd: root });
+    await git("git", ["add", ".gitmodules"], { cwd: root });
+    await writeFile(join(nested, ".git"), "gitdir: ../.git/modules/other\n");
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+    const foreign = join(root, "foreign"); await mkdir(foreign);
+    await writeFile(join(foreign, ".git"), `gitdir: ${join(secret, ".git")}\n`);
+    const untracked = { units: [{ unit: { read: [], write: ["foreign/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, untracked), /untrusted nested Git metadata/);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("standalone nested Git directories reject redirected metadata before Review and snapshot", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-standalone-metadata-"));
+  const root = join(area, "root"), child = join(root, "nested"), fixture = join(area, "ordinary-fixture");
+  const metadata = join(child, ".git"), fixtureMetadata = join(fixture, ".git");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    await mkdir(child, { recursive: true }); await mkdir(fixture);
+    for (const directory of [root, child, fixture]) await git("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(child, "input.txt"), "nested input\n");
+    await git("git", ["add", "input.txt"], { cwd: child }); await commit(child);
+    await writeFile(join(fixture, "example.txt"), "ordinary fixture only\n");
+    await git("git", ["add", "example.txt"], { cwd: fixture }); await commit(fixture);
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    const protection = () => currentSnapshotProtection(root, { read: [], write: ["nested/**"] });
+    const rejected = async () => {
+      await assert.rejects(protection(), /untrusted nested Git metadata/);
+      await assert.rejects(missionReviewSource(root, run), error => {
+        assert.match(String(error), /untrusted nested Git metadata/);
+        assert.doesNotMatch(String(error), /ordinary fixture only/);
+        return true;
+      });
+    };
+    assert.ok((await protection()).includes(join(child, "input.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /nested input/);
+    const config = await fs.readFile(join(metadata, "config"));
+    await git("git", ["config", "--file", join(metadata, "config"), "core.worktree", fixture], { cwd: root });
+    assert.ok((await protection()).includes(join(child, "input.txt")), "the declared worktree overrides local config");
+    const pinned = await missionReviewSource(root, run);
+    assert.match(pinned.excerpt, /nested input/);
+    assert.doesNotMatch(pinned.excerpt, /ordinary fixture only/);
+    await writeFile(join(metadata, "config"), config);
+
+    // Same directory-form layout and public caller as the pre-change oracle.
+    const head = await fs.readFile(join(metadata, "HEAD")), index = await fs.readFile(join(metadata, "index"));
+    await fs.copyFile(join(fixtureMetadata, "HEAD"), join(metadata, "HEAD"));
+    await fs.copyFile(join(fixtureMetadata, "index"), join(metadata, "index"));
+    await writeFile(join(metadata, "commondir"), `${fixtureMetadata}\n`);
+    await rejected();
+    await rm(join(metadata, "commondir"));
+    await writeFile(join(metadata, "HEAD"), head); await writeFile(join(metadata, "index"), index);
+
+    await writeFile(join(metadata, "objects", "info", "alternates"), `${join(fixtureMetadata, "objects")}\n`);
+    await rejected();
+    await rm(join(metadata, "objects", "info", "alternates"));
+    if (process.platform !== "win32") {
+      const link = join(metadata, "refs", "fixture-link");
+      await symlink(join(fixtureMetadata, "HEAD"), link);
+      await rejected();
+      await rm(link);
+    }
+    assert.ok((await protection()).includes(join(child, "input.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /nested input/);
+
+    // Preserve conditional settings without disclosing arbitrary values from an
+    // included config in the diff or in a Git error's command/stderr.
+    const externalConfig = join(area, "config-fixture");
+    await writeFile(externalConfig, "[diff]\n\tsrcPrefix = config-fixture-only/\n\tdstPrefix = config-fixture-only/\n");
+    await appendFile(join(metadata, "config"), `\n[include]\n\tpath = ${externalConfig}\n`);
+    await writeFile(join(child, "input.txt"), "changed input\n");
+    const included = await missionReviewSource(root, run);
+    assert.match(included.excerpt, /\+changed input/);
+    assert.doesNotMatch(included.excerpt, /config-fixture-only/);
+    await writeFile(externalConfig, "[diff]\n\talgorithm = config-fixture-only\n");
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /git-inspection: cannot inspect nested Git repository/);
+      assert.doesNotMatch(String(error), /config-fixture-only/);
+      assert.doesNotMatch(JSON.stringify(error), /config-fixture-only/);
+      return true;
+    });
+    await writeFile(externalConfig, "[diff]\n\talgorithm = default\n");
+    const oid = (await git("git", ["rev-parse", "HEAD"], { cwd: child })).stdout.trim();
+    await git("git", ["update-index", "--add", "--cacheinfo", `160000,${oid},component`], { cwd: child });
+    await writeFile(join(child, ".gitmodules"), '[submodule "component"]\n\tpath = component\n\turl = fixture\n');
+    await writeFile(externalConfig, '[submodule "component"]\n\tignore = config-fixture-only\n');
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /invalid submodule ignore mode/);
+      assert.doesNotMatch(String(error), /config-fixture-only/);
+      return true;
+    });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("Git pointer checks bound reads and reject unrelated paths before resolving them", async t => {
+  const area = await mkdtemp(join(tmpdir(), "review-git-pointer-"));
+  const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
+  const marker = join(nested, ".git"), unrelated = join(area, "unrelated");
+  const originalOpen = fs.open, originalRealpath = fs.realpath;
+  const flags: number[] = [];
+  let unrelatedResolutions = 0;
+  try {
+    for (const path of [root, source, unrelated]) await mkdir(path);
+    for (const path of [root, source]) await git("git", ["init", "--quiet"], { cwd: path });
+    await writeFile(join(source, "input.txt"), "ordinary fixture\n");
+    await git("git", ["add", "."], { cwd: source });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: source });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const saved = await fs.readFile(marker, "utf8");
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (args[0] === marker && typeof args[1] === "number") flags.push(args[1]);
+      return originalOpen(...args);
+    });
+    t.mock.method(fs, "realpath", async (...args: Parameters<typeof fs.realpath>) => {
+      if (args[0] === unrelated) unrelatedResolutions++;
+      return originalRealpath(...args);
+    });
+    syncBuiltinESMExports();
+    assert.ok((await currentSnapshotProtection(root, { read: [], write: ["nested/**"] })).includes(join(nested, "input.txt")));
+    assert.ok(flags.length > 0, "the public snapshot path opens the pointer through the bounded reader");
+    if (constants.O_NONBLOCK) assert.ok(flags.every(value => (value & constants.O_NONBLOCK) !== 0));
+    if (constants.O_NOFOLLOW) assert.ok(flags.every(value => (value & constants.O_NOFOLLOW) !== 0));
+    assert.equal((await missionDeliveryObservation(root, "valid"))?.clean, true);
+
+    await writeFile(marker, "x".repeat(65_537));
+    const before = flags.length;
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    assert.equal(flags.length, before, "oversized metadata is rejected before reading");
+    assert.equal(await missionDeliveryObservation(root, "oversized"), undefined);
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+
+    await writeFile(marker, `gitdir: ${unrelated}\n`);
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+    assert.equal(await missionDeliveryObservation(root, "unrelated"), undefined);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    assert.equal(unrelatedResolutions, 0, "the marker's unrelated target is never resolved");
+    await writeFile(marker, saved);
+    assert.equal((await missionDeliveryObservation(root, "restored"))?.clean, true);
+
+    const standalone = join(root, "standalone"), admin = join(area, "fixture-admin", "worktrees", "entry");
+    await mkdir(standalone); await mkdir(admin, { recursive: true });
+    await writeFile(join(standalone, ".git"), `gitdir: ${admin}\n`);
+    await writeFile(join(admin, "gitdir"), `${unrelated}\n`);
+    const standaloneRun = { units: [{ unit: { read: [], write: ["standalone/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, standaloneRun), /untrusted nested Git metadata/);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["standalone/**"] }), /untrusted nested Git metadata/);
+    assert.equal(unrelatedResolutions, 0, "an unrelated worktree backlink is not resolved either");
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    await rm(area, { recursive: true, force: true });
+  }
+});
+
+test("public Review and delivery inspect dirty Git submodules without executing their filters", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-submodule-filter-"));
+  const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested"), marker = join(area, "filter-fired");
+  try {
+    await mkdir(root); await mkdir(source);
+    await git("git", ["init", "--quiet"], { cwd: source });
+    await writeFile(join(source, ".gitattributes"), "*.txt filter=probe\n");
+    await writeFile(join(source, "file.txt"), "before\n");
+    await git("git", ["add", "."], { cwd: source });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: source });
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, ".gitignore"), ".sortie-dogs-v010/\n");
+    await writeFile(join(root, "check.mjs"), "process.exit(0);\n");
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["add", ".gitignore", "check.mjs"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const probe = join(area, "filter.cjs");
+    await writeFile(probe, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'fired');process.stdin.pipe(process.stdout);\n`);
+    await git("git", ["config", "filter.probe.clean", `"${process.execPath.replaceAll("\\", "/")}" "${probe.replaceAll("\\", "/")}"`], { cwd: nested });
+    assert.equal((await missionDeliveryObservation(root, "clean"))?.clean, true);
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" });
+    await writeFile(join(nested, "file.txt"), "after!\n");
+    await git("git", ["-c", "core.fsmonitor=false", "status", "--porcelain=v2"], { cwd: root });
+    assert.equal(await fs.readFile(marker, "utf8"), "fired", "ordinary parent status reaches the submodule filter");
+    await rm(marker); await writeFile(join(nested, "file.txt"), "after2\n");
+    const history: unknown[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+    } } } as never);
+    const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+      message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Review the submodule change" }],
+    });
+    await tool("start_mission", { requirements: ["Review the submodule change"] });
+    await tool("plan_units", { executor: "self", units: [{ title: "Proof", objective: "Review the submodule",
+      read: ["check.mjs"], write: ["."], validation: ["node check.mjs"] }] });
+    const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
+    const started = Date.now();
+    await hooks["tool.execute.before"]!(input, { args });
+    const checked = await git(process.execPath, ["check.mjs"], { cwd: root });
+    await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: "proof",
+      state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+    const finished = await tool("finish_direct_unit");
+    assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
+    assert.equal((await tool("operator_status")).acceptance_summary.delivery.clean, false, "only the dirty submodule makes delivery dirty");
+    assert.equal((await tool("review_mission", { risk_tags: ["public-logic"] })).status, "review-required");
+    const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    assert.match(mission.review!.task!.prompt, /dirty submodule: nested/u);
+    assert.match(mission.review!.task!.prompt, /\+after2/u);
+    const first = await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope);
+    await writeFile(join(nested, "file.txt"), "after3\n");
+    assert.notEqual((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).candidateFingerprint, first.candidateFingerprint);
+    await writeFile(join(nested, "file.txt"), "before\n");
+    assert.equal((await missionDeliveryObservation(root, "restored"))?.clean, true, "a restored submodule is not permanently dirty");
+    for (const ignore of ["all", "dirty", "untracked", "none"]) {
+      await git("git", ["config", "submodule.nested.ignore", ignore], { cwd: root });
+      await writeFile(join(nested, "file.txt"), "changed tracked input\n");
+      const ordinary = await git("git", ["-c", "core.fsmonitor=false", "-c", "filter.probe.clean=", "-c", "filter.probe.process=",
+        "status", "--porcelain=v2", "--untracked-files=all"], { cwd: root });
+      const trackedIgnored = ignore === "all" || ignore === "dirty";
+      assert.equal(ordinary.stdout.length === 0, trackedIgnored, `native Git oracle: tracked, ignore=${ignore}`);
+      assert.equal((await missionDeliveryObservation(root, ignore))?.clean, trackedIgnored, `delivery: tracked, ignore=${ignore}`);
+      assert.equal((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).excerpt.includes("dirty submodule: nested"),
+        !trackedIgnored, `Review: tracked, ignore=${ignore}`);
+      await writeFile(join(nested, "file.txt"), "before\n");
+      await writeFile(join(nested, "untracked.txt"), "untracked input\n");
+      const untrackedIgnored = ignore !== "none";
+      assert.equal((await missionDeliveryObservation(root, ignore))?.clean, untrackedIgnored, `delivery: untracked, ignore=${ignore}`);
+      await rm(join(nested, "untracked.txt"));
+    }
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
+    await git("git", ["config", "--file", join(root, ".gitmodules"), "submodule.nested.ignore", "dirty"], { cwd: root });
+    await git("git", ["add", ".gitmodules"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Ignore submodule worktree"], { cwd: root });
+    await writeFile(join(nested, "file.txt"), "changed tracked input\n");
+    assert.equal((await missionDeliveryObservation(root, "gitmodules"))?.clean, true, ".gitmodules supplies the fallback ignore mode");
+    const conditional = join(area, "submodule-settings"), includeKey = `includeIf.gitdir:${root.replaceAll("\\", "/")}/.git.path`;
+    await writeFile(conditional, '[submodule "nested"]\n\tignore = none\n');
+    await git("git", ["config", includeKey, conditional], { cwd: root });
+    assert.equal((await missionDeliveryObservation(root, "conditional"))?.clean, false, "effective local includes override .gitmodules");
+    assert.match((await missionReviewSource(root, run, [], mission.reviewBaseline, mission.reviewScope)).excerpt, /dirty submodule: nested/u);
+    await git("git", ["config", "--unset", includeKey], { cwd: root });
+    await git("git", ["config", "submodule.nested.ignore", "all"], { cwd: root });
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" }, "automatic Review and delivery never ran the filter");
+    await git("git", ["-c", "filter.probe.clean=", "-c", "filter.probe.process=", "add", "file.txt"], { cwd: nested });
+    // Commit can recheck a racy index entry too; fixture delivery must not fire the probe itself.
+    await git("git", ["-c", "filter.probe.clean=", "-c", "filter.probe.process=", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+      "commit", "--quiet", "-m", "New submodule HEAD"], { cwd: nested });
+    assert.equal((await git("git", ["status", "--porcelain=v2"], { cwd: root })).stdout, "", "native ignore=all hides an unstaged gitlink HEAD change");
+    assert.equal((await missionDeliveryObservation(root, "ignored-head"))?.clean, true);
+    const ignoredHead = await missionReviewSource(root, run);
+    assert.doesNotMatch(ignoredHead.excerpt, /Subproject commit|dirty submodule:/u);
+    await git("git", ["add", "nested"], { cwd: root });
+    assert.notEqual((await git("git", ["status", "--porcelain=v2"], { cwd: root })).stdout, "", "native ignore=all still reports staged gitlinks");
+    assert.equal((await missionDeliveryObservation(root, "staged-head"))?.clean, false, "ignore=all must not hide a staged gitlink from delivery");
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("Review compares the effective submodule worktree rather than an intermediate staged gitlink", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-gitlink-state-"));
+  const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
+  const commit = async (directory: string, message: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", message], { cwd: directory });
+  try {
+    await mkdir(root); await mkdir(source);
+    await git("git", ["init", "--quiet"], { cwd: root }); await git("git", ["init", "--quiet"], { cwd: source });
+    await writeFile(join(source, "file.txt"), "original\n");
+    await git("git", ["add", "."], { cwd: source }); await commit(source, "base");
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root }); await commit(root, "base");
+    const first = (await git("git", ["rev-parse", "HEAD"], { cwd: nested })).stdout.trim();
+    const baseline = (await git("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const externalMarker = join(area, "external-diff-fired"), externalProbe = join(area, "external-diff.cjs");
+    await writeFile(externalProbe, `require('node:fs').writeFileSync(${JSON.stringify(externalMarker)},'fired');\n`);
+    await git("git", ["config", "diff.external", `"${process.execPath.replaceAll("\\", "/")}" "${externalProbe.replaceAll("\\", "/")}"`], { cwd: root });
+    const run = { units: [{ unit: { read: [], write: ["."] }, hashes: [] }] } as never;
+    const initial = await missionReviewSource(root, run, [], baseline);
+    // The gitlink itself changes even when the submodule's file bytes do not.
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "second"], { cwd: nested });
+    await git("git", ["add", "nested"], { cwd: root });
+    const changed = await missionReviewSource(root, run, [], baseline);
+    assert.notEqual(changed.candidateFingerprint, initial.candidateFingerprint);
+    const ordinary = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.ok(changed.excerpt.includes(ordinary));
+    await git("git", ["checkout", "--quiet", "--detach", first], { cwd: nested });
+    assert.equal((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout, "");
+    assert.equal((await missionDeliveryObservation(root, "staged"))?.clean, false, "delivery still sees the real staged index");
+    for (const base of [undefined, baseline]) {
+      const reverted = await missionReviewSource(root, run, [], base);
+      assert.doesNotMatch(reverted.excerpt, /Subproject commit|dirty submodule: nested/u);
+      if (base) assert.equal(reverted.candidateFingerprint, initial.candidateFingerprint);
+    }
+    await git("git", ["config", "submodule.nested.ignore", "all"], { cwd: root });
+    const ignored = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.equal(ignored, "", "native diff hides an ignored submodule even when its index is staged");
+    assert.doesNotMatch((await missionReviewSource(root, run)).excerpt, /Subproject commit|dirty submodule: nested/u);
+    assert.equal((await missionDeliveryObservation(root, "ignored-stage"))?.clean, false, "status still retains the staged gitlink");
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
+    await git("git", ["add", "nested"], { cwd: root });
+    await git("git", ["rm", "--quiet", "--cached", "nested"], { cwd: root });
+    const deleted = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.match(deleted, /deleted file mode 160000/u);
+    assert.ok((await missionReviewSource(root, run, [], baseline)).excerpt.includes(deleted), "deleted gitlinks remain visible");
+    await assert.rejects(fs.readFile(externalMarker), { code: "ENOENT" }, "gitlink comparison must not execute an external diff");
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("Review reports missing Git objects instead of manufacturing an empty diff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-git-missing-object-"));
+  try {
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "source.txt"), "base\n");
+    await git("git", ["add", "source.txt"], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const head = (await git("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    await rm(join(root, ".git", "objects", head.slice(0, 2), head.slice(2)));
+    const run = { units: [{ unit: { read: [], write: ["source.txt"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run), /bad object|unknown revision|bad revision/u);
+    assert.equal(await missionDeliveryObservation(root, "missing"), undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Review does not execute a remote helper for a missing promised Git object", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-promisor-boundary-")), root = join(area, "root"), marker = join(area, "remote-fired");
+  try {
+    await mkdir(root);
+    await git("git", ["init", "--quiet"], { cwd: root });
+    await writeFile(join(root, "source.txt"), "base\n");
+    await git("git", ["add", "."], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const blob = (await git("git", ["rev-parse", "HEAD:source.txt"], { cwd: root })).stdout.trim();
+    const head = (await git("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const probe = join(area, "remote.cjs");
+    await writeFile(probe, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'fired');process.exit(1);\n`);
+    const extWord = (value: string) => value.replaceAll("\\", "/").replaceAll("%", "%%").replaceAll(" ", "% ");
+    for (const [key, value] of [["core.repositoryformatversion", "1"], ["extensions.partialClone", "origin"],
+      ["remote.origin.promisor", "true"], ["remote.origin.url", `ext::${extWord(process.execPath)} ${extWord(probe)}`], ["protocol.ext.allow", "always"]]) {
+      await git("git", ["config", key!, value!], { cwd: root });
+    }
+    await rm(join(root, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+    await writeFile(join(root, "source.txt"), "changed\n");
+    const run = { units: [{ unit: { read: [], write: ["source.txt"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, run));
+    await missionDeliveryObservation(root, "partial");
+    await rm(join(root, ".git", "objects", head.slice(0, 2), head.slice(2)));
+    assert.equal(await missionReviewBaseline(root), undefined, "baseline capture cannot fetch a missing promised commit");
+    assert.equal(await missionDeliveryObservation(root, "missing-head"), undefined);
+    await assert.rejects(fs.readFile(marker), { code: "ENOENT" }, "missing objects must fail without an implicit fetch outside native permissions");
+  } finally { await rm(area, { recursive: true, force: true }); }
 });
 
 test("a non-Git mission reviews scoped nested repositories without a new root or grant", async () => {
