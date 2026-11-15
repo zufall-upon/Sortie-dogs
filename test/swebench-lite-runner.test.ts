@@ -15,6 +15,7 @@ import { nativeRunPending as readNativePending } from "../scripts/native-run-set
 import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
 import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
+import { runtimeAssets } from "../src/runtime-assets-v010.ts";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1532,12 +1533,34 @@ test("URL test data and explicit package registries are allowed for every benchm
 });
 
 test("candidate agent verification rejects missing models and later allow rules", () => {
+  const routes = [
+    ["dog-operator", "gpt-6.1-sol", "xhigh"],
+    ["dogs-coordinator", "gpt-6.1-terra", "xhigh"],
+    ["dog-worker-v010", "gpt-6.1-terra", "max"],
+    ["dog-luna-worker-v010", "gpt-6-luna-fast", "max"],
+    ["dog-scout-v010", "gpt-6-luna-fast", "max"],
+    ["dog-reviewer-v010", "gpt-6.1-sol", "xhigh"],
+    ["dog-advisor-v010", "gpt-6.1-sol", "xhigh"],
+  ];
+  for (const [id, model, variant] of routes) {
+    const asset = runtimeAssets.find(item => item.installPath === `agent/${id}.md`);
+    assert.ok(asset, `missing packaged agent ${id}`);
+    assert.ok(asset.content.includes(`model: openai/${model}#${variant}\n`) ||
+      asset.content.includes(`model: openai/${model}\nvariant: ${variant}\n`), `packaged model for ${id}`);
+    verifyCandidateAgent(id, { id, model: { providerID: "openai", id: model, variant }, permissions: benchmarkPermissionPolicy() });
+  }
   const base = {
-    id: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" },
+    id: "dog-worker-v010", model: { providerID: "openai", id: "gpt-6.1-terra", variant: "max" },
     permissions: benchmarkPermissionPolicy(),
   };
   verifyCandidateAgent(base.id, base);
   assert.throws(() => verifyCandidateAgent(base.id, { ...base, model: undefined }), /candidate-agent-model-mismatch/);
+  const workerOverride = { ...base, model: { ...base.model, id: "gpt-6-luna-fast" } };
+  assert.throws(() => verifyCandidateAgent(base.id, workerOverride), /candidate-agent-model-mismatch/);
+  verifyCandidateAgent(base.id, workerOverride, "openai/gpt-6-luna-fast#max");
+  assert.throws(() => verifyCandidateAgent(base.id, { ...base, model: { ...base.model, variant: "xhigh" } }), /candidate-agent-model-mismatch/);
+  assert.throws(() => verifyCandidateAgent("dogs-coordinator", { ...base, id: "dogs-coordinator",
+    model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } }), /candidate-agent-model-mismatch/);
   assert.throws(() => verifyCandidateAgent(base.id, { ...base, permissions: [
     ...base.permissions, { action: "shell", resource: "*", effect: "allow" },
   ] }), /candidate-agent-network-permission-invalid/);
