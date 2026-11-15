@@ -202,11 +202,11 @@ export function snapshotScratchExclusion(binding: Binding, currentProtection: re
 export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">,
   directory?: string): Promise<string[]> {
   const actual = (entry: string) => resolve(projectRoot, normalizeManifestScope(entry).path);
-  // The Location may contain a separately checked-out repository. Discover only
-  // ancestors of declared paths and the fixed validation cwd, never unrelated
-  // nested trees or filename patterns. A whole-Location grant need not name the
-  // checkout explicitly, but its tracked scratch inputs still require protection.
-  const roots = new Set<string>(), markers = new Map<string, Promise<boolean>>();
+  // Query the Location itself even when its .git is in an ancestor: ls-files
+  // then returns only paths relative to the Location. Also discover separately
+  // checked-out repositories along declared paths and the fixed validation cwd,
+  // without searching unrelated nested trees or filename patterns.
+  const roots = new Set<string>([resolve(projectRoot)]), markers = new Map<string, Promise<boolean>>();
   for (const start of new Set([resolve(projectRoot), ...(directory ? [resolve(projectRoot, directory)] : []),
     ...manifest.read.map(actual), ...manifest.write.map(actual)])) {
     let path = start;

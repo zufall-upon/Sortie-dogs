@@ -86,6 +86,62 @@ writeFileSync(process.env.TMPDIR + '/run-' + process.argv[2], 'diagnostic output
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("direct validation in a Git subdirectory Location rejects changed tracked scratch inputs", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const repository = await mkdtemp(resolve("_testenv/mission-subdir-scratch-"));
+  const directory = join(repository, "package"), scratch = join(directory, ".tmp");
+  try {
+    await mkdir(scratch, { recursive: true });
+    await exec("git", ["init", "--quiet"], { cwd: repository });
+    await writeFile(join(scratch, "tracked.txt"), "tracked input");
+    await writeFile(join(scratch, "fixture.txt"), "explicit input");
+    await writeFile(join(directory, "check.mjs"), `import { readFileSync, writeFileSync } from 'node:fs';
+for (const p of ['.tmp/tracked.txt', '.tmp/fixture.txt']) readFileSync(p);
+writeFileSync(process.env.TMPDIR + '/generated.log', 'output only');\n`);
+    await exec("git", ["add", "--", "package/.tmp/tracked.txt", "package/check.mjs"], { cwd: repository });
+    const command = "TMPDIR=./.tmp node check.mjs", history: any[] = [];
+    const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+      get: async () => ({ data: { id: "root", agent: "dog-operator", outcome: "running" } }),
+      messages: async () => ({ data: history }), children: async () => ({ data: [] }),
+    } } } as never);
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "prompt", agent: "dog-operator" }, {
+      message: { id: "prompt", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+      parts: [{ type: "text", text: "Validate the Location and retain its real inputs." }],
+    });
+    await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Validate the Location"] }, { sessionID: "root" });
+    const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [{
+      title: "Validate Location", objective: "Run the check with its declared scratch",
+      read: [directory + "/**", ".tmp/fixture.txt"], write: [".tmp/**"], validation: [command],
+      validation_cwd: { [command]: directory },
+    }] }, { sessionID: "root" }));
+    assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+    const args = { command, workdir: directory }, start = Date.now();
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "root", callID: "check" }, { args });
+    await exec(command, { cwd: directory, shell: true });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "bash", callID: "check",
+      state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "root", callID: "check", args },
+      { output: "PASS", metadata: { exit: 0, status: "completed" } });
+    const run = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    const checks = (await run()).units[0]!.directExecution!.checks;
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0]!.exitCode, 0);
+    assert.equal(checks[0]!.fresh, true);
+    assert.ok(checks[0]!.binding.freshness!.protected_paths.includes(join(scratch, "tracked.txt")));
+    for (const [name, original] of [["tracked.txt", "tracked input"], ["fixture.txt", "explicit input"]]) {
+      await writeFile(join(scratch, name!), "changed input");
+      const stale = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+      assert.equal(stale.status, "direct-unit-awaits-validation", name);
+      assert.match(stale.reason, /validation-stale/u);
+      await writeFile(join(scratch, name!), original!);
+    }
+    await writeFile(join(scratch, "generated.log"), "different output only");
+    const result = JSON.parse(await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: "root" }));
+    assert.equal((await run()).units[0]!.status, "succeeded", JSON.stringify(result));
+    assert.deepEqual((await run()).units[0]!.directExecution!.checks, checks, "retained check and binding are not rewritten");
+  } finally { await rm(repository, { recursive: true, force: true }); }
+});
+
 test("Worker Reviewer prompt observes the registered cwd and current admission", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/worker-review-root-"));

@@ -422,6 +422,55 @@ test("a whole-Location grant protects tracked scratch inputs from the fixed vali
   assert.equal(JSON.stringify(pinned.binding), saved, "the fixed cwd tightens protection without rewriting the saved binding");
 }));
 
+test("a Git subdirectory Location protects tracked scratch and retains per-call exclusions", async () => fixture(async repository => {
+  const root = join(repository, "package"), scratch = join(root, ".tmp");
+  await mkdir(scratch, { recursive: true });
+  await exec("git", ["init", "--quiet"], { cwd: repository });
+  await writeFile(join(repository, "outside.txt"), "outside Location");
+  await writeFile(join(scratch, "tracked.txt"), "tracked input");
+  await writeFile(join(scratch, "fixture.txt"), "explicit input");
+  await exec("git", ["add", "--", "outside.txt", "package/.tmp/tracked.txt"], { cwd: repository });
+  const commands = ["TMPDIR=./.tmp node check.mjs", "node check.mjs"];
+  const manifestPath = join(root, "manifest.json");
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**", ".tmp/fixture.txt"],
+    write: [".tmp/**"], validation: commands });
+  await writeFile(manifestPath, bytes);
+  const auth = { projectRoot: root, manifestPath, manifestHash: hash(bytes) };
+  const pinned = await protectedSnapshot(auth, { directory: root, command: commands[0] });
+  assert.ok(pinned?.binding.freshness);
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [scratch]);
+  assert.ok(pinned.binding.freshness.protected_paths.includes(join(scratch, "tracked.txt")));
+  assert.ok(!pinned.binding.freshness.protected_paths.includes(join(repository, "outside.txt")));
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  const concrete = { ...pinned.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const };
+  const concreteSource = await validatedSourceSnapshot(root, concrete);
+  assert.ok(inputs && concreteSource);
+  await writeFile(join(scratch, "generated.log"), "output only");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  for (const [name, original] of [["tracked.txt", "tracked input"], ["fixture.txt", "explicit input"]]) {
+    await writeFile(join(scratch, name!), "changed input");
+    assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs, name);
+    const changed = await refreshProtectedSnapshot(root, pinned.binding);
+    assert.notEqual(changed?.source, pinned.source, name);
+    assert.notEqual(changed?.candidate, pinned.candidate, name);
+    assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource, name);
+    await writeFile(join(scratch, name!), original!);
+  }
+  await writeFile(join(scratch, "promoted.txt"), "new tracked input");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  await exec("git", ["add", "--", "package/.tmp/promoted.txt"], { cwd: repository });
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.notEqual((await refreshProtectedSnapshot(root, concrete))?.source, concreteSource);
+  assert.equal(JSON.stringify(pinned.binding), saved, "current tracked inputs never rewrite the captured recipe");
+  const other = await protectedSnapshot(auth, { directory: root, command: commands[1] });
+  assert.ok(other?.binding.freshness);
+  assert.ok(!other.binding.freshness.scratch_paths.includes(scratch));
+  await writeFile(join(scratch, "generated.log"), "different output");
+  assert.notEqual((await refreshProtectedSnapshot(root, other.binding))?.source, other.source,
+    "a different validation call does not inherit the first call's scratch exemption");
+}));
+
 test("a broad project read excludes inherited compiler outputs, but source and configured environment stay bound", async () => fixture(async root => {
   const previous = process.env.GOCACHE;
   process.env.GOCACHE = join(root, "compiler-output");
