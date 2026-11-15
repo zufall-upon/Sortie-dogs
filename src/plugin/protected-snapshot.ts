@@ -218,7 +218,9 @@ export async function currentSnapshotProtection(projectRoot: string, manifest: P
       path = dirname(path);
     }
   }
-  const tracked = (await Promise.all([...roots].map(root => exec("git", ["ls-files", "-z"], { cwd: root, maxBuffer: 16 * 1024 * 1024 })
+  // A discovered repository may be Worker-writable. Never execute its fsmonitor hook
+  // while collecting tracked inputs outside the native command permission boundary.
+  const tracked = (await Promise.all([...roots].map(root => exec("git", ["-c", "core.fsmonitor=false", "ls-files", "-z"], { cwd: root, maxBuffer: 16 * 1024 * 1024 })
     .then(value => value.stdout.split("\0").filter(Boolean).map(path => resolve(root, path))).catch(() => [])))).flat();
   const outputs = manifest.write.filter(path => !path.endsWith("/**")).map(actual);
   // An absent execution grant is not a newly delivered artifact. Initial missing paths remain
