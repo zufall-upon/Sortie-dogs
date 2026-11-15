@@ -19,11 +19,11 @@ evidence-backed result, not more agents for their own sake.
 [![Node.js](https://img.shields.io/node/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
 [![MIT License](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
 
-**Release notes: [v0.16.26](docs/releases/v0.16.26.md)**
+**Release notes: [v0.16.27](docs/releases/v0.16.27.md)**
 · [GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases)
 · [Execution vision](docs/v0.14.0-execution-vision.md)
 
-The npm examples below target v0.16.26. npm publication remains a separate manual
+The npm examples below target v0.16.27. npm publication remains a separate manual
 release step; installing a package does not imply a running host has reloaded it.
 
 [When to use](#when-to-use-sortie-dogs) · [Quick start](#quick-start) · [Workflow](#mission-workflow) · [Models](#default-models) ·
@@ -81,7 +81,7 @@ Use an existing Codex CLI signed in with **ChatGPT**. On Windows, PowerShell **7
 available; POSIX uses bash. Sortie does not install Codex, start login or use a metered API fallback.
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.26
+npm install --save-dev sortie-dogs@0.16.27
 npx --no-install sortie-dogs codex init .
 ```
 
@@ -110,7 +110,7 @@ bridge. [Codex guide: SDK, permissions, progress, resume and manifest route](doc
 Use **OpenCode V2**. In the target project:
 
 ```sh
-npm install --save-dev sortie-dogs@0.16.26
+npm install --save-dev sortie-dogs@0.16.27
 npx --no-install sortie-dogs init .
 ```
 
@@ -343,8 +343,9 @@ Install the desired package version and rerun **your host's** initializer:
 
 An OpenCode config-local bridge may resolve a separate package; npm-global update alone does not
 update it. [Global/update instructions](docs/configuration.md#global-availability).
-The v0.16.26 Mission asset marker is `0.16.26-nested-validation-scratch-v1`; v0.16.25 uses
-`0.16.25-execution-recovery-v1`. The Codex skill marker is `0.14.6-codex-skill-v1`.
+The v0.16.27 Mission asset marker is `0.16.27-git-review-boundaries-v1`; v0.16.26 uses
+`0.16.26-nested-validation-scratch-v1`, and v0.16.25 uses `0.16.25-execution-recovery-v1`.
+The Codex skill marker is `0.14.6-codex-skill-v1`.
 Installed markers alone do not prove a running host reloaded the new version.
 
 There is no supported uninstall command. Remove the dependency and only known Sortie-owned paths;
@@ -360,7 +361,7 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
   [SWE-bench history](docs/benchmarks/swebench-lite-history.md) · [Historical local case study](docs/benchmark-reference.md).
 - **Development:** [Testing](docs/testing.md) · [CLI testing](docs/cli-testing.md) ·
   [Windows tests](docs/windows-tests.md) · [Release routine](docs/release-batch.md).
-- **Release notes:** [v0.16.26](docs/releases/v0.16.26.md) · [v0.16.25](docs/releases/v0.16.25.md) · [v0.16.24](docs/releases/v0.16.24.md).
+- **Release notes:** [v0.16.27](docs/releases/v0.16.27.md) · [v0.16.26](docs/releases/v0.16.26.md) · [v0.16.25](docs/releases/v0.16.25.md) · [v0.16.24](docs/releases/v0.16.24.md).
 - **Releases:** [v0.15.2](docs/release-v0.15.2.md) · [v0.15.1](docs/v0.15.1-migration.md) · [v0.15.0](docs/release-v0.15.0.md) · [v0.14.9](docs/release-v0.14.9.md) · [v0.14.8](docs/release-v0.14.8.md) · [v0.14.7](docs/release-v0.14.7.md) · [v0.14.6](docs/release-v0.14.6.md) · [v0.14.5](docs/release-v0.14.5.md) · [v0.14.4](docs/release-v0.14.4.md) · [v0.14.3](docs/release-v0.14.3.md) · [v0.14.2](docs/release-v0.14.2.md) · [v0.14.1](docs/release-v0.14.1.md) · [v0.14.0](docs/release-v0.14.0.md) · [v0.13.22](docs/release-v0.13.22.md) · [v0.13.21](docs/release-v0.13.21.md) · [v0.13.20](docs/release-v0.13.20.md) · [v0.13.19](docs/release-v0.13.19.md) · [v0.13.18](docs/release-v0.13.18.md) · [v0.13.17](docs/release-v0.13.17.md) · [v0.13.16](docs/release-v0.13.16.md) · [v0.13.15](docs/release-v0.13.15.md) · [v0.13.14](docs/release-v0.13.14.md) · [v0.13.13](docs/release-v0.13.13.md) · [v0.13.12](docs/release-v0.13.12.md) · [v0.13.11](docs/release-v0.13.11.md) · [v0.13.10](docs/release-v0.13.10.md) ·
   [v0.13.9](docs/release-v0.13.9.md) · [All GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases).
 
