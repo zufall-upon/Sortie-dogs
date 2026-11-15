@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
 import test, { describe } from "node:test";
@@ -11396,6 +11396,143 @@ test("git native context rejects environment declaration changes before consumin
       { args: { command: "export SAFE=1 && git commit -m candidate" } }, { investigativeShell: true });
     assert.equal(await index(), current, "rejection preserves the native index");
     assert.equal(await index(alternateEnvironment), alternate, "rejection preserves the alternate index");
+  });
+});
+
+test("git native alternate index add checks public caller paths and preserves the real index", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-native-alternate-index", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, ".sortie-env"));
+    await writeFile(join(directory, "allowed.txt"), "authorized fixture\n");
+    await writeFile(join(directory, "existing.txt"), "existing index fixture\n");
+    await execFileAsync("git", ["-C", directory, "add", "--", "existing.txt"]);
+    const realIndex = await readFile(join(directory, ".git", "index"));
+    const index = join(directory, ".sortie-env", "candidate.index");
+    const quotedIndex = join(directory, ".sortie-env", "quoted $ index");
+    const manifest = operationManifest(["allowed.txt", ".sortie-env/candidate.index", ".sortie-env/quoted $ index"]);
+    const gate = await createWriteGate(await createProjectPaths(directory), manifest);
+    const command = `GIT_INDEX_FILE=${index} git add -- allowed.txt`;
+    const request = { tool: "shell", sessionID: "alternate-index", callID: "add" };
+    const extracted = extractWritePaths("shell", { command }, directory);
+    assert.equal(extracted.ambiguous, false);
+    assert.equal(extracted.gitAmbiguous, undefined);
+    assert.equal(isGitMutation("shell", { command }), true);
+    assert.equal(isKnownReadOnlyTool("shell", { command }), false);
+    assert.deepEqual(extracted.paths, [index, join(directory, "allowed.txt")]);
+    for (const investigativeShell of [false, true]) {
+      await gate.check(request, { args: { command } }, { investigativeShell });
+      await gate.check(request, { args: { command: `GIT_INDEX_FILE='${quotedIndex}' git add -- allowed.txt` } }, { investigativeShell });
+    }
+    assert.equal(await stat(index).catch(() => undefined), undefined, "gate preflight does not create the alternate index");
+    assert.deepEqual(await readFile(join(directory, ".git", "index")), realIndex);
+
+    await writeFile(join(directory, "operation-manifest.json"), JSON.stringify(manifest));
+    await writeFile(join(directory, "handoff.json"), JSON.stringify(writeGateHandoff(directory, "operation-manifest.json")));
+    const observed: string[][] = [];
+    let prohibitIndex = false;
+    const hooks = await SortieDogsPlugin({ directory, runtimeBridge: {
+      allowsInvestigativeShell: async (sessionID: string) => sessionID === "alternate-worker",
+      assertMissionWrite: async (_sessionID: string, paths: readonly string[]) => {
+        observed.push([...paths]);
+        if (prohibitIndex && paths.includes(index)) throw new WriteDeniedError("manifest-scope", index);
+      },
+    } as never });
+    await beginTrackedTaskChild(hooks, directory, "alternate-parent", "alternate-worker", "alternate-task");
+    await inspectHandoffWithRead(hooks, join(directory, "handoff.json"), "alternate-worker");
+    assert.equal((await executeBindWriteGate(hooks, directory, "alternate-worker")).status, "bound");
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "alternate-worker", callID: "allowed" }, { args: { command } });
+    assert.ok(observed.some(paths => paths.includes(index) && paths.includes(join(directory, "allowed.txt"))));
+    prohibitIndex = true;
+    await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "shell", sessionID: "alternate-worker", callID: "prohibited" }, { args: { command } },
+    ), (error: unknown) => error instanceof WriteDeniedError && error.reason === "manifest-scope");
+    assert.equal(await stat(index).catch(() => undefined), undefined, "caller denial cannot run the add");
+    assert.deepEqual(await readFile(join(directory, ".git", "index")), realIndex);
+
+    await execFileAsync("bash", ["-c", command], { cwd: directory });
+    await execFileAsync("bash", ["-c", `GIT_INDEX_FILE='${quotedIndex}' git add -- allowed.txt`], { cwd: directory });
+    for (const path of [index, quotedIndex]) {
+      const result = await execFileAsync("git", ["-C", directory, "ls-files", "-z"], { env: { ...process.env, GIT_INDEX_FILE: path } });
+      assert.equal(result.stdout, "allowed.txt\0", "Git stages only the selected fixture in the chosen index");
+    }
+    assert.deepEqual(await readFile(join(directory, ".git", "index")), realIndex, "actual adds leave the native index byte-for-byte intact");
+
+    const subdir = join(directory, "nested");
+    await mkdir(join(subdir, ".sortie-env"), { recursive: true });
+    await writeFile(join(subdir, "allowed.txt"), "nested fixture\n");
+    const nestedIndex = join(subdir, ".sortie-env", "candidate.index");
+    const nestedGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["nested/allowed.txt", "nested/.sortie-env/candidate.index"]));
+    const nestedCommand = `GIT_INDEX_FILE=${nestedIndex} git add -- allowed.txt`;
+    for (const investigativeShell of [false, true]) await nestedGate.check(request,
+      { args: { command: nestedCommand, workdir: subdir } }, { investigativeShell });
+    await execFileAsync("bash", ["-c", nestedCommand], { cwd: subdir });
+    const nested = await execFileAsync("git", ["-C", directory, "ls-files", "-z"], { env: { ...process.env, GIT_INDEX_FILE: nestedIndex } });
+    assert.equal(nested.stdout, "nested/allowed.txt\0", "the absolute index and relative pathspec use the intended destinations");
+    assert.deepEqual(await readFile(join(directory, ".git", "index")), realIndex);
+    const relativeCommand = "GIT_INDEX_FILE=.sortie-env/root-resolution.index git add -- allowed.txt";
+    for (const investigativeShell of [false, true]) await assert.rejects(nestedGate.check(request,
+      { args: { command: relativeCommand, workdir: subdir } }, { investigativeShell }), /Write denied/);
+    await execFileAsync("bash", ["-c", relativeCommand], { cwd: subdir });
+    const actualIndex = join(directory, ".sortie-env", "root-resolution.index");
+    const relativeResult = await execFileAsync("git", ["-C", directory, "ls-files", "-z"], { env: { ...process.env, GIT_INDEX_FILE: actualIndex } });
+    assert.equal(relativeResult.stdout, "nested/allowed.txt\0", "native Git resolves this relative index at the repository root");
+    assert.equal(await stat(join(subdir, ".sortie-env", "root-resolution.index")).catch(() => undefined), undefined);
+    assert.deepEqual(await readFile(join(directory, ".git", "index")), realIndex);
+  });
+});
+
+test("git native alternate index add rejects unscoped destinations, expansion, overrides and commit chains", { skip: process.platform === "win32" }, async () => {
+  await withProject("git-native-alternate-boundaries", async directory => {
+    await execFileAsync("git", ["init", directory]);
+    await mkdir(join(directory, ".sortie-env"));
+    await writeFile(join(directory, "allowed.txt"), "authorized fixture\n");
+    await writeFile(join(directory, "outside.txt"), "unauthorized fixture\n");
+    await execFileAsync("git", ["-C", directory, "add", "--", "outside.txt"]);
+    const realIndex = await readFile(join(directory, ".git", "index"));
+    const index = join(directory, ".sortie-env", "candidate.index");
+    const nativeIndex = join(directory, ".git", "index");
+    const gate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt", index]));
+    const nativeIndexGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt", nativeIndex]));
+    const check = (command: string, investigativeShell: boolean, selected = gate) => selected.check(
+      { tool: "shell", sessionID: "alternate-boundary", callID: command }, { args: { command } }, { investigativeShell });
+    const link = join(directory, ".sortie-env", "link.index");
+    await symlink(nativeIndex, link);
+    for (const investigativeShell of [false, true]) {
+      await assert.rejects(check(`GIT_INDEX_FILE=${join(directory, ".sortie-env", "other.index")} git add -- allowed.txt`, investigativeShell), /Write denied/);
+      await assert.rejects(check(`GIT_INDEX_FILE=${index} git add -- outside.txt`, investigativeShell), /Write denied/);
+      await assert.rejects(check(`GIT_INDEX_FILE=${nativeIndex} git add -- allowed.txt`, investigativeShell), /Write denied/);
+      await check(`GIT_INDEX_FILE=${nativeIndex} git add -- allowed.txt`, investigativeShell, nativeIndexGate);
+      await assert.rejects(check(`GIT_INDEX_FILE=${link} git add -- allowed.txt`, investigativeShell, nativeIndexGate), /Write denied/,
+        "a symlinked index cannot bypass the caller's prohibition on its target");
+      for (const command of [
+        "GIT_INDEX_FILE=$INDEX git add -- allowed.txt",
+        'GIT_INDEX_FILE="${INDEX}" git add -- allowed.txt',
+        `GIT_INDEX_FILE='${index}'suffix git add -- allowed.txt`,
+        `GIT_INDEX_FILE=${index} GIT_DIR=.git git add -- allowed.txt`,
+        `GIT_OBJECT_DIRECTORY=elsewhere GIT_INDEX_FILE=${index} git add -- allowed.txt`,
+        `env GIT_INDEX_FILE=${index} git add -- allowed.txt`,
+        `GIT_INDEX_FILE=${index} git add -- allowed.txt && git commit -m candidate`,
+        `GIT_INDEX_FILE=${index} git commit -m candidate`,
+      ]) await assert.rejects(check(command, investigativeShell), /Write denied/, command);
+    }
+    assert.deepEqual(await readFile(nativeIndex), realIndex);
+    assert.equal(await stat(index).catch(() => undefined), undefined);
+    const realDirectory = join(directory, ".sortie-env", "real");
+    const aliasDirectory = join(directory, ".sortie-env", "alias");
+    await mkdir(realDirectory);
+    await symlink(realDirectory, aliasDirectory, "dir");
+    const aliasIndex = join(aliasDirectory, "candidate.index"), physicalIndex = join(realDirectory, "candidate.index");
+    const aliasGate = await createWriteGate(await createProjectPaths(directory), operationManifest(["allowed.txt", aliasIndex]));
+    await assert.rejects(aliasGate.check({ tool: "shell", sessionID: "alias-index", callID: "caller" }, {
+      args: { command: `GIT_INDEX_FILE=${aliasIndex} git add -- allowed.txt` },
+    }, { investigativeShell: true, assertWritePaths: async paths => {
+      assert.ok(paths.includes(aliasIndex) && paths.includes(physicalIndex));
+      throw new Error("physical index caller prohibition");
+    } }), /physical index caller prohibition/);
+    assert.equal(await stat(physicalIndex).catch(() => undefined), undefined);
+    await execFileAsync("git", ["-C", directory, "add", "--", "allowed.txt"], { env: { ...process.env, GIT_INDEX_FILE: link } });
+    assert.equal((await lstat(link)).isSymbolicLink(), true, "native Git retains the index symlink");
+    assert.notDeepEqual(await readFile(nativeIndex), realIndex, "native Git follows the index symlink and writes its target");
   });
 });
 
