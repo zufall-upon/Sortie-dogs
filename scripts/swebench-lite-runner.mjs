@@ -164,9 +164,11 @@ export function verifyCandidateAgent(name, resolvedAgent, override) {
     `candidate-agent-web-permission-invalid:${name}`);
   ensure(benchmarkPermissionPolicy().filter(rule => rule.action === "shell" && rule.effect === "deny")
     .every(rule => denied(rule.action, rule.resource)), `candidate-agent-network-permission-invalid:${name}`);
-  const sol = name === "dog-operator" || name === "dogs-coordinator" ||
+  const sol = name === "dog-operator" ||
     name === "dog-reviewer-v010" || name === "dog-advisor-v010";
   const target = override ? override.slice("openai/".length).split("#")
+    : name === "dogs-coordinator" ? ["gpt-6.1-terra", "xhigh"]
+    : name === "dog-worker-v010" ? ["gpt-6.1-terra", "max"]
     : sol ? ["gpt-6.1-sol", "xhigh"] : ["gpt-6-luna-fast", "max"];
   const selected = resolvedAgent.model;
   ensure(selected?.providerID === "openai" && (selected.id ?? selected.model) === target[0] &&
