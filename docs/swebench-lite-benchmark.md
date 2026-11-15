@@ -245,7 +245,8 @@ locally. Each environment uses 0.2–1.4 GB inside the workspace until the insta
 
 The candidate runtime sets `TMPDIR` to a separately owned `sd-swe-*` directory under the host's OS temporary
 directory, rather than beneath a potentially long campaign path. This respects an explicitly selected `TMPDIR`;
-it does not silently fall back to another location. To leave room for typical Python multiprocessing socket names
+relative selections are resolved against the runner's calling directory before child commands change directory.
+It does not silently fall back to another location. To leave room for typical Python multiprocessing socket names
 (including parallel Black checks), on Unix the resulting `sd-swe-*` path must be at most 71 bytes. If it would be longer,
 candidate setup fails before starting commands with `candidate-temporary-path-too-long`; select a shorter writable
 `TMPDIR` in an approved location and retry. Setup failure, preflight completion and live-run cleanup remove the

@@ -804,7 +804,8 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
   ensure(digest(packageBytes) === candidate.sha256, "candidate-package-sha256-mismatch");
-  const temporaryPrefix = join(tmpdir(), "sd-swe-");
+  // Pin a relative TMPDIR to this caller's cwd before child commands change cwd.
+  const temporaryPrefix = join(resolve(tmpdir()), "sd-swe-");
   // Reserve 32 bytes for Python's pymp-*/listener-* suffix and one for the
   // terminator even on systems with a 104-byte Unix socket pathname field.
   // mkdtemp appends six ASCII characters. Do not silently bypass the selected TMPDIR.

@@ -19,7 +19,7 @@ import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-
 import { runtimeAssets } from "../src/runtime-assets-v010.ts";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const instance = (instance_id: string, extra: Record<string, unknown> = {}) => ({
   instance_id,
@@ -1113,6 +1113,70 @@ test("candidate setup uses a short owned temporary directory and removes it on f
     if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousDataHome;
     if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate setup pins relative TMPDIR to the caller before checking length or changing command cwd", { skip: process.platform === "win32" }, async t => {
+  const selectedParent = resolve(tmpdir());
+  const root = await mkdtemp(join(selectedParent, "swebench-relative-tmp-"));
+  const previousCwd = process.cwd(), previousTmpdir = process.env.TMPDIR, previousDataHome = process.env.XDG_DATA_HOME;
+  try {
+    const hostData = join(root, "host-data"), packagePath = join(root, "candidate.tgz");
+    const bytes = Buffer.from("relative temporary directory fixture");
+    const fixtureCandidate = { ...candidate, sha256: createHash("sha256").update(bytes).digest("hex") };
+    await mkdir(join(hostData, "opencode"), { recursive: true });
+    await writeFile(join(hostData, "opencode", "auth.json"), "{}\n");
+    await writeFile(packagePath, bytes);
+    process.env.XDG_DATA_HOME = hostData;
+    await t.test("short relative selection remains the same owned directory in the child cwd", async () => {
+      process.chdir(selectedParent);
+      process.env.TMPDIR = ".";
+      let temporaryRoot: string | undefined;
+      try {
+        await assert.rejects(prepareCandidateRuntime(fixtureCandidate, packagePath, join(root, "short"), {
+          execute: async (_command: string, _args: string[], options: { cwd: string; env: Record<string, string> }) => {
+            temporaryRoot = options.env.TMPDIR;
+            assert.equal(dirname(temporaryRoot!), selectedParent);
+            assert.equal(resolve(options.cwd, temporaryRoot!), temporaryRoot, "child cwd must not change the selected directory");
+            await execFileAsync(process.execPath, ["-e", "require('node:fs').writeFileSync(require('node:path').join(process.env.TMPDIR, 'relative-tmp-probe.txt'), 'owned\\n')"], options);
+            assert.equal(await readFile(join(temporaryRoot!, "relative-tmp-probe.txt"), "utf8"), "owned\n");
+            throw new Error("setup-stop-after-relative-tmpdir-probe");
+          },
+        }), /setup-stop-after-relative-tmpdir-probe/u);
+        assert.ok(temporaryRoot);
+        await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
+        await assert.rejects(stat(join(root, "short", "candidate-runtime")), { code: "ENOENT" });
+      } finally {
+        // A failed regression assertion must not leak its separately owned directory.
+        if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+        process.chdir(previousCwd);
+      }
+    });
+    await t.test("overlong resolved relative selection fails before commands and preserves existing state", async () => {
+      const caller = join(root, "long-campaign-".repeat(6)), runRoot = join(root, "long");
+      const sentinel = join(runRoot, "candidate-runtime", "preexisting.txt");
+      await mkdir(caller);
+      await mkdir(dirname(sentinel), { recursive: true });
+      await writeFile(sentinel, "untouched\n");
+      assert.ok(Buffer.byteLength(join(caller, "sd-swe-XXXXXX")) > 71);
+      process.chdir(caller);
+      process.env.TMPDIR = ".";
+      let commands = 0;
+      try {
+        await assert.rejects(prepareCandidateRuntime(fixtureCandidate, packagePath, runRoot, {
+          execute: async () => { commands++; throw new Error("unexpected-relative-tmpdir-command"); },
+        }), /candidate-temporary-path-too-long.*TMPDIR/u);
+        assert.equal(commands, 0);
+        assert.deepEqual(await readdir(caller), []);
+        assert.equal(await readFile(sentinel, "utf8"), "untouched\n");
+      } finally { process.chdir(previousCwd); }
+    });
+    assert.equal(await readFile(join(hostData, "opencode", "auth.json"), "utf8"), "{}\n");
+  } finally {
+    process.chdir(previousCwd);
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousDataHome;
     await rm(root, { recursive: true, force: true });
   }
 });
