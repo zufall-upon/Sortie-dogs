@@ -907,6 +907,89 @@ test("Review and snapshot reject redirected tracked submodule metadata", async (
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("standalone nested Git directories reject redirected metadata before Review and snapshot", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-standalone-metadata-"));
+  const root = join(area, "root"), child = join(root, "nested"), fixture = join(area, "ordinary-fixture");
+  const metadata = join(child, ".git"), fixtureMetadata = join(fixture, ".git");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    await mkdir(child, { recursive: true }); await mkdir(fixture);
+    for (const directory of [root, child, fixture]) await git("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(child, "input.txt"), "nested input\n");
+    await git("git", ["add", "input.txt"], { cwd: child }); await commit(child);
+    await writeFile(join(fixture, "example.txt"), "ordinary fixture only\n");
+    await git("git", ["add", "example.txt"], { cwd: fixture }); await commit(fixture);
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    const protection = () => currentSnapshotProtection(root, { read: [], write: ["nested/**"] });
+    const rejected = async () => {
+      await assert.rejects(protection(), /untrusted nested Git metadata/);
+      await assert.rejects(missionReviewSource(root, run), error => {
+        assert.match(String(error), /untrusted nested Git metadata/);
+        assert.doesNotMatch(String(error), /ordinary fixture only/);
+        return true;
+      });
+    };
+    assert.ok((await protection()).includes(join(child, "input.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /nested input/);
+    const config = await fs.readFile(join(metadata, "config"));
+    await git("git", ["config", "--file", join(metadata, "config"), "core.worktree", fixture], { cwd: root });
+    assert.ok((await protection()).includes(join(child, "input.txt")), "the declared worktree overrides local config");
+    const pinned = await missionReviewSource(root, run);
+    assert.match(pinned.excerpt, /nested input/);
+    assert.doesNotMatch(pinned.excerpt, /ordinary fixture only/);
+    await writeFile(join(metadata, "config"), config);
+
+    // Same directory-form layout and public caller as the pre-change oracle.
+    const head = await fs.readFile(join(metadata, "HEAD")), index = await fs.readFile(join(metadata, "index"));
+    await fs.copyFile(join(fixtureMetadata, "HEAD"), join(metadata, "HEAD"));
+    await fs.copyFile(join(fixtureMetadata, "index"), join(metadata, "index"));
+    await writeFile(join(metadata, "commondir"), `${fixtureMetadata}\n`);
+    await rejected();
+    await rm(join(metadata, "commondir"));
+    await writeFile(join(metadata, "HEAD"), head); await writeFile(join(metadata, "index"), index);
+
+    await writeFile(join(metadata, "objects", "info", "alternates"), `${join(fixtureMetadata, "objects")}\n`);
+    await rejected();
+    await rm(join(metadata, "objects", "info", "alternates"));
+    if (process.platform !== "win32") {
+      const link = join(metadata, "refs", "fixture-link");
+      await symlink(join(fixtureMetadata, "HEAD"), link);
+      await rejected();
+      await rm(link);
+    }
+    assert.ok((await protection()).includes(join(child, "input.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /nested input/);
+
+    // Preserve conditional settings without disclosing arbitrary values from an
+    // included config in the diff or in a Git error's command/stderr.
+    const externalConfig = join(area, "config-fixture");
+    await writeFile(externalConfig, "[diff]\n\tsrcPrefix = config-fixture-only/\n\tdstPrefix = config-fixture-only/\n");
+    await appendFile(join(metadata, "config"), `\n[include]\n\tpath = ${externalConfig}\n`);
+    await writeFile(join(child, "input.txt"), "changed input\n");
+    const included = await missionReviewSource(root, run);
+    assert.match(included.excerpt, /\+changed input/);
+    assert.doesNotMatch(included.excerpt, /config-fixture-only/);
+    await writeFile(externalConfig, "[diff]\n\talgorithm = config-fixture-only\n");
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /git-inspection: cannot inspect nested Git repository/);
+      assert.doesNotMatch(String(error), /config-fixture-only/);
+      assert.doesNotMatch(JSON.stringify(error), /config-fixture-only/);
+      return true;
+    });
+    await writeFile(externalConfig, "[diff]\n\talgorithm = default\n");
+    const oid = (await git("git", ["rev-parse", "HEAD"], { cwd: child })).stdout.trim();
+    await git("git", ["update-index", "--add", "--cacheinfo", `160000,${oid},component`], { cwd: child });
+    await writeFile(join(child, ".gitmodules"), '[submodule "component"]\n\tpath = component\n\turl = fixture\n');
+    await writeFile(externalConfig, '[submodule "component"]\n\tignore = config-fixture-only\n');
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /invalid submodule ignore mode/);
+      assert.doesNotMatch(String(error), /config-fixture-only/);
+      return true;
+    });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("Git pointer checks bound reads and reject unrelated paths before resolving them", async t => {
   const area = await mkdtemp(join(tmpdir(), "review-git-pointer-"));
   const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants, type Stats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -41,6 +41,60 @@ async function readPointer(path: string, initial?: Stats): Promise<string> {
 export const pinnedGitArguments = (directory: string, gitdir?: string) => gitdir
   ? [`--git-dir=${gitdir}`, `--work-tree=${directory}`] : [];
 
+export const isStandaloneNestedGitdir = (directory: string, gitdir?: string) =>
+  gitdir !== undefined && canonical(gitdir) === canonical(join(directory, ".git"));
+
+/** Git errors may include effective config values in stderr or command arguments. */
+export function sanitizedNestedGitError(error: unknown): Error {
+  const original = error as { code?: number | string; stderr?: string };
+  const stderr = String(original?.stderr ?? "");
+  const known = /^fatal: Needed a single revision\s*$/u.test(stderr) ? "fatal: Needed a single revision"
+    : /^fatal: bad object HEAD\s*$/u.test(stderr) ? "fatal: bad object HEAD"
+    : /^fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?\s*$/u.test(stderr)
+      ? "fatal: not a git repository (or any of the parent directories): .git" : "";
+  const reason = known === "fatal: bad object HEAD" ? ": bad object HEAD" : "";
+  return Object.assign(new Error(`git-inspection: cannot inspect nested Git repository${reason}`), { code: original?.code, stderr: known });
+}
+
+/** A standalone checkout's administrative directory is writable with its worktree.
+ * Pinning the marker alone does not prevent commondir, object alternates or metadata
+ * symlinks from redirecting Git. Check those paths before asking Git to inspect it. */
+async function trustedStandaloneGitdir(root: string, marker: string, initial: Stats): Promise<string> {
+  const fail = () => new Error(`not a git repository: untrusted nested Git metadata: ${relative(root, dirname(marker))}`);
+  const missing = async (path: string) => lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+    return undefined;
+  });
+  try {
+    // These files redirect Git's common metadata or object database even though
+    // the .git marker itself is an ordinary directory.
+    if (await missing(join(marker, "commondir"))) throw fail();
+    const inspect = async (path: string): Promise<void> => {
+      const info = await missing(path);
+      if (!info) return;
+      if (info.isDirectory()) {
+        for (const entry of await readdir(path, { withFileTypes: true })) {
+          if (entry.isSymbolicLink()) throw fail();
+          if (entry.isDirectory()) await inspect(join(path, entry.name));
+          else if (!entry.isFile()) {
+            // Some filesystems return unknown Dirent types. lstat instead of
+            // assuming that an unknown entry is a regular file.
+            const child = await lstat(join(path, entry.name));
+            if (child.isSymbolicLink() || !child.isFile()) throw fail();
+          }
+        }
+      } else if (!info.isFile()) throw fail();
+    };
+    for (const name of ["HEAD", "index", "config", "config.worktree", "packed-refs", "shallow", "refs", "objects", "info"]) {
+      await inspect(join(marker, name));
+    }
+    if (await missing(join(marker, "objects", "info", "alternates"))) throw fail();
+    const after = await lstat(marker);
+    if (!after.isDirectory() || after.dev !== initial.dev || after.ino !== initial.ino) throw fail();
+    return marker;
+  } catch { throw fail(); }
+}
+
 /** A tracked submodule must refer to its own protected superproject metadata, not an
  * arbitrary repository selected by a Worker-writable .git file. Return the verified
  * gitdir so subsequent Git commands cannot race a replacement of that marker. */
@@ -48,8 +102,12 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
   const scoped = relative(directory, child).replaceAll("\\", "/");
   if (!scoped || scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return undefined;
   const env = { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" };
-  const git = async (args: string[]) => (await exec("git", [...pinnedGitArguments(directory, parentGitdir),
-    "-c", "core.fsmonitor=false", ...args], { cwd: directory, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  const git = async (args: string[]) => {
+    try {
+      return (await exec("git", [...pinnedGitArguments(directory, parentGitdir), "-c", "core.fsmonitor=false", ...args],
+        { cwd: directory, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
+    } catch (error) { throw isStandaloneNestedGitdir(directory, parentGitdir) ? sanitizedNestedGitError(error) : error; }
+  };
   let stage: string;
   try { stage = await git(["ls-files", "--stage", "-z", "--", scoped]); }
   catch (error) {
@@ -119,7 +177,8 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
   if (submodule) return submodule;
   const marker = join(child, ".git");
   const info = await lstat(marker).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-  if (!info || info.isDirectory()) return undefined;
+  if (!info) return undefined;
+  if (info.isDirectory()) return trustedStandaloneGitdir(root, marker, info);
   const fail = () => new Error(`not a git repository: untrusted nested Git metadata: ${relative(root, child)}`);
   if (!info.isFile()) throw fail();
   try {
