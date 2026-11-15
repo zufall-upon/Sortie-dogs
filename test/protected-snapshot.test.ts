@@ -475,9 +475,9 @@ test("failed nested Git inventories conservatively pin scratch without changing 
   assert.notEqual((await refreshProtectedSnapshot(root, recovered.binding))?.source, recovered.source);
 }));
 
-test("linked worktree validation preserves tracked scratch protection and per-call freshness", async () => fixture(async area => {
-  const repository = join(area, "repository"), root = join(area, "location"), checkout = join(root, "checkout");
-  await mkdir(repository); await mkdir(root);
+for (const placement of ["outside", "inside"] as const) test(`linked worktree validation preserves tracked scratch protection and per-call freshness (${placement} Location)`, async () => fixture(async area => {
+  const root = placement === "inside" ? area : join(area, "location"), repository = join(area, "repository"), checkout = join(root, "checkout");
+  await mkdir(repository); if (root !== area) await mkdir(root);
   await exec("git", ["init", "--quiet"], { cwd: repository });
   await mkdir(join(repository, "scratch"));
   await writeFile(join(repository, "scratch", "tracked.txt"), "tracked input");

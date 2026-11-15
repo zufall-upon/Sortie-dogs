@@ -18,7 +18,7 @@ import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers,
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
-import { isStandaloneNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
+import { isLocallyControlledNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -36,12 +36,12 @@ type FilterlessGit = ((args: string[]) => Promise<string>) & {
 async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>, gitdir?: string): Promise<T> {
   // Missing promised objects are unavailable input, not permission to fetch or run a remote helper.
   const readEnv = gitReadEnvironment();
-  const standalone = isStandaloneNestedGitdir(directory, gitdir);
+  const sanitize = isLocallyControlledNestedGitdir(directory, gitdir);
   const original = async (args: string[]) => {
     try {
       return (await exec("git", [...pinnedGitArguments(directory, gitdir), "-c", "core.fsmonitor=false", ...args],
         { cwd: directory, env: readEnv, maxBuffer: 8 * 1024 * 1024 })).stdout;
-    } catch (error) { throw standalone ? sanitizedNestedGitError(error) : error; }
+    } catch (error) { throw sanitize ? sanitizedNestedGitError(error) : error; }
   };
   const line = (value: string) => value.replace(/\r?\n$/u, "");
   const path = async (name: string) => resolve(directory, line(await original(["rev-parse", "--git-path", name])));
@@ -69,7 +69,7 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
   }));
   const ignoreMode = (value: string): SubmoduleIgnore => {
     if (!["none", "untracked", "dirty", "all"].includes(value)) {
-      throw new Error(`mission-review-git: invalid submodule ignore mode${standalone ? "" : `: ${value}`}`);
+      throw new Error(`mission-review-git: invalid submodule ignore mode${sanitize ? "" : `: ${value}`}`);
     }
     return value as SubmoduleIgnore;
   };
@@ -141,12 +141,12 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
         ...[...moduleNames].flatMap(([, name]) => ["-c", `submodule.${name}.ignore=all`])] : [];
       // Included config is needed for ordinary settings such as core.filemode.
       // Do not render arbitrary included diff-prefix values into Review output.
-      const prefixes = standalone ? ["-c", "diff.srcPrefix=a/", "-c", "diff.dstPrefix=b/"] : [];
+      const prefixes = sanitize ? ["-c", "diff.srcPrefix=a/", "-c", "diff.dstPrefix=b/"] : [];
       try {
         return (await exec("git", ["--no-optional-locks", `--git-dir=${privateGit}`, `--work-tree=${root}`,
           ...effective, ...submodules, ...prefixes, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...args],
           { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
-      } catch (error) { throw standalone ? sanitizedNestedGitError(error) : error; }
+      } catch (error) { throw sanitize ? sanitizedNestedGitError(error) : error; }
     }, { submoduleIgnore, originalGitdir: gitdir });
     return await action(safeGit);
   } finally { await rm(privateGit, { recursive: true, force: true }); }
@@ -942,7 +942,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       try {
         return (await exec("git", [...pinnedGitArguments(absolute, gitdir), "-c", "core.fsmonitor=false", ...args],
           { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
-      } catch (error) { throw isStandaloneNestedGitdir(absolute, gitdir) ? sanitizedNestedGitError(error) : error; }
+      } catch (error) { throw isLocallyControlledNestedGitdir(absolute, gitdir) ? sanitizedNestedGitError(error) : error; }
     };
     const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
     const prefix = (name: string) => join(path, name).replaceAll("\\", "/");

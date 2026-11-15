@@ -41,8 +41,12 @@ async function readPointer(path: string, initial?: Stats): Promise<string> {
 export const pinnedGitArguments = (directory: string, gitdir?: string) => gitdir
   ? [`--git-dir=${gitdir}`, `--work-tree=${directory}`] : [];
 
-export const isStandaloneNestedGitdir = (directory: string, gitdir?: string) =>
-  gitdir !== undefined && canonical(gitdir) === canonical(join(directory, ".git"));
+// A linked worktree can share metadata with another checkout inside the writable
+// Location. Do not expose its effective config or Git errors any more than a
+// standalone nested checkout's, even when another linked worktree is protected.
+export const isLocallyControlledNestedGitdir = (directory: string, gitdir?: string) =>
+  gitdir !== undefined && (canonical(gitdir) === canonical(join(directory, ".git")) ||
+    basename(dirname(gitdir)).toLowerCase() === "worktrees");
 
 /** Git errors may include effective config values in stderr or command arguments. */
 export function sanitizedNestedGitError(error: unknown): Error {
@@ -56,39 +60,39 @@ export function sanitizedNestedGitError(error: unknown): Error {
   return Object.assign(new Error(`git-inspection: cannot inspect nested Git repository${reason}`), { code: original?.code, stderr: known });
 }
 
-/** A standalone checkout's administrative directory is writable with its worktree.
- * Pinning the marker alone does not prevent commondir, object alternates or metadata
- * symlinks from redirecting Git. Check those paths before asking Git to inspect it. */
+const missingGitPath = async (path: string) => lstat(path).catch((error: NodeJS.ErrnoException) => {
+  if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+  return undefined;
+});
+
+async function inspectWritableGitPath(path: string, fail: () => Error): Promise<void> {
+  const info = await missingGitPath(path);
+  if (!info) return;
+  if (info.isDirectory()) {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw fail();
+      if (entry.isDirectory()) await inspectWritableGitPath(join(path, entry.name), fail);
+      else if (!entry.isFile()) {
+        // Some filesystems return unknown Dirent types.
+        const child = await lstat(join(path, entry.name));
+        if (child.isSymbolicLink() || !child.isFile()) throw fail();
+      }
+    }
+  } else if (!info.isFile()) throw fail();
+}
+
+/** Writable metadata must not redirect Git through commondir, object alternates
+ * or metadata symlinks. This also applies to a linked worktree's common Git dir. */
 async function trustedStandaloneGitdir(root: string, marker: string, initial: Stats): Promise<string> {
   const fail = () => new Error(`not a git repository: untrusted nested Git metadata: ${relative(root, dirname(marker))}`);
-  const missing = async (path: string) => lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
-    return undefined;
-  });
   try {
     // These files redirect Git's common metadata or object database even though
     // the .git marker itself is an ordinary directory.
-    if (await missing(join(marker, "commondir"))) throw fail();
-    const inspect = async (path: string): Promise<void> => {
-      const info = await missing(path);
-      if (!info) return;
-      if (info.isDirectory()) {
-        for (const entry of await readdir(path, { withFileTypes: true })) {
-          if (entry.isSymbolicLink()) throw fail();
-          if (entry.isDirectory()) await inspect(join(path, entry.name));
-          else if (!entry.isFile()) {
-            // Some filesystems return unknown Dirent types. lstat instead of
-            // assuming that an unknown entry is a regular file.
-            const child = await lstat(join(path, entry.name));
-            if (child.isSymbolicLink() || !child.isFile()) throw fail();
-          }
-        }
-      } else if (!info.isFile()) throw fail();
-    };
+    if (await missingGitPath(join(marker, "commondir"))) throw fail();
     for (const name of ["HEAD", "index", "config", "config.worktree", "packed-refs", "shallow", "refs", "objects", "info"]) {
-      await inspect(join(marker, name));
+      await inspectWritableGitPath(join(marker, name), fail);
     }
-    if (await missing(join(marker, "objects", "info", "alternates"))) throw fail();
+    if (await missingGitPath(join(marker, "objects", "info", "alternates"))) throw fail();
     const after = await lstat(marker);
     if (!after.isDirectory() || after.dev !== initial.dev || after.ino !== initial.ino) throw fail();
     return marker;
@@ -106,7 +110,7 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
     try {
       return (await exec("git", [...pinnedGitArguments(directory, parentGitdir), "-c", "core.fsmonitor=false", ...args],
         { cwd: directory, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
-    } catch (error) { throw isStandaloneNestedGitdir(directory, parentGitdir) ? sanitizedNestedGitError(error) : error; }
+    } catch (error) { throw isLocallyControlledNestedGitdir(directory, parentGitdir) ? sanitizedNestedGitError(error) : error; }
   };
   let stage: string;
   try { stage = await git(["ls-files", "--stage", "-z", "--", scoped]); }
@@ -191,10 +195,8 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
     if (basename(dirname(requested)).toLowerCase() !== "worktrees") throw fail();
     const gitdir = await realpath(requested);
     if (basename(dirname(gitdir)).toLowerCase() !== "worktrees") throw fail();
-    // A linked worktree's protected administrative record points back to this exact
-    // marker. Metadata inside the writable Location is not an independent record.
-    const rootGit = await realpath(join(root, ".git")).catch(() => undefined);
-    if (inside(await realpath(root), gitdir) && (!rootGit || !inside(rootGit, gitdir))) throw fail();
+    // Reciprocal records identify the checkout, but do not by themselves make
+    // writable administrative data safe to give to Git.
     const backlink = line(await readPointer(join(gitdir, "gitdir")));
     const declaredMarker = resolve(gitdir, backlink), physicalMarker = join(await realpath(child), ".git");
     if (canonical(declaredMarker) !== canonical(marker) && canonical(declaredMarker) !== canonical(physicalMarker)) throw fail();
@@ -202,6 +204,17 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
     if (canonical(commonPath) !== canonical(dirname(dirname(gitdir)))) throw fail();
     const common = await realpath(commonPath);
     if (canonical(await realpath(join(common, "worktrees"))) !== canonical(dirname(gitdir))) throw fail();
+    const rootGit = await realpath(join(root, ".git")).catch(() => undefined);
+    if (inside(await realpath(root), gitdir) && (!rootGit || !inside(rootGit, gitdir))) {
+      const initial = await lstat(common);
+      if (!initial.isDirectory()) throw fail();
+      await trustedStandaloneGitdir(root, common, initial);
+      const entry = await lstat(gitdir);
+      if (!entry.isDirectory()) throw fail();
+      await inspectWritableGitPath(gitdir, fail);
+      const after = await lstat(gitdir);
+      if (!after.isDirectory() || after.dev !== entry.dev || after.ino !== entry.ino) throw fail();
+    }
     return gitdir;
   } catch { throw fail(); }
 }

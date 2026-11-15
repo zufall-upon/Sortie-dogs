@@ -990,6 +990,85 @@ test("standalone nested Git directories reject redirected metadata before Review
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("linked worktrees inside a broad Location preserve review while rejecting redirected shared Git metadata", async () => {
+  const area = await mkdtemp(resolve("_testenv/review-linked-shared-"));
+  const root = join(area, "location"), repository = join(root, "repository"), child = join(root, "checkout"),
+    other = join(root, "other"), secret = join(area, "private");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    await mkdir(repository, { recursive: true }); await mkdir(secret);
+    for (const [directory, content] of [[repository, "public\n"], [secret, "PRIVATE_LINKED_OBJECT_SENTINEL\n"]]) {
+      await git("git", ["init", "--quiet"], { cwd: directory });
+      await writeFile(join(directory, "payload.txt"), content);
+      await git("git", ["add", "."], { cwd: directory }); await commit(directory);
+    }
+    await git("git", ["worktree", "add", "--detach", child], { cwd: repository });
+    await git("git", ["worktree", "add", "--detach", other], { cwd: repository });
+    const marker = join(child, ".git"), savedMarker = await fs.readFile(marker, "utf8");
+    const admin = resolve(child, savedMarker.trim().slice("gitdir: ".length)), common = join(repository, ".git");
+    const run = { units: [{ unit: { read: [], write: ["checkout/**"] }, hashes: [] }] } as never;
+    const protection = () => currentSnapshotProtection(root, { read: [], write: ["checkout/**"] }, child);
+    const rejected = async () => {
+      await assert.rejects(protection(), /untrusted nested Git metadata/);
+      await assert.rejects(missionReviewSource(root, run), error => {
+        assert.match(String(error), /untrusted nested Git metadata/);
+        assert.doesNotMatch(String(error), /PRIVATE_LINKED_OBJECT_SENTINEL/);
+        return true;
+      });
+    };
+    await writeFile(join(child, "payload.txt"), "changed public\n");
+    assert.ok((await protection()).includes(join(child, "payload.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /\+changed public/);
+
+    // A marker alone cannot impersonate another real linked worktree.
+    await writeFile(marker, await fs.readFile(join(other, ".git")));
+    await rejected();
+    await writeFile(marker, savedMarker);
+    const backlink = await fs.readFile(join(admin, "gitdir"));
+    await writeFile(join(admin, "gitdir"), join(other, ".git") + "\n");
+    await rejected();
+    await writeFile(join(admin, "gitdir"), backlink);
+    const commonPointer = await fs.readFile(join(admin, "commondir"));
+    await writeFile(join(admin, "commondir"), join(secret, ".git") + "\n");
+    await rejected();
+    await writeFile(join(admin, "commondir"), commonPointer);
+
+    // Native Git follows this writable shared object alternate and exposes the
+    // private commit in a diff, even though all worktree pointers are reciprocal.
+    const head = await fs.readFile(join(admin, "HEAD"));
+    const oid = (await git("git", ["rev-parse", "HEAD"], { cwd: secret })).stdout.trim();
+    await writeFile(join(admin, "HEAD"), oid + "\n");
+    const alternates = join(common, "objects", "info", "alternates");
+    await writeFile(alternates, join(secret, ".git", "objects") + "\n");
+    assert.match((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "payload.txt"], { cwd: child })).stdout,
+      /PRIVATE_LINKED_OBJECT_SENTINEL/);
+    await rejected();
+    await rm(alternates); await writeFile(join(admin, "HEAD"), head);
+    if (process.platform !== "win32") {
+      await rm(join(admin, "HEAD")); await symlink(join(secret, ".git", "HEAD"), join(admin, "HEAD"));
+      await rejected();
+      await rm(join(admin, "HEAD")); await writeFile(join(admin, "HEAD"), head);
+    }
+
+    // Linked checkout config is also writable: neither diff prefixes nor Git
+    // errors may render arbitrary values from an included external config.
+    const externalConfig = join(area, "config-fixture");
+    await writeFile(externalConfig, "[diff]\n\tsrcPrefix = linked-config-fixture/\n\tdstPrefix = linked-config-fixture/\n");
+    await appendFile(join(common, "config"), `\n[include]\n\tpath = ${externalConfig}\n`);
+    const review = await missionReviewSource(root, run);
+    assert.match(review.excerpt, /\+changed public/);
+    assert.doesNotMatch(review.excerpt, /linked-config-fixture/);
+    await writeFile(externalConfig, "[diff]\n\talgorithm = linked-config-fixture\n");
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /git-inspection: cannot inspect nested Git repository/);
+      assert.doesNotMatch(String(error), /linked-config-fixture/);
+      assert.doesNotMatch(JSON.stringify(error), /linked-config-fixture/);
+      return true;
+    });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("Git pointer checks bound reads and reject unrelated paths before resolving them", async t => {
   const area = await mkdtemp(join(tmpdir(), "review-git-pointer-"));
   const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
