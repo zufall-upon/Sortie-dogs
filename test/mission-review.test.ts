@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, writeFile, symlink } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
@@ -906,6 +907,68 @@ test("Review and snapshot reject redirected tracked submodule metadata", async (
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("Git pointer checks bound reads and reject unrelated paths before resolving them", async t => {
+  const area = await mkdtemp(join(tmpdir(), "review-git-pointer-"));
+  const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
+  const marker = join(nested, ".git"), unrelated = join(area, "unrelated");
+  const originalOpen = fs.open, originalRealpath = fs.realpath;
+  const flags: number[] = [];
+  let unrelatedResolutions = 0;
+  try {
+    for (const path of [root, source, unrelated]) await mkdir(path);
+    for (const path of [root, source]) await git("git", ["init", "--quiet"], { cwd: path });
+    await writeFile(join(source, "input.txt"), "ordinary fixture\n");
+    await git("git", ["add", "."], { cwd: source });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: source });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root });
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: root });
+    const saved = await fs.readFile(marker, "utf8");
+    const run = { units: [{ unit: { read: [], write: ["nested/**"] }, hashes: [] }] } as never;
+    t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (args[0] === marker && typeof args[1] === "number") flags.push(args[1]);
+      return originalOpen(...args);
+    });
+    t.mock.method(fs, "realpath", async (...args: Parameters<typeof fs.realpath>) => {
+      if (args[0] === unrelated) unrelatedResolutions++;
+      return originalRealpath(...args);
+    });
+    syncBuiltinESMExports();
+    assert.ok((await currentSnapshotProtection(root, { read: [], write: ["nested/**"] })).includes(join(nested, "input.txt")));
+    assert.ok(flags.length > 0, "the public snapshot path opens the pointer through the bounded reader");
+    if (constants.O_NONBLOCK) assert.ok(flags.every(value => (value & constants.O_NONBLOCK) !== 0));
+    if (constants.O_NOFOLLOW) assert.ok(flags.every(value => (value & constants.O_NOFOLLOW) !== 0));
+    assert.equal((await missionDeliveryObservation(root, "valid"))?.clean, true);
+
+    await writeFile(marker, "x".repeat(65_537));
+    const before = flags.length;
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    assert.equal(flags.length, before, "oversized metadata is rejected before reading");
+    assert.equal(await missionDeliveryObservation(root, "oversized"), undefined);
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+
+    await writeFile(marker, `gitdir: ${unrelated}\n`);
+    await assert.rejects(missionReviewSource(root, run), /untrusted Git submodule metadata/);
+    assert.equal(await missionDeliveryObservation(root, "unrelated"), undefined);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["nested/**"] }), /untrusted Git submodule metadata/);
+    assert.equal(unrelatedResolutions, 0, "the marker's unrelated target is never resolved");
+    await writeFile(marker, saved);
+    assert.equal((await missionDeliveryObservation(root, "restored"))?.clean, true);
+
+    const standalone = join(root, "standalone"), admin = join(area, "fixture-admin", "worktrees", "entry");
+    await mkdir(standalone); await mkdir(admin, { recursive: true });
+    await writeFile(join(standalone, ".git"), `gitdir: ${admin}\n`);
+    await writeFile(join(admin, "gitdir"), `${unrelated}\n`);
+    const standaloneRun = { units: [{ unit: { read: [], write: ["standalone/**"] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, standaloneRun), /untrusted nested Git metadata/);
+    await assert.rejects(currentSnapshotProtection(root, { read: [], write: ["standalone/**"] }), /untrusted nested Git metadata/);
+    assert.equal(unrelatedResolutions, 0, "an unrelated worktree backlink is not resolved either");
+  } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports();
+    await rm(area, { recursive: true, force: true });
+  }
+});
+
 test("public Review and delivery inspect dirty Git submodules without executing their filters", async () => {
   const area = await mkdtemp(join(tmpdir(), "review-submodule-filter-"));
   const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested"), marker = join(area, "filter-fired");
@@ -1006,6 +1069,55 @@ test("public Review and delivery inspect dirty Git submodules without executing 
     assert.notEqual((await git("git", ["status", "--porcelain=v2"], { cwd: root })).stdout, "", "native ignore=all still reports staged gitlinks");
     assert.equal((await missionDeliveryObservation(root, "staged-head"))?.clean, false, "ignore=all must not hide a staged gitlink from delivery");
     await assert.rejects(fs.readFile(marker), { code: "ENOENT" });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("Review compares the effective submodule worktree rather than an intermediate staged gitlink", async () => {
+  const area = await mkdtemp(join(tmpdir(), "review-gitlink-state-"));
+  const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
+  const commit = async (directory: string, message: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", message], { cwd: directory });
+  try {
+    await mkdir(root); await mkdir(source);
+    await git("git", ["init", "--quiet"], { cwd: root }); await git("git", ["init", "--quiet"], { cwd: source });
+    await writeFile(join(source, "file.txt"), "original\n");
+    await git("git", ["add", "."], { cwd: source }); await commit(source, "base");
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "nested"], { cwd: root });
+    await git("git", ["add", "."], { cwd: root }); await commit(root, "base");
+    const first = (await git("git", ["rev-parse", "HEAD"], { cwd: nested })).stdout.trim();
+    const baseline = (await git("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const externalMarker = join(area, "external-diff-fired"), externalProbe = join(area, "external-diff.cjs");
+    await writeFile(externalProbe, `require('node:fs').writeFileSync(${JSON.stringify(externalMarker)},'fired');\n`);
+    await git("git", ["config", "diff.external", `"${process.execPath.replaceAll("\\", "/")}" "${externalProbe.replaceAll("\\", "/")}"`], { cwd: root });
+    const run = { units: [{ unit: { read: [], write: ["."] }, hashes: [] }] } as never;
+    const initial = await missionReviewSource(root, run, [], baseline);
+    // The gitlink itself changes even when the submodule's file bytes do not.
+    await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "--allow-empty", "-m", "second"], { cwd: nested });
+    await git("git", ["add", "nested"], { cwd: root });
+    const changed = await missionReviewSource(root, run, [], baseline);
+    assert.notEqual(changed.candidateFingerprint, initial.candidateFingerprint);
+    const ordinary = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.ok(changed.excerpt.includes(ordinary));
+    await git("git", ["checkout", "--quiet", "--detach", first], { cwd: nested });
+    assert.equal((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout, "");
+    assert.equal((await missionDeliveryObservation(root, "staged"))?.clean, false, "delivery still sees the real staged index");
+    for (const base of [undefined, baseline]) {
+      const reverted = await missionReviewSource(root, run, [], base);
+      assert.doesNotMatch(reverted.excerpt, /Subproject commit|dirty submodule: nested/u);
+      if (base) assert.equal(reverted.candidateFingerprint, initial.candidateFingerprint);
+    }
+    await git("git", ["config", "submodule.nested.ignore", "all"], { cwd: root });
+    const ignored = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.equal(ignored, "", "native diff hides an ignored submodule even when its index is staged");
+    assert.doesNotMatch((await missionReviewSource(root, run)).excerpt, /Subproject commit|dirty submodule: nested/u);
+    assert.equal((await missionDeliveryObservation(root, "ignored-stage"))?.clean, false, "status still retains the staged gitlink");
+    await git("git", ["config", "--unset", "submodule.nested.ignore"], { cwd: root });
+    await git("git", ["add", "nested"], { cwd: root });
+    await git("git", ["rm", "--quiet", "--cached", "nested"], { cwd: root });
+    const deleted = (await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "nested"], { cwd: root })).stdout;
+    assert.match(deleted, /deleted file mode 160000/u);
+    assert.ok((await missionReviewSource(root, run, [], baseline)).excerpt.includes(deleted), "deleted gitlinks remain visible");
+    await assert.rejects(fs.readFile(externalMarker), { code: "ENOENT" }, "gitlink comparison must not execute an external diff");
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 

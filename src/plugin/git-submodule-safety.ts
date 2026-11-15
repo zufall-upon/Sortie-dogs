@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { lstat, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -9,6 +10,32 @@ const inside = (root: string, path: string) => {
   const rest = relative(canonical(root), canonical(path));
   return rest === "" || rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
 };
+
+// These are small Git pointer files, never general artifacts. Do not follow a
+// replaced symlink, wait for a FIFO, or allocate according to an untrusted size.
+async function readPointer(path: string, initial?: Stats): Promise<string> {
+  const before = initial ?? await lstat(path);
+  if (!before.isFile() || before.size > 65_536) throw new Error("invalid Git pointer file");
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > 65_536) {
+      throw new Error("changed Git pointer file");
+    }
+    const buffer = Buffer.alloc(65_537);
+    let size = 0;
+    while (size < buffer.length) {
+      const result = await handle.read(buffer, size, buffer.length - size, size);
+      if (!result.bytesRead) break;
+      size += result.bytesRead;
+    }
+    const after = await handle.stat();
+    if (size > 65_536 || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+      throw new Error("changed Git pointer file");
+    }
+    return buffer.subarray(0, size).toString("utf8");
+  } finally { await handle.close(); }
+}
 
 /** Use an already verified submodule gitdir instead of rereading its writable .git file. */
 export const pinnedGitArguments = (directory: string, gitdir?: string) => gitdir
@@ -38,7 +65,7 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
   if (!info.isFile()) throw fail();
   try {
     const line = (value: string) => value.replace(/\r?\n$/u, "");
-    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(await readFile(marker, "utf8"));
+    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(await readPointer(marker, info));
     if (!match) throw fail();
     const [top, common, modules] = await Promise.all([
       git(["rev-parse", "--show-toplevel"]), git(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
@@ -50,19 +77,28 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
       return name && canonical(resolve(line(top), value)) === canonical(child) ? [name] : [];
     });
     if (names.length !== 1) throw fail();
-    const modulesRoot = await realpath(join(line(common), "modules"));
-    const expected = await realpath(resolve(modulesRoot, names[0]!));
-    const actual = await realpath(resolve(child, match[1]!));
+    const logicalModules = resolve(line(common), "modules");
+    const modulesRoot = await realpath(logicalModules);
+    const expectedPath = resolve(modulesRoot, names[0]!);
+    const actualPath = resolve(child, match[1]!);
+    // Check the lexical boundary before touching a path supplied by the marker.
+    if (!inside(modulesRoot, expectedPath) || !inside(logicalModules, actualPath) && !inside(modulesRoot, actualPath)) throw fail();
+    const expected = await realpath(expectedPath);
+    const actual = await realpath(actualPath);
     if (!inside(modulesRoot, expected) || canonical(expected) !== canonical(actual)) throw fail();
     // An edited .gitmodules/index must not redirect one gitlink to a different
     // protected module. The protected module's own config binds its worktree.
     const worktree = line(await git(["config", "--no-includes", "--file", join(expected, "config"), "--get", "core.worktree"]));
-    if (canonical(await realpath(resolve(expected, worktree))) !== canonical(await realpath(child))) throw fail();
+    const declaredWorktree = resolve(expected, worktree), physicalChild = await realpath(child);
+    if (canonical(declaredWorktree) !== canonical(child) && canonical(declaredWorktree) !== canonical(physicalChild)) throw fail();
     const commonFile = join(expected, "commondir");
-    const commonContent = await readFile(commonFile, "utf8").catch((error: NodeJS.ErrnoException) => {
+    const commonContent = await readPointer(commonFile).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
     });
-    if (commonContent !== undefined && !inside(expected, await realpath(resolve(expected, line(commonContent))))) throw fail();
+    if (commonContent !== undefined) {
+      const commonPath = resolve(expected, line(commonContent));
+      if (!inside(expected, commonPath) || !inside(expected, await realpath(commonPath))) throw fail();
+    }
     return expected;
   } catch { throw fail(); }
 }
@@ -88,17 +124,25 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
   if (!info.isFile()) throw fail();
   try {
     const line = (value: string) => value.replace(/\r?\n$/u, "");
-    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(await readFile(marker, "utf8"));
+    const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(await readPointer(marker, info));
     if (!match) throw fail();
-    const gitdir = await realpath(resolve(child, match[1]!));
+    const requested = resolve(child, match[1]!);
+    // A linked worktree marker identifies an entry in its common worktrees
+    // directory. Reject other layouts before opening any selected metadata.
+    if (basename(dirname(requested)).toLowerCase() !== "worktrees") throw fail();
+    const gitdir = await realpath(requested);
+    if (basename(dirname(gitdir)).toLowerCase() !== "worktrees") throw fail();
     // A linked worktree's protected administrative record points back to this exact
     // marker. Metadata inside the writable Location is not an independent record.
     const rootGit = await realpath(join(root, ".git")).catch(() => undefined);
     if (inside(await realpath(root), gitdir) && (!rootGit || !inside(rootGit, gitdir))) throw fail();
-    const backlink = line(await readFile(join(gitdir, "gitdir"), "utf8"));
-    if (canonical(await realpath(resolve(gitdir, backlink))) !== canonical(await realpath(marker))) throw fail();
-    const common = await realpath(resolve(gitdir, line(await readFile(join(gitdir, "commondir"), "utf8"))));
-    if (!inside(await realpath(join(common, "worktrees")), gitdir)) throw fail();
+    const backlink = line(await readPointer(join(gitdir, "gitdir")));
+    const declaredMarker = resolve(gitdir, backlink), physicalMarker = join(await realpath(child), ".git");
+    if (canonical(declaredMarker) !== canonical(marker) && canonical(declaredMarker) !== canonical(physicalMarker)) throw fail();
+    const commonPath = resolve(gitdir, line(await readPointer(join(gitdir, "commondir"))));
+    if (canonical(commonPath) !== canonical(dirname(dirname(gitdir)))) throw fail();
+    const common = await realpath(commonPath);
+    if (canonical(await realpath(join(common, "worktrees"))) !== canonical(dirname(gitdir))) throw fail();
     return gitdir;
   } catch { throw fail(); }
 }
