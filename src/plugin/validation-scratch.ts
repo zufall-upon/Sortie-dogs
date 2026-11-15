@@ -22,7 +22,7 @@ const isControl = (path: string) => controlDirectories.has(process.platform === 
 
 /** Only configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
 export function validationScratchPaths(directory: string, commands: readonly string[],
-  inherited: Readonly<Record<string, string | undefined>> = {}): string[] {
+  inherited: Readonly<Record<string, string | undefined>> = {}, commandDirectory = directory): string[] {
   const paths = new Set<string>();
   for (const command of commands) {
     const configured = new Map<string, string>();
@@ -34,7 +34,7 @@ export function validationScratchPaths(directory: string, commands: readonly str
     }
     for (const [key, value] of configured) for (const declared of key === "GOPATH" ? value.split(delimiter) : [value]) {
       if (!declared || key === "GOCACHE" && declared === "off") continue;
-      const absolute = nativeScratchPath(directory, declared);
+      const absolute = nativeScratchPath(commandDirectory, declared);
       if (!absolute) continue;
       const scoped = localScratchPath(directory, absolute);
       if (!scoped || isControl(scoped)) continue;

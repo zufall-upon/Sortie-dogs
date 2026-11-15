@@ -13,7 +13,8 @@ test("normal updates reuse observed whole-request progress without a display-onl
     assert.match(policy, /NOT elapsed time, cost, budget or completed-unit share/u);
     assert.match(policy, /only formal request completion means 100%/u);
     assert.match(policy, /Task metadata may be saved without being displayed[\s\S]*Direct may/u);
-    assert.match(policy, /append it verbatim exactly once outside any code fence/u);
+    assert.match(policy, /append the host-authored summary verbatim exactly once outside any code fence/u);
+    assert.match(policy, /Do not add a detailed record/u);
     assert.match(policy, /↩ recovered only after recovery is observed/u);
   }
 });

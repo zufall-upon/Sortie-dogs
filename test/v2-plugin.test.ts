@@ -722,11 +722,11 @@ test("Reviewer model tool order never changes other agents' native tool set or i
   } finally { cleanup?.(); }
 });
 
-for (const heading of ["帰還報告", "Return Report"]) for (const format of ["legacy", "compact"]) test(`V2 final request retains the verbatim host return card (${heading}, ${format}); only compaction omits it without mutating history`, async () => {
+for (const heading of ["帰還報告", "Return Report"]) for (const format of ["legacy", "compact", "summary"]) test(`V2 final request retains the verbatim host return card (${heading}, ${format}); only compaction omits it without mutating history`, async () => {
   const fixture = contextFixture();
   const card = format === "legacy"
     ? `<details>\n<summary><strong>🐾 SORTIE DOGS — ${heading}</strong></summary>\n\nfull host metrics\n\n</details>`
-    : `\`\`\`text\n🐾 SORTIE DOGS — ${heading}｜🟢 Complete\nfull host metrics\n\`\`\`\n\n<details>\n<summary>📜 ${heading === "帰還報告" ? "詳細記録" : "Detailed record"}</summary>\n\nrecord\n\n</details>`;
+    : `\`\`\`text\n🐾 SORTIE DOGS — ${heading}｜🟢 Complete\nsummary host metrics\n\`\`\`${format === "compact" ? `\n\n<details>\n<summary>📜 ${heading === "帰還報告" ? "詳細記録" : "Detailed record"}</summary>\n\nrecord\n\n</details>` : ""}`;
   const packet = { status: "succeeded", run_id: "run", acceptance_fingerprint: "sha256:accepted",
     receipt: { status: "succeeded", goal_id: "goal", evidence_refs: ["sha256:check"] },
     limitations: ["unknown usage"], return_report: card, return_report_instruction: "Append return_report verbatim once" };
@@ -1806,13 +1806,35 @@ test("V2 role defaults preserve explicit agent models and keep review separate f
   const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
   try {
     assert.deepEqual(models.get("dog-operator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
-    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
+    assert.deepEqual(models.get("dogs-coordinator"), { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" });
     assert.deepEqual(models.get("dog-worker-v010"), { providerID: "openai", id: "gpt-6.1-terra", variant: "max" });
     assert.deepEqual(models.get("dog-luna-worker-v010"), { providerID: "openai", id: "gpt-6-luna-fast", variant: "max" });
     assert.deepEqual(models.get("dog-reviewer-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-advisor-v010"), { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" });
     assert.deepEqual(models.get("dog-scout-v010"), { providerID: "anthropic", id: "custom", variant: "high" });
   } finally { if (typeof dispose === "function") dispose(); }
+});
+
+test("V2 Coordinator explicit models survive registry initialization", async () => {
+  for (const selected of [
+    { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" },
+    { providerID: "anthropic", id: "custom", variant: "high" },
+  ]) {
+    const fixture = contextFixture();
+    const models = new Map<string, typeof selected>([["dogs-coordinator", structuredClone(selected)]]);
+    const context: OpenCodeV2Context = { ...fixture.context, agent: { transform: async callback => {
+      callback({ update: (id, update) => {
+        if (!models.has(id)) return;
+        const agent = { model: models.get(id) };
+        update(agent);
+        models.set(id, agent.model!);
+      } });
+      return { dispose() {} };
+    } } };
+    const dispose = await createSortieDogsV2Plugin(async () => ({})).setup(context);
+    try { assert.deepEqual(models.get("dogs-coordinator"), selected); }
+    finally { if (typeof dispose === "function") dispose(); }
+  }
 });
 
 test("V2 subagent dispatch leaves role defaults structured and preserves explicit Task models", async () => {
@@ -2026,6 +2048,88 @@ test("V2 report accounting traverses native pages and retains child model, tool 
     assert.equal(incomplete?.tokens, undefined, "a missing hierarchy must never report a root-only total as complete");
     assert.equal(incomplete?.debrief?.complete, false);
   } finally { cleanup?.(); }
+});
+
+test("V2 reconciles the explicitly selected predecessor shell after a corrected operation declaration", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-predecessor-operation-"));
+  const fixture = contextFixture();
+  const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 10_000 } },
+  };
+  const history: Record<string, Record<string, unknown>[]> = {};
+  let hooks!: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+  const cleanup = await createSortieDogsV2Plugin(async input => { hooks = await SortieDogsV010Plugin(input); return {}; }).setup({
+    ...fixture.context, location: { directory }, session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, ...identities[sessionID] }),
+      list: async ({ parentID }) => ({ data: Object.entries(identities).filter(([, info]) => info.parentID === parentID)
+        .map(([id, info]) => ({ id, ...info })), cursor: {} }),
+      context: async ({ sessionID }) => history[sessionID] ?? [] },
+    message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
+      : history[sessionID] ?? [], cursor: {} }) },
+  });
+  let turn = 0;
+  const chat = async (sessionID: string, text: string) => hooks["chat.message"]!(
+    { sessionID, messageID: `${sessionID}-${++turn}`, agent: identities[sessionID]!.agent },
+    { message: { id: `${sessionID}-${turn}`, agent: identities[sessionID]!.agent,
+      model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }] });
+  const tool = async (name: string, sessionID: string, input: object = {}) =>
+    JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(input, { sessionID }));
+  try {
+    await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "build"));
+    await writeFile(join(directory, "check.mjs"), 'console.log("auxiliary");\n');
+    const build = "TMPDIR=/fixture/tmp XDG_CACHE_HOME=/fixture/cache /usr/bin/cmake --build build --target vdm_linux_readonly --parallel 4";
+    const initialBuild = build.replace("vdm_linux_readonly --parallel", "vdm_linux_readonly linux_readonly_test --parallel");
+    const launch = "node launch.mjs";
+    const unit = { title: "Build and launch", objective: "Build the requested target and launch once",
+      read: ["check.mjs"], write: ["build/**"], validation: ["node check.mjs"] };
+    await chat("root", "Build and launch once; retain the real result without replay.");
+    const started = await tool("start_mission", "root", { requirements: ["Build and launch once"], kind: "operation" });
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+    const planned = await tool("plan_units", "coordinator", { units: [unit], execution: { commands: [initialBuild, launch], directory } });
+    const workerTask = { args: structuredClone(planned.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
+    await chat("worker", workerTask.args.prompt);
+    const original = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), worker = original.units[0]!;
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: worker.handoffPath } });
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { output: "inspected" });
+    await tool("bind_write_gate", "worker", { project_root: directory, manifest_path: worker.manifestPath });
+    const ran = Date.now();
+    history.worker = [{ id: "msg_original", type: "assistant", agent: "dog-worker-v010", time: { created: ran, completed: ran },
+      content: [{ type: "tool", id: "call_original_build", name: "shell", time: { created: ran, ran, completed: ran },
+        state: { status: "completed", input: { command: build, workdir: directory, timeout: 240_000 },
+          metadata: { status: "completed", exit: 0 }, content: [{ type: "text", text: "[100%] Built target vdm_linux_readonly" }] } }] }];
+    // Only synthetic host events represent the build/launch; no CMake or GUI process is started.
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "launch" }, { args: { command: launch, workdir: directory } });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "launch" }, { output: "launched", metadata: { status: "completed", exit: 0 } });
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "check" }, { args: { command: "node check.mjs", workdir: directory } });
+    const checked = await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: directory });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "worker", callID: "check" }, { output: checked.stdout, metadata: { status: "completed", exit: 0 } });
+    identities.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, { output: "done", metadata: { sessionId: "worker" } });
+    assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "succeeded");
+    assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.status, "not-started");
+    const corrected = await tool("plan_units", "coordinator", { executor: "self", reason: "Correct the target without replay",
+      units: [{ ...unit, title: "Retain native result", objective: "Reconcile the existing call" }],
+      execution: { commands: [build, launch], directory } });
+    const recovery = await tool("plan_units", "root", { execution: { commands: [build, launch], directory,
+      recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: "call_original_build" } } });
+    assert.equal(recovery.status, "operation-reconciled");
+    assert.equal(recovery.run_id, corrected.run_id);
+    const recovered = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(recovered.status, "executed");
+    const observation = recovered.observations.find((item: { callID: string }) => item.callID === "call_original_build");
+    assert.equal(observation.sourceRunID, original.runID);
+    assert.equal(observation.sessionID, "worker");
+    assert.equal(observation.nativeTimeoutMs, 240_000);
+    assert.equal(observation.nativeStartedAt, new Date(ran).toISOString());
+    assert.equal(observation.exit, 0);
+    assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 2);
+    assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
 for (const mode of ["success", "failure", "no-start", "structured-failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
@@ -2561,7 +2665,9 @@ test("V2 six child roles preserve structured defaults and explicit choices throu
   for (const role of roles) for (const wrapped of [false, true]) for (const explicit of [false, true]) {
     const fixture = contextFixture();
     fixture.history.length = 0;
-    const configured = { providerID: "openai", id: `${role}-configured`, variant: "high" };
+    const configured = role === "dogs-coordinator"
+      ? { providerID: "openai", id: "gpt-6.1-terra", variant: "xhigh" }
+      : { providerID: "openai", id: `${role}-configured`, variant: "high" };
     const native = { providerID: "anthropic", id: "user-selected", variant: "max" };
     let selected = { ...native };
     fixture.context.agent!.get = async () => wrapped ? { data: { model: configured } } : { model: configured };
@@ -2825,6 +2931,12 @@ test("actual v0.10 tools preserve required, optional, and described schemas thro
     assert.equal(validate({ ...capturedHandoff, parallel: "true" }), false);
     assert.equal(validate({ ...capturedHandoff, units: "invented-plan" }), false);
     assert.equal(validate({ ...capturedHandoff, units: [] }), false, "empty units cannot masquerade as a new plan");
+    const execution = { commands: ["cmake --build build --target gui"], directory: "/fixture" };
+    assert.equal(validate({ ...capturedHandoff, execution }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, execution: { ...execution, recover_call: {
+      run_id: "previous-run", unit_id: "unit-1", session_id: "worker", call_id: "call-build" } } }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...capturedHandoff, execution: { ...execution, recover_call: {
+      run_id: "previous-run", unit_id: "unit-1", session_id: "worker" } } }), false, "a partial native call reference is not a recovery proof");
     const review = tools.find(tool => tool.name === "sortie_v010_review_mission")!;
     const validateReview = new Ajv({ strict: false }).compile(review.input);
     const capturedReview = { risk_tags: [], mode: "", reviewer_session_id: "", evidence: "", traces: "", purpose_decision: "" };

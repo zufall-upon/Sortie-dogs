@@ -951,6 +951,38 @@ for (const promotion of ["exact-output", "tracked-source"]) test(`Review include
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Review includes tracked scratch promoted under a Git subdirectory Location", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const repository = await mkdtemp(resolve("_testenv/mission-review-subdir-"));
+  const root = join(repository, "package"), scratch = join(root, ".tmp");
+  try {
+    await mkdir(scratch, { recursive: true });
+    await git("git", ["init", "--quiet"], { cwd: repository });
+    await writeFile(join(scratch, "tracked.txt"), "tracked input");
+    await git("git", ["add", "--", "package/.tmp/tracked.txt"], { cwd: repository });
+    const command = "TMPDIR=./.tmp node check.mjs", manifestPath = join(root, "manifest.json");
+    const value = { version: "0.1.0", task_id: "unit", read: [root + "/**"], write: [".tmp/**"], validation: [command] };
+    const bytes = JSON.stringify(value); await writeFile(manifestPath, bytes);
+    const snapshot = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: createHash("sha256").update(bytes).digest("hex") },
+      { directory: root, command });
+    assert.ok(snapshot);
+    const run = { units: [{ unit: { id: "unit", ...value, acceptance_indices: [0] }, hashes: [], evidence: [{ protected_binding: snapshot.binding }] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.match(first.excerpt, /tracked\.txt/u);
+    await writeFile(join(scratch, "cache.log"), "output only");
+    assert.equal((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+    await writeFile(join(scratch, "tracked.txt"), "modified tracked input");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+    await writeFile(join(scratch, "tracked.txt"), "tracked input");
+    await writeFile(join(scratch, "promoted.txt"), "new input");
+    assert.equal((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+    await git("git", ["add", "--", "package/.tmp/promoted.txt"], { cwd: repository });
+    const changed = await missionReviewSource(root, run);
+    assert.notEqual(changed.fingerprint, first.fingerprint);
+    assert.match(changed.excerpt, /promoted\.txt/u);
+  } finally { await rm(repository, { recursive: true, force: true }); }
+});
+
 test("committed candidates still supply current source and large artifacts expose truncation", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(join(resolve("_testenv"), "mission-committed-"));

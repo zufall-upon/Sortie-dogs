@@ -72,7 +72,7 @@ Codex threads with existing authentication; no OpenCode settings are imported.
 
 ### Models and shells
 
-- Operator, Coordinator, Reviewer and Advisor retain native Sol 6.1/xhigh defaults.
+- The Coordinator defaults to native `gpt-6.1-terra` / `xhigh`; Operator, Reviewer and Advisor retain Sol 6.1/xhigh defaults.
 - The ordinary Worker defaults to native `gpt-6.1-terra`, effort `max`, Standard (no priority/Fast).
   OpenCode's corresponding default is `openai/gpt-6.1-terra#max`. Scout and dedicated Luna routes remain unchanged.
 - The retained Luna-fast/max alias maps **only in Codex** to native `gpt-6-luna`, effort `max`,

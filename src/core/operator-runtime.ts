@@ -526,9 +526,10 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
 /** Root-owned durable queue. It never executes code, changes acceptance, or accepts a candidate. */
 export class OperatorRuntime {
   private readonly fabricControllers = new Map<string, AbortController>();
-  private readonly states = new Map<string, OperatorState>();
-  private readonly writes = new Map<string, Promise<void>>();
-  private readonly transactions = new Map<string, Promise<unknown>>();
+  // Several loaded adapters can own views of the same root. Serialize their
+  // read/modify/write transactions by durable state path, not by instance.
+  private static readonly writes = new Map<string, Promise<void>>();
+  private static readonly transactions = new Map<string, Promise<unknown>>();
   readonly projectRoot: string;
   constructor(projectRoot: string, readonly profile: RuntimeProfile, private readonly gitPath = "git") {
     this.projectRoot = resolve(projectRoot);
@@ -577,12 +578,16 @@ export class OperatorRuntime {
     }
   }
   async read(root: string): Promise<OperatorState | undefined> {
-    await this.writes.get(root);
-    const cached = this.states.get(root);
-    if (cached) { rememberWorkRun(this.projectRoot, cached); return structuredClone(cached); }
+    await OperatorRuntime.writes.get(this.file(root));
     let source: string;
     try { source = await readFile(this.file(root), "utf8"); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return undefined;
+      if (code) throw new OperatorContractError([{ document: "controls", pointer: "/controls", code: "operator-control-write-failed",
+        rule: "authoritative-state-accessible", repair_kind: "retry-storage-after-cleanup" }]);
+      throw error;
+    }
     const parsed = JSON.parse(source) as OperatorState & { parentRunID?: unknown; priorAcceptedUnits?: unknown; remediationParent?: unknown; gitLifecycle?: unknown;
       contractRepair?: unknown; repairGeneration?: unknown; repairResidualPaths?: unknown };
     // Display metadata must not turn an otherwise valid execution state into a refusal.
@@ -673,7 +678,6 @@ export class OperatorRuntime {
           this.validRepairValidationState(unit.repairValidation))) {
       throw new Error("operator-state-invalid");
     }
-    this.states.set(root, state);
     rememberWorkRun(this.projectRoot, state);
     return structuredClone(state);
   }
@@ -684,7 +688,8 @@ export class OperatorRuntime {
     syncWorkQuantity(applyPendingWork(this.projectRoot, state.rootSessionID, state.workQuantity), {}, state);
     state.sequence++;
     const serialized = JSON.stringify(state);
-    const previous = this.writes.get(state.rootSessionID) ?? Promise.resolve();
+    const key = this.file(state.rootSessionID);
+    const previous = OperatorRuntime.writes.get(key) ?? Promise.resolve();
     const next = previous.then(async () => {
       const directory = join(this.projectRoot, this.profile.stateDirectory, "operators");
       await mkdir(directory, { recursive: true });
@@ -697,22 +702,24 @@ export class OperatorRuntime {
         await rm(temporary, { force: true }).catch(() => undefined);
       }
     });
-    this.writes.set(state.rootSessionID, next);
+    OperatorRuntime.writes.set(key, next);
     try {
       await next;
-      this.states.set(state.rootSessionID, structuredClone(state));
       rememberWorkRun(this.projectRoot, state);
     } catch (error) {
       state.sequence--;
       throw error;
     } finally {
-      if (this.writes.get(state.rootSessionID) === next) this.writes.delete(state.rootSessionID);
+      if (OperatorRuntime.writes.get(key) === next) OperatorRuntime.writes.delete(key);
     }
   }
   private serial<T>(root: string, operation: () => Promise<T>): Promise<T> {
-    const next = (this.transactions.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
-    this.transactions.set(root, next);
-    return next;
+    const key = this.file(root);
+    const next = (OperatorRuntime.transactions.get(key) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    OperatorRuntime.transactions.set(key, next);
+    return next.finally(() => {
+      if (OperatorRuntime.transactions.get(key) === next) OperatorRuntime.transactions.delete(key);
+    });
   }
   private validGitLifecycleState(value: unknown): value is OperatorGitLifecycleState | null {
     return value === null || (record(value) && exactKeys(value, ["branch", "startRef", "startOID", "originalHead", "originalRef", "commitMessage", "writeUnion", "remediationReserve", "postCommitValidation", "committedHead", "commitProvenance", "carriedPaths"]) &&

@@ -405,7 +405,7 @@ Worker交代や文書編集だけを理由に無関係な検証を繰り返さ�
 ### 既定route
 
 - `dog-operator`: `openai/gpt-6.1-sol` / `xhigh`
-- `dogs-coordinator`: `openai/gpt-6.1-sol` / `xhigh`
+- `dogs-coordinator`: `openai/gpt-6.1-terra` / `xhigh`
 - `dog-worker-v010`: `openai/gpt-6.1-terra` / `max`（Standard、Fast/priorityなし）
 - `dog-luna-worker-v010`: `openai/gpt-6-luna-fast` / `max`（専用経路は維持）
 - `dog-scout-v010`: `openai/gpt-6-luna-fast` / `max`

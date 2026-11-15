@@ -89,9 +89,17 @@ export interface MissionTerminalRescue {
 export interface MissionExecution {
   commands: string[];
   directory: string;
+  /** Explicit reference to one native call, not proof of its ownership or result. */
+  recoverCall?: { runID: string; unitID: string; sessionID: string; callID: string };
   /** History-service availability is not a process outcome or an execution permission. */
   recovery?: { status: "unavailable"; errors: { sessionID: string; reason: string }[] };
   observations: { command: string; directory: string; callID: string; sessionID: string; startedAt: string;
+    /** Earlier same-Mission admission from which this native call was recovered. */
+    sourceRunID?: string; sourceUnitID?: string;
+    /** The native timeout is retained as provenance, not inferred from the current declaration. */
+    nativeTimeoutMs?: number;
+    /** Complete native input identity for an imported predecessor call. */
+    nativeExecutionHash?: string;
     /** Native tool clock, distinct from hook admission; alone it does not prove process start. */
     nativeStartedAt?: string;
     /** Positive native process evidence, unlike a tool's pre-hook running envelope/clock. */

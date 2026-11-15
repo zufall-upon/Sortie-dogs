@@ -1680,10 +1680,9 @@ emoji. After those paragraphs, always render one durable fallback card in the sa
 🐾 SORTIE DOGS — 帰還報告｜<same short conclusion>
 確認: <concise validation/review summary without internal identifiers>
 \`\`\`
-The plugin replaces that exact persisted card in place with a compact visible text panel and optional
-detailed record, including measured time, cost, validation/review, and evidence-backed traits.
-Its model gauges and PACK RECORD summarize retained project goals, with coverage and team titles;
-they never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
+The plugin replaces that exact persisted card in place with a compact summary including measured time,
+cost, validation/review, and evidence-backed traits. Do not add a detailed record. Its model gauges
+never imply lifetime history, XP, levels, unmeasured savings, or a leaderboard rank.
 Never write measured metrics, token bars, PACK RECORD, traits, or badges yourself. Do not estimate or fabricate them.
 Use 任務完了 for DONE, 中断帰還（未完了） for INTERRUPTED, 外部要因で待機（未完了） for BLOCKED,
 and 指示待ち（未完了） for NEED_DECISION; preserve the machine status token and first-line checkpoint.

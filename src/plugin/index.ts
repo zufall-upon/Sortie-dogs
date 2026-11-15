@@ -1835,9 +1835,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const direct = await input.runtimeBridge?.directMissionExecution?.(toolInput.sessionID);
     if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) && !direct || parallelChildBindings.has(toolInput.sessionID)) return;
     const identity = await hostSessionIdentity(toolInput.sessionID);
-    const owner = direct?.root ?? identity?.parentID;
-    if (owner === undefined) return;
+    const parent = identity?.parentID;
     const authorization = sessionAuthorizations.get(toolInput.sessionID);
+    const owner = direct?.root ?? (parent && authorization?.rootSessionID === goalRoot(parent) ? goalRoot(parent) : parent);
+    if (owner === undefined) return;
     if (authorization === undefined || authorization.suspended || authorization.rootSessionID !== owner) return;
     const args = isRecord(output.args) ? output.args : undefined;
     const dockerTool = toolInput.tool === "fh_docker_exec" || toolInput.tool === "fh.docker_exec";
@@ -1869,7 +1870,13 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const admittedSnapshot = dockerRequest
       ? await protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd).catch(() => undefined)
       : await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
-    if (admittedSnapshot === undefined) return;
+    if (admittedSnapshot === undefined) {
+      // A registered native check without a start-time source binding cannot
+      // become formal evidence later. Surface the failure before the potentially
+      // expensive command runs instead of silently discarding its result.
+      if (correction) throw new Error("mission-validation-snapshot-unavailable: cannot bind the registered check to its current source and candidate");
+      return;
+    }
     const dockerWorkspace = admittedSnapshot.binding.docker_workspace;
     if (dockerRequest && (!dockerWorkspace || dockerWorkspace.container_id !== dockerRequest.containerID || dockerWorkspace.cwd !== dockerRequest.cwd)) return;
     const root = goalRoot(owner);
@@ -1899,7 +1906,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const committed = authorization.expiresAt > Date.now() && await input.runtimeBridge?.beforeValidationSnapshot?.(
       authorization.rootSessionID, toolInput.sessionID, rawCommand);
     const current = committed ? await refreshProtectedSnapshot(authorization.projectRoot, admittedSnapshot.binding) : admittedSnapshot;
-    if (!current) return;
+    if (!current) {
+      if (correction) throw new Error("mission-validation-snapshot-unavailable: cannot refresh the registered check after commit");
+      return;
+    }
     const snapshot = { ...admittedSnapshot, ...current };
     if (goal.goal_id !== null && criteria.length > 0) {
       const requestedFull = criteria.some((criterion) => criterion.proof_scope === "requested-full");
@@ -2952,7 +2962,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         correction: { taskID: reservation.unitID, dispatchCallID: check.dispatchCallID,
           commands: check.matchedOccurrences.map(item => check.command[item.member]!) } }, state, reservation.unitID);
     });
-    const hostEvidence = [...new Map((directEvidence ?? [...observedEvidence, ...inherited]).map(entry => [entry.evidence_id, entry])).values()];
+    // Checks may have been captured by a different loaded adapter. Only the
+    // exact ordered, fresh, host-bound native records are eligible for replay.
+    const currentChecks = childSessionID
+      ? await input.runtimeBridge?.reviewerCorrectionValidation?.(reservation.root, callID, childSessionID, reservation.started) : undefined;
+    const verified = currentChecks?.ready ? (currentChecks.verifiedChecks ?? []).filter(check => !hostGoalExecutions.has(check.callID)).flatMap(check =>
+      observedHostGoalEvidence({ ...check, owner: "coordinator", outcome: "pass",
+        immutableRef: goalFingerprint({ direct_check: check }), correction: { taskID: reservation.unitID,
+          dispatchCallID: callID, commands: check.matchedOccurrences.map(item => check.command[item.member]!) } }, state, reservation.unitID)) : [];
+    const hostEvidence = [...new Map((directEvidence ?? [...observedEvidence, ...inherited, ...verified]).map(entry => [entry.evidence_id, entry])).values()];
     // A worker may return after a user scope epoch changed. Settle its spend/reservation, but only
     // adopt observations still bound to the current accepted source/candidate/criterion contract.
     const acceptedEvidence = hostEvidence.filter((entry) => validGoalEvidence(entry, state) &&
@@ -2973,8 +2991,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ["failed", "interrupted", "cancelled"].includes(String(childOutcome));
     const interrupted = metadata?.status === "cancel" || metadata?.status === "cancelled" ||
       output.status === "cancel" || output.status === "cancelled" || ["interrupted", "cancelled"].includes(String(childOutcome));
-    const correctionChecks = childSessionID && !terminalFailed && !interrupted
-      ? await input.runtimeBridge?.reviewerCorrectionValidation?.(reservation.root, callID, childSessionID, reservation.started) : undefined;
+    const correctionChecks = !terminalFailed && !interrupted ? currentChecks : undefined;
     const validated = !terminalFailed && !interrupted && acceptedEvidence.length > 0 && correctionChecks?.ready !== false;
     const settlementEvidence = terminalFailed || interrupted || correctionChecks?.ready === false ? [] : acceptedEvidence;
     const hostBindingDefect = childSessionID !== undefined && [...(bindingDenials.get(reservation.root)?.values() ?? [])]
@@ -5726,7 +5743,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         diagnostics.some(({ severity }) => severity === "error") ||
         inspectionFingerprint(handoffValidation.value, diagnostics, validation.value) !== inspectedEntry.fingerprint
       ) return denyHandoffMismatch(handoffValue, contractDefects(diagnostics));
-      await retryPendingDirectReleases(inspectedEntry.rootSessionID);
+      // A prior Mission can hold the same path after its cancelled direct writer's
+      // tool terminal was delayed. Reconcile exact pending owners across roots before
+      // reporting an overlap; unknown or active native calls remain protected.
+      await retryPendingDirectReleases();
       const conflictsWithActiveAuthorization = (
         writeScopes: readonly string[],
         readScopes: readonly string[],
@@ -5937,9 +5957,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return active.inFlightCalls.size ? "tool_dispatch_active_or_unproven" : undefined;
   }
 
-  async function retryPendingDirectReleases(root: string): Promise<void> {
+  async function retryPendingDirectReleases(root?: string): Promise<void> {
     for (const [actor, expected] of pendingDirectReleases) {
-      if (expected.root !== root) continue;
+      if (root !== undefined && expected.root !== root) continue;
       const matches = () => sessionAuthorizations.get(actor) === expected.authorization &&
         expected.authorization.rootSessionID === expected.root && expected.authorization.taskID === expected.taskID &&
         expected.authorization.dispatchCallID === expected.callID;
@@ -8941,7 +8961,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const binding = await input.runtimeBridge?.missionReadBinding?.(root, actor, handoffPath);
       if (!binding) throw new Error("mission-direct-grant-stale");
       const result = await activateMissionBinding(actor, handoffPath, binding);
-      if (result.status !== "bound") throw new Error(`mission-direct-activation:${String(result.reason)}`);
+      if (result.status !== "bound") throw new Error(`mission-direct-activation:${String(result.reason)}${
+        Array.isArray(result.conflicts) && result.conflicts.length ? `:${JSON.stringify(result.conflicts)}` : ""}`);
       bootstrapRequired = false;
       bootstrapCompleted = true;
     }),
@@ -9005,12 +9026,25 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await releaseWriteGate(actor);
       releaseSessionEnforcement(actor);
     },
-    activateMissionWorker: (root, child, handoffPath, admission) => serializeChatTransition(child, async () => {
+    activateMissionWorker: (root, child, handoffPath, admission, retainBound) => serializeChatTransition(child, async () => {
       // Resolve CURRENT durable pins inside the existing session lane. A retried prompt must
       // retain legitimate scope growth, not replay the original manifest hash from dispatch.
       const binding = await input.runtimeBridge?.missionReadBinding?.(root, child, handoffPath, admission);
-      if (!binding || coordinatorRootForSession(child) !== root) throw new Error("mission-activation-grant-stale");
+      if (!binding) throw new Error("mission-activation-grant-stale");
+      if (coordinatorRootForSession(child) !== root) {
+        // A different loaded adapter can receive the next native call. Restore
+        // only the durable, exactly admitted child and its host-proven parent.
+        const native = await hostSessionIdentity(child);
+        if (!native?.parentID || !await recoverCoordinatorRoot(root)) throw new Error("mission-activation-grant-stale");
+        rememberParent(child, native.parentID);
+        sessionRoots.set(child, root);
+        sessionTaskIDs.set(child, admission.taskID);
+        if (native.parentID !== root) goalRootSessions.set(native.parentID, root);
+        activateSession(child);
+      }
       const previous = sessionAuthorizations.get(child);
+      if (retainBound && previous && previous.taskID === admission.taskID && previous.dispatchCallID === admission.callID &&
+          !previous.suspended && activeSessionStatus(child) === "active" && !activeSessions.get(child)?.released) return;
       if (previous && (previous.taskID !== admission.taskID || previous.dispatchCallID !== admission.callID)) {
         const released = JSON.parse(await releaseWriteGate(child));
         if (released.status === "denied") throw new Error(`mission-activation:${released.reason}`);
@@ -9018,7 +9052,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         activateSession(child);
       }
       const result = await activateMissionBinding(child, handoffPath, binding);
-      if (result.status !== "bound") throw new Error(`mission-activation:${String(result.reason)}`);
+      if (result.status !== "bound") throw new Error(`mission-activation:${String(result.reason)}${
+        Array.isArray(result.conflicts) && result.conflicts.length ? `:${JSON.stringify(result.conflicts)}` : ""}`);
       // Cancellation can settle this dispatch while control-file I/O is pending. Do not
       // leave its just-bound writer live; native failure/return owns the ordinary settlement.
       if (!await input.runtimeBridge?.ownsMissionDispatch?.(root, admission.callID, admission.taskID)) {
