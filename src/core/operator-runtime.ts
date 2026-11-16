@@ -507,7 +507,7 @@ export const unitValidationCwd = (unit: OperatorState["units"][number]): Readonl
   unit.validationRegistration?.cwd ?? unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
 /** Strip only the owning unit's registration fields when comparing its frozen plan. */
 export function directValidationRegistrationPlanHash(state: OperatorState, plan: OperatorPlan, unitID: string,
-  legacyWriteScope?: readonly string[]): string {
+  legacyWriteScopes?: ReadonlyMap<string, readonly string[]>): string {
   const original = state.units.find(item => item.unit.id === unitID)?.unit;
   const proposed = plan.units.find(item => item.id === unitID);
   const criteria = plan.goal_declaration.criteria;
@@ -516,7 +516,7 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
       ? { ...criterion, validation_command: original?.validation.at(-1) } : criterion) } : plan.goal_declaration;
   return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
     const prior = state.units[index]?.unit;
-    const initialWrite = state.units[index]?.initialWriteScope ?? (prior?.id === unitID ? legacyWriteScope : undefined);
+    const initialWrite = state.units[index]?.initialWriteScope ?? (prior ? legacyWriteScopes?.get(prior.id) : undefined);
     // A scope extension is authorized separately; normalize only the exact current
     // scope back to the frozen plan identity. Other scope edits still fail the hash.
     const normalized = prior && initialWrite && JSON.stringify(next.write) === JSON.stringify(prior.write)
@@ -529,6 +529,30 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
     else delete restored.validation_cwd;
     return restored;
   }) }));
+}
+
+/** Recover pre-field scope identities without weakening the frozen plan hash. */
+export function recoverLegacyRegistrationScopes(state: OperatorState, plan: OperatorPlan, unitID: string): Map<string, readonly string[]> | undefined {
+  const eligible = state.units.filter((item, index) => !item.initialWriteScope && item.unit.write.length > 0 &&
+    item.unit.id === plan.units[index]?.id && JSON.stringify(item.unit.write) === JSON.stringify(plan.units[index]?.write));
+  const choices = new Map<string, readonly string[]>();
+  let attempts = 0;
+  // A bounded search protects the host from combinatorial work. The original
+  // exact plan remains a valid input if an old record exceeds this bound.
+  const search = (index: number): boolean => {
+    if (index === eligible.length) {
+      if (++attempts > 4096) return false;
+      return directValidationRegistrationPlanHash(state, plan, unitID, choices) === state.planHash;
+    }
+    const unit = eligible[index]!.unit;
+    for (let length = unit.write.length; length >= 0 && attempts < 4096; length--) {
+      choices.set(unit.id, unit.write.slice(0, length));
+      if (search(index + 1)) return true;
+    }
+    choices.delete(unit.id);
+    return false;
+  };
+  return eligible.length && search(0) ? choices : undefined;
 }
 
 /** Root-owned durable queue. It never executes code, changes acceptance, or accepts a candidate. */
@@ -1022,25 +1046,15 @@ export class OperatorRuntime {
       if (state.runID !== runID || state.phase !== "running" || active.length !== 1 || !unit?.directExecution ||
           unit.directExecution.actor !== actor || unit.directExecution.finishedAt || unit.reviewerCorrection ||
           plan.units.length !== state.units.length) throw new Error("mission-validation-registration-owner-mismatch");
-      let matchingHash = directValidationRegistrationPlanHash(state, plan, unit.unit.id) === state.planHash;
-      let recoveredWrite: readonly string[] | undefined;
-      const proposed = plan.units.find(item => item.id === unit.unit.id);
-      if (!unit.initialWriteScope && proposed && JSON.stringify(proposed.write) === JSON.stringify(unit.unit.write) && !matchingHash) {
-        // Older admissions did not persist the original scope. Expansion only
-        // appends, so verify each possible prefix against the frozen plan hash.
-        for (let length = 0; length < unit.unit.write.length; length++) {
-          const prefix = unit.unit.write.slice(0, length);
-          if (directValidationRegistrationPlanHash(state, plan, unit.unit.id, prefix) === state.planHash) {
-            recoveredWrite = prefix;
-            matchingHash = true;
-            break;
-          }
-        }
-      }
-      if (!matchingHash) {
+      const matchingHash = directValidationRegistrationPlanHash(state, plan, unit.unit.id) === state.planHash;
+      const recoveredScopes = matchingHash ? undefined : recoverLegacyRegistrationScopes(state, plan, unit.unit.id);
+      if (!matchingHash && !recoveredScopes) {
         throw new Error("mission-validation-registration-contract-mismatch");
       }
-      if (recoveredWrite) unit.initialWriteScope = recoveredWrite;
+      if (recoveredScopes) for (const item of state.units) {
+        const original = recoveredScopes.get(item.unit.id);
+        if (original) item.initialWriteScope = original;
+      }
       const next = plan.units.find(next => next.id === unit.unit.id)!;
       const validation = next.validation.map(normalizeCommand), cwd = next.validation_cwd ?? {};
       const previousValidation = unitValidation(unit), previousCwd = unitValidationCwd(unit) ?? {};
@@ -1057,7 +1071,7 @@ export class OperatorRuntime {
         unit.directExecution.validationCwd = cwd;
         unit.directExecution.validationRegisteredAt = registeredAt;
         await this.save(state);
-      } else if (recoveredWrite) await this.save(state);
+      } else if (recoveredScopes) await this.save(state);
       return state;
     });
   }
@@ -1412,7 +1426,7 @@ export class OperatorRuntime {
         "Preserve existing public API success and error return semantics unless acceptance explicitly changes them, and cover those compatibility boundaries in the declared validation.",
         "Do not spawn nested subagents for consultation. Required consultations belong to the root before dispatch; use the confirmed decisions and evidence declared in the unit objective and inputs. If required consultation results or user decisions are missing, return the exact contract gap to the parent instead of attempting a deeper Task, inventing consent, or asking the user to repeat an already recorded decision.",
         ...commitBoundary, `unit_acceptance_indices: ${JSON.stringify(unit.acceptance_indices)}`, "", unit.objective]).join("\n");
-      units.push({ unit, task: { subagent_type: profileAgent(this.profile, mission?.reviewerCorrection ? "dog-reviewer" : "dog-worker"), description: unit.title, prompt,
+      units.push({ unit, initialWriteScope: [...unit.write], task: { subagent_type: profileAgent(this.profile, mission?.reviewerCorrection ? "dog-reviewer" : "dog-worker"), description: unit.title, prompt,
           ...(mission?.reviewerCorrection ? { task_id: mission.reviewerCorrection.author } : {}) },
         handoffPath, manifestPath, hashes: [...contents.map(hash), hash(declaration)], status: "pending", callID: null,
         childSessionID: mission?.reviewerCorrection?.author ?? null,
