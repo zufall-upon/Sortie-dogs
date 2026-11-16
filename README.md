@@ -30,8 +30,9 @@ invoke Sortie when a task needs coordinated execution and an evidence-backed res
 · [GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases)
 · [Execution vision](docs/v0.14.0-execution-vision.md)
 
-The npm examples below target v0.16.27. npm publication remains a separate manual
-release step; installing a package does not imply a running host has reloaded it.
+The npm examples below target v0.16.27. The [release routine](docs/release-batch.md#release-completion)
+includes npm publication; local installation or a GitHub Release alone does not complete it.
+Installing a package also does not imply a running host has reloaded it.
 
 > **Beta:** the package is still stabilizing before 1.0. Both host integrations are
 > implemented; Codex Missions have completed implementation, validation, correction and acceptance.

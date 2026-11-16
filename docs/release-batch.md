@@ -2,7 +2,32 @@
 
 The release tooling is repository-maintainer tooling, not part of the distributed plugin. It runs on
 Windows with PowerShell 7, Node 22, Git, the approved npm/gh executables, and a configured WSL OpenCode
-CLI. npm authentication and publication remain manual.
+CLI. The batch does not perform npm authentication or publication itself; the manual publication
+stage is still part of the release routine, not an optional follow-up.
+
+## Release completion
+
+**The release routine includes npm publication.** Validation, global application, a version tag,
+or a GitHub Release alone does not complete it. Use the same frozen tarball throughout validation,
+installation, GitHub Release attachment and npm publication. Record npm's successful acceptance,
+retain the receipts, finish cleanup, and perform the read-only publication checks below.
+
+`prepare` completes the batch's preparation/distribution stages and prints the npm commands; it
+does **not** complete the overall release routine. For an authorized release, continue through the
+manual npm publication stage within the existing authorization. Do not add another approval gate
+merely because the batch command ended. If login, OTP or another user-only action is required,
+report that concrete dependency and the unfinished publication rather than claiming release success.
+
+An explicit validation/install-only request or publication hold is a narrower delivery scope:
+report a validated or installed **candidate**, with npm publication unperformed. Historical
+candidate notes that retained a manual publication boundary describe that request's scope; they
+do not remove npm publication from the normal release routine or prove that version was published.
+A documentation-only request does not itself authorize publishing an existing candidate.
+
+Record registry propagation separately from npm's successful acceptance. A temporary 404 or stale
+`latest` after acceptance requires later read-only reconciliation, not another publish. Report any
+pending checks explicitly. Restarting a shared OpenCode host remains a separate manual operation;
+installed bytes, npm publication and the running host's loaded version are different observations.
 
 ## Prepare a manifest
 
@@ -55,10 +80,14 @@ does not invoke this command against the real repository.
 6. Install the same tarball globally, initialize assets, compare installed code and all canonical assets.
 7. Stage only `files`, check staged scope and source, commit with the repository release author.
 8. Push `main`, create/push an annotated version tag, create the Release with the frozen tarball.
-9. Print manual npm login/publish and `verify-publish` commands.
+9. `prepare` prints manual npm login/publish and `verify-publish` commands. The release remains
+   publication-pending until the manual npm stage below succeeds.
+10. Publish the same frozen tarball once, record npm acceptance, perform read-only publication
+    verification and finish cleanup. Retain any propagation delay as a pending observation, not a
+    reason to republish or rerun unchanged validation.
 
 Tests may create their own fixture packages. The **distributable** tarball is generated once and used
-unchanged by CLI, global installation, GitHub Release, and manual npm publication. A changed source
+unchanged by CLI, global installation, GitHub Release, and the required manual npm publication stage. A changed source
 fingerprint or digest invalidates the candidate. No tag/Release is deleted or replaced automatically.
 
 ## CLI smoke
@@ -171,7 +200,8 @@ and resuming at granular completed test phases instead of rerunning target tests
 
 ## Manual npm publication and verification
 
-Use the command block printed by prepare. It runs `whoami`, browser login only if needed, then manual
+This is the final publication stage of the release routine, not a separate optional task. Use the
+command block printed by prepare. It runs `whoami`, browser login only if needed, then manual
 `npm publish` and optional interactive OTP. No credential values are saved in the receipt.
 
 When a maintainer already has a suitable npm token in a private file, an isolated userconfig can be

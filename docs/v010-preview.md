@@ -489,8 +489,10 @@ The release manifest accepts `releaseProfile`:
 The preview profiles require the install target inside that worktree's `_testenv`
 and can publish an initially absent remote branch. They never require merging
 into `main`. Version/tag/Release reuse is refused. npm publication remains manual;
-the generated command includes the selected dist-tag. Release preparation, push,
-tags and publication require the user's explicit release instruction.
+the generated command includes the selected dist-tag. That publication stage is required to
+complete the [release routine](release-batch.md#release-completion); preparation, global installation,
+or a GitHub Release alone is not release completion. Release preparation, push, tags and publication
+require the user's explicit release instruction.
 
 ## Evaluation
 
