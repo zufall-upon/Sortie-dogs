@@ -8,8 +8,10 @@ import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
+import { availableParallelism } from "node:os";
 import test from "node:test";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { copyManagedRouterFixture } from "./helpers/managed-router-fixture.ts";
 
 import V2Plugin, {
   createSortieDogsV2Plugin,
@@ -943,7 +945,7 @@ test(managedScenario === "router-required" ? "V2 formally required project route
   managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
   managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
   `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
-{ skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async () => {
+{ skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async (context) => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -956,6 +958,8 @@ test(managedScenario === "router-required" ? "V2 formally required project route
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
   const originalPath = process.env.PATH;
+  const originalRouterEnvironment = { HOME: process.env.HOME, npm_config_userconfig: process.env.npm_config_userconfig,
+    npm_config_globalconfig: process.env.npm_config_globalconfig };
   let joinedPermission!: () => void;
   const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
@@ -1180,15 +1184,16 @@ test(managedScenario === "router-required" ? "V2 formally required project route
     }
     if (managedScenario === "router" || managedScenario === "router-required") {
       const project = process.cwd(), pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
-      process.env.PATH = `${resolve(project, "node_modules/.bin")}${delimiter}${originalPath ?? ""}`;
-      await mkdir(join(directory, "scripts"), { recursive: true });
-      await mkdir(join(directory, "test/helpers"), { recursive: true });
+      const tools = join(directory, ".git/sortie-dogs/tools");
+      process.env.PATH = `${tools}${delimiter}${resolve(project, "node_modules/.bin")}${delimiter}${originalPath ?? ""}`;
+      process.env.HOME = join(directory, ".git/sortie-dogs/home");
+      process.env.npm_config_userconfig = join(process.env.HOME, ".npmrc");
+      process.env.npm_config_globalconfig = join(process.env.HOME, "global.npmrc");
+      await mkdir(tools, { recursive: true });
+      await mkdir(process.env.HOME, { recursive: true });
+      await copyManagedRouterFixture(project, directory);
       await mkdir(join(directory, "src/cli"), { recursive: true });
-      for (const path of ["scripts/test-router.mjs", "test/helpers/full-test-runner.ts", "test/setup.ts", "tsconfig.json"])
-        await cp(join(project, path), join(directory, path));
       await writeFile(join(directory, ".gitignore"), "dist/\n_testenv/\nnode_modules/\n");
-      // The project snapshot must not follow the real dependency symlink outside this fixture.
-      // Use the already installed compiler from PATH and a minimal local ambient type root.
       await mkdir(join(directory, "node_modules/@types/node"), { recursive: true });
       await writeFile(join(directory, "node_modules/@types/node/index.d.ts"), "export {};\n");
       await writeFile(join(directory, "src/cli/main.ts"), "export const fixture = true;\n");
@@ -1196,6 +1201,17 @@ test(managedScenario === "router-required" ? "V2 formally required project route
       await mkdir(join(directory, "_testenv"), { recursive: true });
       await writeFile(join(directory, "test/fixture.test.ts"),
         `import { appendFileSync, readFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';\ntest('managed', () => { appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'); assert.notEqual(readFileSync('result.txt', 'utf8'), 'broken\\n'); });\n`);
+      for (const name of ["a", "b"]) await writeFile(join(directory, `test/concurrent-${name}.test.ts`),
+        `import { existsSync, rmSync, writeFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';
+test('requires exclusive execution', async () => {
+  const mine = '.git/sortie-dogs/active-${name}', peer = '.git/sortie-dogs/active-${name === "a" ? "b" : "a"}';
+  writeFileSync(mine, 'active');
+  try {
+    const deadline = Date.now() + 1000;
+    while (!existsSync(peer) && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+    assert.equal(existsSync(peer), false);
+  } finally { rmSync(mine, { force: true }); }
+});\n`);
       await exec("npm", ["run", "build"], { cwd: directory });
     } else if (managedScenario) {
       await writeFile(join(directory, "package.json"), JSON.stringify({ scripts: {
@@ -1420,6 +1436,21 @@ test(managedScenario === "router-required" ? "V2 formally required project route
             const different = await before(child, "shell", { command: "npm run test:full", workdir: directory });
             assert.equal(different.input.command, "npm run test:full", "a different runner/setup is not the same selection");
             await after(different, "not started", { status: "cancelled" });
+            await context.test("a concurrent targeted selection is not a serial full failure", { skip: availableParallelism() < 2 }, async () => {
+              const paths = ["test/concurrent-a.test.ts", "test/concurrent-b.test.ts"];
+              const multiple = `npm run test:targeted -- ${paths.join(" ")}`;
+              const multi = await before(child, "shell", { command: multiple, workdir: directory });
+              const failed = await exec("npm", ["run", "test:targeted", "--", ...paths], { cwd: directory, env: environment })
+                .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+              assert.equal(failed.code, 1); await after(multi, failed.stdout, { exit: failed.code });
+              // These are the full helper's actual per-file arguments, not a full launch.
+              for (const path of paths) await exec(process.execPath,
+                ["--experimental-strip-types", "--import", "./test/setup.ts", "--test", "--test-concurrency=1", path],
+                { cwd: directory, env: environment });
+              const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+              assert.equal(full.input.command, "npm run test:full");
+              await after(full, "not started", { status: "cancelled" });
+            });
           }
           const focused = await before(child, "shell", { command: focusedCommand, workdir: directory });
           const failed = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment })
@@ -1431,6 +1462,28 @@ test(managedScenario === "router-required" ? "V2 formally required project route
             await after(full, "not started", { status: "cancelled" });
           } else {
             await assert.rejects(before(child, "shell", { command: "npm run test:full", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED.*test:targeted/u);
+            for (const kind of ["userconfig", "globalconfig"]) await context.test(`${kind} npm effects remain native with an existing focused failure`, async () => {
+              const config = process.env[`npm_config_${kind}`]!, shell = join(directory, ".git/sortie-dogs/tools/script-shell");
+              await writeFile(shell, "#!/bin/sh\nprintf 'called\\n' >> .git/sortie-dogs/shell-count\nexec /bin/sh \"$@\"\n", { mode: 0o755 });
+              await writeFile(config, `script-shell=${shell}\n`);
+              try {
+                assert.equal((await exec("npm", ["config", "get", "script-shell"], { cwd: directory })).stdout.trim(), shell);
+                const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+                assert.equal(full.input.command, "npm run test:full");
+                await after(full, "not started", { status: "cancelled" });
+                assert.equal(await readFile(config, "utf8"), `script-shell=${shell}\n`, "client-owned configuration is not rewritten");
+              } finally { await rm(config, { force: true }); }
+            });
+            await context.test("an external compiler fallback is not suppressed", async () => {
+              const compiler = join(directory, "node_modules/.bin/tsc"), wrapper = join(directory, ".git/sortie-dogs/tools/tsc");
+              await rm(compiler);
+              await writeFile(wrapper, "#!/bin/sh\nprintf 'called\\n' >> .git/sortie-dogs/compiler-count\nexit 0\n", { mode: 0o755 });
+              try {
+                const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+                assert.equal(full.input.command, "npm run test:full");
+                await after(full, "not started", { status: "cancelled" });
+              } finally { await symlink("../typescript/bin/tsc", compiler); }
+            });
             const router = join(directory, "scripts/test-router.mjs"), originalRouter = await readFile(router, "utf8");
             await writeFile(router, `${originalRouter}\n// changed\n`);
             const changed = await before(child, "shell", { command: "npm run test:full", workdir: directory });
@@ -1662,6 +1715,9 @@ test(managedScenario === "router-required" ? "V2 formally required project route
   } finally {
     cleanup?.();
     if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    for (const [key, value] of Object.entries(originalRouterEnvironment)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });

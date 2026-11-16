@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { decideValidationBudget, selectValidationScope, validationEvidenceKey, validationEvidenceState, validationResultFingerprint, type ValidationBudgetRequest } from "../dist/core/validation-budget.js";
 import { managedTestCommand } from "../dist/plugin/managed-test-command.js";
+import { copyManagedRouterFixture } from "./helpers/managed-router-fixture.ts";
 
 test("managed test reachability resolves literal project scripts without claiming opaque commands", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -46,13 +47,16 @@ test("managed project router uses actual sources, build configuration, cwd and s
   await mkdir(resolve("_testenv"), { recursive: true });
   const root = await mkdtemp(resolve("_testenv/managed-router-"));
   const project = process.cwd();
+  const originalEnvironment = { HOME: process.env.HOME, npm_config_userconfig: process.env.npm_config_userconfig,
+    npm_config_globalconfig: process.env.npm_config_globalconfig };
   try {
+    process.env.HOME = join(root, "home");
+    process.env.npm_config_userconfig = join(root, "home/.npmrc");
+    process.env.npm_config_globalconfig = join(root, "global.npmrc");
+    await mkdir(process.env.HOME, { recursive: true });
     const pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
     const scripts = { ...pkg.scripts, whole: "npm run test:full" };
-    await mkdir(join(root, "scripts"), { recursive: true });
-    await mkdir(join(root, "test/helpers"), { recursive: true });
-    for (const path of ["scripts/test-router.mjs", "test/helpers/full-test-runner.ts", "test/setup.ts", "tsconfig.json"])
-      await cp(join(project, path), join(root, path));
+    await copyManagedRouterFixture(project, root);
     await writeFile(join(root, "package.json"), JSON.stringify({ type: "module", scripts }));
     await writeFile(join(root, "test/check.test.ts"), "// project fixture\n");
     const full = await managedTestCommand("npm run whole", root);
@@ -60,12 +64,31 @@ test("managed project router uses actual sources, build configuration, cwd and s
     assert.equal(full.scope, "full"); assert.equal(focused.scope, "focused");
     assert.equal("runner" in full && full.runner, "node-project-router");
     assert.equal("suiteKey" in full && full.suiteKey, "suiteKey" in focused && focused.suiteKey);
-    assert.equal((await managedTestCommand("npm run test:full", project)).scope, "full", "real root package and runner");
+    const projectScope = (await lstat(join(project, "node_modules"))).isSymbolicLink() ? "unknown" : "full";
+    assert.equal((await managedTestCommand("npm run test:full", project)).scope, projectScope, "external dependency trees are not inspected project-local tooling");
     const realFocused = await managedTestCommand("npm run test:targeted -- test/validation-budget.test.ts", project);
-    assert.equal(realFocused.scope, "focused", "real targeted script and file");
+    assert.equal(realFocused.scope, projectScope === "full" ? "focused" : "unknown", "real targeted script and file");
+    await writeFile(join(root, "test/companion.test.ts"), "// companion fixture\n");
     for (const command of ["npm run test:targeted -- test/missing.test.ts", "npm run test:targeted -- test/check.test.js",
-      "npm run test:targeted -- test/../test/check.test.ts", "npm run test:full -- test/check.test.ts", "npm run test:windows"])
+      "npm run test:targeted -- test/../test/check.test.ts", "npm run test:full -- test/check.test.ts", "npm run test:windows",
+      "npm run test:targeted -- test/check.test.ts test/companion.test.ts"])
       assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
+    for (const config of [process.env.npm_config_userconfig, process.env.npm_config_globalconfig]) {
+      await writeFile(config, "script-shell=/custom/shell\n");
+      assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "uninspected effective npm config remains native");
+      await rm(config);
+    }
+    const shellOption = process.env["npm_config_script-shell"];
+    try {
+      process.env["npm_config_script-shell"] = "/custom/shell";
+      assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "npm also accepts dashed option names in its environment");
+    } finally {
+      if (shellOption === undefined) delete process.env["npm_config_script-shell"]; else process.env["npm_config_script-shell"] = shellOption;
+    }
+    const compiler = join(root, "node_modules/typescript/bin/tsc"), originalCompiler = await readFile(compiler);
+    await writeFile(compiler, "#!/bin/sh\nexit 0\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "a local compiler wrapper is not the inspected CLI");
+    await writeFile(compiler, originalCompiler);
     await writeFile(join(root, "scripts/test-router.mjs"), "// changed runner\n");
     assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
     await cp(join(project, "scripts/test-router.mjs"), join(root, "scripts/test-router.mjs"));
@@ -83,7 +106,12 @@ test("managed project router uses actual sources, build configuration, cwd and s
     await rm(join(root, "test/check.test.ts"));
     await symlink(join(project, "test/validation-budget.test.ts"), join(root, "test/check.test.ts"));
     assert.equal((await managedTestCommand("npm run test:targeted -- test/check.test.ts", root)).scope, "unknown");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    for (const [key, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const request = (extra: Partial<ValidationBudgetRequest> = {}): ValidationBudgetRequest => ({
