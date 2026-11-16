@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionStatus, missionReviewTraces, missionReviewVerdict } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
@@ -67,6 +69,66 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+test("Operator recovers a registered native check in a linked worktree within a broad Location", async () => fixture(async root => {
+  const exec = promisify(execFile), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other"),
+    component = join(root, "component-source");
+  await mkdir(repository); await mkdir(component);
+  await exec("git", ["init", "--quiet"], { cwd: component });
+  await writeFile(join(component, "payload.txt"), "component expected\n");
+  await exec("git", ["add", "."], { cwd: component });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: component });
+  await exec("git", ["init", "--quiet"], { cwd: repository });
+  await writeFile(join(repository, "input.txt"), "expected\n");
+  await writeFile(join(repository, "check.mjs"), 'import assert from "node:assert/strict";import {readFileSync} from "node:fs";assert.equal(readFileSync("input.txt","utf8"),"expected\\n");assert.equal(readFileSync("component/payload.txt","utf8"),"component expected\\n");console.log("USEFUL_CHECK_PASSED");\n');
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", component, "component"], { cwd: repository });
+  await exec("git", ["add", "."], { cwd: repository });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repository });
+  await exec("git", ["worktree", "add", "--detach", checkout], { cwd: repository });
+  await exec("git", ["worktree", "add", "--detach", other], { cwd: repository });
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"], { cwd: checkout });
+  const marker = join(checkout, ".git"), savedMarker = await readFile(marker);
+  const history: unknown[] = [];
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  const chat = async (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Check the linked checkout" }],
+  });
+  const command = "node check.mjs", plan = { executor: "self", units: [{ title: "Check", objective: "Check input",
+    read: ["checkout/check.mjs", "checkout/input.txt", "checkout/component/payload.txt"], write: ["checkout/**"], validation: [command], validation_cwd: { [command]: checkout } }] };
+  const call = (callID: string) => ({ tool: "shell", sessionID: "root", callID });
+  const args = { command, workdir: checkout };
+  await chat("request"); await tool("start_mission", { requirements: ["Check the linked checkout"] });
+  assert.equal((await tool("plan_units", plan)).status, "direct-unit-running");
+
+  // Real validation start rejects a marker impersonating the other checkout.
+  await writeFile(marker, await readFile(join(other, ".git")));
+  await assert.rejects(hooks["tool.execute.before"]!(call("bad-check"), { args }), /mission-validation-snapshot-unavailable/);
+  const before = await tool("operator_status");
+  assert.equal((await tool("cancel_operator", { reason: "plain" })).status, "cancelled");
+  const cancelled = await tool("operator_status");
+  assert.ok(cancelled.budget.consumed_units >= before.budget.consumed_units);
+  await writeFile(marker, savedMarker);
+  await chat("resume"); await tool("start_mission", { intent: "new", requirements: ["Check the linked checkout"] });
+  assert.equal((await tool("plan_units", plan)).status, "direct-unit-running");
+  const resumed = await tool("operator_status");
+  assert.ok(resumed.budget.consumed_units >= cancelled.budget.consumed_units, "recovery does not reset cumulative consumption");
+
+  const input = call("recovered-check"), started = Date.now();
+  await hooks["tool.execute.before"]!(input, { args });
+  const checked = await exec(process.execPath, ["check.mjs"], { cwd: checkout });
+  assert.match(checked.stdout, /USEFUL_CHECK_PASSED/);
+  await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: input.callID,
+    state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.ok(run.units[0]!.directExecution!.checks.some(check => check.callID === input.callID && check.exitCode === 0 && check.fresh));
+  assert.notEqual((await tool("finish_direct_unit")).status, "direct-unit-awaits-validation");
+}));
 
 test("Worker acceptance observations use each saved admission and cwd, including historical units", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE), operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
