@@ -128,6 +128,8 @@ type OperatorPhase = "prepared" | "running" | "awaiting-decision" | "awaiting-ac
 interface UnitState {
   readonly fabricRoot?: string;
   readonly unit: OperatorUnit;
+  /** Original plan identity before an in-place write-scope expansion. */
+  initialWriteScope?: readonly string[];
   task: OperatorTask;
   readonly handoffPath: string;
   readonly manifestPath: string;
@@ -504,7 +506,8 @@ export const unitValidation = (unit: OperatorState["units"][number]): readonly s
 export const unitValidationCwd = (unit: OperatorState["units"][number]): Readonly<Record<string, string>> | undefined =>
   unit.validationRegistration?.cwd ?? unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
 /** Strip only the owning unit's registration fields when comparing its frozen plan. */
-export function directValidationRegistrationPlanHash(state: OperatorState, plan: OperatorPlan, unitID: string): string {
+export function directValidationRegistrationPlanHash(state: OperatorState, plan: OperatorPlan, unitID: string,
+  legacyWriteScope?: readonly string[]): string {
   const original = state.units.find(item => item.unit.id === unitID)?.unit;
   const proposed = plan.units.find(item => item.id === unitID);
   const criteria = plan.goal_declaration.criteria;
@@ -513,10 +516,15 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
       ? { ...criterion, validation_command: original?.validation.at(-1) } : criterion) } : plan.goal_declaration;
   return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
     const prior = state.units[index]?.unit;
-    if (!prior || prior.id !== unitID || next.id !== unitID) return next;
+    const initialWrite = state.units[index]?.initialWriteScope ?? (prior?.id === unitID ? legacyWriteScope : undefined);
+    // A scope extension is authorized separately; normalize only the exact current
+    // scope back to the frozen plan identity. Other scope edits still fail the hash.
+    const normalized = prior && initialWrite && JSON.stringify(next.write) === JSON.stringify(prior.write)
+      ? { ...next, write: initialWrite } : next;
+    if (!prior || prior.id !== unitID || next.id !== unitID) return normalized;
     // Preserve the frozen property order even when the proposal omits cwd:
     // appending it after acceptance_indices changes JSON identity by itself.
-    const restored = { ...prior, ...next, validation: prior.validation };
+    const restored = { ...prior, ...normalized, validation: prior.validation };
     if (prior.validation_cwd) restored.validation_cwd = prior.validation_cwd;
     else delete restored.validation_cwd;
     return restored;
@@ -674,6 +682,7 @@ export class OperatorRuntime {
            (typeof state.pendingScopeExpansionApprovalTurnID !== "string" || state.pendingScopeExpansionApprovalTurnID.length === 0 ||
              /[\r\n]/u.test(state.pendingScopeExpansionApprovalTurnID))) ||
          !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
+          (unit.initialWriteScope === undefined || strings(unit.initialWriteScope)) &&
           Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
           this.validRepairValidationState(unit.repairValidation))) {
       throw new Error("operator-state-invalid");
@@ -1013,9 +1022,25 @@ export class OperatorRuntime {
       if (state.runID !== runID || state.phase !== "running" || active.length !== 1 || !unit?.directExecution ||
           unit.directExecution.actor !== actor || unit.directExecution.finishedAt || unit.reviewerCorrection ||
           plan.units.length !== state.units.length) throw new Error("mission-validation-registration-owner-mismatch");
-      if (directValidationRegistrationPlanHash(state, plan, unit.unit.id) !== state.planHash) {
+      let matchingHash = directValidationRegistrationPlanHash(state, plan, unit.unit.id) === state.planHash;
+      let recoveredWrite: readonly string[] | undefined;
+      const proposed = plan.units.find(item => item.id === unit.unit.id);
+      if (!unit.initialWriteScope && proposed && JSON.stringify(proposed.write) === JSON.stringify(unit.unit.write) && !matchingHash) {
+        // Older admissions did not persist the original scope. Expansion only
+        // appends, so verify each possible prefix against the frozen plan hash.
+        for (let length = 0; length < unit.unit.write.length; length++) {
+          const prefix = unit.unit.write.slice(0, length);
+          if (directValidationRegistrationPlanHash(state, plan, unit.unit.id, prefix) === state.planHash) {
+            recoveredWrite = prefix;
+            matchingHash = true;
+            break;
+          }
+        }
+      }
+      if (!matchingHash) {
         throw new Error("mission-validation-registration-contract-mismatch");
       }
+      if (recoveredWrite) unit.initialWriteScope = recoveredWrite;
       const next = plan.units.find(next => next.id === unit.unit.id)!;
       const validation = next.validation.map(normalizeCommand), cwd = next.validation_cwd ?? {};
       const previousValidation = unitValidation(unit), previousCwd = unitValidationCwd(unit) ?? {};
@@ -1032,7 +1057,7 @@ export class OperatorRuntime {
         unit.directExecution.validationCwd = cwd;
         unit.directExecution.validationRegisteredAt = registeredAt;
         await this.save(state);
-      }
+      } else if (recoveredWrite) await this.save(state);
       return state;
     });
   }
