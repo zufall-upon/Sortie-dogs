@@ -195,6 +195,11 @@ export interface RuntimeBridge {
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     validateMissionFabric(rootSessionID: string, request: import("../core/mission-fabric.js").MissionFabricValidation, signal?: AbortSignal): Promise<import("../core/types.js").ContainedValidationResult>;
     reserveMissionFabricValidation(root: string, request: import("../core/mission-fabric.js").MissionFabricValidation, actor: string, callID: string): Promise<void>;
+    joinMissionValidation(root: string, actor: string, agent: string | undefined, callID: string,
+      owner: { child: string; taskID: string; dispatchCallID: string }, signal?: AbortSignal): Promise<{
+        owner_session_id: string; owner_call_id: string; command: string; outcome: string; exit_code: number | null;
+        evidence_ids: readonly string[];
+      } | undefined>;
     settleMissionFabricValidation(root: string, request: import("../core/mission-fabric.js").MissionFabricValidation, actor: string, callID: string,
       outcome: import("../core/validation-budget.js").ValidationOutcome, exit: number | null, duration: number): Promise<void>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,

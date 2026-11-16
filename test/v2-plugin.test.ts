@@ -5,7 +5,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "no
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { availableParallelism } from "node:os";
@@ -926,12 +926,15 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, managed: managedScenario } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario } of [
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false }, { legacy: false, commit: false, cancel: false, join: true },
+  ...["passed", "failed", "source-changed", "environment-changed", "source-before", "environment-before", "permission-denied",
+    "owner-cancelled", "waiter-cancelled", "required-occurrence", "timeout-mismatch", "background-mismatch", "environment-mismatch"]
+    .map(reviewJoin => ({ legacy: false, commit: false, cancel: false, reviewJoin })),
   { legacy: false, commit: false, cancel: false, managed: true },
   { legacy: false, commit: false, cancel: false, managed: "required" },
   { legacy: false, commit: false, cancel: false, managed: "focused" },
@@ -944,7 +947,7 @@ test(managedScenario === "router-required" ? "V2 formally required project route
   managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
   managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
   managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
-  `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
+  `V2 ${reviewJoin ? `controller joins Worker validation ${reviewJoin}` : directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
 { skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async (context) => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
@@ -966,8 +969,11 @@ test(managedScenario === "router-required" ? "V2 formally required project route
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
-    if (joinScenario) fixture.context.permission.assert = async request => {
-      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u); joinedPermission();
+    if (joinScenario || reviewJoin) fixture.context.permission.assert = async request => {
+      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u);
+      if (reviewJoin) assert.equal(request.sessionID, "root");
+      joinedPermission();
+      if (reviewJoin === "permission-denied") throw new Error("native permission denied");
     };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => {
       const hooks = await SortieDogsV010Plugin(input, options);
@@ -1044,6 +1050,11 @@ test(managedScenario === "router-required" ? "V2 formally required project route
     await exec("git", ["init", "--quiet", "--initial-branch=base"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict";\nimport {readFileSync} from "node:fs";\n' +
       'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
+    if (reviewJoin) await writeFile(join(directory, "check.mjs"), `import { appendFileSync, existsSync } from 'node:fs';
+appendFileSync('.git/sortie-dogs/join-count', 'run\\n'); process.stdout.write('started\\n');
+const deadline = Date.now() + 15000;
+while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
     if (fabric) {
       await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(`${process.argv[2]}.txt`, "utf8") !== "ready\\n") process.exit(1); console.log("PASS");\n');
@@ -1224,8 +1235,12 @@ test('requires exclusive execution', async () => {
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
     const mission = await tool("root", "start_mission", { requirements: [original] });
-    let dispatch = await before("root", "subagent", nativeTask(mission.task));
+    let dispatch = await before("root", "subagent", { ...nativeTask(mission.task), ...(reviewJoin ? { background: true } : {}) });
     await prompt("coordinator", String(dispatch.input.prompt));
+    if (reviewJoin) {
+      assert.equal(dispatch.input.background, true, "the root retains the normal native background Coordinator launch");
+      await after(dispatch, "Coordinator running", { sessionID: "coordinator", status: "running" });
+    }
     if (directRecovery) {
       const unit = { title: "Ready result", objective: "Create ready result", read: ["check.mjs"], write: ["result.txt"],
         validation: ["node check.mjs ready"] };
@@ -1285,7 +1300,8 @@ test('requires exclusive execution', async () => {
         ? "node --test fixture.test.mjs" : `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
         read: managedScenario ? [directory] : ["check.mjs"],
-        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] : ["result.txt"], validation: [command] }],
+        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] : ["result.txt"],
+        validation: reviewJoin === "required-occurrence" ? [command, command] : [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -1649,7 +1665,118 @@ test('requires exclusive execution', async () => {
           await after(operation, executed.stdout, { exit: 0 });
         }
       }
-      const validation = await before(child, "shell", { command });
+      const validation = await before(child, "shell", { command, ...(reviewJoin === "timeout-mismatch" ? { timeout: 10000 } : {}) });
+      if (reviewJoin && index === 0) {
+        const owner = spawn(process.execPath, ["check.mjs", "present"], { cwd: directory });
+        const ended = new Promise<number | null>((resolve, reject) => { owner.once("error", reject); owner.once("close", resolve); });
+        const previousEnvironment = process.env.SORTIE_JOIN_FIXTURE_SETTING;
+        try {
+          await new Promise<void>((resolve, reject) => { owner.stdout.once("data", () => resolve()); owner.once("error", reject); });
+          const ledgerPath = join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+          if (["timeout-mismatch", "background-mismatch", "environment-mismatch"].includes(reviewJoin)) {
+            if (reviewJoin === "environment-mismatch") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+            await assert.rejects(before(child, "shell", { command, ...(reviewJoin === "timeout-mismatch" ? { timeout: 20000 } : {}),
+              ...(reviewJoin === "background-mismatch" ? { background: true } : {}) }), /duplicate-evidence/u);
+            if (previousEnvironment === undefined) delete process.env.SORTIE_JOIN_FIXTURE_SETTING;
+            else process.env.SORTIE_JOIN_FIXTURE_SETTING = previousEnvironment;
+            await writeFile(join(directory, ".git/sortie-dogs/join-release"), "release");
+            assert.equal(await ended, 0);
+            await after(validation, "actual owner terminal", { exit: 0 });
+            assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\n");
+            const ledger = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+            assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.joined").length, 0);
+            assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+            return;
+          }
+          if (reviewJoin === "source-before") await writeFile(join(directory, "check.mjs"), "// changed before join\n");
+          if (reviewJoin === "environment-before") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+          if (reviewJoin === "passed") await assert.rejects(before("unrelated", "sortie_v010_review_mission", { risk_tags: [], traces: [] }),
+            /runtime-profile-session-inactive/u, "an unrelated session cannot join this Mission");
+          const controller = new AbortController();
+          const reviewEvent = await before("root", "sortie_v010_review_mission", { risk_tags: [], traces: [] });
+          const definition = fixture.tools.find(tool => tool.name === "sortie_v010_review_mission") as {
+            execute(input: unknown, context: unknown): Promise<{ content: string }> };
+          const waiting = definition.execute(reviewEvent.input, { sessionID: "root", agent: "dog-operator",
+            id: reviewEvent.id, signal: controller.signal }).then(result => ({ result }), error => ({ error }));
+          if (["required-occurrence", "source-before", "environment-before"].includes(reviewJoin)) {
+            const result = await waiting;
+            assert.ok("error" in result);
+            assert.match(String(result.error), /mission-review-terminal-unreconciled/u);
+          } else await Promise.race([joinPermitted, waiting.then(value => { if ("error" in value) throw value.error; })]);
+          assert.equal(owner.exitCode, null, "the real Worker process is running when the other Agent joins");
+          if (!["permission-denied", "required-occurrence", "source-before", "environment-before"].includes(reviewJoin)) {
+            const deadline = Date.now() + 5000;
+            while (!(await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.some(({ event }) =>
+              event.kind === "validation.joined") && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+            assert.ok((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.some(({ event }) =>
+              event.kind === "validation.joined"), "the waiter is admitted before changing or cancelling either side");
+          }
+          if (reviewJoin === "waiter-cancelled") controller.abort();
+          if (reviewJoin === "source-changed") await writeFile(join(directory, "check.mjs"), "// changed during native validation\n");
+          if (reviewJoin === "environment-changed") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+          if (reviewJoin === "owner-cancelled") owner.kill("SIGTERM");
+          else await writeFile(join(directory, ".git/sortie-dogs/join-release"), "release");
+          const exit = await ended;
+          assert.equal(exit, reviewJoin === "owner-cancelled" ? null : reviewJoin === "failed" ? 7 : 0);
+          await after(validation, "actual owner terminal", reviewJoin === "owner-cancelled" ? { status: "cancelled" } : { exit });
+          const result = await waiting;
+          if (["source-changed", "environment-changed", "source-before", "environment-before", "permission-denied", "waiter-cancelled", "required-occurrence"].includes(reviewJoin)) {
+            assert.ok("error" in result, JSON.stringify(result));
+            assert.match(String(result.error), ["required-occurrence", "source-before", "environment-before"].includes(reviewJoin) ? /mission-review-terminal-unreconciled/u :
+              reviewJoin === "permission-denied" ? /native permission denied/u :
+              reviewJoin === "waiter-cancelled" ? /waiter cancelled/u : /JOINED_OWNER_STALE/u);
+          } else {
+            assert.ok("result" in result, JSON.stringify(result));
+            const packet = JSON.parse(result.result.content);
+            assert.equal(packet.status, reviewJoin === "passed" ? "validation-joined" : "validation-owner-not-passed");
+            assert.equal(packet.validation.owner_session_id, child);
+            assert.equal(packet.validation.owner_call_id, validation.id);
+            assert.equal(packet.validation.outcome, reviewJoin === "passed" ? "passed" : reviewJoin === "failed" ? "failed" : "cancelled");
+            assert.equal(packet.validation.evidence_ids.length > 0, reviewJoin === "passed");
+            assert.match(packet.next_action, /not a second execution or a Review/u);
+            const beforeReview = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review;
+            await after(reviewEvent, result.result.content);
+            assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review,
+              beforeReview, "the wait is not a Review or an acceptance decision");
+          }
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\n");
+          const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+          assert.equal(unitAfter.validationRegistration!.checks.length, 1, "only the Worker's actual shell is registered");
+          assert.equal(unitAfter.validationRegistration!.checks[0]!.callID, validation.id);
+          if (["source-changed", "environment-changed", "source-before", "environment-before"].includes(reviewJoin)) {
+            assert.equal(unitAfter.validationRegistration!.checks[0]!.fresh, false, "changed owner inputs cannot become fresh proof");
+          }
+          const ledger = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+          assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.joined").length,
+            ["permission-denied", "required-occurrence", "source-before", "environment-before"].includes(reviewJoin) ? 0 : 1);
+          assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+          if (reviewJoin === "required-occurrence") {
+            const second = await before(child, "shell", { command });
+            assert.equal(second.input.command, command, "the other required occurrence is not substituted");
+            const actual = await exec(process.execPath, ["check.mjs", "present"], { cwd: directory });
+            await after(second, actual.stdout, { exit: 0 });
+            assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\nrun\n");
+            const registered = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.deepEqual(registered.map(item => item.callID), [validation.id, second.id]);
+            assert.equal((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records
+              .filter(({ event }) => event.kind === "validation.settled").length, 2);
+          }
+          if (reviewJoin === "passed") {
+            agents[child]!.outcome = "succeeded";
+            const workerResult = await after(worker, "Validation passed", { sessionID: child });
+            assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status,
+              "succeeded", workerResult);
+            const review = await tool("coordinator", "review_mission", { risk_tags: [], traces: [] });
+            assert.notEqual(review.status, "validation-joined", "the normal post-Worker Review path remains reachable");
+          }
+          return;
+        } finally {
+          if (previousEnvironment === undefined) delete process.env.SORTIE_JOIN_FIXTURE_SETTING;
+          else process.env.SORTIE_JOIN_FIXTURE_SETTING = previousEnvironment;
+          if (owner.exitCode === null && owner.signalCode === null) { owner.kill("SIGTERM"); await ended; }
+        }
+      }
       let waiter: { sessionID: string; agent: string; tool: string; id: string; input: { command: string } } | undefined;
       let joined: Promise<void> | undefined;
       if (joinScenario && index === 0) {

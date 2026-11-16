@@ -508,6 +508,9 @@ interface HostGoalExecution {
   readonly validationInputs?: string;
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
+  /** Captured at the owner's actual admission, never reconstructed from current settings. */
+  readonly joinAuthority?: string;
+  readonly joinEnvironment?: string;
   /** Informal test observation, never an acceptance-criterion proof. */
   readonly managedTest?: Extract<ManagedTestCommand, { scope: "full" | "focused" }> &
     { readonly environment: string; readonly equivalence: "unverified-external-inputs" };
@@ -627,6 +630,14 @@ function validationEnvironment(directory?: string, dockerWorkspace?: DockerWorks
     toolchain: `container:${dockerWorkspace.container_id}`, directory: dockerWorkspace.cwd };
   return { platform: process.platform, arch: process.arch, runtime: process.version,
     ...(directory ? { directory } : {}) };
+}
+
+/** Only foreground calls with known native options can share an execution. */
+function validationJoinOptions(args: Record<string, unknown>): { timeout: number | null } | undefined {
+  if (Object.keys(args).some(key => !["command", "workdir", "timeout", "description", "background"].includes(key)) ||
+      args.background !== undefined && args.background !== false ||
+      args.timeout !== undefined && (typeof args.timeout !== "number" || !Number.isFinite(args.timeout) || args.timeout <= 0)) return undefined;
+  return { timeout: typeof args.timeout === "number" ? args.timeout : null };
 }
 
 function dockerToolExitCode(output: TaskResultRepairOutput): number | null | undefined {
@@ -2078,6 +2089,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
     let reusedEvidence: readonly GoalEvidence[] | undefined;
+    let joinAuthority: string | undefined, joinEnvironment: string | undefined;
     const unitID = authorization.taskID;
     const repairResume = operatorContractRepairResumes.get(root);
     const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
@@ -2160,12 +2172,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         validation = { ledger, request: continued, reservation: retained[0]!.reservation_id };
       } else {
         let reservation: Awaited<ReturnType<RunFlightLedger["reserveJoinableValidation"]>>;
+        const environment = goalFingerprint(process.env);
         try {
           // A changed candidate produces a new evidence key and must not become a user-facing blocker
           // merely because earlier necessary validations consumed the initial estimate. Duplicate
           // evidence remains denied by reserveValidation before this limit is considered.
           const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
-          const joinable = input.authorizeValidationJoin !== undefined && !dockerRequest && !requiredExecution &&
+          const mode = validationJoinOptions(args!);
+          const joinable = input.authorizeValidationJoin !== undefined && !dockerRequest && !requiredExecution && mode !== undefined &&
             snapshot.binding.freshness !== undefined && ["bash", "shell"].includes(toolInput.tool) &&
             !/[;&|\n\r`$<>]/u.test(rawCommand) && (repairResume === undefined || repairResume.retryAuthorization === null);
           const binding = snapshot.binding;
@@ -2173,11 +2187,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             readScopes: authorization.readScopes, writeScopes: authorization.writeScopes,
             source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
             source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
-            tool: toolInput.tool }) : undefined;
+            tool: toolInput.tool, environment, mode }) : undefined;
           reservation = repairResume?.retryAuthorization !== null && repairResume !== undefined
             ? await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation)
             : authority ? await ledger.reserveJoinableValidation(request, validationLimit, authority, skipReconciliation)
               : await ledger.reserveValidation(request, validationLimit, skipReconciliation);
+          if (reservation.decision === "ALLOW" && authority) { joinAuthority = authority; joinEnvironment = environment; }
         } catch (error) {
           throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
         }
@@ -2212,6 +2227,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               (execution.admissionCandidate ?? execution.candidate) !== snapshot.candidate ||
               currentSnapshot?.source !== snapshot.source || currentSnapshot.candidate !== snapshot.candidate ||
               now.goal_id !== goal.goal_id || now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
+              goalFingerprint(process.env) !== environment ||
               sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
               controller.signal.aborted) {
             throw denyValidation(`joined-owner-${terminal.outcome}: native proof unavailable or stale`);
@@ -2256,8 +2272,70 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ...(validationInputs === undefined ? {} : { validationInputs }),
       ...(validationSource === undefined ? {} : { validationSource }),
       owner: validation?.request.owner ?? "worker", validation,
+      ...(joinAuthority && joinEnvironment ? { joinAuthority, joinEnvironment } : {}),
       ...(correction ? { correction } : {}),
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
+  }
+
+  /** A controller can await the running Worker's exact registered check, without becoming a writer. */
+  async function joinMissionValidation(root: string, actor: string, agent: string | undefined, callID: string,
+    owner: { child: string; taskID: string; dispatchCallID: string }, signal?: AbortSignal) {
+    if (!input.authorizeValidationJoin || !callID || actor === owner.child) return undefined;
+    const authorization = sessionAuthorizations.get(owner.child);
+    if (!authorization || authorization.rootSessionID !== root || authorization.taskID !== owner.taskID ||
+        authorization.dispatchCallID !== owner.dispatchCallID || authorization.suspended || authorization.expiresAt <= Date.now() ||
+        activeSessionStatus(owner.child) !== "active") return undefined;
+    const candidates = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
+      execution.sessionID === owner.child && execution.endedAt === undefined && execution.correction?.nativeWorker === true &&
+      execution.correction.taskID === owner.taskID && execution.correction.dispatchCallID === owner.dispatchCallID &&
+      execution.validation && !execution.validation.request.required_execution && execution.joinAuthority && execution.joinEnvironment);
+    if (candidates.length !== 1) return undefined;
+    const execution = candidates[0]!, validation = execution.validation!, authority = execution.joinAuthority!;
+    const environment = execution.joinEnvironment!, ledger = validation.ledger;
+    const current = async () => {
+      if (goalFingerprint(process.env) !== environment || sessionAuthorizations.get(owner.child) !== authorization ||
+          authorization.suspended || authorization.expiresAt <= Date.now()) return false;
+      const snapshot = await refreshProtectedSnapshot(authorization.projectRoot, execution.binding).catch(() => undefined);
+      const goal = (await ledger.readGoal()).state;
+      return snapshot?.source === (execution.admissionSource ?? execution.source) &&
+        snapshot.candidate === (execution.admissionCandidate ?? execution.candidate) &&
+        goal.goal_id === execution.goalIdentity?.id && goal.revision === execution.goalIdentity.revision &&
+        goal.scope_epoch === execution.goalIdentity.scopeEpoch && goal.phase === "active";
+    };
+    if (!await current()) return undefined;
+    const controller = new AbortController(), abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    validationJoinWaiters.set(callID, { sessionID: actor, controller });
+    try {
+      await input.authorizeValidationJoin({ sessionID: actor, agent, command: execution.command[0]!, directory: execution.directory });
+      if (controller.signal.aborted) throw new Error("Validation waiter cancelled.");
+      if (!await current()) return undefined;
+      const request = { ...validation.request, operation_id: callID };
+      if (!await ledger.joinActiveValidation(request, validation.reservation, authority)) return undefined;
+      const terminal = await ledger.waitForJoinedValidation(validation.reservation, { signal: controller.signal, timeoutMs: 30 * 60_000 });
+      await hostGoalEndOperations.get(terminal.operation_id);
+      const observed = hostGoalExecutions.get(terminal.operation_id);
+      if (terminal.operation_id !== execution.callID || !observed || observed.validation?.reservation !== validation.reservation) {
+        throw new Error("SORTIE_VALIDATION_JOINED_OWNER_UNAVAILABLE");
+      }
+      if (terminal.outcome !== "passed" || terminal.exit_code !== 0) return { owner_session_id: owner.child,
+        owner_call_id: execution.callID, command: execution.command[0]!, outcome: terminal.outcome,
+        exit_code: terminal.exit_code, evidence_ids: [] };
+      if (!await current() || controller.signal.aborted || observed.outcome !== "pass" || observed.exitCode !== 0 ||
+          observed.endedAt === undefined || observed.immutableRef === undefined || observed.fresh !== true) {
+        throw new Error("SORTIE_VALIDATION_JOINED_OWNER_STALE");
+      }
+      const goal = (await ledger.readGoal()).state;
+      const evidence = observedHostGoalEvidence({ ...observed, endedAt: observed.endedAt, immutableRef: observed.immutableRef,
+        exitCode: 0, outcome: "pass", fresh: true }, goal, owner.taskID).filter(item => validGoalEvidence(item, goal));
+      if (!evidence.length) throw new Error("SORTIE_VALIDATION_JOINED_OWNER_EVIDENCE_UNAVAILABLE");
+      return { owner_session_id: owner.child, owner_call_id: execution.callID, command: execution.command[0]!,
+        outcome: terminal.outcome, exit_code: terminal.exit_code, evidence_ids: evidence.map(item => item.evidence_id) };
+    } finally {
+      validationJoinWaiters.delete(callID);
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   async function recordHostGoalEnd(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
@@ -2338,7 +2416,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validationBinding = execution.correction && fresh && !generated && execution.validationSource !== undefined
       ? { ...execution.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const } : undefined;
     const validatedSource = validationBinding && await validatedSourceSnapshot(execution.projectRoot, validationBinding).catch(() => undefined);
-    const proofFresh = fresh && managedFresh && (!validationBinding || validatedSource === execution.validationSource);
+    const joinFresh = execution.joinEnvironment === undefined || goalFingerprint(process.env) === execution.joinEnvironment;
+    const proofFresh = fresh && managedFresh && joinFresh && (!validationBinding || validatedSource === execution.validationSource);
     const observed = proofFresh && validatedSource && validationBinding
       ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
     const focusedRetries = outcome === "fail" && execution.managedTest?.scope === "full" &&
@@ -9502,6 +9581,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     reserveMissionFabricValidation: async (root, candidate, actor, callID) =>
       (await import("./mission-fabric-validation.js")).reserveFabricValidation(await goalLedger(root), candidate, actor, callID),
+    joinMissionValidation,
     settleMissionFabricValidation: async (root, candidate, actor, callID, outcome, exit, duration) =>
       (await import("./mission-fabric-validation.js")).settleFabricValidation(await goalLedger(root), candidate, actor, callID, outcome, exit, duration),
     completionReadiness: async root => {

@@ -1126,6 +1126,34 @@ export class RunFlightLedger {
     return result!;
   }
 
+  /** Join one already-admitted owner, without ever admitting a new execution. */
+  async joinActiveValidation(request: ValidationBudgetRequest, ownerReservation: string, authority: string): Promise<boolean> {
+    if (!this.#goalMode || !ownerReservation || !authority || request.required_execution !== undefined) return false;
+    const { validationEvidenceKey, validationJoinFingerprint } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request), fingerprint = validationJoinFingerprint(request, authority);
+    const unavailable = Symbol("validation-owner-unavailable");
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>(done => { resolveTail = done; });
+    await previous;
+    try {
+      try {
+        await this.#appendGoalLocked((state, records) => {
+          const owner = state.validation_budget.reservations.find(item => item.reservation_id === ownerReservation &&
+            item.evidence_key === evidenceKey && item.operation_id !== request.operation_id);
+          const admission = owner && records.find(({ event }) => event.kind === "validation.admission" &&
+            event.decision === "ALLOW" && event.reservation_id === ownerReservation)?.event;
+          if (state.goal_id !== request.run_id || state.phase !== "active" || !owner ||
+              admission?.kind !== "validation.admission" || admission.join_fingerprint !== fingerprint) throw unavailable;
+          return { kind: "validation.joined", at: new Date().toISOString(), goal_id: request.run_id,
+            operation_id: request.operation_id, owner_reservation_id: ownerReservation,
+            evidence_key: evidenceKey, join_fingerprint: fingerprint };
+        });
+        return true;
+      } catch (error) { if (error === unavailable) return false; throw error; }
+    } finally { resolveTail(); }
+  }
+
   /** Return only the owner's durable terminal observation, not proof for the waiter. */
   async waitForJoinedValidation(ownerReservation: string, options: { readonly signal?: AbortSignal; readonly timeoutMs: number }):
     Promise<Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>> {

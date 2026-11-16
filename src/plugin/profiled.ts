@@ -3612,7 +3612,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Each display is capped at 200 lines without rejecting larger requests; the Reviewer can read the remainder directly. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
         traces: { ...stringList, description: "Optional concise implementation notes. No R-ID labels or per-requirement proof required.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root } = await missionAuthority(context.sessionID);
-        return serializeDispatchTransition(root, async () => {
+        return serializeDispatchTransition(root, async yieldWait => {
           let { mission } = await missionAuthority(context.sessionID);
           const reconciled = await reconcileReview(root, mission);
           mission = reconciled.mission;
@@ -3620,6 +3620,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Join the existing native Reviewer. Its current call and prompt remain authoritative; no replacement, revalidation or new conversation." });
           await control!.currentBudget(root, { reconcileUsage: false });
           const run = await operators.required(root);
+          // Review needs this very same declared occurrence, not a second shell run.
+          // An active Worker remains the sole writer and its native result is the only proof.
+          const running = !run.fabric && run.phase === "running" ? run.units.filter(unit => unit.status === "running") : [];
+          if (running.length === 1 && running[0]!.childSessionID && running[0]!.callID &&
+              !running[0]!.directExecution && !running[0]!.reviewerCorrection && !running[0]!.repairValidation && context.callID) {
+            const unit = running[0]!, taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+            if (taskID) {
+              const joined = await yieldWait(() => control!.joinMissionValidation(root, context.sessionID, context.agent,
+                context.callID!, { child: unit.childSessionID!, taskID, dispatchCallID: unit.callID! }, context.signal));
+              if (joined) {
+                const latestMission = await missions.required(root), latestRun = await operators.required(root);
+                if (latestMission.id !== mission.id || latestMission.runID !== run.runID || latestRun.runID !== run.runID ||
+                    ["cancelled", "completed"].includes(latestMission.phase)) throw new Error("mission-validation-join-stale");
+                return JSON.stringify({ status: joined.outcome === "passed" && joined.exit_code === 0 ? "validation-joined" : "validation-owner-not-passed",
+                  validation: joined, next_action: "This is the Worker's native result, not a second execution or a Review. " +
+                    "Wait for its Task terminal and use the ordinary Review/acceptance flow; preserve any failure or cancellation." });
+              }
+            }
+          }
           await reconcileNativeFabricCheck(root, run);
           const currentMission = await missions.required(root);
           for (const unit of run.units) {
