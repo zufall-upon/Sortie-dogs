@@ -223,7 +223,7 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "scope-registration-legacy", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -874,14 +874,22 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       return;
     }
     await write("fixed\n");
-    if (mode === "scope-registration") {
+    if (mode === "scope-registration" || mode === "scope-registration-legacy") {
       const old = await readRun();
       const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
       for (const path of ["extra-one.txt", "extra-two.txt"]) {
         await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id, paths: [path], reason: "In-request output" }, { sessionID: actor });
       }
+      if (mode === "scope-registration-legacy") {
+        // Simulate an admission expanded by an older runtime before this field existed.
+        const path = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root");
+        const saved = JSON.parse(await readFile(path, "utf8"));
+        delete saved.units[0].initialWriteScope;
+        await writeFile(path, JSON.stringify(saved));
+        await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id, paths: ["extra-three.txt"], reason: "Another in-request output after upgrade" }, { sessionID: actor });
+      }
       hooks = await create(); // Registration must also work after the persisted admission is reloaded.
-      const corrected = { ...declaration, write: [...declaration.write, "extra-one.txt", "extra-two.txt"], validation: ["node check.mjs --corrected"] };
+      const corrected = { ...declaration, write: [...declaration.write, "extra-one.txt", "extra-two.txt", ...(mode === "scope-registration-legacy" ? ["extra-three.txt"] : [])], validation: ["node check.mjs --corrected"] };
       await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [{ ...corrected, write: [...corrected.write, "unapproved.txt"] }] }, { sessionID: actor }), /contract-mismatch/);
       const registered = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [corrected] }, { sessionID: actor }));
       assert.equal(registered.status, "direct-unit-registration-corrected");
@@ -889,6 +897,7 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       assert.equal(kept.runID, old.runID);
       assert.equal(kept.units[0]!.callID, old.units[0]!.callID);
       assert.deepEqual(kept.units[0]!.unit.write, corrected.write);
+      assert.deepEqual(kept.units[0]!.initialWriteScope, declaration.write);
       assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
       checkCommand = "node check.mjs --corrected";
     }
