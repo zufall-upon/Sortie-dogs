@@ -1584,6 +1584,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     callID: string | null }>();
   const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
+  const hostGoalEndOperations = new Map<string, Promise<void>>();
   const settledPassNotices = new Map<string, { readonly sessionID: string; readonly command: string }>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
@@ -2022,17 +2023,38 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function recordHostGoalEnd(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
     timing?: HostToolTiming): Promise<void> {
+    const callID = toolInput.callID;
+    if (callID === undefined) return;
+    const pending = hostGoalEndOperations.get(callID);
+    if (pending !== undefined) return await pending;
+    const operation = recordHostGoalEndOnce(toolInput, output, timing);
+    hostGoalEndOperations.set(callID, operation);
+    try { await operation; } finally {
+      if (hostGoalEndOperations.get(callID) === operation) hostGoalEndOperations.delete(callID);
+    }
+  }
+
+  async function recordHostGoalEndOnce(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
+    timing?: HostToolTiming): Promise<void> {
     const execution = hostGoalExecutions.get(toolInput.callID ?? "");
     if (execution === undefined || execution.endedAt !== undefined) return;
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
     const rawExit = metadata?.exit;
-    const exitCode = execution.dockerWorkspace ? dockerToolExitCode(output)
+    const reportedExit = execution.dockerWorkspace ? dockerToolExitCode(output)
       : typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
-    const rawStatus = metadata?.status ?? output.status;
-    const outcome = exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip" : exitCode !== undefined ? "fail"
-      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
-    const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed"
-      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancelled" : "interrupted";
+    const statuses = [metadata?.status, output.status].filter((value): value is string => typeof value === "string")
+      .map(value => value.toLowerCase());
+    const cancelled = statuses.some(value => ["cancel", "cancelled", "canceled"].includes(value));
+    const timedOut = statuses.some(value => ["timeout", "timed-out"].includes(value));
+    const interrupted = statuses.some(value => ["interrupted", "aborted"].includes(value));
+    const badStatus = cancelled || timedOut || interrupted || statuses.some(value => ["error", "failed"].includes(value));
+    // An unknown Docker exit is not a failed exit, and a zero attached to an error or
+    // cancellation is contradictory metadata, not proof that the command passed.
+    const exitCode = typeof reportedExit === "number" && !(reportedExit === 0 && badStatus) ? reportedExit : undefined;
+    const outcome = cancelled ? "cancel" : exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip"
+      : exitCode !== undefined ? "fail" : undefined;
+    const validationOutcome: ValidationOutcome = cancelled ? "cancelled" : timedOut ? "timeout" : interrupted ? "interrupted"
+      : exitCode === 0 ? "passed" : exitCode !== undefined ? "failed" : "interrupted";
     if (execution.validation !== undefined) {
       const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
         Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start

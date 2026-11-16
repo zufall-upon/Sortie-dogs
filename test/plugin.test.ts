@@ -5021,8 +5021,13 @@ for (const registered of [false, true]) test(`serial settled-pass reuse reconcil
     assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
 
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "first-check" }, { args: { command } });
-    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
-      { output: "passed", metadata: { exit: 0 } });
+    await Promise.all([
+      hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
+        { output: "passed", metadata: { exit: 0 } }),
+      hooks.event!({ event: { type: "message.part.updated", properties: { sessionID: child,
+        part: { type: "tool", tool: "bash", callID: "first-check",
+          state: { status: "completed", input: { command }, output: "passed", metadata: { exit: 0 } } } } } }),
+    ]);
     captureRegistration = registered;
     const duplicate = { args: { command } };
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "duplicate-check" }, duplicate);
@@ -5150,7 +5155,8 @@ test("validation admission-only failures do not consume no-progress and cannot e
         await writeFile(join(directory, "candidate.txt"), `candidate revision ${index}\n`);
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
-          { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
+          index === 0 ? { output: "failed", metadata: { exit: 1 } }
+            : { status: index === 1 ? "error" : "cancelled", output: "host execution unavailable", metadata: { exit: 0 } });
         if (index === 0) {
           // A settled nonzero exit now permits a fresh attempt. A later host failure or denial
           // must still preserve the earlier real failed check at the unit boundary.
@@ -5172,6 +5178,10 @@ test("validation admission-only failures do not consume no-progress and cannot e
     }
     const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
     const ledger = JSON.parse(await readFile(path, "utf8"));
+    const checks = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "validation.settled");
+    assert.deepEqual(checks.map(({ event }: { event: { outcome: string; exit_code: number | null } }) => [event.outcome, event.exit_code]),
+      [["failed", 1], ["interrupted", null], ["interrupted", null], ["cancelled", null]],
+      "host error or cancellation must not become PASS even if metadata contains zero");
     const settled = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "unit.settled");
     assert.deepEqual(settled.map(({ event }: { event: { result_class: string } }) => event.result_class),
       ["acceptance", "process-defect", "process-defect", "process-defect", "process-defect"]);

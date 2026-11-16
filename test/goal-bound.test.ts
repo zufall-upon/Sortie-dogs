@@ -506,6 +506,30 @@ test("validation admission permits monotonic limit growth for a changed candidat
   assert.equal(state.validation_budget.consumed, 2);
 });
 
+test("concurrent goal validation admissions observe the locked reservation", async () => {
+  const name = "validation-concurrent", { ledger } = await accepted(name, 4);
+  const other = await RunFlightLedger.openGoal(path.join(root, name, ".sortie-dogs", "run-flight", "root.json"));
+  const request = { run_id: `goal-${name}`, operation_id: "first", source_snapshot: "source", candidate: "candidate",
+    command: ["node", "check"], environment: { platform: "linux", arch: "x64", runtime: "node-22" },
+    scope: "targeted" as const, owner: "worker" as const, expected_evidence: ["command"],
+    marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const results = await Promise.all([ledger.reserveValidation(request, 4),
+    other.reserveValidation({ ...request, operation_id: "second" }, 4)]);
+  assert.deepEqual(results.map(result => result.decision).sort(), ["ALLOW", "DENY"]);
+  assert.equal(results.find(result => result.decision === "DENY")!.reason, "duplicate-evidence");
+  const owner = results.find(result => result.decision === "ALLOW")!;
+  assert.ok(owner.reservation_id);
+  const state = (await ledger.readGoal()).state.validation_budget;
+  assert.equal(state.consumed, 1);
+  assert.equal(state.reservations.length, 1);
+  assert.deepEqual(state.evidence_keys, [], "an in-flight reservation is not passed evidence");
+
+  const distinct = await Promise.all([ledger.reserveValidation({ ...request, operation_id: "third", candidate: "other-1" }, 4),
+    other.reserveValidation({ ...request, operation_id: "fourth", candidate: "other-2" }, 4)]);
+  assert.deepEqual(distinct.map(result => result.decision), ["ALLOW", "ALLOW"]);
+  assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 3);
+});
+
 test("goal validation evidence becomes reusable only after a passed settlement", async () => {
   const { ledger } = await accepted("validation-settlement-gate", 4);
   const request = { run_id: "goal-validation-settlement-gate", operation_id: "first",
@@ -528,7 +552,13 @@ test("goal validation evidence becomes reusable only after a passed settlement",
   assert.equal(passed.decision, "ALLOW");
   assert.equal(passed.consumed, 2);
   assert.equal(passed.evidence_key, first.evidence_key);
-  await ledger.settleValidation(passed.reservation_id!, passedRequest, "passed", 0, 11);
+  await Promise.all([
+    ledger.settleValidation(passed.reservation_id!, passedRequest, "passed", 0, 11),
+    cold.settleValidation(passed.reservation_id!, passedRequest, "passed", 0, 11),
+  ]);
+  await assert.rejects(ledger.settleValidation(passed.reservation_id!, passedRequest, "failed", 1), /conflicts with its original observation/);
+  assert.equal((await ledger.readGoal()).records.filter(({ event }) => event.kind === "validation.settled" &&
+    event.reservation_id === passed.reservation_id).length, 1);
   await assert.rejects(ledger.reserveValidation({ ...passedRequest, operation_id: "guarded-reuse" }, 4, {
     unit_id: "unit", source: "source", candidate: "candidate", command: passedRequest.command, evidence: [],
   }), RunFlightLedgerError);
@@ -574,6 +604,33 @@ test("one operator-authorized repair retry reopens only interrupted evidence and
     ["validation-first", "validation-retry"]);
   assert.equal(allowed[1]?.kind === "validation.admission" ? allowed[1].reopen?.prior_reservation_id : undefined,
     first.reservation_id);
+});
+
+test("concurrent interrupted validation retries reopen only one reservation", async () => {
+  const name = "validation-concurrent-reopen", { ledger } = await accepted(name, 4);
+  const other = await RunFlightLedger.openGoal(path.join(root, name, ".sortie-dogs", "run-flight", "root.json"));
+  const request = { run_id: `goal-${name}`, operation_id: "first", source_snapshot: "source", candidate: "candidate",
+    command: ["node", "check"], environment: { platform: "linux", arch: "x64", runtime: "node-22" },
+    scope: "targeted" as const, owner: "worker" as const, expected_evidence: ["unit:repair-unit"],
+    marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const first = await ledger.reserveValidation(request, 4);
+  await ledger.settleValidation(first.reservation_id!, request, "interrupted", null);
+  const authorization = { authority: "operator-repair-validation-retry" as const, operator_run_id: "operator-run",
+    unit_id: "repair-unit", operator_generation: 2, plan_hash: "a".repeat(64),
+    control_hash: `sha256:${"b".repeat(64)}`, goal_fingerprint: acceptance,
+    repair_fingerprint: `sha256:${"c".repeat(64)}` };
+  const retries = [{ ...request, operation_id: "retry-a" }, { ...request, operation_id: "retry-b" }];
+  const results = await Promise.all([ledger.reserveInterruptedValidationRetry(retries[0]!, 4, authorization),
+    other.reserveInterruptedValidationRetry(retries[1]!, 4, authorization)]);
+  assert.deepEqual(results.map(result => result.decision).sort(), ["ALLOW", "DENY"]);
+  assert.equal(results.find(result => result.decision === "DENY")!.reason, "duplicate-evidence");
+  const winner = results.findIndex(result => result.decision === "ALLOW");
+  await ledger.settleValidation(results[winner]!.reservation_id!, retries[winner]!, "passed", 0);
+  const state = (await other.readGoal()).state.validation_budget;
+  assert.equal(state.consumed, 2);
+  assert.equal(state.completed, 2);
+  assert.equal(state.reservations.length, 0);
+  assert.equal(state.evidence_keys.length, 1);
 });
 
 test("native Fabric retry retains interrupted spend, exact authority and the existing one-reopen limit", async () => {

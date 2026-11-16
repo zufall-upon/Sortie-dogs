@@ -476,7 +476,10 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
     title: "Repair formatter", objective, read: ["src/project/format.py"], write: ["src/project/format.py", "tests/test_format.py"],
     validation: ["python -m pytest tests/test_format.py"], requirement_ids: ["R1", "R2"],
   }]));
-  const task = (await operators.next("root", "root") as { task: { prompt: string } }).task;
+  const task = (await operators.next("root", "root") as { task: { prompt: string; subagent_type: string } }).task;
+  assert.equal(task.subagent_type, "dog-worker-v010");
+  assert.match(worker, /Compare existing test inputs, boundaries, assertions, failures; reuse if sufficient; keep unique coverage/u,
+    "the ordinary implementation Worker receives the test-value guidance");
   await operators.admitWorker("root", "root", "worker-call", task as never);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
   assert.match(expanded.prompt, /^contract_reference: handoff$/m);

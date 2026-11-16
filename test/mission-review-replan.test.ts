@@ -77,6 +77,8 @@ test("failed implementation then read-only validation and test-only replan keep 
     assert.match(mission.review!.task!.prompt, /return nilValue/);
     assert.match(mission.review!.task!.prompt, /changed: test\.js/);
     assert.ok(mission.review!.task!.prompt.includes(MISSION_BEHAVIOR_REVIEW));
+    assert.match(mission.review!.task!.prompt, /compare relevant existing tests by inputs, boundaries, assertions and failure detection/);
+    assert.match(mission.review!.task!.prompt, /duplication, weak or meaningless assertions, excessive mocks/);
     assert.ok(runtimeAssets.find(asset => asset.name === "dog-reviewer-v010")!.content.includes(MISSION_BEHAVIOR_REVIEW),
       "installed Reviewer and dispatched review use the same behavioral and workflow guidance");
     await missions.update("root", item => { item.review!.verdict = "PASS"; });

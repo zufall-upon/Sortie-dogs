@@ -1020,21 +1020,35 @@ export class RunFlightLedger {
     const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey } = await import("./validation-budget.js");
     const evidenceKey = validationEvidenceKey(request);
     if (this.#goalMode) {
-      const snapshot = await this.readGoal();
-      const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
-      const guidance = passedValidationDurationGuidance(snapshot.records.map(({ event }) => event), evidenceKey);
-      const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-        evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
-      const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-      const admission = { kind: "validation.admission" as const, at: new Date().toISOString(), goal_id: snapshot.state.goal_id!,
-        reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`, operation_id: request.operation_id,
-        evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
-        reason: decision.reason, consumed: decision.consumed, limit, saved_ms: decision.redundant_time_ms };
-      if (decision.decision === "SKIP" && skipReconciliation !== undefined) {
-        await this.#appendGoalWithSkipReconciliation(admission, skipReconciliation);
-      }
-      else await this.appendGoal(admission);
-      return { ...decision, reservation_id };
+      let result: (ValidationBudgetDecision & { readonly reservation_id: string | null }) | undefined;
+      let resolveTail!: () => void;
+      const previous = this.#tail;
+      this.#tail = new Promise<void>((done) => { resolveTail = done; });
+      await previous;
+      try {
+        // Decide from the records protected by the same cross-instance lock as the append.
+        // Otherwise concurrent callers can both decide ALLOW from an old snapshot and the
+        // loser receives a stale-transition error rather than the actual in-flight decision.
+        await this.#appendGoalLocked((state, records) => {
+          const events = records.map(({ event }) => event);
+          const evidence = validationEvidenceState(events);
+          const guidance = passedValidationDurationGuidance(events, evidenceKey);
+          const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+            evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
+          const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+          result = { ...decision, reservation_id };
+          return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+            reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+            operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+            scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+            limit, saved_ms: decision.redundant_time_ms };
+        }, (state, event) => {
+          if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+            this.#assertSkipReconciliation(state, event, skipReconciliation);
+          }
+        });
+      } finally { resolveTail(); }
+      return result!;
     }
     const snapshot = await this.read();
     const current = snapshot.state;
@@ -1056,41 +1070,54 @@ export class RunFlightLedger {
     authorization: GoalValidationRetryAuthorization | GoalNativeValidationRetryAuthorization,
     skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
     if (!this.#goalMode) throw new RunFlightLedgerError("invalid", "Interrupted validation retry requires a goal ledger.");
-    const { decideValidationBudget, validationEvidenceKey } = await import("./validation-budget.js");
-    const snapshot = await this.readGoal(), evidenceKey = validationEvidenceKey(request);
-    const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
-    const admissions = snapshot.records.filter(({ event }) => event.kind === "validation.admission" &&
-      event.decision === "ALLOW" && event.evidence_key === evidenceKey);
-    const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
-    const prior = admissions.at(-1)?.event;
-    const settlement = prior?.kind === "validation.admission" ? snapshot.records.find(({ event }) =>
-      event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
-    const native = authorization.authority === "mission-fabric-native-validation-retry";
-    const binding = native ? request.environment.toolchain === "native-shell-v1" && request.owner === "coordinator" &&
-      request.scope === "canonical" && authorization.evidence_key === evidenceKey &&
-      request.expected_evidence.includes(`fabric:${authorization.operator_run_id}`) &&
-      request.operation_id.startsWith(`fabric-native:${authorization.actor_session_id}:`) &&
-      prior?.kind === "validation.admission" && prior.operation_id.startsWith("fabric-native:")
-      : request.expected_evidence.includes(`unit:${authorization.unit_id}`);
-    const bound = snapshot.state.goal_id !== null && request.run_id === snapshot.state.goal_id &&
-      authorization.goal_fingerprint === snapshot.state.acceptance_fingerprint &&
-      binding;
-    if (!bound || alreadyReopened || prior?.kind !== "validation.admission" || settlement?.kind !== "validation.settled" ||
-        settlement.operation_id !== prior.operation_id || settlement.evidence_key !== evidenceKey || settlement.outcome !== "interrupted") {
-      return this.reserveValidation(request, limit, skipReconciliation);
-    }
-    const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-      evidence_keys: evidence.reusable.filter(key => key !== evidenceKey),
-      blocked_evidence_keys: evidence.blocked.filter(key => key !== evidenceKey) });
-    const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-    await this.appendGoal({ kind: "validation.admission", at: new Date().toISOString(), goal_id: snapshot.state.goal_id,
-      reservation_id: reservation_id ?? `deny-${randomUUID()}`, operation_id: request.operation_id,
-      evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope,
-      decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit,
-      saved_ms: decision.redundant_time_ms,
-      ...(decision.decision === "ALLOW" ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id,
-        prior_operation_id: prior.operation_id } } : {}) });
-    return { ...decision, reservation_id };
+    const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request);
+    let result: (ValidationBudgetDecision & { readonly reservation_id: string | null }) | undefined;
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((done) => { resolveTail = done; });
+    await previous;
+    try {
+      await this.#appendGoalLocked((state, records) => {
+        const events = records.map(({ event }) => event), evidence = validationEvidenceState(events);
+        const admissions = records.filter(({ event }) => event.kind === "validation.admission" &&
+          event.decision === "ALLOW" && event.evidence_key === evidenceKey);
+        const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
+        const prior = admissions.at(-1)?.event;
+        const settlement = prior?.kind === "validation.admission" ? records.find(({ event }) =>
+          event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
+        const native = authorization.authority === "mission-fabric-native-validation-retry";
+        const binding = native ? request.environment.toolchain === "native-shell-v1" && request.owner === "coordinator" &&
+          request.scope === "canonical" && authorization.evidence_key === evidenceKey &&
+          request.expected_evidence.includes(`fabric:${authorization.operator_run_id}`) &&
+          request.operation_id.startsWith(`fabric-native:${authorization.actor_session_id}:`) &&
+          prior?.kind === "validation.admission" && prior.operation_id.startsWith("fabric-native:")
+          : request.expected_evidence.includes(`unit:${authorization.unit_id}`);
+        const reopen = state.goal_id !== null && request.run_id === state.goal_id &&
+          authorization.goal_fingerprint === state.acceptance_fingerprint && binding && !alreadyReopened &&
+          prior?.kind === "validation.admission" && settlement?.kind === "validation.settled" &&
+          settlement.operation_id === prior.operation_id && settlement.evidence_key === evidenceKey && settlement.outcome === "interrupted";
+        const guidance = passedValidationDurationGuidance(events, evidenceKey);
+        const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+          evidence_keys: reopen ? evidence.reusable.filter(key => key !== evidenceKey) : evidence.reusable,
+          blocked_evidence_keys: reopen ? evidence.blocked.filter(key => key !== evidenceKey) : evidence.blocked,
+          prior_duration_ms: guidance.median_ms ?? undefined });
+        const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+        result = { ...decision, reservation_id };
+        return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+          reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+          operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+          scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+          limit, saved_ms: decision.redundant_time_ms,
+          ...(reopen && decision.decision === "ALLOW" && prior?.kind === "validation.admission"
+            ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id, prior_operation_id: prior.operation_id } } : {}) };
+      }, (state, event) => {
+        if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+          this.#assertSkipReconciliation(state, event, skipReconciliation);
+        }
+      });
+    } finally { resolveTail(); }
+    return result!;
   }
 
   async settleValidation(reservation_id: string, request: ValidationBudgetRequest, outcome: ValidationOutcome,
@@ -1125,24 +1152,16 @@ export class RunFlightLedger {
     try { return await this.#appendGoalLocked(structuredClone(event)); } finally { resolveTail(); }
   }
 
-  async #appendGoalWithSkipReconciliation(event: Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>,
-    reconciliation: ValidationSkipReconciliation | undefined): Promise<GoalFlightState> {
-    let resolveTail!: () => void;
-    const previous = this.#tail;
-    this.#tail = new Promise<void>((resolve) => { resolveTail = resolve; });
-    await previous;
-    try {
-      return await this.#appendGoalLocked(event, (state) => {
-        if (reconciliation === undefined || reconciliation.evidence.length === 0 || state.goal_id !== event.goal_id ||
-          reconciliation.evidence.some(entry => !validGoalEvidence(entry, state) ||
-            !entry.execution.units.includes(reconciliation.unit_id) || entry.identity.source !== reconciliation.source ||
-            entry.identity.candidate !== reconciliation.candidate ||
-            entry.execution.command.length !== reconciliation.command.length ||
-            entry.execution.command.some((part, index) => part !== reconciliation.command[index]))) {
-          throw new RunFlightLedgerError("transition", "Settled-pass reconciliation is unavailable or stale.");
-        }
-      });
-    } finally { resolveTail(); }
+  #assertSkipReconciliation(state: GoalFlightState, event: Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>,
+    reconciliation: ValidationSkipReconciliation | undefined): void {
+    if (reconciliation === undefined || reconciliation.evidence.length === 0 || state.goal_id !== event.goal_id ||
+      reconciliation.evidence.some(entry => !validGoalEvidence(entry, state) ||
+        !entry.execution.units.includes(reconciliation.unit_id) || entry.identity.source !== reconciliation.source ||
+        entry.identity.candidate !== reconciliation.candidate ||
+        entry.execution.command.length !== reconciliation.command.length ||
+        entry.execution.command.some((part, index) => part !== reconciliation.command[index]))) {
+      throw new RunFlightLedgerError("transition", "Settled-pass reconciliation is unavailable or stale.");
+    }
   }
 
   async #appendLocked(event: RunFlightEvent): Promise<RunFlightState> {
@@ -1192,7 +1211,8 @@ export class RunFlightLedger {
     } finally { await handle.close(); await unlink(lockPath).catch(() => undefined); }
   }
 
-  async #appendGoalLocked(event: GoalFlightEvent, guard?: (state: GoalFlightState) => void): Promise<GoalFlightState> {
+  async #appendGoalLocked(eventInput: GoalFlightEvent | ((state: GoalFlightState, records: readonly GoalFlightEventRecord[]) => GoalFlightEvent),
+    guard?: (state: GoalFlightState, event: GoalFlightEvent) => void): Promise<GoalFlightState> {
     await mkdir(path.dirname(this.#filePath), { recursive: true });
     const lockPath = `${this.#filePath}.lock`;
     let handle;
@@ -1206,7 +1226,23 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readGoalRecords();
-      if (guard !== undefined) guard(reduceGoalFlight(records));
+      const current = typeof eventInput === "function" || guard !== undefined ? reduceGoalFlight(records) : undefined;
+      const event = typeof eventInput === "function" ? eventInput(current!, records) : eventInput;
+      if (guard !== undefined) guard(current!, event);
+      if (event.kind === "validation.settled") {
+        const prior = records.find(({ event: stored }) => stored.kind === "validation.settled" &&
+          stored.goal_id === event.goal_id && stored.reservation_id === event.reservation_id)?.event;
+        if (prior?.kind === "validation.settled") {
+          // Terminal events may be delivered again after a reconnect. Keep the first real
+          // observation and its duration; a conflicting result must never become a replay.
+          if (prior.operation_id !== event.operation_id || prior.evidence_key !== event.evidence_key ||
+            prior.outcome !== event.outcome || prior.exit_code !== event.exit_code ||
+            prior.evidence_fingerprint !== event.evidence_fingerprint) {
+            throw new RunFlightLedgerError("transition", "Validation settlement conflicts with its original observation.");
+          }
+          return current ?? reduceGoalFlight(records);
+        }
+      }
       if (event.kind === "unit.usage-reconciled" && records.some(({ event: stored }) =>
         stored.kind === "unit.usage-reconciled" && stored.goal_id === event.goal_id &&
         stored.reservation_id === event.reservation_id && stored.native_session_id === event.native_session_id &&
