@@ -1108,6 +1108,52 @@ test("linked worktrees inside a broad Location preserve review while rejecting r
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("Review inventories a validated shared-clone checkout without reading untrusted Git history", async () => {
+  const area = await mkdtemp(resolve("_testenv/review-shared-alternate-"));
+  const root = join(area, "location"), origin = join(root, "origin"), repository = join(root, "repository"),
+    checkout = join(root, "checkout"), secret = join(area, "secret"), sentinel = join(area, "hook-fired");
+  const commit = (cwd: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd });
+  try {
+    await mkdir(origin, { recursive: true }); await mkdir(secret);
+    for (const [cwd, text] of [[origin, "public input\n"], [secret, "SHARED_ALTERNATE_PRIVATE_SENTINEL\n"]]) {
+      await git("git", ["init", "--quiet"], { cwd });
+      await writeFile(join(cwd, "payload.txt"), text);
+      await git("git", ["add", "payload.txt"], { cwd }); await commit(cwd);
+    }
+    await git("git", ["clone", "--quiet", "--shared", origin, repository], { cwd: root });
+    await git("git", ["worktree", "add", "--quiet", "--detach", checkout], { cwd: repository });
+    const manifest = JSON.stringify({ task_id: "unit", read: ["checkout/payload.txt"], write: ["checkout/payload.txt"], validation: ["node check.mjs"] });
+    const manifestPath = join(root, "manifest.json"); await writeFile(manifestPath, manifest);
+    const pinned = await protectedSnapshot({ projectRoot: root, manifestPath,
+      manifestHash: createHash("sha256").update(manifest).digest("hex") }, { directory: checkout });
+    assert.ok(pinned?.binding.freshness?.protected_paths.includes(checkout));
+    const unit = { id: "unit-1", read: ["checkout/payload.txt"], write: ["checkout/payload.txt"], validation: ["node check.mjs"], acceptance_indices: [] };
+    const unvalidated = { units: [{ unit, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(root, unvalidated), /untrusted nested Git metadata/);
+    const run = { units: [{ unit, hashes: [], evidence: [{ protected_binding: pinned!.binding }] }] } as never;
+
+    // The alternate may be malicious even after an earlier validated capture.
+    // Native Git would disclose this private fixture through its forged HEAD.
+    const marker = (await fs.readFile(join(checkout, ".git"), "utf8")).trim().slice("gitdir: ".length);
+    const admin = resolve(checkout, marker), oid = (await git("git", ["rev-parse", "HEAD"], { cwd: secret })).stdout.trim();
+    await writeFile(join(admin, "HEAD"), `${oid}\n`);
+    await writeFile(join(repository, ".git", "objects", "info", "alternates"), join(secret, ".git", "objects") + "\n");
+    assert.match((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "payload.txt"], { cwd: checkout })).stdout,
+      /SHARED_ALTERNATE_PRIVATE_SENTINEL/);
+    await writeFile(join(repository, ".git", "probe-fsmonitor"), `#!/bin/sh\nprintf fired > '${sentinel}'\n`);
+    await chmod(join(repository, ".git", "probe-fsmonitor"), 0o755);
+    await git("git", ["config", "core.fsmonitor", join(repository, ".git", "probe-fsmonitor")], { cwd: repository });
+    const observed = await missionReviewSource(root, run);
+    assert.match(observed.excerpt, /public input/);
+    assert.doesNotMatch(observed.excerpt, /SHARED_ALTERNATE_PRIVATE_SENTINEL/);
+    assert.match(observed.excerpt, /UNINSPECTED GIT HISTORY:[\s\S]*baseline diffs and tracked deletions are not established/);
+    await assert.rejects(fs.readFile(sentinel), { code: "ENOENT" });
+    await writeFile(join(checkout, "payload.txt"), "changed public input\n");
+    assert.notEqual((await missionReviewSource(root, run)).candidateFingerprint, observed.candidateFingerprint);
+    await assert.rejects(missionReviewSource(root, unvalidated), /untrusted nested Git metadata/);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("linked worktree submodules use their own modules path and reject writable metadata redirects", async () => {
   const area = await mkdtemp(resolve("_testenv/review-linked-submodule-"));
   const root = join(area, "location"), repository = join(root, "repository"), checkout = join(root, "checkout"),

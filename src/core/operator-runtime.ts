@@ -999,8 +999,10 @@ export class OperatorRuntime {
     return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, supersededRunID, terminalChildren, replaceRequirements, context, terminalTaskCalls }));
   }
   /** Stage a settled mission's replacement; rejected preparation never cancels the usable run. */
-  replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>): Promise<OperatorState> {
-    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID, context }));
+  replanMission(root: string, runID: string, raw: unknown, dispatcher?: { sessionID: string; callID: string }, context?: Record<string, unknown>,
+    options: { sameProcessDefect?: boolean } = {}): Promise<OperatorState> {
+    return this.serial(root, () => this.prepareOnce(root, raw, undefined, { dispatcher, replaceRunID: runID, context,
+      sameProcessDefect: options.sameProcessDefect }));
   }
   /** Correct only native-check registration in the SAME active direct admission. */
   correctDirectValidationRegistration(root: string, actor: string, runID: string, plan: OperatorPlan): Promise<OperatorState> {
@@ -1098,6 +1100,7 @@ export class OperatorRuntime {
   private async prepareOnce(root: string, raw: unknown, scopeApprovalTurnID?: string,
     mission?: { dispatcher?: { sessionID: string; callID: string }; supersededRunID?: string;
       terminalChildren?: readonly string[]; replaceRunID?: string; replaceRequirements?: boolean; context?: Record<string, unknown>;
+      sameProcessDefect?: boolean;
       terminalTaskCalls?: { runID: string; callIDs: readonly string[] };
       reviewerCorrection?: { author: string; reviewIdentity: string; writeUnion: readonly string[] } }): Promise<OperatorState> {
     const previous = await this.read(root);
@@ -1161,7 +1164,9 @@ export class OperatorRuntime {
           throw new Error("mission-review-correction-contract-mismatch");
         }
       }
-      if (previous.planHash === validatedPlanHash) return previous;
+      if (previous.planHash === validatedPlanHash && !(mission.sameProcessDefect && previous.phase === "awaiting-decision" &&
+          previous.units.length > 0 && previous.units.every(unit => unit.status === "failed" &&
+            unit.resultClass === "process-defect" && !unit.reviewerCorrection))) return previous;
     }
     if (mission?.supersededRunID !== undefined && previous?.supersededRunID === mission.supersededRunID &&
         previous.planHash === validatedPlanHash && previous.phase !== "cancelled") return previous;

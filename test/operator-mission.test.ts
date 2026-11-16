@@ -107,7 +107,11 @@ test("Operator recovers a registered native check in a linked worktree within a 
 
   // Real validation start rejects a marker impersonating the other checkout.
   await writeFile(marker, await readFile(join(other, ".git")));
-  await assert.rejects(hooks["tool.execute.before"]!(call("bad-check"), { args }), /mission-validation-snapshot-unavailable/);
+  await assert.rejects(hooks["tool.execute.before"]!(call("bad-check"), { args }), error => {
+    assert.match(String(error), /mission-validation-snapshot-unavailable:.*untrusted-nested-git-metadata/);
+    assert.doesNotMatch(String(error), /repository|checkout|other/);
+    return true;
+  });
   const before = await tool("operator_status");
   assert.equal((await tool("cancel_operator", { reason: "plain" })).status, "cancelled");
   const cancelled = await tool("operator_status");

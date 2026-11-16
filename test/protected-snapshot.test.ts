@@ -108,6 +108,65 @@ test("tracked nested checkout files cannot hide ignored inputs or new outputs fr
   await assert.rejects(readFile(sentinel), { code: "ENOENT" }, "snapshot must not execute the nested checkout's fsmonitor hook");
 }));
 
+test("shared-clone linked checkout uses filesystem snapshot protection without trusting alternates", async () => fixture(async root => {
+  const origin = join(root, "origin"), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other");
+  await mkdir(origin); await exec("git", ["init", "--quiet"], { cwd: origin });
+  await writeFile(join(origin, "input.txt"), "tracked input\n");
+  await exec("git", ["add", "input.txt"], { cwd: origin });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: origin });
+  await exec("git", ["clone", "--quiet", "--shared", origin, repository], { cwd: root });
+  await exec("git", ["worktree", "add", "--quiet", "--detach", checkout], { cwd: repository });
+  await exec("git", ["worktree", "add", "--quiet", "--detach", other], { cwd: repository });
+  const alternate = join(repository, ".git", "objects", "info", "alternates");
+  assert.ok((await readFile(alternate, "utf8")).trim());
+  const scratch = join(checkout, "cache"); await mkdir(scratch);
+  const oldTmp = process.env.TMPDIR; process.env.TMPDIR = scratch;
+  try {
+    // Review's Git-based inspection remains strict; validation never runs Git
+    // against the alternate and instead protects the entire checkout from scratch exclusions.
+    await assert.rejects(currentSnapshotProtection(root, { read: ["checkout/input.txt"], write: ["checkout/**"] }, checkout), /untrusted nested Git metadata/);
+    const pinned = await validationPin(root, ["checkout/input.txt"], ["checkout/**"], ["node check.mjs"]);
+    assert.ok(pinned.binding.freshness!.protected_paths.includes(checkout));
+    const before = await refreshProtectedSnapshot(root, pinned.binding);
+    assert.deepEqual(before, { source: pinned.source, candidate: pinned.candidate });
+    await writeFile(join(scratch, "real-input.txt"), "new input\n");
+    assert.notEqual((await refreshProtectedSnapshot(root, pinned.binding))?.candidate, before?.candidate);
+    await rm(join(scratch, "real-input.txt"));
+    const marker = join(checkout, ".git"), originalMarker = await readFile(marker);
+    const manifestPath = join(root, "manifest.json"), manifestHash = hash(await readFile(manifestPath, "utf8"));
+    await writeFile(marker, await readFile(join(other, ".git")));
+    await assert.rejects(protectedSnapshot({ projectRoot: root, manifestPath, manifestHash }), /untrusted nested Git metadata/,
+      "an alternate cannot excuse a forged checkout backlink");
+    await writeFile(marker, originalMarker);
+    const child = join(checkout, "nested"); await mkdir(child);
+    await exec("git", ["init", "--quiet"], { cwd: child });
+    await writeFile(join(child, "input.txt"), "child input\n");
+    const childManifest = JSON.stringify({ task_id: "child", read: ["checkout/nested/input.txt"], write: [], validation: ["node check.mjs"] });
+    await writeFile(manifestPath, childManifest);
+    await assert.rejects(protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(childManifest) }), /untrusted nested Git metadata/,
+      "an ancestor's alternate cannot authorize an unverified nested checkout");
+    await rm(child, { recursive: true });
+    await writeFile(manifestPath, JSON.stringify({ version: "0.1.0", task_id: "unit", read: ["checkout/input.txt"], write: ["checkout/**"], validation: ["node check.mjs"] }));
+    await rm(alternate);
+    assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), before, "captured conservative protection survives later settings changes");
+  } finally {
+    if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
+  }
+}));
+
+test("snapshot distinguishes a changed manifest from unavailable source scope", async () => fixture(async root => {
+  const manifestPath = join(root, "manifest.json"), manifest = JSON.stringify({ read: ["input"], write: [] });
+  await writeFile(manifestPath, manifest);
+  let reason = "";
+  assert.equal(await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash("different") },
+    { onUnavailable: value => { reason = value; } }), undefined);
+  assert.equal(reason, "manifest-hash-mismatch");
+  await symlink(join(root, "missing"), join(root, "input"));
+  assert.equal(await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(manifest) },
+    { onUnavailable: value => { reason = value; } }), undefined);
+  assert.equal(reason, "source-or-candidate-unavailable");
+}));
+
 test("tracked input scans do not execute root or nested Git fsmonitor hooks", async () => fixture(async root => {
   const nested = join(root, "nested"), scratch = join(nested, "scratch");
   await mkdir(scratch, { recursive: true });
