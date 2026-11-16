@@ -8,7 +8,7 @@ import { join } from 'node:path';
 const [directory, fault = 'foreign-read'] = process.argv.slice(2);
 await fs.mkdir(directory, { recursive: true });
 const originalRead = fs.readFile, originalKill = process.kill, originalPath = process.env.PATH;
-const child = spawn(process.execPath, [join(import.meta.dirname, 'owned-process-group.mjs'), directory, 'closed-stubborn'],
+const child = spawn(process.execPath, [join(import.meta.dirname, 'owned-process-group.mjs'), directory, 'closed-stubborn', String(process.pid)],
   { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
 let stdout = '', stderr = '';
 child.stdout.on('data', bytes => { stdout += bytes; }); child.stderr.on('data', bytes => { stderr += bytes; });
@@ -16,6 +16,7 @@ const rootExit = await new Promise((done, reject) => {
   child.once('error', reject); child.once('close', (code, signal) => done({ code, signal }));
 });
 const { writerPID, file } = JSON.parse(stdout);
+if (process.env.SORTIE_TEST_INSPECTION_READY) await fs.writeFile(join(directory, 'inspection-ready.json'), JSON.stringify({ writerPID, group: child.pid }));
 const foreignStat = await originalRead('/proc/1/stat', 'utf8');
 assert.notEqual(Number(foreignStat.slice(foreignStat.lastIndexOf(')') + 2).trim().split(/\s+/)[2]), child.pid);
 let deniedReads = 0, signals = [], cleanupError = null;
