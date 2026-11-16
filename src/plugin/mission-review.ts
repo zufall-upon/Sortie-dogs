@@ -18,7 +18,7 @@ import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers,
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
-import { isLocallyControlledNestedGitdir, isWritableNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
+import { hasNestedGitAlternates, isLocallyControlledNestedGitdir, isWritableNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -789,7 +789,11 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   // grant can contain a nested checkout whose newly tracked scratch is real input.
   const manifest = { read: scope.read.map(manifestScope), write: scope.write.map(manifestScope) };
   const directories = new Set(bindings.flatMap(binding => binding.freshness?.toolchain?.directory ? [binding.freshness.toolchain.directory] : []));
-  const protection = [...new Set((await Promise.all([undefined, ...directories].map(cwd => currentSnapshotProtection(directory, manifest, cwd)))).flat())];
+  // Only a checkout already conservatively protected by a captured validation
+  // recipe may use a filesystem-only Review inventory. It never becomes safe Git.
+  const filesystemOnlyAlternateRoots = [...new Set(bindings.flatMap(binding => binding.freshness?.protected_paths ?? []))];
+  const protection = [...new Set((await Promise.all([undefined, ...directories].map(cwd =>
+    currentSnapshotProtection(directory, manifest, cwd, { filesystemOnlyAlternateRoots })))).flat())];
   const scratch = bindings.map(binding => ({ binding, excludes: snapshotScratchExclusion(binding, protection) }));
   const controls = bindings.map(binding => ({ binding, excludes: snapshotControlExclusion(directory, binding, protection) }));
   const scopes = [...scope.read, ...scope.write].map(path => resolve(directory, normalizeManifestScope(manifestScope(path)).path));
@@ -908,6 +912,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const toolInput = scope.read.some(path => normalizeManifestScope(path).path.startsWith(TOOL_ENVIRONMENT));
   const untracked = new Set<string>(), currentFiles = new Set<string>();
   const collected = new Set<string>();
+  const uninspectedGit = new Set<string>();
   const unreadableLocal = new Map<string, string>();
   // A Location may inherit an ancestor repository while its actual outputs live in a
   // nested repository/worktree. Resolve that boundary before asking the outer Git:
@@ -963,7 +968,24 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   };
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
     const marker = await lstat(join(absolute, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-    const gitdir = marker ? await trustedNestedGitdir(directory, absolute) : undefined;
+    let gitdir: string | undefined;
+    try { gitdir = marker ? await trustedNestedGitdir(directory, absolute) : undefined; }
+    catch (error) {
+      const samePath = (other: string) => process.platform === "win32"
+        ? resolve(other).toLowerCase() === resolve(absolute).toLowerCase() : resolve(other) === resolve(absolute);
+      if (!hasNestedGitAlternates(error, absolute) || !filesystemOnlyAlternateRoots.some(samePath)) throw error;
+      // Do not invoke Git, follow object alternates, or invent a diff. Inventory
+      // only the declared filesystem outputs, with an explicit history gap below.
+      for (const spec of pathspec) {
+        const target = resolve(absolute, spec), within = relative(absolute, target);
+        if (within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within)) throw error;
+        const scoped = relative(directory, target).replaceAll("\\", "/") || ".";
+        collected.add(scoped); untracked.add(scoped);
+      }
+      uninspectedGit.add(path);
+      sourceUpdate(JSON.stringify(["uninspected-git-history", path]));
+      return;
+    }
     const sanitize = isLocallyControlledNestedGitdir(absolute, gitdir) || await isWritableNestedGitdir(directory, gitdir);
     const scopedGit = async (args: string[]) => {
       try {
@@ -1180,6 +1202,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`, excerpt: (bytes.length > 24_000 ? bytes.subarray(0, 24_000).toString("utf8") : excerpt) +
     (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
     (unreadableLocal.size ? `\n[UNINSPECTED LOCAL DIRECTORIES: ${[...unreadableLocal.keys()].slice(0, 20).join(", ")}; permission denied; contents not inspected or fingerprinted; select specific result files as review evidence]` : "") +
-    (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") + outsideNotice,
+    (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") + outsideNotice +
+    (uninspectedGit.size ? `\n[UNINSPECTED GIT HISTORY: ${[...uninspectedGit].slice(0, 20).join(", ")}; current declared files only. Git was not run against writable alternates; baseline diffs and tracked deletions are not established.]` : ""),
     truncatedEvidence, truncatedSource };
 }

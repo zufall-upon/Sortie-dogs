@@ -200,7 +200,7 @@ export function snapshotScratchExclusion(binding: Binding, currentProtection: re
 }
 
 async function snapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">,
-  directory?: string, protectUninspectedRoots = false, filesystemOnlyAlternates = false): Promise<string[]> {
+  directory?: string, protectUninspectedRoots = false, filesystemOnlyAlternates: boolean | readonly string[] = false): Promise<string[]> {
   const actual = (entry: string) => resolve(projectRoot, normalizeManifestScope(entry).path);
   // Query the Location itself even when its .git is in an ancestor: ls-files
   // then returns only paths relative to the Location. Also discover separately
@@ -227,7 +227,10 @@ async function snapshotProtection(projectRoot: string, manifest: Pick<OperationM
       // Do not run Git with writable object alternates. Snapshot still hashes the
       // declared inputs and outputs, and must not exclude any checkout scratch
       // when it cannot safely enumerate tracked files. Review keeps rejecting it.
-      if (filesystemOnlyAlternates && hasNestedGitAlternates(error, root)) return [root];
+      const samePath = (path: string) => process.platform === "win32"
+        ? resolve(path).toLowerCase() === resolve(root).toLowerCase() : resolve(path) === resolve(root);
+      const allowed = filesystemOnlyAlternates === true || Array.isArray(filesystemOnlyAlternates) && filesystemOnlyAlternates.some(samePath);
+      if (allowed && hasNestedGitAlternates(error, root)) return [root];
       throw error;
     }
     return exec("git", [...pinnedGitArguments(root, gitdir), "-c", "core.fsmonitor=false", "ls-files", "-z"], { cwd: root, maxBuffer: 16 * 1024 * 1024, windowsHide: true })
@@ -253,8 +256,8 @@ async function snapshotProtection(projectRoot: string, manifest: Pick<OperationM
 
 /** Tighten old scratch exclusions for current real inputs/outputs; never rewrite the saved recipe. */
 export async function currentSnapshotProtection(projectRoot: string, manifest: Pick<OperationManifest, "read" | "write">,
-  directory?: string): Promise<string[]> {
-  return snapshotProtection(projectRoot, manifest, directory);
+  directory?: string, options: { filesystemOnlyAlternateRoots?: readonly string[] } = {}): Promise<string[]> {
+  return snapshotProtection(projectRoot, manifest, directory, false, options.filesystemOnlyAlternateRoots ?? false);
 }
 
 type SnapshotUnavailable = "manifest-unreadable" | "manifest-hash-mismatch" | "validation-contract-changed" |

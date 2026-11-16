@@ -309,6 +309,9 @@ test("registered shell check replans and continues a Worker in a shared-clone li
   const settled = await f.tool("operator_status");
   assert.equal(settled.units[0].status, "succeeded");
   assert.equal(settled.budget.consumed_units, 2); assert.equal(settled.budget.reserved_units, 0);
+  const review = await f.tool("review_mission", { risk_tags: ["public-logic"] }, "coordinator");
+  assert.equal(review.status, "review-required");
+  assert.match((await f.missions.required("root")).review.task.prompt, /UNINSPECTED GIT HISTORY:[\s\S]*tracked deletions are not established/);
 }));
 
 test("another loaded adapter binds the same Worker's registered check after handoff", async () => fixture(async f => {
