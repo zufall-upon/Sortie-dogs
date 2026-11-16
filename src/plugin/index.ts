@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES, GOAL_CRITERION_ENUMS, expandGoalDeclaration } from "../core/goal-declaration-format.js";
@@ -507,6 +507,9 @@ interface HostGoalExecution {
   readonly validationInputs?: string;
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
+  /** Informal test observation, never an acceptance-criterion proof. */
+  readonly managedTest?: { readonly evidenceKey: string; readonly environment: string; readonly authority: string;
+    readonly reusedFrom?: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
@@ -648,6 +651,19 @@ function settledPassNoticeCommand(joined = false): string {
     return `& '${process.execPath.replaceAll("'", "''")}' -e '${script}'`;
   }
   return `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script}'`;
+}
+
+/** Recognize literal, unfiltered runner invocations only. Opaque scripts and shell syntax are not controlled. */
+function managedFullTestCommand(command: string): boolean {
+  return /^(?:node --test|python(?:3)? -m pytest|pytest|go test \.\/\.\.\.|cargo test --workspace)$/u.test(command);
+}
+
+function managedTestNoticeCommand(joined: boolean, reference: string, reservation: string): string {
+  const text = `SORTIE_MANAGED_TEST_${joined ? "JOINED" : "REUSED"} original_execution=${reference} original_reservation=${reservation}\n`;
+  const script = `process.stdout.write(${JSON.stringify(text)})`;
+  return process.platform === "win32"
+    ? `& '${process.execPath.replaceAll("'", "''")}' -e '${script.replaceAll("'", "''")}'`
+    : `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script.replaceAll("'", `'\\''`)}'`;
 }
 
 function proposeExperienceRoute(requestJson: string): string {
@@ -1838,6 +1854,116 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     scheduledGoalRecoveries.set(sessionID, operation);
   }
 
+  async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
+    authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
+    // Only the ordinary Mission shell can execute these undeclared commands. Leave unknown
+    // programs, scripts, shell compositions, parallel lanes and unobservable permissions alone.
+    if (!["bash", "shell"].includes(toolInput.tool) || !managedFullTestCommand(command) ||
+        input.authorizeValidationJoin === undefined || activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
+        activeSessions.get(toolInput.sessionID)?.released || activeSessionStatus(toolInput.sessionID) !== "active" ||
+        authorization.expiresAt <= Date.now() ||
+        await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) !== true ||
+        Object.keys(args).some(key => !["command", "workdir", "timeout", "description"].includes(key))) return;
+    // An unfiltered runner can consume any project input. A narrow Task read declaration is
+    // insufficient to establish equivalence; in that case preserve the original execution.
+    const coversDirectory = authorization.readScopes.some(scope => {
+      const path = relative(scope, directory);
+      return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+    });
+    const localDirectory = relative(authorization.projectRoot, directory);
+    if (!coversDirectory || localDirectory === ".." || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) return;
+    const ledger = await goalLedger(root), initial = await ledger.readGoal(), goal = initial.state;
+    if (goal.goal_id === null || goal.phase !== "active" ||
+        !goal.outstanding_reservations.some(item => item.unit_id === authorization.taskID && item.session_id === root) ||
+        goal.acceptance_contract?.criteria.some(criterion => criterion.proof_scope === "requested-full" &&
+          goalValidationCommand(goal, criterion) === command)) return;
+    // Run the same write gate on the original command before replacing anything. Native shell
+    // permission is independently checked for a waiter or a reuse below.
+    const admittedGate = await authorizedGate(toolInput.sessionID);
+    if (!admittedGate || admittedGate !== authorization.gate) return;
+    await admittedGate.check(toolInput, { args }, { investigativeShell: true,
+      assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
+    const snapshot = await protectedSnapshot(authorization, { directory, command }).catch(() => undefined);
+    if (!snapshot?.binding.freshness || sessionAuthorizations.get(toolInput.sessionID) !== authorization ||
+        authorization.suspended || authorization.gate !== admittedGate || authorization.expiresAt <= Date.now()) return;
+    const environment = goalFingerprint(process.env), callSettings = goalFingerprint(args);
+    const binding = snapshot.binding;
+    const authority = goalFingerprint({ projectRoot: authorization.projectRoot, readScopes: authorization.readScopes,
+      writeScopes: authorization.writeScopes, source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
+      source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
+      tool: toolInput.tool, environment, callSettings, revision: goal.revision, scope_epoch: goal.scope_epoch });
+    const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
+      source_snapshot: snapshot.source, candidate: goalFingerprint({ kind: "managed-full-test-v1", source: snapshot.source,
+        candidate: snapshot.candidate, authority }), command: [command], environment: validationEnvironment(directory),
+      scope: "related", owner: "worker", expected_evidence: ["managed-test-observation"],
+      marginal_value: { unmet_criteria: [], risk_hypothesis: "unfiltered project test" }, reason: "preflight" };
+    const evidenceKey = validationEvidenceKey(request);
+    const reusable = [...hostGoalExecutions.values()].find(execution => execution.root === root &&
+      execution.managedTest?.evidenceKey === evidenceKey && execution.managedTest.authority === authority &&
+      execution.managedTest.environment === environment && execution.outcome === "pass" && execution.exitCode === 0 &&
+      execution.fresh === true && execution.immutableRef !== undefined && execution.source === snapshot.source &&
+      execution.candidate === snapshot.candidate);
+    // A durable budget key alone is not a native result reference after host recovery.
+    if (goal.validation_budget.evidence_keys.includes(evidenceKey) && !reusable) return;
+    if (reusable) await input.authorizeValidationJoin({ sessionID: toolInput.sessionID, agent: toolInput.agent, command, directory });
+    const limit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1, goal.validation_budget.limit ?? 0);
+    const reservation = await ledger.reserveJoinableValidation(request, limit, authority);
+    let original: HostGoalExecution | undefined;
+    if (reservation.decision === "JOIN") {
+      const controller = new AbortController(), abort = () => controller.abort();
+      toolInput.signal?.addEventListener("abort", abort, { once: true });
+      if (toolInput.signal?.aborted) controller.abort();
+      validationJoinWaiters.set(toolInput.callID, { sessionID: toolInput.sessionID, controller });
+      try {
+        const wait = async () => {
+          await input.authorizeValidationJoin!({ sessionID: toolInput.sessionID, agent: toolInput.agent, command, directory });
+          return ledger.waitForJoinedValidation(reservation.owner_reservation_id, { signal: controller.signal, timeoutMs: 30 * 60_000 });
+        };
+        const terminal = toolInput.yieldValidationJoin ? await toolInput.yieldValidationJoin(wait) : await wait();
+        await hostGoalEndOperations.get(terminal.operation_id);
+        original = hostGoalExecutions.get(terminal.operation_id);
+        if (terminal.outcome !== "passed" || terminal.exit_code !== 0 || controller.signal.aborted ||
+            original?.validation?.reservation !== reservation.owner_reservation_id) {
+          throw new Error(`SORTIE_MANAGED_TEST_JOIN_UNAVAILABLE: owner-${terminal.outcome}`);
+        }
+      } finally {
+        validationJoinWaiters.delete(toolInput.callID);
+        toolInput.signal?.removeEventListener("abort", abort);
+      }
+    } else if (reservation.decision === "SKIP") original = reusable;
+    else if (reservation.decision === "ALLOW" && reservation.reservation_id) {
+      hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
+        callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
+        binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
+        validation: { ledger, request, reservation: reservation.reservation_id }, managedTest: { evidenceKey, environment, authority } });
+      return;
+    } else {
+      // No equivalent owner or trustworthy result: run normally, without manufacturing evidence.
+      return;
+    }
+    const currentGoal = await ledger.readGoal(), now = currentGoal.state;
+    const current = await refreshProtectedSnapshot(authorization.projectRoot, binding).catch(() => undefined);
+    const originalTerminal = original?.validation && currentGoal.records.find(({ event }) => event.kind === "validation.settled" &&
+      event.reservation_id === original!.validation!.reservation && event.operation_id === original!.callID &&
+      event.evidence_key === evidenceKey && event.outcome === "passed" && event.exit_code === 0)?.event;
+    if (!original || original.root !== root || original.managedTest?.evidenceKey !== evidenceKey ||
+        original.managedTest.authority !== authority || original.outcome !== "pass" || original.exitCode !== 0 ||
+        original.fresh !== true || !original.immutableRef || !original.validation || !originalTerminal || original.source !== snapshot.source ||
+        original.candidate !== snapshot.candidate || current?.source !== snapshot.source || current.candidate !== snapshot.candidate ||
+        goalFingerprint(process.env) !== environment || goalFingerprint(args) !== callSettings || now.goal_id !== goal.goal_id ||
+        now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
+        sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
+        authorization.gate !== admittedGate || await authorizedGate(toolInput.sessionID) !== admittedGate ||
+        toolInput.signal?.aborted) throw new Error("SORTIE_MANAGED_TEST_JOIN_UNAVAILABLE: native proof unavailable or stale");
+    const notice = managedTestNoticeCommand(reservation.decision === "JOIN", original.immutableRef, original.validation.reservation);
+    args.command = notice;
+    settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
+    hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
+      callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
+      binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker", reusedEvidence: [],
+      managedTest: { evidenceKey, environment, authority, reusedFrom: original.immutableRef } });
+  }
+
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
     const direct = await input.runtimeBridge?.directMissionExecution?.(toolInput.sessionID);
     if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) && !direct || parallelChildBindings.has(toolInput.sessionID)) return;
@@ -1863,6 +1989,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // recipe at actual native start; never retrofit it to older external-cwd history.
     const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, directory)
       : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    if (!direct && !reviewerCorrection && !members && !authorization.validationCommands.has(rawCommand)) {
+      await recordManagedTestStart(toolInput, args!, authorization, goalRoot(owner), directory, rawCommand);
+      return;
+    }
     if (correcting && !members) return;
     if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
         toolInput.sessionID, members, directory) === false) return;
@@ -1958,6 +2088,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           entry.execution.command.length === 1 && entry.execution.command[0] === rawCommand)
         .map(entry => ({ ...entry, execution: { ...entry.execution, units: [unitID] } }));
       const live = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
+        execution.managedTest === undefined &&
         execution.sessionID === toolInput.sessionID && (execution.directory === directory || dockerWorkspace !== undefined &&
           execution.dockerWorkspace?.container_id === dockerWorkspace.container_id && execution.dockerWorkspace.cwd === dockerWorkspace.cwd) &&
         execution.endedAt !== undefined && execution.exitCode === 0 &&
@@ -2114,7 +2245,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       : exitCode !== undefined ? "fail" : undefined;
     const validationOutcome: ValidationOutcome = cancelled ? "cancelled" : timedOut ? "timeout" : interrupted ? "interrupted"
       : exitCode === 0 ? "passed" : exitCode !== undefined ? "failed" : "interrupted";
-    if (execution.validation !== undefined) {
+    if (execution.validation !== undefined && execution.managedTest === undefined) {
       const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
         Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start
         ? Math.round(timing.end - timing.start) : undefined;
@@ -2136,6 +2267,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : execution.validationInputs !== undefined
           ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
           : refreshed.source === execution.source);
+    const managedFresh = execution.managedTest === undefined || refreshed !== undefined &&
+      refreshed.source === execution.source && refreshed.candidate === execution.candidate &&
+      goalFingerprint(process.env) === execution.managedTest.environment;
+    if (execution.validation !== undefined && execution.managedTest !== undefined) {
+      const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
+        Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start
+        ? Math.round(timing.end - timing.start) : undefined;
+      await execution.validation.ledger.settleValidation(execution.validation.reservation, execution.validation.request,
+        validationOutcome === "passed" && !managedFresh ? "interrupted" : validationOutcome,
+        validationOutcome === "passed" && !managedFresh ? null : exitCode ?? null, duration);
+    }
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command, directory: execution.directory,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
@@ -2147,7 +2289,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validationBinding = execution.correction && fresh && !generated && execution.validationSource !== undefined
       ? { ...execution.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const } : undefined;
     const validatedSource = validationBinding && await validatedSourceSnapshot(execution.projectRoot, validationBinding).catch(() => undefined);
-    const proofFresh = fresh && (!validationBinding || validatedSource === execution.validationSource);
+    const proofFresh = fresh && managedFresh && (!validationBinding || validatedSource === execution.validationSource);
     const observed = proofFresh && validatedSource && validationBinding
       ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
     hostGoalExecutions.set(execution.callID, { ...execution,
@@ -3035,6 +3177,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const childSessionID = taskChildSessionID(output);
     const observedEvidence = [...hostGoalExecutions.values()]
       .filter((execution) => childSessionID !== undefined && execution.sessionID === childSessionID &&
+        execution.managedTest === undefined &&
         execution.root === reservation.root && execution.endedAt !== undefined &&
         execution.startedAt.length > 0 && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
         execution.fresh === true && (execution.reusedEvidence !== undefined
@@ -3238,7 +3381,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const prior = snapshot.records.map(record => record.event).find(event => event.kind === "unit.evidence-reconciled" && event.previous_receipt_id === defect.receipt_id);
     const savedBinding = prior?.kind === "unit.evidence-reconciled" ? prior.evidence[0]?.protected_binding :
       [...hostGoalExecutions.values()].find(execution => execution.root === root && execution.sessionID === request.childSessionID &&
-        execution.endedAt !== undefined && execution.fresh === true)?.binding;
+        execution.managedTest === undefined && execution.endedAt !== undefined && execution.fresh === true)?.binding;
     const projectRoot = request.projectRoot ?? input.directory;
     const refreshedBinding = savedBinding && await refreshProtectedSnapshot(projectRoot, savedBinding);
     // Historical admissions without a saved recipe must retain the old full manifest/path recipe.
@@ -3253,7 +3396,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return prior.evidence;
     }
     const liveEvidence = [...hostGoalExecutions.values()]
-      .filter(execution => execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
+      .filter(execution => execution.managedTest === undefined && execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
         execution.exitCode === 0 && execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === current.source && execution.candidate === current.candidate)
       .flatMap(execution => observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
@@ -8295,6 +8438,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
+        const managed = hostGoalExecutions.get(toolInput.callID);
+        if (managed?.managedTest && managed.endedAt === undefined) {
+          // Admission precedes the normal gate. If that later gate rejects the original
+          // call, settle the reservation as interrupted rather than leaving a phantom owner.
+          await recordHostGoalEnd(toolInput, { status: "error", output: "Native admission did not start." });
+        }
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
         if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
         const signature = denialSignature(toolInput, output, error.reason, sessionAuthorizations.get(toolInput.sessionID));

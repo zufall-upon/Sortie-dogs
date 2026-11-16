@@ -924,15 +924,17 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, managed: managedScenario } of [
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false }, { legacy: false, commit: false, cancel: false, join: true },
+  { legacy: false, commit: false, cancel: false, managed: true },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(managedScenario ? "V2 undeclared full runner reuses a native observation in a normal Mission" :
+  `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -950,8 +952,9 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
-    if (joinScenario) fixture.context.permission.assert = async request => {
-      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u); joinedPermission();
+    if (joinScenario || managedScenario) fixture.context.permission.assert = async request => {
+      assert.equal(request.action, "shell");
+      assert.match(request.resources[0]!, managedScenario ? /^node --test$/u : /^node check\.mjs /u); joinedPermission();
     };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => {
       const hooks = await SortieDogsV010Plugin(input, options);
@@ -1166,6 +1169,8 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
       await exec("git", ["add", ".gitignore", "check.mjs"], { cwd: directory });
       await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
     }
+    if (managedScenario) await writeFile(join(directory, "fixture.test.mjs"),
+      `import { appendFileSync } from 'node:fs'; import { test } from 'node:test';\ntest('managed', () => appendFileSync('.git/managed-count', 'run\\n'));\n`);
     const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
@@ -1228,7 +1233,7 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
       const finalCandidate = commit || index === 1;
       const command = `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
-        read: ["check.mjs"], write: ["result.txt"], validation: [command] }],
+        read: managedScenario ? [directory] : ["check.mjs"], write: ["result.txt"], validation: [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -1361,6 +1366,33 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
       const patch = await before(child, "patch", { patchText });
       await writeFile(join(directory, "result.txt"), finalCandidate ? "ready\n" : "partial\n");
       await after(patch, "Updated result.txt");
+      if (managedScenario) {
+        const first = await before(child, "shell", { command: "node --test", workdir: directory });
+        assert.equal(first.input.command, "node --test");
+        const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+        const checked = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+        await after(first, checked.stdout, { exit: 0 });
+        const repeat = await before(child, "shell", { command: "node --test", workdir: directory });
+        const diagnostic = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.match(String(repeat.input.command), /SORTIE_MANAGED_TEST_REUSED/u, JSON.stringify({ goal: diagnostic.state,
+          admissions: diagnostic.records.filter(({ event }) => event.kind === "validation.admission") }));
+        const notice = await exec(process.platform === "win32" ? "powershell.exe" : "sh",
+          process.platform === "win32" ? ["-NoProfile", "-Command", String(repeat.input.command)] : ["-c", String(repeat.input.command)], { cwd: directory });
+        assert.match(notice.stdout, /^SORTIE_MANAGED_TEST_REUSED original_execution=sha256:[a-f0-9]{64} original_reservation=[a-f0-9-]+\n$/u);
+        await after(repeat, notice.stdout, { exit: 0 });
+        assert.equal(await readFile(join(directory, ".git/managed-count"), "utf8"), "run\n");
+        const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+        assert.equal(unitAfter.validationRegistration!.checks.length, 0, "informal observation is not formal validation");
+        const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.deepEqual(ledger.records.filter(({ event }) => event.kind === "validation.admission").map(({ event }) =>
+          event.kind === "validation.admission" && event.decision), ["ALLOW", "SKIP"]);
+        const terminal = ledger.records.find(({ event }) => event.kind === "validation.settled" && event.operation_id === first.id)?.event;
+        assert.ok(terminal?.kind === "validation.settled" && notice.stdout.includes(`original_reservation=${terminal.reservation_id}`),
+          "the public notice identifies the actual owner's durable terminal");
+        return;
+      }
       if (commit) {
         for (const args of [["add", "--", "result.txt"], ["commit", "-m", "Implement result"]]) {
           const gitCommand = args[0] === "add" ? "git add -- result.txt" : 'git commit -m "Implement result"';
