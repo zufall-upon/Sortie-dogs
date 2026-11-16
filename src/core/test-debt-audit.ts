@@ -89,7 +89,7 @@ export function testDebtInventoryKey(root: string, unit: AuditUnit): string {
 // Directory streams are an optimization, not durable state. After a host restart a stream
 // is reconstructed in bounded chunks up to the saved name; the serialized cursor remains
 // authoritative. The small LRU also bounds descriptors for abandoned Missions.
-const streams = new Map<string, { dir: Dir; expected: string | null; seeking: boolean }>();
+const streams = new Map<string, { dir: Dir; expected: string | null; seeking: boolean; recoveryLeft: number; suspended: boolean }>();
 const MAX_OPEN_STREAMS = 64;
 async function closeStream(key: string): Promise<void> {
   const entry = streams.get(key);
@@ -104,9 +104,19 @@ async function inventoryStream(key: string, directory: string, after: string | n
   let stream = streams.get(key);
   if (stream && stream.expected !== after) { await closeStream(key); stream = undefined; }
   if (!stream) {
-    while (streams.size >= MAX_OPEN_STREAMS) await closeStream(streams.keys().next().value!);
-    stream = { dir: await opendir(directory), expected: after, seeking: after !== null };
+    while (streams.size >= MAX_OPEN_STREAMS) {
+      // Prefer suspended ancestors, then streams not reconstructing a durable
+      // checkpoint. Otherwise a busy cache can evict the same long resync on
+      // every milestone before it has made any forward progress.
+      const entries = [...streams.entries()];
+      const victim = entries.find(([, value]) => value.suspended && !value.recoveryLeft) ??
+        entries.find(([, value]) => !value.recoveryLeft) ?? entries.find(([, value]) => value.suspended) ?? entries[0]!;
+      await closeStream(victim[0]);
+    }
+    stream = { dir: await opendir(directory), expected: after, seeking: after !== null,
+      recoveryLeft: after === null ? 0 : MAX_WALK_ENTRIES, suspended: false };
   } else streams.delete(key);
+  stream.suspended = false;
   streams.set(key, stream);
   return stream;
 }
@@ -218,10 +228,11 @@ export async function inspectTestDebtPage(root: string, unit: AuditUnit, changed
         }
         frame.after = entry.name;
         stream.expected = entry.name;
+        if (stream.recoveryLeft) stream.recoveryLeft--;
         const name = entry.name;
         if (entry.isSymbolicLink() || name.startsWith(".") || ignoredTrees.has(name.toLowerCase())) continue;
         const path = join(directory, name);
-        if (entry.isDirectory()) cursor.frames.push({ path: relative(root, path), after: null });
+        if (entry.isDirectory()) { stream.suspended = true; cursor.frames.push({ path: relative(root, path), after: null }); }
         else if (entry.isFile() && testPath(path) && !inspected.has(path) && !excluded(path)) await inspect(path, true);
       } catch (error) {
         if (!unavailable(error)) throw error;

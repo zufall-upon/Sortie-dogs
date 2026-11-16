@@ -19,7 +19,7 @@ import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
-import { closeTestDebtInventory, inspectTestDebt } from "../dist/core/test-debt-audit.js";
+import { closeTestDebtInventory, inspectTestDebt, inspectTestDebtPage } from "../dist/core/test-debt-audit.js";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
@@ -300,6 +300,11 @@ test("ordinary Mission resumes bounded inventory after entry and directory limit
   assert.ok(firstCursor.frames.length && firstCursor.frames[0]!.after, "the entry cap retains a continuation, not a completed inventory");
   await tool("plan_units", plan("flat", 1));
   await closeTestDebtInventory(`${root}\0root`); // Model a cold host reopening the saved cursor.
+  const pressure = Array.from({ length: 65 }, (_, index) => `cache-${index}`);
+  for (const scope of pressure) {
+    await mkdir(join(root, scope));
+    for (let index = 0; index < 16; index++) await writeFile(join(root, scope, `${index}.test.mjs`), "");
+  }
   const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
   await writeFile(join(flat, "later.test.mjs"), text);
   let foundFlat = false;
@@ -310,10 +315,13 @@ test("ordinary Mission resumes bounded inventory after entry and directory limit
       parts: [{ type: "text", text: "Continue maintaining both test trees." }],
     });
     await tool("start_mission", { intent: "continue", requirements: ["Maintain both test trees"] });
+    // Other scoped inventories are fixture-only; they exercise the bounded stream cache.
+    for (const scope of pressure) await inspectTestDebtPage(root, { read: [], write: [`${scope}/**`], validation: [] }, [], { cacheKey: scope });
     const result = await tool("plan_units", plan("flat", index));
     foundFlat ||= (result.test_debt_audit?.signals ?? []).some((signal: { path: string }) => signal.path === "flat/later.test.mjs");
   }
-  assert.ok(foundFlat, "a test beyond a 2048-entry page is eventually scheduled despite repeated cancellations");
+  assert.ok(foundFlat, "a test beyond a 2048-entry page is eventually scheduled despite cancellation and stream-cache pressure");
+  for (const scope of pressure) await closeTestDebtInventory(scope);
   await tool("plan_units", plan("nested", 10));
   const cursors = Object.values((await mission.required("root")).testDebtInventory!.cursors);
   assert.ok(cursors.some(cursor => cursor.frames.some(frame => frame.path.startsWith("nested"))),
