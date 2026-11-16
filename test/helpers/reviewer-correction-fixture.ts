@@ -50,7 +50,8 @@ after(async () => {
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
-export async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number; compactedHistory?: boolean } = {}) {
+export async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number; compactedHistory?: boolean;
+  nativeReplay?: boolean } = {}) {
   const seed = await (repositorySeed ??= createRepositorySeed());
   const directory = await mkdtemp(resolve("_testenv/reviewer-correction-"));
   try {
@@ -70,24 +71,44 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
   let cleanup: (() => void) | void, counter = 0;
   const nativeLaunches: ObjectValue[] = [];
   const compaction = { start: null as number | null };
-  const projection = { failGrant: false, failRestore: false, failRestorationLookup: false };
+  const projection = { failGrant: false, failGrantPersistent: false, failRestore: false, failRestorationLookup: false, roleUnavailable: false };
+  let replayAgents: () => void, pluginDisabled = false;
   const start = async () => {
+    pluginDisabled = false;
     cleanup?.(); tools = [{ name: "subagent", execute: async (input: ObjectValue) => {
       nativeLaunches.push(input); return { content: "Native launch", metadata: {} };
     } }]; toolHooks = new Map(); sessionHooks = new Map();
     const transforms: Function[] = [];
+    const materializeReviewer = (next: Record<string, ObjectValue>) => {
+      const asset = runtimeAssets.find(asset => asset.name === "dog-reviewer-v010")!;
+      next[asset.name] = { ...Agent.Info.default(asset.name as never), system: asset.content.split("---").slice(2).join("---"),
+        permissions: [...Agent.Info.default(asset.name as never).permissions, ...globalRules,
+          ...(!projection.roleUnavailable ? convertedAssetPermissions(asset.content) : []), ...(agentRules[asset.name] ?? [])] };
+    };
     const rebuild = () => {
       const next: Record<string, ObjectValue> = Object.fromEntries(runtimeAssets.filter(asset => asset.installPath.startsWith("agent/")).map(asset =>
         [asset.name, { ...Agent.Info.default(asset.name as never), system: asset.content.split("---").slice(2).join("---"),
           permissions: [...Agent.Info.default(asset.name as never).permissions, ...globalRules, ...convertedAssetPermissions(asset.content), ...(agentRules[asset.name] ?? [])] }]));
+      if (options.nativeReplay) delete next["dog-reviewer-v010"];
+      else if (projection.roleUnavailable) materializeReviewer(next);
       const editor = { get: (id: string) => next[id], update: (id: string, update: Function) => {
-        if (id.startsWith("dog-reviewer-correction-") && projection.failGrant) { projection.failGrant = false; throw new Error("native-permission-storage-failed"); }
+        if (id.startsWith("dog-reviewer-correction-") && (projection.failGrant || projection.failGrantPersistent)) {
+          projection.failGrant = false; throw new Error("native-permission-storage-failed");
+        }
         update(next[id] ??= { ...Agent.Info.default(id as never) });
       } };
-      for (const transform of transforms) transform(editor);
+      try { for (const transform of transforms) transform(editor); }
+      catch (error) {
+        if (options.nativeReplay) {
+          pluginDisabled = true;
+          tools = tools.filter(tool => !tool.name.startsWith("sortie_"));
+        }
+        throw error;
+      }
       registry = next;
       for (const [id, info] of Object.entries(registry)) if (id.startsWith("dog-reviewer-correction-")) rules.push({ agent: id, permissions: structuredClone(info.permissions) });
     };
+    replayAgents = rebuild;
     rebuild();
     const context: OpenCodeV2Context = {
       location: { directory }, storage: { get: async key => structuredClone(storage.get(key)),
@@ -95,10 +116,14 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
         scan: async ({ prefix }) => ({ entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) }) },
       ...(!options.permissionsUnavailable ? { agent: { transform: async (callback: Function) => {
         transforms.push(callback);
-        try { rebuild(); } catch (error) { transforms.pop(); throw error; }
+        if (!options.nativeReplay) try { rebuild(); } catch (error) { transforms.pop(); throw error; }
         return { dispose() { transforms.splice(transforms.indexOf(callback), 1); rebuild(); } };
-      }, get: async ({ agentID }: { agentID: string }) => ({ ...registry[agentID], model: registry[agentID]?.model ?? {
-        providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6.1-sol", variant: agentID === "dog-worker-v010" ? "max" : "xhigh" } }) } } : {}),
+      }, get: async ({ agentID }: { agentID: string }) => {
+        if (options.nativeReplay) rebuild();
+        return { ...registry[agentID], model: registry[agentID]?.model ?? {
+          providerID: "openai", id: agentID === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6.1-sol",
+          variant: agentID === "dog-worker-v010" ? "max" : "xhigh" } };
+      } } } : {}),
       event: { subscribe: async function* () {} },
       tool: { transform: async callback => { callback({ add: tool => tools.push(tool),
         update: (name, update) => { const tool = tools.find(tool => tool.name === name); if (tool) update(tool as never); } }); return { dispose() {} }; },
@@ -138,6 +163,16 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
       }
       hooks = await SortieDogsV010Plugin(input, pluginOptions); return hooks;
     }).setup(context);
+    if (options.nativeReplay) {
+      // Native config.agent registers AFTER local plugins, including cold recovery scans.
+      // A later correction registration is appended after this source, not inserted before it.
+      transforms.push((editor: ObjectValue) => {
+        const next: Record<string, ObjectValue> = {};
+        materializeReviewer(next);
+        editor.update("dog-reviewer-v010", (agent: ObjectValue) => Object.assign(agent, next["dog-reviewer-v010"]));
+      });
+      rebuild();
+    }
   };
   const permission = async (sessionID: string, action: string, resource: string | string[], savedAllow = false, callID?: string) => {
     // Permission.evaluateInput: configured deny is terminal before saved allow and hook.
@@ -228,7 +263,9 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     throw new Error("fixture-goal-ledger-missing");
   };
   await start();
-  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, registry: () => registry, start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
+  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, registry: () => registry,
+    replayAgents: () => replayAgents(), pluginDisabled: () => pluginDisabled, toolNames: () => tools.map(tool => tool.name),
+    start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
     launch: (event: ObjectValue) => tools.find(tool => tool.name === "subagent")!.execute(event.input, { id: event.id, sessionID: event.sessionID }),
     hooks: () => hooks, context: (event: ObjectValue) => sessionHooks.get("context")!(event),
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };

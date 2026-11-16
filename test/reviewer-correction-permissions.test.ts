@@ -8,6 +8,119 @@ import { convertedAssetPermissions, evaluate, whollyDisabled, type Rule } from "
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
 import { exec, fixture, initial, inlineReport } from "./helpers/reviewer-correction-fixture.ts";
 
+test("native lazy replay defers cold correction until the configured Reviewer materializes without disabling Operator tools", async () => {
+  const f = await fixture({ nativeReplay: true });
+  try {
+    await initial(f);
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    const selected = structuredClone(f.agents.author!.model);
+    const before = (await f.ledger()).state.consumed_units;
+    await f.start();
+    assert.equal(f.pluginDisabled(), false);
+    assert.ok(f.toolNames().includes("sortie_v010_operator_status"));
+    await f.tool("root", "operator_status");
+    await f.context({ sessionID: "author", agent: f.agents.author!.agent, system: [], tools: {} });
+    assert.match(f.agents.author!.agent, /^dog-reviewer-correction-/);
+    assert.equal(whollyDisabled("edit", f.registry()[f.agents.author!.agent]!.permissions), false);
+    assert.deepEqual(f.agents.author!.model, selected);
+    assert.equal((await f.ledger()).state.consumed_units, before);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled").length, 2);
+  } finally { await f.dispose(); }
+});
+
+test("native callback storage failure remains local to correction and preserves Operator status and single settlement", async () => {
+  const f = await fixture({ nativeReplay: true });
+  try {
+    await initial(f);
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    f.projection.failGrantPersistent = true;
+    assert.doesNotThrow(f.replayAgents);
+    await f.tool("root", "operator_status");
+    assert.equal(f.pluginDisabled(), false);
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert(f.storage.has("v2-reviewer-correction-permissions:author"));
+    await assert.rejects(f.context({ sessionID: "author", agent: f.agents.author!.agent, system: [], tools: {} }), /native-permission-storage-failed/);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled").length, 2);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+test("projection plus restoration failure retains parent status and context without weakening cancellation or settling again", async () => {
+  const f = await fixture({ nativeReplay: true });
+  try {
+    const { original } = await initial(f);
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    const alias = f.agents.author!.agent;
+    f.projection.roleUnavailable = true;
+    f.replayAgents();
+    f.projection.failRestore = true;
+    const status = await f.tool("root", "operator_status");
+    assert.deepEqual(status.runtime.reviewer_correction_recovery, [{ child_session_id: "author", error: "native-switch-transient" }]);
+    assert.equal(f.agents.author!.agent, alias);
+    assert(f.storage.has("v2-reviewer-correction-permissions:author"));
+    assert.equal(f.pluginDisabled(), false);
+    f.projection.failRestore = true;
+    const event = { sessionID: "root", agent: "dog-operator", system: [] as ObjectValue[], tools: { sortie_v010_operator_status: {} } };
+    await f.context(event);
+    assert.match(JSON.stringify(event.system), /Reviewer correction recovery is deferred.*native-switch-transient/);
+    assert("sortie_v010_operator_status" in event.tools);
+    f.projection.failRestore = true;
+    await f.prompt("root", original);
+    assert(f.storage.has("v2-reviewer-correction-permissions:author"));
+    f.projection.roleUnavailable = false;
+    f.replayAgents();
+    await f.tool("root", "operator_status");
+    f.projection.failRestore = true;
+    await assert.rejects(f.tool("root", "cancel_operator", { reason: "explicit-cancellation" }), /native-switch-transient/);
+    assert(f.storage.has("v2-reviewer-correction-permissions:author"));
+    const settled = (await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled").length;
+    await f.tool("root", "operator_status");
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    assert.equal(f.storage.has("v2-reviewer-correction-permissions:author"), false);
+    assert.equal((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled").length, settled);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
+test("native replay of an unrecognized Reviewer fails closed locally and retains Operator recovery and single settlement", async () => {
+  const f = await fixture({ nativeReplay: true });
+  try {
+    await initial(f);
+    const prepared = await f.tool("root", "repair_review");
+    const dispatch = await f.before("root", "subagent", f.task(prepared.task));
+    await f.prompt("author", dispatch.input.prompt);
+    const alias = f.agents.author!.agent;
+    f.projection.roleUnavailable = true;
+    assert.doesNotThrow(f.replayAgents);
+    assert.equal(f.pluginDisabled(), false);
+    assert.equal(whollyDisabled("edit", f.registry()[alias]!.permissions), true);
+    assert.equal(whollyDisabled("shell", f.registry()[alias]!.permissions), true);
+    assert.ok(f.toolNames().includes("sortie_v010_operator_status"));
+    await f.tool("root", "operator_status");
+    assert(f.storage.has("v2-reviewer-correction-permissions:author"));
+    assert.equal(f.agents.author!.agent, "dog-reviewer-v010");
+    f.projection.roleUnavailable = false;
+    f.replayAgents();
+    await f.context({ sessionID: "author", agent: f.agents.author!.agent, system: [], tools: {} });
+    assert.match(f.agents.author!.agent, /^dog-reviewer-correction-/);
+    await f.tool("root", "cancel_operator", { reason: "explicit-cancellation" });
+    await f.tool("root", "operator_status");
+    assert.equal((await f.ledger()).records.filter(({ event }) => event.kind === "unit.settled").length, 2);
+    assert.equal((await f.ledger()).state.consumed_units, 2);
+  } finally { await f.dispose(); }
+});
+
 for (const effect of ["allow", "ask"] as const) test(`native correction dispatch admits wildcard deny then original-target ${effect} without alias grants`, async () => {
   const f = await fixture();
   try {

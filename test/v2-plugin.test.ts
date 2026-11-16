@@ -496,6 +496,20 @@ test("V2 cache-ledger storage failure preserves current state and in-process app
 
 test("Reviewer model tool order keeps genuine read-only definitions as a deterministic prefix across correction admission", async () => {
   const fixture = contextFixture();
+  const transforms: Array<Parameters<NonNullable<OpenCodeV2Context["agent"]>["transform"]>[0]> = [];
+  let registry: Record<string, any>;
+  const rebuild = () => {
+    registry = { "dog-reviewer-v010": { permissions: [...nativeReviewerRoleRules] } };
+    const editor = { get: (id: string) => registry[id], update: (id: string, update: (agent: any) => void) => update(registry[id] ??= {}) };
+    for (const callback of transforms) callback(editor);
+  };
+  fixture.context.agent = {
+    transform: async callback => {
+      transforms.push(callback);
+      return { dispose() { transforms.splice(transforms.indexOf(callback), 1); } };
+    },
+    get: async ({ agentID }) => { rebuild(); return registry[agentID]; },
+  };
   let correcting = false;
   fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-reviewer-v010",
     model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } });

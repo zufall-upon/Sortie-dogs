@@ -522,7 +522,13 @@ function correctionGatewayReviewerRules(rules: readonly NativePermissionRule[]):
   }
   return [...rules];
 }
-const correctionAgents = new WeakMap<OpenCodeV2Context, Map<string, { generation: number; registration: Registration }>>();
+class ReviewerCorrectionProjectionError extends Error {}
+interface CorrectionRegistration {
+  generation: number;
+  registration: Registration;
+  projection: { ready: boolean; error?: Error };
+}
+const correctionAgents = new WeakMap<OpenCodeV2Context, Map<string, CorrectionRegistration>>();
 
 /** Use 2.0.18's agent.transform/switchAgent BEFORE native tool snapshot selection; never mutate session rules. */
 export async function syncReviewerCorrectionPermissions(context: OpenCodeV2Context, hooks: OpenCodeHooks, sessionID: string, activate = true): Promise<void> {
@@ -571,8 +577,8 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
     return;
   }
   if (!scope && !record(saved)) return;
-  if (!context.agent || !context.storage || !context.session.switchAgent) throw new Error("native-reviewer-correction-permissions-unavailable");
-  const active = correctionAgents.get(context) ?? new Map<string, { generation: number; registration: Registration }>();
+  if (!context.agent?.get || !context.storage || !context.session.switchAgent) throw new Error("native-reviewer-correction-permissions-unavailable");
+  const active = correctionAgents.get(context) ?? new Map<string, CorrectionRegistration>();
   correctionAgents.set(context, active);
   if (!scope) {
     // A failed lookup is not proof of deletion or restoration. Keep both the registration and
@@ -597,28 +603,61 @@ async function syncReviewerCorrectionPermissionsOnce(context: OpenCodeV2Context,
   const original = record(saved) && typeof saved.agent === "string" ? saved.agent : info.agent;
   if (original !== "dog-reviewer-v010") throw new Error("native-reviewer-correction-author-role-mismatch");
   await context.storage.set(key, { agent: original, model: info.model, generation: scope.generation });
-  if (active.get(sessionID)?.generation !== scope.generation) {
+  if (active.get(sessionID)?.generation !== scope.generation || active.get(sessionID)?.projection.error) {
+    if (active.has(sessionID) && info.agent === id) {
+      await context.session.switchAgent({ sessionID, agent: original });
+      info.agent = original;
+    }
     await active.get(sessionID)?.registration.dispose();
     active.delete(sessionID);
+    const projection: CorrectionRegistration["projection"] = { ready: false };
+    const identity = { id, name: id, mode: "subagent", hidden: true, model: { ...info.model as JsonObject } };
     const registration = await context.agent.transform(editor => {
-      const reviewer = editor.get?.("dog-reviewer-v010");
-      if (!reviewer?.permissions) throw new Error("native-reviewer-correction-role-permissions-unavailable");
-      const rules = correctionGatewayReviewerRules(reviewer.permissions);
-      const shipped = shippedReviewerBlock(rules);
-      if (!shipped) throw new Error("native-reviewer-correction-readonly-role-block-unavailable");
-      const inherited = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => !["edit", "shell"].includes(rule.action)),
-        ...["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
-        ...rules.slice(shipped.start + shipped.rules.length)];
-      editor.update(id, agent => Object.assign(agent, reviewer, { id, name: id, mode: "subagent", hidden: true,
-        model: { ...info.model as JsonObject },
-        // Project only the exact generated gateway block and shipped read-only edit/shell
-        // role entries. Other configured rules keep their native order/effective meaning.
-        // No edit/shell grants, copied historical denies, command scanner or session-rule replacement.
-        // The existing correction-control tools stay exposed beneath the shipped sortie_* deny.
-        // Common implementation gates own known output scope; the ordinary Reviewer is untouched.
-        permissions: inherited }));
+      projection.ready = false;
+      delete projection.error;
+      try {
+        const reviewer = editor.get?.("dog-reviewer-v010");
+        if (!reviewer?.permissions) throw new ReviewerCorrectionProjectionError("native-reviewer-correction-role-permissions-unavailable");
+        const rules = correctionGatewayReviewerRules(reviewer.permissions);
+        const shipped = shippedReviewerBlock(rules);
+        if (!shipped) throw new ReviewerCorrectionProjectionError("native-reviewer-correction-readonly-role-block-unavailable");
+        const inherited = [...rules.slice(0, shipped.start), ...shipped.rules.filter(rule => !["edit", "shell"].includes(rule.action)),
+          ...["bind_write_gate", "release_write_gate", "operator_status", "expand_unit"].map(name => ({ action: `sortie_v010_${name}`, resource: "*", effect: "allow" as const })),
+          ...rules.slice(shipped.start + shipped.rules.length)];
+        // Change only our exact shipped/generated blocks, preserving surrounding native policy.
+        editor.update(id, agent => Object.assign(agent, reviewer, identity, { permissions: inherited }));
+        projection.ready = true;
+      } catch (error) {
+        // Registrations are lazy and replay onto a fresh registry. During cold setup the
+        // config role can be materialized AFTER this callback. Throwing here disables the
+        // entire plugin, including Operator recovery. Keep the alias inert instead, and
+        // report the actual failure outside the transform before any correction launch.
+        projection.error = error instanceof ReviewerCorrectionProjectionError ? error
+          : new ReviewerCorrectionProjectionError(error instanceof Error ? error.message : "native-reviewer-correction-projection-failed", { cause: error });
+        try { editor.update(id, agent => Object.assign(agent, identity,
+          { permissions: [{ action: "*", resource: "*", effect: "deny" }] })); }
+        catch { /* Retain the original error for the calling hook, never kill the control plane. */ }
+      }
     });
-    active.set(sessionID, { generation: scope.generation, registration });
+    active.set(sessionID, { generation: scope.generation, registration, projection });
+  }
+  const current = active.get(sessionID)!;
+  // transform() returning is not proof its callback ran or its alias exists. A native
+  // read forces replay; it also catches later role changes before selecting the alias.
+  let projected: V2AgentInfo | undefined;
+  try {
+    const response = await context.agent.get({ agentID: id });
+    projected = response.data ?? response;
+  } catch (error) { if (!current.projection.error) throw error; }
+  const failure = current.projection.error ?? (!current.projection.ready || !Array.isArray(projected?.permissions)
+    ? new ReviewerCorrectionProjectionError("native-reviewer-correction-projection-unconfirmed") : undefined);
+  if (failure) {
+    // Restore a previously selected alias before removing it. On a failed switch retain
+    // both registration and durable identity, so recovery can retry without new spend.
+    if (info.agent === id) await context.session.switchAgent({ sessionID, agent: original });
+    await current.registration.dispose();
+    active.delete(sessionID);
+    throw failure;
   }
   const selected = activate ? id : original;
   if (info.agent !== selected) await context.session.switchAgent({ sessionID, agent: selected });
@@ -632,9 +671,19 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
   const correctionPermissions = (sessionID: string) => syncReviewerCorrectionPermissions(context, hooks, sessionID);
-  const reconcileCorrectionPermissions = async (sessionID: string) => {
-    for (const child of await hooks.reviewerCorrectionSessions?.(sessionID) ?? []) await correctionPermissions(child);
+  const reconcileCorrectionPermissions = async (sessionID: string, retainParentRecovery = false) => {
+    const deferred: Array<{ child_session_id: string; error: string }> = [];
+    for (const child of await hooks.reviewerCorrectionSessions?.(sessionID) ?? []) {
+      try { await correctionPermissions(child); }
+      catch (error) {
+        if (!retainParentRecovery && !(error instanceof ReviewerCorrectionProjectionError)) throw error;
+        const message = error instanceof Error ? error.message : "native-reviewer-correction-recovery-failed";
+        deferred.push({ child_session_id: child, error: message });
+        console.warn("[sortie-dogs-v010] Reviewer correction deferred; Operator recovery remains available", message);
+      }
+    }
     await correctionPermissions(sessionID);
+    return deferred;
   };
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
@@ -723,15 +772,16 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         options: { codemode: name === "sortie_v010_extend_mission_budget" },
         execute: async (input, execution) => {
           await background.reconcile(String(execution.sessionID ?? ""));
-          let content: string;
+          let content: string, deferred: Array<{ child_session_id: string; error: string }> = [];
           try { content = await definition.execute(legacyToolArgs(input, definition.args), {
             sessionID: String(execution.sessionID ?? ""), ...(typeof execution.id === "string" ? { callID: execution.id } : {}), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}),
             ...(execution.signal instanceof AbortSignal ? { signal: execution.signal } : {}) }); }
-          finally { await reconcileCorrectionPermissions(String(execution.sessionID ?? "")); }
+          finally { deferred = await reconcileCorrectionPermissions(String(execution.sessionID ?? ""), name === "sortie_v010_operator_status"); }
           if (name !== "sortie_v010_operator_status") return { content };
           const status: unknown = JSON.parse(content);
           return { content: record(status) ? serializeOperatorStatus({ ...status,
-            runtime: { ...loadedAdapter, host_version: context.app?.version ?? null } }) : content };
+            runtime: { ...loadedAdapter, host_version: context.app?.version ?? null,
+              ...(deferred.length ? { reviewer_correction_recovery: deferred } : {}) } }) : content };
         } });
     }
   });
@@ -739,7 +789,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await grip.before(event);
     await background.resume(String(event.sessionID ?? ""));
     if (event.tool === "subagent" && record(event.input) && event.input.agent === "dog-reviewer-v010" &&
-        typeof event.input.sessionID === "string" && (!context.agent || !context.storage)) {
+        typeof event.input.sessionID === "string" && (!context.agent?.get || !context.storage)) {
       throw new Error("native-reviewer-correction-permissions-unavailable");
     }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
@@ -856,7 +906,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       parts: legacyUserParts(legacyText, event.prompt.files, String(event.sessionID), String(event.messageID ?? "")) };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
-    await reconcileCorrectionPermissions(String(event.sessionID));
+    await reconcileCorrectionPermissions(String(event.sessionID), true);
     // Native explicit selections and configured role models already won above. Legacy fixed serial
     // routing must not undo them at prompt admission (including same-child resumes).
     if (typeof info.parentID === "string" && selectedChildModels.has(String(event.sessionID))) output.message.model = model;
@@ -890,7 +940,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
     if (reconciliation) (output.system ??= []).push(reconciliation);
-    await reconcileCorrectionPermissions(String(event.sessionID));
+    const deferred = await reconcileCorrectionPermissions(String(event.sessionID), true);
+    if (deferred.length) output.system.push(`Reviewer correction recovery is deferred: ${JSON.stringify(deferred)}. ` +
+      "Its registration and original identity remain available for retry. Continue using Operator recovery controls; do not infer correction success or reset the Mission.");
     if (record(event.tools)) {
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
       const logicalRole = canonicalAgent(V010_RUNTIME_PROFILE, String(event.agent));
@@ -985,7 +1037,7 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
         (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
         hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
           nativeBackground: background, returnReportTransport: "tool-result",
-          reviewerCorrectionPermissions: !!context.agent && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
+          reviewerCorrectionPermissions: !!context.agent?.get && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
         await registerV2Hooks(context, hooks, background, liveState);
         // Recreate exact durable correction profiles at plugin setup, before resumed native Steps
         // resolve their agent/tool snapshots. Storage.scan is part of Plugin 2.0.18's public domain.
@@ -993,7 +1045,14 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
           let after: string | undefined;
           do {
             const page = await context.storage.scan({ prefix: correctionStoragePrefix, ...(after ? { after } : {}) });
-            for (const entry of page.entries) await syncReviewerCorrectionPermissions(context, hooks, entry.key.slice(correctionStoragePrefix.length));
+            for (const entry of page.entries) {
+              try { await syncReviewerCorrectionPermissions(context, hooks, entry.key.slice(correctionStoragePrefix.length)); }
+              catch (error) {
+                // One child's unavailable role or transient restoration failure must not
+                // prevent plugin loading. Retain its identity for the next owning hook.
+                console.warn("[sortie-dogs-v010] Reviewer correction restore deferred", error instanceof Error ? error.message : "unknown");
+              }
+            }
             after = page.next;
           } while (after);
         }
