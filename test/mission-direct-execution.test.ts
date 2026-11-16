@@ -223,7 +223,7 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "scope-registration-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "replan-cwd-order", "scope-registration-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "scope-multi-registration" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -324,9 +324,10 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
     const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
       read: ["check.mjs", ...(mode === "generated-read-output" ? ["emit.mjs", "reports/**"] : []), ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
       write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
-      validation: registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
+      validation: mode === "replan-cwd-order" ? ["node check.mjs", "node check.mjs --second"] : registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
         : [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
-      ...(mode === "external-cwd" || mode === "registration-with-cwd" ? { validation_cwd: { "node check.mjs": mode === "external-cwd" ? externalDirectory! : directory } } : {}) };
+      ...(mode === "replan-cwd-order" ? { validation_cwd: { "node check.mjs": directory, "node check.mjs --second": directory } } :
+        mode === "external-cwd" || mode === "registration-with-cwd" ? { validation_cwd: { "node check.mjs": mode === "external-cwd" ? externalDirectory! : directory } } : {}) };
     const multi = mode.includes("pending") || mode === "recovery-normal-succeeded" || mode === "scope-multi-registration";
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration,
       ...(multi ? [{ ...declaration, title: "Second planned result", objective: "Validate the second planned result",
@@ -339,6 +340,14 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
     const before = await readRun();
     assert.equal(before.units[0]!.directExecution?.actor, actor);
     assert.equal(before.dispatched, 0, "no native Worker Task was dispatched");
+    if (mode === "replan-cwd-order") {
+      const next = { ...declaration, title: "Replan result", objective: "Continue with a corrected objective",
+        validation_cwd: { "node check.mjs --second": directory, "node check.mjs": directory } };
+      const replanned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct objective", units: [next] }, { sessionID: actor }));
+      assert.equal(replanned.status, "direct-unit-running");
+      assert.notEqual(replanned.run_id, before.runID);
+      return;
+    }
     if (cancelledWriterModes.includes(mode)) {
       const callID = "cancelled-question", args = { questions: [] };
       await hooks["tool.execute.before"]!({ tool: "question", sessionID: actor, callID }, { args });
