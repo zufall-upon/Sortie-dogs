@@ -1170,7 +1170,7 @@ test(managedScenario ? "V2 undeclared full runner reuses a native observation in
       await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
     }
     if (managedScenario) await writeFile(join(directory, "fixture.test.mjs"),
-      `import { appendFileSync } from 'node:fs'; import { test } from 'node:test';\ntest('managed', () => appendFileSync('.git/managed-count', 'run\\n'));\n`);
+      `import { appendFileSync } from 'node:fs'; import { test } from 'node:test';\ntest('managed', () => appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'));\n`);
     const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
@@ -1381,7 +1381,7 @@ test(managedScenario ? "V2 undeclared full runner reuses a native observation in
           process.platform === "win32" ? ["-NoProfile", "-Command", String(repeat.input.command)] : ["-c", String(repeat.input.command)], { cwd: directory });
         assert.match(notice.stdout, /^SORTIE_MANAGED_TEST_REUSED original_execution=sha256:[a-f0-9]{64} original_reservation=[a-f0-9-]+\n$/u);
         await after(repeat, notice.stdout, { exit: 0 });
-        assert.equal(await readFile(join(directory, ".git/managed-count"), "utf8"), "run\n");
+        assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\n");
         const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
         assert.equal(unitAfter.validationRegistration!.checks.length, 0, "informal observation is not formal validation");
         const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",

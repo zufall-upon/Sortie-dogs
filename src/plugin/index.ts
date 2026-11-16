@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -508,7 +509,7 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   /** Informal test observation, never an acceptance-criterion proof. */
-  readonly managedTest?: { readonly evidenceKey: string; readonly environment: string; readonly authority: string;
+  readonly managedTest?: { readonly evidenceKey: string; readonly environment: string; readonly repository: string; readonly authority: string;
     readonly reusedFrom?: string };
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
@@ -656,6 +657,56 @@ function settledPassNoticeCommand(joined = false): string {
 /** Recognize literal, unfiltered runner invocations only. Opaque scripts and shell syntax are not controlled. */
 function managedFullTestCommand(command: string): boolean {
   return /^(?:node --test|python(?:3)? -m pytest|pytest|go test \.\/\.\.\.|cargo test --workspace)$/u.test(command);
+}
+
+/** Pin Git inputs as well as project files; never traverse a worktree pointer or unbounded metadata. */
+async function managedTestRepository(projectRoot: string, directory: string): Promise<string | undefined> {
+  let cursor = resolve(directory);
+  const root = resolve(projectRoot);
+  for (;;) {
+    const marker = join(cursor, ".git");
+    let info: Awaited<ReturnType<typeof lstat>> | undefined;
+    try { info = await lstat(marker); }
+    catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    }
+    if (info) {
+      // Linked worktrees and symlinked metadata need their own safe inventory. Until then,
+      // do not substitute a previous result for an actual execution in those layouts.
+      if (!info.isDirectory() || info.isSymbolicLink()) return undefined;
+      let bytes = 0, count = 0;
+      const entries: Array<readonly [string, string, number, number, number]> = [];
+      const visit = async (path: string, name: string): Promise<boolean> => {
+        if (++count > 8192) return false;
+        const before = await lstat(path);
+        if (before.isSymbolicLink()) return false;
+        if (before.isDirectory()) {
+          entries.push([name, "directory", before.mode, before.mtimeMs, before.ctimeMs]);
+          for (const child of (await readdir(path)).sort()) {
+            // This is the live Sortie ledger, not Git source or a user test fixture.
+            if (!name && child === "sortie-dogs") continue;
+            if (!await visit(join(path, child), name ? `${name}/${child}` : child)) return false;
+          }
+          return true;
+        }
+        if (!before.isFile() || (bytes += before.size) > 64 * 1024 * 1024) return false;
+        const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+        try {
+          const opened = await file.stat();
+          if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) return false;
+          const content = await file.readFile(), after = await file.stat();
+          if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) return false;
+          entries.push([name, createHash("sha256").update(content).digest("hex"), opened.mode, opened.mtimeMs, opened.ctimeMs]);
+          return true;
+        } finally { await file.close(); }
+      };
+      return await visit(marker, "").then(ok => ok ? goalFingerprint({ git_root: cursor, entries }) : undefined).catch(() => undefined);
+    }
+    if (cursor === root) return undefined;
+    const parent = dirname(cursor), relativeRoot = relative(root, parent);
+    if (parent === cursor || relativeRoot === ".." || relativeRoot.startsWith(`..${sep}`) || isAbsolute(relativeRoot)) return undefined;
+    cursor = parent;
+  }
 }
 
 function managedTestNoticeCommand(joined: boolean, reference: string, reservation: string): string {
@@ -1883,6 +1934,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     if (!admittedGate || admittedGate !== authorization.gate) return;
     await admittedGate.check(toolInput, { args }, { investigativeShell: true,
       assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
+    const repository = await managedTestRepository(authorization.projectRoot, directory);
+    if (!repository) return;
     const snapshot = await protectedSnapshot(authorization, { directory, command }).catch(() => undefined);
     if (!snapshot?.binding.freshness || sessionAuthorizations.get(toolInput.sessionID) !== authorization ||
         authorization.suspended || authorization.gate !== admittedGate || authorization.expiresAt <= Date.now()) return;
@@ -1891,7 +1944,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const authority = goalFingerprint({ projectRoot: authorization.projectRoot, readScopes: authorization.readScopes,
       writeScopes: authorization.writeScopes, source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
       source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
-      tool: toolInput.tool, environment, callSettings, revision: goal.revision, scope_epoch: goal.scope_epoch });
+      tool: toolInput.tool, environment, repository, callSettings, revision: goal.revision, scope_epoch: goal.scope_epoch });
     const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
       source_snapshot: snapshot.source, candidate: goalFingerprint({ kind: "managed-full-test-v1", source: snapshot.source,
         candidate: snapshot.candidate, authority }), command: [command], environment: validationEnvironment(directory),
@@ -1935,7 +1988,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
         callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
         binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
-        validation: { ledger, request, reservation: reservation.reservation_id }, managedTest: { evidenceKey, environment, authority } });
+        validation: { ledger, request, reservation: reservation.reservation_id }, managedTest: { evidenceKey, environment, repository, authority } });
       return;
     } else {
       // No equivalent owner or trustworthy result: run normally, without manufacturing evidence.
@@ -1950,6 +2003,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         original.managedTest.authority !== authority || original.outcome !== "pass" || original.exitCode !== 0 ||
         original.fresh !== true || !original.immutableRef || !original.validation || !originalTerminal || original.source !== snapshot.source ||
         original.candidate !== snapshot.candidate || current?.source !== snapshot.source || current.candidate !== snapshot.candidate ||
+        await managedTestRepository(authorization.projectRoot, directory) !== repository ||
         goalFingerprint(process.env) !== environment || goalFingerprint(args) !== callSettings || now.goal_id !== goal.goal_id ||
         now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
         sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
@@ -1961,7 +2015,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
       binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker", reusedEvidence: [],
-      managedTest: { evidenceKey, environment, authority, reusedFrom: original.immutableRef } });
+      managedTest: { evidenceKey, environment, repository, authority, reusedFrom: original.immutableRef } });
   }
 
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
@@ -2269,6 +2323,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           : refreshed.source === execution.source);
     const managedFresh = execution.managedTest === undefined || refreshed !== undefined &&
       refreshed.source === execution.source && refreshed.candidate === execution.candidate &&
+      await managedTestRepository(execution.projectRoot, execution.directory) === execution.managedTest.repository &&
       goalFingerprint(process.env) === execution.managedTest.environment;
     if (execution.validation !== undefined && execution.managedTest !== undefined) {
       const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&

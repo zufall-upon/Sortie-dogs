@@ -5153,12 +5153,14 @@ for (const scenario of ["passed", "failed", "stale", "environment", "owner-cance
     process.env.SORTIE_MANAGED_TEST_FIXTURE = "original";
     try {
       const command = "node --test", formal = "node -e 1";
+      await mkdir(join(directory, ".git", "sortie-dogs", "guard-fixture"), { recursive: true });
+      await writeFile(join(directory, ".git", "HEAD"), "ref: refs/heads/fixture\n");
       await writeFile(join(directory, "candidate.test.mjs"), `import { test } from 'node:test';
 import { appendFileSync, existsSync } from 'node:fs';
-test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
+test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check-count', 'run\\n');
   process.stdout.write('owner-started\\n'); const deadline = Date.now() + 10000;
-  while (!existsSync('.git/release') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-  if (!existsSync('.git/release') || ${scenario === "failed"}) throw new Error('fixture failure');
+  while (!existsSync('.git/sortie-dogs/guard-fixture/release') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  if (!existsSync('.git/sortie-dogs/guard-fixture/release') || ${scenario === "failed"}) throw new Error('fixture failure');
 });\n`);
       const ids = ["first", "second"];
       for (const id of ids) {
@@ -5212,7 +5214,7 @@ test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
       const owner = spawn(process.execPath, ["--test"], { cwd: directory, env: childEnvironment });
       const ownerExit = new Promise<number | null>((resolve, reject) => { owner.once("error", reject); owner.once("close", resolve); });
       const deadline = Date.now() + 5000;
-      while (!await stat(join(directory, ".git", "check-count")).catch(() => undefined)) {
+      while (!await stat(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count")).catch(() => undefined)) {
         if (owner.exitCode !== null || Date.now() >= deadline) throw new Error("native owner did not start the fixture");
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -5236,7 +5238,7 @@ test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
       }
       if (scenario === "stale") await writeFile(join(directory, "changed.txt"), "changed during run\n");
       if (scenario === "environment") process.env.SORTIE_MANAGED_TEST_FIXTURE = "changed";
-      await writeFile(join(directory, ".git", "release"), "release");
+      await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
       const exit = await ownerExit;
       assert.equal(exit, scenario === "failed" ? 1 : 0);
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "first-child", callID: "owner", args: ownerArgs.args },
@@ -5260,6 +5262,12 @@ test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
         assert.equal(reused.stdout.replace("REUSED", "JOINED"), notice.stdout);
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "reuse", args: repeat.args },
           { output: reused.stdout, metadata: { exit: 0 } });
+        await writeFile(join(directory, ".git", "HEAD"), "ref: refs/heads/different\n");
+        const changedGit = { args: { command } };
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "changed-git" }, changedGit);
+        assert.equal(changedGit.args.command, command, "a changed Git candidate cannot reuse the original run");
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "changed-git", args: changedGit.args },
+          { status: "cancelled", output: "cancelled", metadata: {} });
         await writeFile(join(directory, "changed.txt"), "changed after run\n");
         const changed = { args: { command } };
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "changed" }, changed);
@@ -5277,7 +5285,7 @@ test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "opaque", args: opaque.args },
           { status: "cancelled", output: "not started", metadata: {} });
       }
-      assert.equal(await readFile(join(directory, ".git", "check-count"), "utf8"), "run\n");
+      assert.equal(await readFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count"), "utf8"), "run\n");
       assert.ok(permissionRequests.includes("second-child"));
       const ledger = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
         `${createHash("sha256").update("root").digest("hex")}.json`), "utf8"));
@@ -5295,6 +5303,54 @@ test('owner', async () => { appendFileSync('.git/check-count', 'run\\n');
       if (oldEnvironment === undefined) delete process.env.SORTIE_MANAGED_TEST_FIXTURE;
       else process.env.SORTIE_MANAGED_TEST_FIXTURE = oldEnvironment;
     }
+  });
+});
+
+test("undeclared full runner leaves a genuine linked Git worktree executable without assuming its metadata", async () => {
+  await withProject("managed-full-linked-worktree", async directory => {
+    await execFileAsync("git", ["init", "-q", directory]);
+    await execFileAsync("git", ["-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+      "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "base"]);
+    const linked = join(directory, "linked");
+    await execFileAsync("git", ["-C", directory, "worktree", "add", "--detach", "-q", linked, "HEAD"]);
+    const marker = await readFile(join(linked, ".git"), "utf8");
+    const formal = "node -e 1", taskID = "linked-unit", child = "linked-child", manifest = "linked-unit.json";
+    const handoff = join(linked, "handoff.linked-unit.json");
+    await writeFile(join(linked, manifest), JSON.stringify({ ...operationManifest([]), task_id: taskID, read: [linked], validation: [formal] }));
+    await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(linked, manifest), id: taskID }));
+    const hooks = await SortieDogsPlugin({ directory: linked, runtimeBridge: { profile: STABLE_RUNTIME_PROFILE,
+      assetVersion: RUNTIME_ASSET_VERSION, allowsInvestigativeShell: async () => true,
+      ownsValidationRegistration: async () => true, reviewerCorrectionValidationMembers: async () => undefined },
+      authorizeValidationJoin: async () => { throw new Error("unsupported worktree must not join"); }, client: { session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+          ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }), messages: async () => ({ data: [] }),
+      } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text: "validate the linked worktree" }],
+    });
+    const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${linked}`, `handoff_path: ${handoff}`,
+      `source_manifest: [${linked}]`, `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+      `validation: { level: targeted, command: ${formal}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+      "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+      "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID }, { args: { subagent_type: "dog-worker", prompt } });
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory: linked } } } });
+    await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+    });
+    await inspectHandoffWithRead(hooks, handoff, child);
+    assert.equal((await executeBindWriteGate(hooks, linked, child, manifest)).status, "bound");
+    const testCall = { args: { command: "node --test" } };
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "linked-test" }, testCall);
+    assert.equal(testCall.args.command, "node --test");
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "linked-test", args: testCall.args },
+      { status: "cancelled", output: "not started", metadata: {} });
+    assert.equal(await readFile(join(linked, ".git"), "utf8"), marker);
+    assert.ok((await execFileAsync("git", ["-C", linked, "rev-parse", "--verify", "HEAD"])).stdout.trim());
   });
 });
 
