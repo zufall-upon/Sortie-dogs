@@ -148,6 +148,9 @@ test("ordinary direct Mission schedules test debt before validation and retains 
   await writeFile(outsideTest, "assert.equal(1, 1);\nassert.equal(1, 1);\n");
   await mkdir(join(root, "test", "node_modules"));
   await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), "assert.equal(2, 2);\nassert.equal(2, 2);\n");
+  await mkdir(join(root, "test", ".opencode"));
+  await writeFile(join(root, "test", ".opencode", "private.test.mjs"), "assert.equal(3, 3);\nassert.equal(3, 3);\n");
+  await writeFile(join(root, "test", ".state.test.mjs"), "assert.equal(4, 4);\nassert.equal(4, 4);\n");
   const foreign = join(root, "other-task.txt");
   await writeFile(foreign, "baseline\n");
   for (const args of [["init", "--quiet"], ["config", "user.name", "test"], ["config", "user.email", "test@example.invalid"],
@@ -176,7 +179,7 @@ test("ordinary direct Mission schedules test debt before validation and retains 
     read: ["value.mjs", "check.mjs"], write: ["value.mjs", "test/**"], validation: [command] }] });
   assert.equal(started.status, "direct-unit-running");
   assert.deepEqual(started.test_debt_audit.signals.map((signal: { path: string }) => signal.path), ["test/value.test.mjs"],
-    "the glob discovers the in-scope test without inspecting the dependency tree");
+    "the glob discovers the in-scope test without inspecting dependency or hidden entries");
   assert.deepEqual(started.test_debt_audit.signals[0].repeated_assertions, [[3, 4], [6, 7]]);
   assert.match(started.test_debt_audit.instruction, /similar lines or size alone do not establish redundancy/);
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
@@ -268,12 +271,20 @@ test("a newly edited test can schedule audit once without treating repeated asse
   await writeFile(join(root, "test", "nested", "nested.test.mjs"), text);
   await mkdir(join(root, "test", "node_modules"));
   await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), text);
+  const hiddenDirectory = join(root, "test", ".opencode"), hiddenTest = join(hiddenDirectory, "private.test.mjs");
+  await mkdir(hiddenDirectory);
+  await writeFile(hiddenTest, text);
+  await writeFile(join(root, "test", ".state.test.mjs"), text);
   await symlink(other, join(root, "test", "link"), process.platform === "win32" ? "junction" : "dir");
   await symlink(join(root, ".."), join(root, "test", "linked-outside"), process.platform === "win32" ? "junction" : "dir");
   const globbed = await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] });
   assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs"]);
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/link/**"], validation: [] }), [],
     "a scope starting through a link must not traverse even an in-project target");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/.opencode/**"], validation: [] }), [],
+    "an automatic inventory must not start inside a hidden directory");
+  assert.deepEqual((await inspectTestDebt(root, { read: [hiddenTest], write: [], validation: [] })).map(signal => signal.path),
+    ["test/.opencode/private.test.mjs"], "an explicit file input retains the pre-existing opt-in behavior");
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/*.test.mjs"], validation: [] }), [],
     "unsupported shell patterns do not become wider host write scopes");
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: [], validation: ["npm test"] }), [],

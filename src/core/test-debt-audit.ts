@@ -58,7 +58,7 @@ export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "re
       if (/[*?{}\[\]]/u.test(scope.path)) return;
       const absolute = resolve(base, scope.path);
       const parts = relative(root, absolute).split(sep);
-      if (!inside(root, absolute) || parts.some(part => ignoredTrees.has(part.toLowerCase()) || part.toLowerCase().startsWith(".sortie-"))) return;
+      if (!inside(root, absolute) || parts.some(part => part.startsWith(".") || ignoredTrees.has(part.toLowerCase()))) return;
       if (!directories.includes(absolute)) directories.push(absolute);
     } catch { /* Invalid declarations are not inventory paths. */ }
   };
@@ -97,7 +97,8 @@ export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "re
       for await (const entry of await opendir(directory)) {
         entriesLeft--;
         const name = entry.name, lower = name.toLowerCase();
-        if (!entry.isSymbolicLink() && !ignoredTrees.has(lower) && !lower.startsWith(".sortie-")) {
+        // Hidden entries are opt-in explicit inputs, never automatic inventory targets.
+        if (!entry.isSymbolicLink() && !name.startsWith(".") && !ignoredTrees.has(lower)) {
           names.push({ name, directory: entry.isDirectory(), file: entry.isFile() });
         }
         if (!entriesLeft) break;
