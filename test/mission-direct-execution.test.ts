@@ -223,9 +223,9 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "scope-registration-legacy", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "scope-registration-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
-  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
+  actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "scope-multi-registration" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
   const retry = mode.startsWith("retry-");
   const incomplete = mode === "blocked" || mode === "needs-decision" || retry;
@@ -327,7 +327,7 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       validation: registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
         : [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
       ...(mode === "external-cwd" || mode === "registration-with-cwd" ? { validation_cwd: { "node check.mjs": mode === "external-cwd" ? externalDirectory! : directory } } : {}) };
-    const multi = mode.includes("pending") || mode === "recovery-normal-succeeded";
+    const multi = mode.includes("pending") || mode === "recovery-normal-succeeded" || mode === "scope-multi-registration";
     const planned = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", units: [declaration,
       ...(multi ? [{ ...declaration, title: "Second planned result", objective: "Validate the second planned result",
         validation: ["node check.mjs --second"] }] : [])] }, { sessionID: actor }));
@@ -421,6 +421,32 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: author, callID, args }, { output: exit ? "FAIL" : "PASS", metadata: { exit, status: "completed" } });
       return exit;
     };
+    if (mode === "scope-multi-registration") {
+      await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: "unit-1", paths: ["first-extra.txt"], reason: "First output" }, { sessionID: actor });
+      await write("fixed\n");
+      assert.equal(await check(), 0);
+      await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor });
+      assert.equal((await readRun()).units[0]!.status, "succeeded");
+      assert.equal(JSON.parse(await hooks.tool!.sortie_v010_start_direct_unit.execute({}, { sessionID: actor })).status, "direct-unit-running");
+      await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: "unit-2", paths: ["second-extra.txt"], reason: "Second output" }, { sessionID: actor });
+      const path = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root");
+      const saved = JSON.parse(await readFile(path, "utf8"));
+      for (const unit of saved.units) delete unit.initialWriteScope; // Saved by the prior runtime.
+      await writeFile(path, JSON.stringify(saved));
+      hooks = await create();
+      const second = { ...declaration, title: "Second planned result", objective: "Validate the second planned result", validation: ["node check.mjs --second-new"] };
+      const units = [{ ...declaration, write: [...declaration.write, "first-extra.txt"] },
+        { ...second, write: [...second.write, "second-extra.txt"] }];
+      const restored = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct second check", units }, { sessionID: actor }));
+      assert.equal(restored.status, "direct-unit-registration-corrected");
+      const state = await readRun();
+      assert.deepEqual(state.units.map(item => item.initialWriteScope), [declaration.write, declaration.write]);
+      assert.equal(state.runID, before.runID);
+      assert.equal(await check(directory, "node check.mjs --second-new"), 0);
+      await hooks.tool!.sortie_v010_finish_direct_unit.execute({}, { sessionID: actor });
+      assert.equal((await readRun()).units[1]!.status, "succeeded");
+      return;
+    }
     if (mode === "generated-read-output") {
       await write("fixed\n");
       const missionID = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id;

@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { OperatorMissionRuntime, missionPlan } from "../dist/core/operator-mission.js";
-import { OperatorRuntime } from "../dist/core/operator-runtime.js";
+import { OperatorRuntime, recoverLegacyRegistrationScopes } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+
+test("legacy multiple expanded units recover only their frozen plan identity", () => {
+  const first = { id: "unit-1", title: "first", objective: "first", read: [], write: ["first"], validation: ["check1"], acceptance_indices: [0] };
+  const second = { id: "unit-2", title: "second", objective: "second", read: [], write: ["second"], validation: ["check2"], acceptance_indices: [0] };
+  const original = { goal_declaration: { criteria: [] }, units: [first, second] };
+  const planHash = createHash("sha256").update(JSON.stringify(original)).digest("hex");
+  const expanded1 = { ...first, write: ["first", "first-extra"] }, expanded2 = { ...second, write: ["second", "second-extra"] };
+  const state = { planHash, units: [{ unit: expanded1 }, { unit: expanded2 }] } as any;
+  const proposal = { ...original, units: [expanded1, { ...expanded2, validation: ["check2-new"] }] } as any;
+  assert.deepEqual([...recoverLegacyRegistrationScopes(state, proposal, "unit-2")!], [["unit-1", ["first"]], ["unit-2", ["second"]]]);
+  assert.equal(recoverLegacyRegistrationScopes(state, { ...proposal, units: [expanded1, { ...proposal.units[1], objective: "unauthorized" }] }, "unit-2"), undefined);
+  assert.equal(recoverLegacyRegistrationScopes(state, { ...proposal, units: [expanded1, { ...proposal.units[1], write: [...expanded2.write, "unapproved"] }] }, "unit-2"), undefined);
+});
 
 test("saved V2 Worker calls retain exact task authority when their display label is shortened", async () => {
   const area = resolve("_testenv");
