@@ -45,7 +45,7 @@ test("failed implementation then read-only validation and test-only replan keep 
     await chat("coordinator", started.task.prompt);
     const currentRun = () => new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
     const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
-    for (const [index, write] of [["source.js"], [], ["test.js"]].entries()) {
+    for (const [index, write] of [["source.js"], [], ["test.js", "test/**"]].entries()) {
       const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: `Unit ${index}`, objective: "Finish the source candidate",
         read: index === 0 ? ["check.mjs", "test/existing.test.mjs"] : ["check.mjs"], write, validation: [`node check.mjs ${index}`] }], ...(index ? { reason: "Correct the previous unit and validate" } : {}) }, { sessionID: "coordinator" }));
       const worker = `worker-${index}`, callID = `worker-call-${index}`;
@@ -59,6 +59,12 @@ test("failed implementation then read-only validation and test-only replan keep 
         const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
         assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/existing.test.mjs");
         assert.match(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.instruction, /do not modify unowned work/);
+      }
+      if (index === 2) {
+        const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
+        assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/existing.test.mjs",
+          "a later planning milestone can re-evaluate a previously scheduled file");
+        assert.equal((await missions.required("root")).testDebtSignals?.filter(signal => signal.path === "test/existing.test.mjs").length, 2);
       }
       await hooks["tool.execute.before"]!({ tool: "read", sessionID: worker, callID: `handoff-${index}` }, { args: { filePath: unit.handoffPath } });
       await hooks["tool.execute.after"]!({ tool: "read", sessionID: worker, callID: `handoff-${index}`, args: { filePath: unit.handoffPath } }, { output: "inspected" });
@@ -79,7 +85,7 @@ test("failed implementation then read-only validation and test-only replan keep 
     const cold = await create();
     await cold.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], traces: ["Source corrected; checks passed"] }, { sessionID: "coordinator" });
     const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
-    assert.deepEqual(mission.reviewScope?.write, ["source.js", "test.js"]);
+    assert.deepEqual(mission.reviewScope?.write, ["source.js", "test.js", "test/**"]);
     assert.match(mission.review!.task!.prompt, /changed: source\.js/);
     assert.match(mission.review!.task!.prompt, /return nilValue/);
     assert.match(mission.review!.task!.prompt, /changed: test\.js/);
@@ -124,7 +130,8 @@ test("planning schedules an existing test signal for its writable unit, not an e
       await chat("coordinator", started.task.prompt);
       const writerScope = scope === "file" ? "test/value.test.mjs" : scope === "directory" ? "test/**" : testFile;
       await hooks.tool!.sortie_v010_plan_units.execute({ units: [
-        { title: "Implement calculation", objective: "Implement source only", read: ["test/value.test.mjs"], write: ["source.mjs"], validation: ["node test/value.test.mjs --source"] },
+        { title: "Implement calculation", objective: "Implement source only", read: scope === "directory" ? [] : ["test/value.test.mjs"],
+          write: ["source.mjs"], validation: [scope === "directory" ? "node --check source.mjs --source" : "node test/value.test.mjs --source"] },
         { title: "Improve tests", objective: "Improve tests", read: ["source.mjs"], write: [writerScope], validation: ["node --check source.mjs"] },
       ] }, { sessionID: "coordinator" });
       const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");

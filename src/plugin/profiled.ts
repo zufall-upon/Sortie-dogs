@@ -3250,14 +3250,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
       for (const history of histories) mission = await missions.contextSnapshot(mission, history.id, history.messages,
         history.id === actor ? handoffNotes : undefined);
-      const knownAudits = new Set((mission.testDebtSignals ?? []).map(item => item.path));
+      // A retry of the same prepared run is idempotent. A later planning milestone is
+      // a new opportunity to inspect unfinished debt; history is not proof of cleanup.
+      const continuingAuditRun = previous && same && !sameProcessDefect && !["completed", "cancelled"].includes(previous.phase)
+        ? previous.runID : undefined;
+      const knownAudits = new Set((mission.testDebtSignals ?? []).filter(item => item.run_id === continuingAuditRun).map(item => item.path));
       const planningCandidates = mission.kind === "operation" ? [] : (await Promise.all(plan.units.map(async unit =>
         unit.write.length ? (await inspectTestDebt(input.directory, unit).catch(() => [])).filter(signal => !knownAudits.has(signal.path))
           .map(signal => ({ ...signal, unit_id: unit.id, trigger: "planning-milestone" as const })) : []))).flat();
       // The first unit to read a test is not necessarily the unit that can edit it.
       // Prefer an existing write scope using the same path semantics as the gate;
       // a scheduling signal is still neither write authority nor proof of cleanup.
-      const availableAuditSlots = Math.max(0, 64 - (mission.testDebtSignals?.length ?? 0));
+      const availableAuditSlots = Math.max(0, 64 - knownAudits.size);
       const projectPaths = planningCandidates.length && availableAuditSlots ? await createProjectPaths(input.directory).catch(() => undefined) : undefined;
       const planningGates = projectPaths ? await Promise.all(plan.units.map(async unit => ({ unit,
         gate: await createWriteGate(projectPaths, { version: "0.1.0", task_id: unit.id, read: unit.read,
@@ -3298,12 +3302,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         item.reviewScope = missionReviewScope(item.reviewScope,
           ...(previous && item.runID === previous.runID ? [previous] : []), state);
         if (item.runID !== state.runID) item.plans++;
-        const seen = new Set((item.testDebtSignals ?? []).map(signal => signal.path));
+        const seen = new Set((item.testDebtSignals ?? []).filter(signal => signal.run_id === state.runID).map(signal => signal.path));
+        const slots = Math.max(0, 64 - seen.size);
         const fresh = planningSignals.filter(signal => {
           if (seen.has(signal.path)) return false;
           seen.add(signal.path); return true;
-        }).slice(0, Math.max(0, 64 - (item.testDebtSignals?.length ?? 0))).map(signal => ({ ...signal, run_id: state.runID }));
-        if (fresh.length) item.testDebtSignals = [...(item.testDebtSignals ?? []), ...fresh];
+        }).slice(0, slots).map(signal => ({ ...signal, run_id: state.runID }));
+        if (fresh.length) item.testDebtSignals = [...(item.testDebtSignals ?? []), ...fresh].slice(-64);
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
         if (operation) { item.kind = "operation"; item.execution = operation; }
@@ -4878,13 +4883,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               let added: MissionTestDebtSignal[] = [];
               if (signals.length) await missions.update(root, state => {
                 if (state.runID !== run.runID) return;
-                const seen = new Set((state.testDebtSignals ?? []).map(item => item.path));
+                const seen = new Set((state.testDebtSignals ?? []).filter(item => item.run_id === run.runID).map(item => item.path));
+                const slots = Math.max(0, 64 - seen.size);
                 added = signals.filter(signal => {
                   if (seen.has(signal.path)) return false;
                   seen.add(signal.path); return true;
-                }).slice(0, Math.max(0, 64 - (state.testDebtSignals?.length ?? 0)))
+                }).slice(0, slots)
                   .map(signal => ({ ...signal, run_id: run.runID, unit_id: unit.unit.id, trigger: "observed-change" }));
-                if (added.length) state.testDebtSignals = [...(state.testDebtSignals ?? []), ...added];
+                if (added.length) state.testDebtSignals = [...(state.testDebtSignals ?? []), ...added].slice(-64);
               });
               if (added.length) output.output += `\n\nSORTIE_TEST_DEBT_AUDIT ${JSON.stringify({ signals: added,
                 measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } })}\n${TEST_DEBT_AUDIT_INSTRUCTION}`;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -20,6 +20,7 @@ import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 import { inspectTestDebt } from "../dist/core/test-debt-audit.js";
+import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -140,14 +141,19 @@ test("ordinary direct Mission schedules test debt before validation and retains 
   await mkdir(join(root, "test"));
   const source = join(root, "value.mjs"), check = join(root, "test", "value.test.mjs");
   const originalSource = "export const double = n => n * 2;\n";
-  const originalTest = 'import assert from "node:assert/strict";\nimport { double } from "../value.mjs";\nassert.strictEqual(double(0), 0);\nconst value = double(21);\nassert.strictEqual(value, 42);\nassert.strictEqual(value, 42);\n';
+  const originalTest = 'import assert from "node:assert/strict";\nimport { double } from "../value.mjs";\nassert.strictEqual(double(0), 0);\nassert.strictEqual(double(0), 0);\nconst value = double(21);\nassert.strictEqual(value, 42);\nassert.strictEqual(value, 42);\n';
   await writeFile(source, originalSource); await writeFile(check, originalTest);
+  await writeFile(join(root, "check.mjs"), 'import "./test/value.test.mjs";\n');
+  const outsideTest = join(root, "outside.test.mjs");
+  await writeFile(outsideTest, "assert.equal(1, 1);\nassert.equal(1, 1);\n");
+  await mkdir(join(root, "test", "node_modules"));
+  await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), "assert.equal(2, 2);\nassert.equal(2, 2);\n");
   const foreign = join(root, "other-task.txt");
   await writeFile(foreign, "baseline\n");
   for (const args of [["init", "--quiet"], ["config", "user.name", "test"], ["config", "user.email", "test@example.invalid"],
     ["add", "--all"], ["commit", "--quiet", "-m", "base"]]) await exec("git", args, { cwd: root });
   await writeFile(foreign, "pre-existing other task change\n");
-  const command = "node test/value.test.mjs";
+  const command = "node check.mjs";
   const probe = async (good: string, broken: string) => {
     await exec(process.execPath, ["test/value.test.mjs"], { cwd: root });
     await writeFile(source, broken);
@@ -165,16 +171,20 @@ test("ordinary direct Mission schedules test debt before validation and retains 
     message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
     parts: [{ type: "text", text: "Update the calculation while retaining its behavior." }],
   });
-  await tool("start_mission", { requirements: ["Update the calculation while retaining its behavior"] });
+  await tool("start_mission", { requirements: ["Update the calculation while retaining its behavior"], prohibited_write: ["outside.test.mjs"] });
   const started = await tool("plan_units", { executor: "self", units: [{ title: "Update calculation", objective: "Preserve the calculation",
-    read: ["value.mjs", "test/value.test.mjs"], write: ["value.mjs", "test/value.test.mjs"], validation: [command] }] });
+    read: ["value.mjs", "check.mjs"], write: ["value.mjs", "test/**"], validation: [command] }] });
   assert.equal(started.status, "direct-unit-running");
-  assert.equal(started.test_debt_audit.signals[0].path, "test/value.test.mjs");
-  assert.deepEqual(started.test_debt_audit.signals[0].repeated_assertions, [[5, 6]]);
+  assert.deepEqual(started.test_debt_audit.signals.map((signal: { path: string }) => signal.path), ["test/value.test.mjs"],
+    "the glob discovers the in-scope test without inspecting the dependency tree");
+  assert.deepEqual(started.test_debt_audit.signals[0].repeated_assertions, [[3, 4], [6, 7]]);
   assert.match(started.test_debt_audit.instruction, /similar lines or size alone do not establish redundancy/);
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
   const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
   assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/value.test.mjs");
+  const gate = await createWriteGate(await createProjectPaths(root), JSON.parse(await readFile(run.units[0]!.manifestPath, "utf8")));
+  await gate.checkPath(check);
+  await assert.rejects(gate.checkPath(outsideTest), (error: { reason?: string }) => error.reason === "manifest-scope");
   const edit = async (path: string, oldString: string, newString: string, callID: string) => {
     const args = { filePath: path, oldString, newString }, request = { tool: "edit", sessionID: "root", callID };
     await hooks["tool.execute.before"]!(request, { args });
@@ -185,15 +195,20 @@ test("ordinary direct Mission schedules test debt before validation and retains 
   };
   const updatedSource = "export const double = n => n + n;\n";
   await edit(source, originalSource, updatedSource, "source-edit");
+  await assert.rejects(hooks["tool.execute.before"]!({ tool: "edit", sessionID: "root", callID: "outside-edit" },
+    { args: { filePath: outsideTest, oldString: "1", newString: "3" } }), /mission-explicit-write-prohibition/);
+  assert.equal(await readFile(outsideTest, "utf8"), "assert.equal(1, 1);\nassert.equal(1, 1);\n");
   // Simulate the existing author applying a source-backed consolidation; the host does not edit files.
   const response = await edit(check, "assert.strictEqual(value, 42);\nassert.strictEqual(value, 42);", "assert.strictEqual(value, 42);", "audit-edit");
   assert.doesNotMatch(response, /SORTIE_TEST_DEBT_AUDIT/, "the audit's own change must not schedule itself again");
+  assert.deepEqual((await inspectTestDebt(root, { read: [check], write: [], validation: [] }))[0]!.repeated_assertions, [[3, 4]],
+    "suppression applies even when the edited file still has a scheduling signal");
   assert.match(await readFile(check, "utf8"), /assert\.strictEqual\(double\(0\), 0\)/);
   assert.equal(await readFile(foreign, "utf8"), "pre-existing other task change\n");
   await probe(updatedSource, "export const double = n => n === 21 ? 41 : n + n;\n");
   const input = { tool: "shell", sessionID: "root", callID: "validation" }, args = { command, workdir: root }, start = Date.now();
   await hooks["tool.execute.before"]!(input, { args });
-  const checked = await exec(process.execPath, ["test/value.test.mjs"], { cwd: root });
+  const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
   await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
   history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: input.callID,
     state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
@@ -249,6 +264,28 @@ test("a newly edited test can schedule audit once without treating repeated asse
   assert.equal((await inspectTestDebt(root, unit))[0]!.path, "other/test/new.test.mjs");
   assert.equal((await inspectTestDebt(root, { ...unit, validation_cwd: { "node test/new.test.mjs": root } }))[0]!.path,
     "test/new.test.mjs", "each inspection uses the current registered cwd, not an earlier setting");
+  await mkdir(join(root, "test", "nested"));
+  await writeFile(join(root, "test", "nested", "nested.test.mjs"), text);
+  await mkdir(join(root, "test", "node_modules"));
+  await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), text);
+  await symlink(other, join(root, "test", "link"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(join(root, ".."), join(root, "test", "linked-outside"), process.platform === "win32" ? "junction" : "dir");
+  const globbed = await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] });
+  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs"]);
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/link/**"], validation: [] }), [],
+    "a scope starting through a link must not traverse even an in-project target");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/*.test.mjs"], validation: [] }), [],
+    "unsupported shell patterns do not become wider host write scopes");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: [], validation: ["npm test"] }), [],
+    "a script name alone does not implicitly expand the test directory");
+  const scoped = await inspectTestDebt(root, { read: [], write: [join(root, "other", "test", "**")], validation: [] });
+  assert.deepEqual(scoped.map(signal => signal.path), ["other/test/new.test.mjs"]);
+  const globCwd = { read: [], write: [], validation: ["node test/**"], validation_cwd: { "node test/**": other } };
+  assert.deepEqual((await inspectTestDebt(root, globCwd)).map(signal => signal.path), ["other/test/new.test.mjs"]);
+  assert.deepEqual((await inspectTestDebt(root, { ...globCwd, validation_cwd: { "node test/**": root } })).map(signal => signal.path).sort(),
+    globbed.map(signal => signal.path).sort(), "glob inventory uses the current validation cwd");
+  for (let index = 0; index < 20; index++) await writeFile(join(root, "test", `bounded-${index}.test.mjs`), text);
+  assert.ok((await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] })).length <= 16);
 }));
 
 test("Worker acceptance observations use each saved admission and cwd, including historical units", async () => fixture(async directory => {
