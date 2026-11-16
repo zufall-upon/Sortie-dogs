@@ -142,6 +142,7 @@ import { reviewerCorrectionValidationFresh } from "./mission-review.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
 import { operationInputSnapshot, protectedDockerSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
+import { managedTestCommand, type ManagedTestCommand } from "./managed-test-command.js";
 import { isDockerContainerID, isDockerWorkspacePath, type DockerWorkspaceSnapshot } from "./docker-validation.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
@@ -508,7 +509,12 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   /** Informal test observation, never an acceptance-criterion proof. */
-  readonly managedTest?: { readonly environment: string; readonly equivalence: "unverified-external-inputs" };
+  readonly managedTest?: { readonly environment: string; readonly equivalence: "unverified-external-inputs";
+    readonly scope: "full" | "focused"; readonly runner: string; readonly identity?: string };
+  /** Classification captured for the command that actually started, not reinterpreted after script changes. */
+  readonly testClassification?: ManagedTestCommand;
+  readonly goalIdentity?: { readonly id: string; readonly revision: number; readonly scopeEpoch: number };
+  readonly focusedRetries?: readonly string[];
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
@@ -652,9 +658,26 @@ function settledPassNoticeCommand(joined = false): string {
   return `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script}'`;
 }
 
-/** Recognize literal, unfiltered runner invocations only. Opaque scripts and shell syntax are not controlled. */
-function managedFullTestCommand(command: string): boolean {
-  return /^(?:node --test|python(?:3)? -m pytest|pytest|go test \.\/\.\.\.|cargo test --workspace)$/u.test(command);
+/** Only turn an actual Node failure location into a runnable, project-local focused command. */
+async function nodeFailureRetries(output: unknown, directory: string): Promise<readonly string[]> {
+  if (typeof output !== "string" || output.length > 2_000_000) return [];
+  const candidates = [
+    ...output.matchAll(/^\s*location:\s*['"]([^'"\r\n]+):\d+:\d+['"]\s*$/gmu),
+    ...output.matchAll(/^not ok \d+ - ([^\r\n]+\.test\.(?:[cm]?js|ts))\s*$/gmu),
+  ];
+  const retries = new Set<string>();
+  for (const match of candidates) {
+    const path = resolve(directory, match[1]!);
+    const local = relative(directory, path).replaceAll("\\", "/");
+    if (!/^[\w@./-]+\.test\.(?:[cm]?js|ts)$/u.test(local) || local.startsWith("../")) continue;
+    try {
+      const resolved = await realpath(path), relativeReal = relative(await realpath(directory), resolved);
+      if (relativeReal === ".." || relativeReal.startsWith(`..${sep}`) || isAbsolute(relativeReal) || !(await stat(resolved)).isFile()) continue;
+      retries.add(`node --test ${local}`);
+      if (retries.size > 100) return [];
+    } catch { /* A diagnostic location is not necessarily an accessible test file. */ }
+  }
+  return [...retries];
 }
 
 function proposeExperienceRoute(requestJson: string): string {
@@ -1845,23 +1868,43 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     scheduledGoalRecoveries.set(sessionID, operation);
   }
 
-  async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
-    authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
-    // Observe only the ordinary Mission shell. Leave unknown programs, scripts,
-    // shell compositions, parallel lanes and unbound workers alone.
-    if (!["bash", "shell"].includes(toolInput.tool) || !managedFullTestCommand(command) ||
-        activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
-        activeSessions.get(toolInput.sessionID)?.released || activeSessionStatus(toolInput.sessionID) !== "active" ||
-        authorization.expiresAt <= Date.now() ||
-        await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) !== true ||
-        Object.keys(args).some(key => !["command", "workdir", "timeout", "description"].includes(key))) return;
-    // A narrow Task read declaration cannot even bind the project observation.
+  async function classifyAuthorizedTest(authorization: SessionAuthorization, directory: string,
+    command: string): Promise<ManagedTestCommand | undefined> {
     const coversDirectory = authorization.readScopes.some(scope => {
       const path = relative(scope, directory);
       return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
     });
     const localDirectory = relative(authorization.projectRoot, directory);
-    if (!coversDirectory || localDirectory === ".." || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) return;
+    if (!coversDirectory || localDirectory === ".." || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) return undefined;
+    if (/^(?:npm|pnpm|yarn)\s/u.test(command)) {
+      // Do not read a package through a directory symlink outside the admitted project/read scopes.
+      const actual = await realpath(directory).catch(() => undefined);
+      const project = await realpath(authorization.projectRoot).catch(() => undefined);
+      const scopes = await Promise.all(authorization.readScopes.map(scope => realpath(scope).catch(() => undefined)));
+      const contains = (parent: string, child: string) => {
+        const path = relative(parent, child);
+        return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+      };
+      if (!actual || !project || !contains(project, actual) || !scopes.some(scope => scope && contains(scope, actual))) return undefined;
+    }
+    return managedTestCommand(command, directory);
+  }
+
+  async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
+    authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
+    // Only ordinary Mission shells with a live, project-wide read binding are managed.
+    if (!["bash", "shell"].includes(toolInput.tool) ||
+        activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
+        activeSessions.get(toolInput.sessionID)?.released || activeSessionStatus(toolInput.sessionID) !== "active" ||
+        authorization.expiresAt <= Date.now() ||
+        await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) !== true ||
+        Object.keys(args).some(key => !["command", "workdir", "timeout", "description"].includes(key))) return;
+    const classification = await classifyAuthorizedTest(authorization, directory, command);
+    if (!classification) return;
+    if (classification.scope === "unknown") {
+      appLogInfo("managed-test.unresolved", toolInput.sessionID, { reason: classification.reason });
+      return;
+    }
     const ledger = await goalLedger(root), initial = await ledger.readGoal(), goal = initial.state;
     if (goal.goal_id === null || goal.phase !== "active" ||
         !goal.outstanding_reservations.some(item => item.unit_id === authorization.taskID && item.session_id === root) ||
@@ -1876,6 +1919,50 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const snapshot = await protectedSnapshot(authorization, { directory, command }).catch(() => undefined);
     if (!snapshot?.binding.freshness || sessionAuthorizations.get(toolInput.sessionID) !== authorization ||
         authorization.suspended || authorization.gate !== admittedGate || authorization.expiresAt <= Date.now()) return;
+    if (classification.scope === "full") {
+      // A real, same-Mission failure is a reason to focus, not a reusable PASS. A later
+      // native focused success clears it only for the actual current candidate. Required
+      // declared occurrences never enter this undeclared-command path.
+      const unresolved = new Map<string, { endedAt: string; identity: string }>();
+      const executions = [...hostGoalExecutions.values()].filter(execution => execution.endedAt !== undefined)
+        .sort((left, right) => left.endedAt!.localeCompare(right.endedAt!));
+      for (const execution of executions) {
+        if (execution.root !== root || execution.sessionID !== toolInput.sessionID || execution.directory !== directory ||
+            execution.goalIdentity?.id !== goal.goal_id || execution.goalIdentity.revision !== goal.revision ||
+            execution.goalIdentity.scopeEpoch !== goal.scope_epoch || execution.endedAt === undefined || execution.fresh !== true) continue;
+        const prior = execution.managedTest ?? execution.testClassification;
+        if (!prior || prior.scope === "unknown" || prior.runner !== classification.runner) continue;
+        const focused = prior.scope === "focused" ? [execution.command[0]!] : execution.focusedRetries ?? [];
+        if (execution.outcome === "fail" && typeof execution.exitCode === "number" && execution.exitCode !== 0) {
+          for (const command of focused) {
+            const focus = prior.scope === "focused" ? prior : await managedTestCommand(command, directory);
+            if (focus.scope === "focused" && focus.identity) unresolved.set(command, { endedAt: execution.endedAt!, identity: focus.identity });
+          }
+        } else if (prior.scope === "focused" && execution.outcome === "pass" && execution.exitCode === 0 && execution.fresh &&
+            (execution.admissionSource ?? execution.source) === snapshot.source &&
+            (execution.admissionCandidate ?? execution.candidate) === snapshot.candidate &&
+            (!execution.managedTest || execution.managedTest.environment === goalFingerprint(process.env))) {
+          for (const command of focused) {
+            const failure = unresolved.get(command);
+            if (failure !== undefined && execution.startedAt > failure.endedAt && prior.identity === failure.identity) unresolved.delete(command);
+          }
+        }
+      }
+      let focused: string | undefined;
+      for (const [command, failure] of unresolved) {
+        const current = await classifyAuthorizedTest(authorization, directory, command);
+        if (current?.scope === "focused" && current.identity === failure.identity) { focused = command; break; }
+        appLogInfo("managed-test.focus-unavailable", toolInput.sessionID, { reason: "focused-command-changed-or-unresolved" });
+      }
+      if (focused !== undefined) {
+        const current = (await ledger.readGoal()).state;
+        if (current.goal_id !== goal.goal_id || current.revision !== goal.revision || current.scope_epoch !== goal.scope_epoch ||
+            current.phase !== "active" || sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended ||
+            authorization.expiresAt <= Date.now()) return;
+        throw new Error(`SORTIE_FULL_TEST_DEFERRED: a native test failed; run the focused check first: ${focused}. ` +
+          "The full test was not run or passed. A required full check must be formally registered.");
+      }
+    }
     const environment = goalFingerprint(process.env);
     const binding = snapshot.binding;
     // An undeclared test can read services, global dependencies, runtime-control paths or
@@ -1895,7 +1982,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
       binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
       validation: { ledger, request, reservation: reservation.reservation_id },
-      managedTest: { environment, equivalence: "unverified-external-inputs" } });
+      goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch },
+      managedTest: { environment, equivalence: "unverified-external-inputs", scope: classification.scope, runner: classification.runner,
+        identity: classification.identity } });
   }
 
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
@@ -2131,10 +2220,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     const validationSource = correction && validationInputs !== undefined
       ? await validatedSourceSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
+    const testClassification = !dockerWorkspace && ["bash", "shell"].includes(toolInput.tool)
+      ? await classifyAuthorizedTest(authorization, directory, rawCommand) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      ...(goal.goal_id === null ? {} : { goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch } }),
+      ...(testClassification === undefined ? {} : { testClassification }),
       admissionSource: snapshot.source, admissionCandidate: snapshot.candidate,
       ...(dockerWorkspace === undefined ? {} : { dockerWorkspace }),
       ...(operationInputs === undefined ? {} : { operationInputs }),
@@ -2226,8 +2319,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const proofFresh = fresh && managedFresh && (!validationBinding || validatedSource === execution.validationSource);
     const observed = proofFresh && validatedSource && validationBinding
       ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
+    const focusedRetries = outcome === "fail" && execution.managedTest?.scope === "full" && execution.managedTest.runner === "node"
+      ? await nodeFailureRetries(output.output, execution.directory) : [];
     hostGoalExecutions.set(execution.callID, { ...execution,
       ...observed,
+      ...(focusedRetries.length === 0 ? {} : { focusedRetries }),
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh: proofFresh });
     if (execution.correction) {

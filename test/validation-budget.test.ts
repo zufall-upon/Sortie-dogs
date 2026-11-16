@@ -1,7 +1,46 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { decideValidationBudget, selectValidationScope, validationEvidenceKey, validationEvidenceState, validationResultFingerprint, type ValidationBudgetRequest } from "../dist/core/validation-budget.js";
+import { managedTestCommand } from "../dist/plugin/managed-test-command.js";
+
+test("managed test reachability resolves literal project scripts without claiming opaque commands", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/managed-command-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: {
+      all: "npm run unit", unit: "node --test", quick: "node --test example.test.mjs",
+      cycle: "npm run cycle", release: "echo release && node --test", opaque: "node scripts/test-router.mjs full",
+      protected: "node --test", preprotected: "node prepare.mjs", "test:windows": "node --test",
+    } }));
+    for (const [command, scope, runner] of [
+      ["npm run all", "full", "node"], ["npm run quick", "focused", "node"],
+      ["python3 -m pytest -q", "full", "pytest"], ["go test ./...", "full", "go"],
+      ["cargo test --workspace", "full", "cargo"], ["vitest run", "full", "vitest"], ["jest", "full", "jest"],
+      ["node --test example.test.mjs", "focused", "node"], ["pytest test_example.py -q", "focused", "pytest"],
+    ]) {
+      const resolved = await managedTestCommand(command!, root);
+      assert.equal(resolved.scope, scope, command);
+      assert.equal("runner" in resolved ? resolved.runner : undefined, runner, command);
+    }
+    const original = await managedTestCommand("npm run quick", root);
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { quick: "node --test another.test.mjs" } }));
+    const changed = await managedTestCommand("npm run quick", root);
+    assert.equal(original.scope, "focused"); assert.equal(changed.scope, "focused");
+    assert.notEqual("identity" in original && original.identity, "identity" in changed && changed.identity,
+      "the same script name does not retain an earlier definition's identity");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: {
+      cycle: "npm run cycle", release: "echo release && node --test", opaque: "node scripts/test-router.mjs full",
+      protected: "node --test", preprotected: "node prepare.mjs", "test:windows": "node --test",
+    } }));
+    for (const command of ["npm run cycle", "npm run release", "npm run opaque", "npm run protected",
+      "npm run missing", "npm run test:windows", "pytest test_example.py --collect-only", "node --test --unknown", "echo done && node --test"]) {
+      assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 const request = (extra: Partial<ValidationBudgetRequest> = {}): ValidationBudgetRequest => ({
   run_id: "run", operation_id: "operation", source_snapshot: "base", candidate: "candidate",
