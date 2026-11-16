@@ -252,11 +252,11 @@ test("registered shell check replans and continues a Worker in a shared-clone li
   const task = { args: structuredClone(plan.task) };
   await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
   await f.chat("worker", task.args.prompt);
-  const first = (await f.runtime.required("root")).units[0];
+  const firstRun = await f.runtime.required("root"), first = firstRun.units[0];
   await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: first.handoffPath } });
   await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(first.handoffPath, "utf8") });
   assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: first.manifestPath }, "worker")).status, "bound");
-  const missionID = (await f.missions.required("root")).id;
+  const originalMission = await f.missions.required("root"), missionID = originalMission.id;
   await symlink(join(f.directory, "missing"), broken);
   const args = { command, workdir: checkout };
   await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "rejected-check" }, { args }),
@@ -275,11 +275,14 @@ test("registered shell check replans and continues a Worker in a shared-clone li
   await assert.rejects(f.tool("retry_mission_unit", { unit_id: "unit-1" }, "coordinator"), /operator-mission-normal-remediation-unavailable/);
   await assert.rejects(f.tool("finish_direct_unit", {}, "coordinator"), /mission-direct-unit-not-running/);
   await rm(broken); await writeFile(join(fixtureRoot, "result.txt"), "retained result\n");
-  const next = await f.tool("plan_units", { units: [{ ...scope, title: "Complete unstarted check",
-    objective: "Retain the existing result and run the previously unstarted check" }],
+  const next = await f.tool("plan_units", { units: [scope],
     reason: "Continue after repairing the unavailable source binding" }, "coordinator");
   assert.ok(next.task, JSON.stringify(next));
-  assert.equal((await f.missions.required("root")).id, missionID);
+  const continuedMission = await f.missions.required("root"), continuedRun = await f.runtime.required("root");
+  assert.equal(continuedMission.id, missionID);
+  assert.deepEqual(continuedMission.requirements, originalMission.requirements);
+  assert.notEqual(continuedRun.runID, firstRun.runID);
+  assert.equal(continuedRun.planHash, firstRun.planHash, "recovery does not depend on changing the plan label or scope");
   assert.deepEqual((await f.tool("operator_status")).budget, failed.budget);
   f.agents.worker2 = { agent: "dog-worker-v010", parentID: "coordinator" };
   const task2 = { args: structuredClone(next.task) };

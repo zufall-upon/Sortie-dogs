@@ -3128,7 +3128,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             : "Dispatch this exact Task to continue the same Mission and Coordinator session with the concrete correction and retained checks. The proposed plan has not been admitted; keep requirements, candidate and cumulative budget unchanged." });
       }
       const same = previous?.planHash === createHash("sha256").update(JSON.stringify(plan)).digest("hex");
-      const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && !same;
+      // A settled process defect (such as a pre-start binding refusal) can need
+      // the very same scope/check after its cause is corrected. A matching plan
+      // is idempotent during registration, but is not a pending continuation.
+      const sameProcessDefect = !!previous && same && previous.phase === "awaiting-decision" && previous.units.length > 0 &&
+        previous.units.every(unit => unit.status === "failed" && unit.resultClass === "process-defect" && !unit.reviewerCorrection);
+      const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && (!same || sameProcessDefect);
       const activeDirect = previous?.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor);
       const nextRegistration = plan.units.find(unit => unit.id === activeDirect?.unit.id);
       const registrationChanged = activeDirect && (JSON.stringify(unitValidationCwd(activeDirect) ?? {}) !==
@@ -3196,7 +3201,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await stopCancelledChildren(root, previous, true);
         previous = await operators.required(root);
       }
-      if (budget && budget.remaining_units < plan.units.length && !same) throw new Error(
+      if (budget && budget.remaining_units < plan.units.length && (!same || replanning)) throw new Error(
         `mission-budget-exhausted: plan needs ${plan.units.length} units; ${budget.remaining_units} remain. ` +
         "The current run is retained. Correct the plan within the remaining budget, or report a necessary cumulative extension to Operator.");
       if (!mission.reviewBaseline) {
@@ -3230,7 +3235,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
           prior_run_id: previous.runID } : {}) };
       const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
-      const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context)
+      const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context, { sameProcessDefect })
         : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
       // prepareMission retains an identical prepared run after either registration stage
       // fails. Verify its pinned controls, then idempotently register the same declaration;
