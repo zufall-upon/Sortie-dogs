@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -509,8 +508,7 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   /** Informal test observation, never an acceptance-criterion proof. */
-  readonly managedTest?: { readonly evidenceKey: string; readonly environment: string; readonly repository: string; readonly authority: string;
-    readonly reusedFrom?: string };
+  readonly managedTest?: { readonly environment: string; readonly equivalence: "unverified-external-inputs" };
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
@@ -657,64 +655,6 @@ function settledPassNoticeCommand(joined = false): string {
 /** Recognize literal, unfiltered runner invocations only. Opaque scripts and shell syntax are not controlled. */
 function managedFullTestCommand(command: string): boolean {
   return /^(?:node --test|python(?:3)? -m pytest|pytest|go test \.\/\.\.\.|cargo test --workspace)$/u.test(command);
-}
-
-/** Pin Git inputs as well as project files; never traverse a worktree pointer or unbounded metadata. */
-async function managedTestRepository(projectRoot: string, directory: string): Promise<string | undefined> {
-  let cursor = resolve(directory);
-  const root = resolve(projectRoot);
-  for (;;) {
-    const marker = join(cursor, ".git");
-    let info: Awaited<ReturnType<typeof lstat>> | undefined;
-    try { info = await lstat(marker); }
-    catch (error) {
-      if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
-    }
-    if (info) {
-      // Linked worktrees and symlinked metadata need their own safe inventory. Until then,
-      // do not substitute a previous result for an actual execution in those layouts.
-      if (!info.isDirectory() || info.isSymbolicLink()) return undefined;
-      let bytes = 0, count = 0;
-      const entries: Array<readonly [string, string, number, number, number]> = [];
-      const visit = async (path: string, name: string): Promise<boolean> => {
-        if (++count > 8192) return false;
-        const before = await lstat(path);
-        if (before.isSymbolicLink()) return false;
-        if (before.isDirectory()) {
-          entries.push([name, "directory", before.mode, before.mtimeMs, before.ctimeMs]);
-          for (const child of (await readdir(path)).sort()) {
-            // This is the live Sortie ledger, not Git source or a user test fixture.
-            if (!name && child === "sortie-dogs") continue;
-            if (!await visit(join(path, child), name ? `${name}/${child}` : child)) return false;
-          }
-          return true;
-        }
-        if (!before.isFile() || (bytes += before.size) > 64 * 1024 * 1024) return false;
-        const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
-        try {
-          const opened = await file.stat();
-          if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) return false;
-          const content = await file.readFile(), after = await file.stat();
-          if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) return false;
-          entries.push([name, createHash("sha256").update(content).digest("hex"), opened.mode, opened.mtimeMs, opened.ctimeMs]);
-          return true;
-        } finally { await file.close(); }
-      };
-      return await visit(marker, "").then(ok => ok ? goalFingerprint({ git_root: cursor, entries }) : undefined).catch(() => undefined);
-    }
-    if (cursor === root) return undefined;
-    const parent = dirname(cursor), relativeRoot = relative(root, parent);
-    if (parent === cursor || relativeRoot === ".." || relativeRoot.startsWith(`..${sep}`) || isAbsolute(relativeRoot)) return undefined;
-    cursor = parent;
-  }
-}
-
-function managedTestNoticeCommand(joined: boolean, reference: string, reservation: string): string {
-  const text = `SORTIE_MANAGED_TEST_${joined ? "JOINED" : "REUSED"} original_execution=${reference} original_reservation=${reservation}\n`;
-  const script = `process.stdout.write(${JSON.stringify(text)})`;
-  return process.platform === "win32"
-    ? `& '${process.execPath.replaceAll("'", "''")}' -e '${script.replaceAll("'", "''")}'`
-    : `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script.replaceAll("'", `'\\''`)}'`;
 }
 
 function proposeExperienceRoute(requestJson: string): string {
@@ -1907,16 +1847,15 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
     authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
-    // Only the ordinary Mission shell can execute these undeclared commands. Leave unknown
-    // programs, scripts, shell compositions, parallel lanes and unobservable permissions alone.
+    // Observe only the ordinary Mission shell. Leave unknown programs, scripts,
+    // shell compositions, parallel lanes and unbound workers alone.
     if (!["bash", "shell"].includes(toolInput.tool) || !managedFullTestCommand(command) ||
-        input.authorizeValidationJoin === undefined || activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
+        activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
         activeSessions.get(toolInput.sessionID)?.released || activeSessionStatus(toolInput.sessionID) !== "active" ||
         authorization.expiresAt <= Date.now() ||
         await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) !== true ||
         Object.keys(args).some(key => !["command", "workdir", "timeout", "description"].includes(key))) return;
-    // An unfiltered runner can consume any project input. A narrow Task read declaration is
-    // insufficient to establish equivalence; in that case preserve the original execution.
+    // A narrow Task read declaration cannot even bind the project observation.
     const coversDirectory = authorization.readScopes.some(scope => {
       const path = relative(scope, directory);
       return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
@@ -1928,94 +1867,35 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         !goal.outstanding_reservations.some(item => item.unit_id === authorization.taskID && item.session_id === root) ||
         goal.acceptance_contract?.criteria.some(criterion => criterion.proof_scope === "requested-full" &&
           goalValidationCommand(goal, criterion) === command)) return;
-    // Run the same write gate on the original command before replacing anything. Native shell
-    // permission is independently checked for a waiter or a reuse below.
+    // Observe only commands admitted by the original write gate. Native shell permissions
+    // still apply to the unchanged command at its actual execution.
     const admittedGate = await authorizedGate(toolInput.sessionID);
     if (!admittedGate || admittedGate !== authorization.gate) return;
     await admittedGate.check(toolInput, { args }, { investigativeShell: true,
       assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
-    const repository = await managedTestRepository(authorization.projectRoot, directory);
-    if (!repository) return;
     const snapshot = await protectedSnapshot(authorization, { directory, command }).catch(() => undefined);
     if (!snapshot?.binding.freshness || sessionAuthorizations.get(toolInput.sessionID) !== authorization ||
         authorization.suspended || authorization.gate !== admittedGate || authorization.expiresAt <= Date.now()) return;
-    const environment = goalFingerprint(process.env), callSettings = goalFingerprint(args);
+    const environment = goalFingerprint(process.env);
     const binding = snapshot.binding;
-    const authority = goalFingerprint({ projectRoot: authorization.projectRoot, readScopes: authorization.readScopes,
-      writeScopes: authorization.writeScopes, source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
-      source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
-      tool: toolInput.tool, environment, repository, callSettings, revision: goal.revision, scope_epoch: goal.scope_epoch });
+    // An undeclared test can read services, global dependencies, runtime-control paths or
+    // other unbound inputs. A project snapshot and a runner name cannot prove equivalence
+    // or authorize skipping a requested occurrence. Record the native run, never replace
+    // it with a JOIN/reuse notice. Declared validation keeps its separate opt-in contract.
     const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
-      source_snapshot: snapshot.source, candidate: goalFingerprint({ kind: "managed-full-test-v1", source: snapshot.source,
-        candidate: snapshot.candidate, authority }), command: [command], environment: validationEnvironment(directory),
+      source_snapshot: snapshot.source, candidate: validationCandidate(snapshot.source, snapshot.candidate),
+      command: [command], environment: validationEnvironment(directory),
       scope: "related", owner: "worker", expected_evidence: ["managed-test-observation"],
-      marginal_value: { unmet_criteria: [], risk_hypothesis: "unfiltered project test" }, reason: "preflight" };
-    const evidenceKey = validationEvidenceKey(request);
-    const reusable = [...hostGoalExecutions.values()].find(execution => execution.root === root &&
-      execution.managedTest?.evidenceKey === evidenceKey && execution.managedTest.authority === authority &&
-      execution.managedTest.environment === environment && execution.outcome === "pass" && execution.exitCode === 0 &&
-      execution.fresh === true && execution.immutableRef !== undefined && execution.source === snapshot.source &&
-      execution.candidate === snapshot.candidate);
-    // A durable budget key alone is not a native result reference after host recovery.
-    if (goal.validation_budget.evidence_keys.includes(evidenceKey) && !reusable) return;
-    if (reusable) await input.authorizeValidationJoin({ sessionID: toolInput.sessionID, agent: toolInput.agent, command, directory });
+      marginal_value: { unmet_criteria: [], risk_hypothesis: "unfiltered test: external inputs and execution obligations unverified" },
+      reason: "preflight", required_execution: { admission: authorization.dispatchCallID ?? authorization.taskID, call_id: toolInput.callID } };
     const limit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1, goal.validation_budget.limit ?? 0);
-    const reservation = await ledger.reserveJoinableValidation(request, limit, authority);
-    let original: HostGoalExecution | undefined;
-    if (reservation.decision === "JOIN") {
-      const controller = new AbortController(), abort = () => controller.abort();
-      toolInput.signal?.addEventListener("abort", abort, { once: true });
-      if (toolInput.signal?.aborted) controller.abort();
-      validationJoinWaiters.set(toolInput.callID, { sessionID: toolInput.sessionID, controller });
-      try {
-        const wait = async () => {
-          await input.authorizeValidationJoin!({ sessionID: toolInput.sessionID, agent: toolInput.agent, command, directory });
-          return ledger.waitForJoinedValidation(reservation.owner_reservation_id, { signal: controller.signal, timeoutMs: 30 * 60_000 });
-        };
-        const terminal = toolInput.yieldValidationJoin ? await toolInput.yieldValidationJoin(wait) : await wait();
-        await hostGoalEndOperations.get(terminal.operation_id);
-        original = hostGoalExecutions.get(terminal.operation_id);
-        if (terminal.outcome !== "passed" || terminal.exit_code !== 0 || controller.signal.aborted ||
-            original?.validation?.reservation !== reservation.owner_reservation_id) {
-          throw new Error(`SORTIE_MANAGED_TEST_JOIN_UNAVAILABLE: owner-${terminal.outcome}`);
-        }
-      } finally {
-        validationJoinWaiters.delete(toolInput.callID);
-        toolInput.signal?.removeEventListener("abort", abort);
-      }
-    } else if (reservation.decision === "SKIP") original = reusable;
-    else if (reservation.decision === "ALLOW" && reservation.reservation_id) {
-      hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
-        callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
-        binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
-        validation: { ledger, request, reservation: reservation.reservation_id }, managedTest: { evidenceKey, environment, repository, authority } });
-      return;
-    } else {
-      // No equivalent owner or trustworthy result: run normally, without manufacturing evidence.
-      return;
-    }
-    const currentGoal = await ledger.readGoal(), now = currentGoal.state;
-    const current = await refreshProtectedSnapshot(authorization.projectRoot, binding).catch(() => undefined);
-    const originalTerminal = original?.validation && currentGoal.records.find(({ event }) => event.kind === "validation.settled" &&
-      event.reservation_id === original!.validation!.reservation && event.operation_id === original!.callID &&
-      event.evidence_key === evidenceKey && event.outcome === "passed" && event.exit_code === 0)?.event;
-    if (!original || original.root !== root || original.managedTest?.evidenceKey !== evidenceKey ||
-        original.managedTest.authority !== authority || original.outcome !== "pass" || original.exitCode !== 0 ||
-        original.fresh !== true || !original.immutableRef || !original.validation || !originalTerminal || original.source !== snapshot.source ||
-        original.candidate !== snapshot.candidate || current?.source !== snapshot.source || current.candidate !== snapshot.candidate ||
-        await managedTestRepository(authorization.projectRoot, directory) !== repository ||
-        goalFingerprint(process.env) !== environment || goalFingerprint(args) !== callSettings || now.goal_id !== goal.goal_id ||
-        now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
-        sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
-        authorization.gate !== admittedGate || await authorizedGate(toolInput.sessionID) !== admittedGate ||
-        toolInput.signal?.aborted) throw new Error("SORTIE_MANAGED_TEST_JOIN_UNAVAILABLE: native proof unavailable or stale");
-    const notice = managedTestNoticeCommand(reservation.decision === "JOIN", original.immutableRef, original.validation.reservation);
-    args.command = notice;
-    settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
+    const reservation = await ledger.reserveValidation(request, limit);
+    if (reservation.decision !== "ALLOW" || !reservation.reservation_id) return;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
-      binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker", reusedEvidence: [],
-      managedTest: { evidenceKey, environment, repository, authority, reusedFrom: original.immutableRef } });
+      binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
+      validation: { ledger, request, reservation: reservation.reservation_id },
+      managedTest: { environment, equivalence: "unverified-external-inputs" } });
   }
 
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
@@ -2323,7 +2203,6 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           : refreshed.source === execution.source);
     const managedFresh = execution.managedTest === undefined || refreshed !== undefined &&
       refreshed.source === execution.source && refreshed.candidate === execution.candidate &&
-      await managedTestRepository(execution.projectRoot, execution.directory) === execution.managedTest.repository &&
       goalFingerprint(process.env) === execution.managedTest.environment;
     if (execution.validation !== undefined && execution.managedTest !== undefined) {
       const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&

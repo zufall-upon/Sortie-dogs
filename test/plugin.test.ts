@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
@@ -5147,20 +5148,25 @@ process.exit(existsSync('.git/release') ? ${failed ? 7 : 0} : 124);\n`);
   });
 });
 
-for (const scenario of ["passed", "failed", "stale", "environment", "owner-cancelled", "owner-error", "waiter-cancelled", "permission-denied"] as const) test(`undeclared full runner joins two authorized worker sessions using the original native observation: ${scenario}`, async () => {
+for (const scenario of ["passed", "failed", "concurrent", "owner-cancelled", "owner-error", "external-state"] as const) test(`undeclared full runner preserves native execution with unverified inputs: ${scenario}`, async () => {
   await withProject(`managed-full-${scenario}`, async directory => {
-    const oldEnvironment = process.env.SORTIE_MANAGED_TEST_FIXTURE;
-    process.env.SORTIE_MANAGED_TEST_FIXTURE = "original";
+    let serviceReady = true, serviceRequests = 0;
+    const service = createServer((_request, response) => { serviceRequests++; response.end(serviceReady ? "ready" : "broken"); });
+    await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
+    const address = service.address();
+    assert.ok(address && typeof address === "object");
     try {
       const command = "node --test", formal = "node -e 1";
       await mkdir(join(directory, ".git", "sortie-dogs", "guard-fixture"), { recursive: true });
       await writeFile(join(directory, ".git", "HEAD"), "ref: refs/heads/fixture\n");
       await writeFile(join(directory, "candidate.test.mjs"), `import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { appendFileSync, existsSync } from 'node:fs';
 test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check-count', 'run\\n');
   process.stdout.write('owner-started\\n'); const deadline = Date.now() + 10000;
   while (!existsSync('.git/sortie-dogs/guard-fixture/release') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   if (!existsSync('.git/sortie-dogs/guard-fixture/release') || ${scenario === "failed"}) throw new Error('fixture failure');
+  assert.equal(await (await fetch('http://127.0.0.1:${address.port}')).text(), 'ready');
 });\n`);
       const ids = ["first", "second"];
       for (const id of ids) {
@@ -5168,17 +5174,11 @@ test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check
           read: [directory], validation: [formal] }));
         await writeFile(join(directory, `handoff.${id}.json`), JSON.stringify({ ...writeGateHandoff(directory, `${id}.json`), id }));
       }
-      let permitted!: () => void;
-      const permission = new Promise<void>(resolve => { permitted = resolve; });
-      const permissionRequests: string[] = [];
       const hooks = await SortieDogsPlugin({ directory, runtimeBridge: { profile: STABLE_RUNTIME_PROFILE,
         assetVersion: RUNTIME_ASSET_VERSION, allowsInvestigativeShell: async () => true,
         ownsMissionParallelDispatch: async () => true, ownsValidationRegistration: async () => true,
         reviewerCorrectionValidationMembers: async () => undefined },
-      authorizeValidationJoin: async request => {
-        permissionRequests.push(request.sessionID); permitted();
-        if (scenario === "permission-denied") throw new Error("native permission denied");
-      }, client: { session: {
+      authorizeValidationJoin: async () => { throw new Error("unverified tests must not join"); }, client: { session: {
         get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
           ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
         messages: async () => ({ data: [] }),
@@ -5218,62 +5218,36 @@ test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check
         if (owner.exitCode !== null || Date.now() >= deadline) throw new Error("native owner did not start the fixture");
         await new Promise(resolve => setTimeout(resolve, 10));
       }
-      if (scenario === "passed") {
-        const differentSettings = { args: { command, timeout: 1000 } };
-        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "different-settings" }, differentSettings);
-        assert.equal(differentSettings.args.command, command, "different native call settings are not joined");
-        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "different-settings", args: differentSettings.args },
-          { status: "cancelled", output: "cancelled before launch", metadata: {} });
-      }
       const waiterArgs = { args: { command } };
-      const controller = new AbortController();
-      const waiting = hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "waiter", signal: controller.signal }, waiterArgs);
-      if (scenario === "permission-denied") await assert.rejects(waiting, /native permission denied/u);
-      else await Promise.race([permission, waiting]);
-      assert.equal(owner.exitCode, null);
-      if (scenario === "waiter-cancelled") {
-        controller.abort();
-        await assert.rejects(waiting, /waiter cancelled/iu);
-        assert.equal(owner.exitCode, null, "cancelling the waiter must not cancel its owner");
-      }
-      if (scenario === "stale") await writeFile(join(directory, "changed.txt"), "changed during run\n");
-      if (scenario === "environment") process.env.SORTIE_MANAGED_TEST_FIXTURE = "changed";
-      await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
+      if (scenario === "concurrent") {
+        const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "second-run", signal: controller.signal }, waiterArgs);
+          assert.equal(owner.exitCode, null, "an in-flight test is not an equivalent observation by default");
+        } finally {
+          clearTimeout(timeout);
+          await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
+        }
+      } else await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
       const exit = await ownerExit;
       assert.equal(exit, scenario === "failed" ? 1 : 0);
       await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "first-child", callID: "owner", args: ownerArgs.args },
         { output: "native owner terminal", metadata: { exit,
           ...(scenario === "owner-cancelled" ? { status: "cancelled" } : scenario === "owner-error" ? { status: "error" } : {}) } });
-      if (["failed", "stale", "environment", "owner-cancelled", "owner-error"].includes(scenario)) {
-        await assert.rejects(waiting, /SORTIE_MANAGED_TEST_JOIN_UNAVAILABLE/u);
-      } else if (scenario === "passed") {
-        await waiting;
-        assert.match(waiterArgs.args.command, /SORTIE_MANAGED_TEST_JOINED/u);
-        const notice = await execFileAsync(process.platform === "win32" ? "powershell.exe" : "sh",
-          process.platform === "win32" ? ["-NoProfile", "-Command", waiterArgs.args.command] : ["-c", waiterArgs.args.command], { cwd: directory });
-        assert.match(notice.stdout, /^SORTIE_MANAGED_TEST_JOINED original_execution=sha256:[a-f0-9]{64} original_reservation=[a-f0-9-]+\n$/u);
-        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "waiter", args: waiterArgs.args },
-          { output: notice.stdout, metadata: { exit: 0 } });
-        const repeat = { args: { command } };
-        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "reuse" }, repeat);
-        assert.match(repeat.args.command, /SORTIE_MANAGED_TEST_REUSED/u);
-        const reused = await execFileAsync(process.platform === "win32" ? "powershell.exe" : "sh",
-          process.platform === "win32" ? ["-NoProfile", "-Command", repeat.args.command] : ["-c", repeat.args.command], { cwd: directory });
-        assert.equal(reused.stdout.replace("REUSED", "JOINED"), notice.stdout);
-        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "reuse", args: repeat.args },
-          { output: reused.stdout, metadata: { exit: 0 } });
-        await writeFile(join(directory, ".git", "HEAD"), "ref: refs/heads/different\n");
-        const changedGit = { args: { command } };
-        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "changed-git" }, changedGit);
-        assert.equal(changedGit.args.command, command, "a changed Git candidate cannot reuse the original run");
-        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "changed-git", args: changedGit.args },
-          { status: "cancelled", output: "cancelled", metadata: {} });
-        await writeFile(join(directory, "changed.txt"), "changed after run\n");
-        const changed = { args: { command } };
-        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "changed" }, changed);
-        assert.equal(changed.args.command, command);
-        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "changed", args: changed.args },
-          { status: "cancelled", output: "cancelled", metadata: {} });
+      if (scenario === "external-state") serviceReady = false;
+      if (scenario !== "concurrent") await hooks["tool.execute.before"]!(
+        { tool: "bash", sessionID: "second-child", callID: "second-run" }, waiterArgs);
+      const second = await execFileAsync(process.platform === "win32" ? "powershell.exe" : "sh",
+        process.platform === "win32" ? ["-NoProfile", "-Command", waiterArgs.args.command] : ["-c", waiterArgs.args.command],
+        { cwd: directory, env: childEnvironment }).then(result => ({ exit: 0, output: result.stdout }),
+          error => ({ exit: error.code, output: error.stdout }));
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "second-run", args: waiterArgs.args },
+        { output: second.output, metadata: { exit: second.exit } });
+      assert.equal(second.exit, scenario === "external-state" || scenario === "failed" ? 1 : 0,
+        "an unchanged project must still observe the current external service");
+      assert.equal(waiterArgs.args.command, command, "unverified observations must not substitute a successful notice");
+      assert.equal(serviceRequests, scenario === "failed" ? 0 : 2);
+      if (scenario === "passed") {
         const arbitrary = { args: { command: "printf 'not a test'" } };
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "arbitrary" }, arbitrary);
         assert.equal(arbitrary.args.command, "printf 'not a test'");
@@ -5285,23 +5259,22 @@ test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "opaque", args: opaque.args },
           { status: "cancelled", output: "not started", metadata: {} });
       }
-      assert.equal(await readFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count"), "utf8"), "run\n");
-      assert.ok(permissionRequests.includes("second-child"));
+      assert.equal(await readFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count"), "utf8"), "run\nrun\n");
       const ledger = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
         `${createHash("sha256").update("root").digest("hex")}.json`), "utf8"));
       const events = ledger.goal_events.map(({ event }: { event: { kind: string } }) => event);
-      assert.equal(events.filter((event: { kind: string }) => event.kind === "validation.joined").length, 1);
+      assert.equal(events.filter((event: { kind: string }) => event.kind === "validation.joined").length, 0);
+      assert.deepEqual(events.filter((event: { kind: string }) => event.kind === "validation.admission")
+        .map((event: { decision: string }) => event.decision), ["ALLOW", "ALLOW"]);
       const settled = events.find((event: { kind: string; operation_id?: string }) => event.kind === "validation.settled" && event.operation_id === "owner");
-      if (scenario === "passed") {
-        const joined = events.find((event: { kind: string }) => event.kind === "validation.joined");
-        assert.equal(joined.owner_reservation_id, settled.reservation_id, "the join points to the owner's actual ledger terminal");
-      }
       assert.equal(settled.outcome, scenario === "failed" ? "failed" : scenario === "owner-cancelled" ? "cancelled" :
-        ["stale", "environment", "owner-error"].includes(scenario) ? "interrupted" : "passed");
+        scenario === "owner-error" ? "interrupted" : "passed");
+      const secondSettled = events.find((event: { kind: string; operation_id?: string }) =>
+        event.kind === "validation.settled" && event.operation_id === "second-run");
+      assert.equal(secondSettled.outcome, second.exit === 1 ? "failed" : "passed");
       assert.equal(events.some((event: { kind: string }) => event.kind === "unit.settled"), false);
     } finally {
-      if (oldEnvironment === undefined) delete process.env.SORTIE_MANAGED_TEST_FIXTURE;
-      else process.env.SORTIE_MANAGED_TEST_FIXTURE = oldEnvironment;
+      await new Promise<void>((resolve, reject) => service.close(error => error ? reject(error) : resolve()));
     }
   });
 });

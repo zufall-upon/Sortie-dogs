@@ -933,7 +933,7 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, managed: true },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(managedScenario ? "V2 undeclared full runner reuses a native observation in a normal Mission" :
+test(managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
   `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
@@ -952,9 +952,8 @@ test(managedScenario ? "V2 undeclared full runner reuses a native observation in
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
-    if (joinScenario || managedScenario) fixture.context.permission.assert = async request => {
-      assert.equal(request.action, "shell");
-      assert.match(request.resources[0]!, managedScenario ? /^node --test$/u : /^node check\.mjs /u); joinedPermission();
+    if (joinScenario) fixture.context.permission.assert = async request => {
+      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u); joinedPermission();
     };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => {
       const hooks = await SortieDogsV010Plugin(input, options);
@@ -1373,24 +1372,19 @@ test(managedScenario ? "V2 undeclared full runner reuses a native observation in
         const checked = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
         await after(first, checked.stdout, { exit: 0 });
         const repeat = await before(child, "shell", { command: "node --test", workdir: directory });
-        const diagnostic = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
-          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
-        assert.match(String(repeat.input.command), /SORTIE_MANAGED_TEST_REUSED/u, JSON.stringify({ goal: diagnostic.state,
-          admissions: diagnostic.records.filter(({ event }) => event.kind === "validation.admission") }));
-        const notice = await exec(process.platform === "win32" ? "powershell.exe" : "sh",
-          process.platform === "win32" ? ["-NoProfile", "-Command", String(repeat.input.command)] : ["-c", String(repeat.input.command)], { cwd: directory });
-        assert.match(notice.stdout, /^SORTIE_MANAGED_TEST_REUSED original_execution=sha256:[a-f0-9]{64} original_reservation=[a-f0-9-]+\n$/u);
-        await after(repeat, notice.stdout, { exit: 0 });
-        assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\n");
+        assert.equal(repeat.input.command, "node --test", "the Mission has no equivalence contract for this undeclared test");
+        const repeated = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+        await after(repeat, repeated.stdout, { exit: 0 });
+        assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\n");
         const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
         assert.equal(unitAfter.validationRegistration!.checks.length, 0, "informal observation is not formal validation");
         const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
           `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
         assert.deepEqual(ledger.records.filter(({ event }) => event.kind === "validation.admission").map(({ event }) =>
-          event.kind === "validation.admission" && event.decision), ["ALLOW", "SKIP"]);
-        const terminal = ledger.records.find(({ event }) => event.kind === "validation.settled" && event.operation_id === first.id)?.event;
-        assert.ok(terminal?.kind === "validation.settled" && notice.stdout.includes(`original_reservation=${terminal.reservation_id}`),
-          "the public notice identifies the actual owner's durable terminal");
+          event.kind === "validation.admission" && event.decision), ["ALLOW", "ALLOW"]);
+        const terminals = ledger.records.filter(({ event }) => event.kind === "validation.settled").map(({ event }) =>
+          event.kind === "validation.settled" && { callID: event.operation_id, outcome: event.outcome, exit: event.exit_code });
+        assert.deepEqual(terminals, [{ callID: first.id, outcome: "passed", exit: 0 }, { callID: repeat.id, outcome: "passed", exit: 0 }]);
         return;
       }
       if (commit) {
