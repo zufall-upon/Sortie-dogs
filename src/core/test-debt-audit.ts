@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import type { Dir, Dirent } from "node:fs";
 import { lstat, opendir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { OperatorUnit } from "./operator-runtime.js";
@@ -39,10 +40,14 @@ const MAX_TEST_FILES = 16, MAX_WALK_ENTRIES = 2048, MAX_WALK_DIRECTORIES = 128;
 const ignoredTrees = new Set([".git", ".hg", ".svn", "node_modules", "dist", "coverage", "_testenv", ".cache", ".venv"]);
 const unavailable = (error: unknown) => ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
 
-/** Inspect explicit inputs first, then a bounded inventory of declared directory scopes. */
-export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "read" | "write" | "validation" | "validation_cwd">,
-  changed: readonly string[] = []): Promise<TestDebtSignal[]> {
-  root = resolve(root);
+type AuditUnit = Pick<OperatorUnit, "read" | "write" | "validation" | "validation_cwd">;
+export interface TestDebtInventoryCursor {
+  frames: { path: string; after: string | null }[];
+  explicitAfter?: string;
+}
+export interface TestDebtInventoryPage { signals: TestDebtSignal[]; cursor: TestDebtInventoryCursor }
+
+function inventoryInputs(root: string, unit: AuditUnit, changed: readonly string[]) {
   const candidates: string[] = [];
   const directories: string[] = [];
   const add = (path: string, base = root) => {
@@ -72,6 +77,50 @@ export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "re
       if (testPath(word) && word.replaceAll("\\", "/").endsWith("/**")) addDirectory(word, cwd);
     }
   }
+  return { candidates, directories };
+}
+
+/** A changed scope or validation cwd gets its own cursor, never an earlier grant. */
+export function testDebtInventoryKey(root: string, unit: AuditUnit): string {
+  root = resolve(root);
+  return createHash("sha256").update(JSON.stringify([root, inventoryInputs(root, unit, []).directories])).digest("hex");
+}
+
+// Directory streams are an optimization, not durable state. After a host restart a stream
+// is reconstructed in bounded chunks up to the saved name; the serialized cursor remains
+// authoritative. The small LRU also bounds descriptors for abandoned Missions.
+const streams = new Map<string, { dir: Dir; expected: string | null; seeking: boolean }>();
+const MAX_OPEN_STREAMS = 64;
+async function closeStream(key: string): Promise<void> {
+  const entry = streams.get(key);
+  if (!entry) return;
+  streams.delete(key);
+  await entry.dir.close().catch(() => undefined);
+}
+export async function closeTestDebtInventory(cacheKey: string): Promise<void> {
+  for (const key of [...streams.keys()]) if (key.startsWith(`${cacheKey}\0`)) await closeStream(key);
+}
+async function inventoryStream(key: string, directory: string, after: string | null) {
+  let stream = streams.get(key);
+  if (stream && stream.expected !== after) { await closeStream(key); stream = undefined; }
+  if (!stream) {
+    while (streams.size >= MAX_OPEN_STREAMS) await closeStream(streams.keys().next().value!);
+    stream = { dir: await opendir(directory), expected: after, seeking: after !== null };
+  } else streams.delete(key);
+  streams.set(key, stream);
+  return stream;
+}
+
+/** Inspect explicit inputs first, then one bounded page of declared directory scopes. */
+export async function inspectTestDebtPage(root: string, unit: AuditUnit, changed: readonly string[] = [],
+  options: { cursor?: TestDebtInventoryCursor; cacheKey?: string; maxFiles?: number; exclude?: ReadonlySet<string> } = {}): Promise<TestDebtInventoryPage> {
+  root = resolve(root);
+  const { candidates, directories } = inventoryInputs(root, unit, changed);
+  const cursor: TestDebtInventoryCursor = options.cursor ? structuredClone(options.cursor) : { frames: [] };
+  if (!cursor.frames.length) cursor.frames = directories.slice().reverse().map(path => ({ path: relative(root, path), after: null }));
+  const cacheKey = options.cacheKey ?? `temporary-${randomUUID()}`;
+  const scopeKey = testDebtInventoryKey(root, unit);
+  const limit = Math.max(0, Math.min(MAX_TEST_FILES, options.maxFiles ?? MAX_TEST_FILES));
   const canonicalRoot = await realpath(root).catch(error => { if (unavailable(error)) return root; throw error; });
   // A scope with a linked ancestor must not enter that tree, even when its target is in-project.
   const noLinks = async (path: string): Promise<boolean> => {
@@ -84,48 +133,21 @@ export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "re
       return inside(canonicalRoot, await realpath(path));
     } catch (error) { if (unavailable(error)) return false; throw error; }
   };
-  const discovered = new Set<string>();
-  const queue = [...directories], visited = new Set<string>();
-  let entriesLeft = MAX_WALK_ENTRIES, directoriesLeft = MAX_WALK_DIRECTORIES;
-  while (queue.length && candidates.length < MAX_TEST_FILES && entriesLeft > 0 && directoriesLeft > 0) {
-    const directory = queue.shift()!;
-    if (visited.has(directory)) continue;
-    visited.add(directory); directoriesLeft--;
-    try {
-      if (!await noLinks(directory) || !(await lstat(directory)).isDirectory()) continue;
-      const names: { name: string; directory: boolean; file: boolean }[] = [];
-      for await (const entry of await opendir(directory)) {
-        entriesLeft--;
-        const name = entry.name, lower = name.toLowerCase();
-        // Hidden entries are opt-in explicit inputs, never automatic inventory targets.
-        if (!entry.isSymbolicLink() && !name.startsWith(".") && !ignoredTrees.has(lower)) {
-          names.push({ name, directory: entry.isDirectory(), file: entry.isFile() });
-        }
-        if (!entriesLeft) break;
-      }
-      names.sort((a, b) => a.name.localeCompare(b.name));
-      for (const entry of names) {
-        const path = join(directory, entry.name);
-        if (entry.directory) queue.push(path);
-        else if (entry.file && testPath(path) && !candidates.includes(path) && candidates.length < MAX_TEST_FILES) {
-          candidates.push(path); discovered.add(path);
-        }
-      }
-    } catch (error) { if (!unavailable(error)) throw error; }
-  }
   const result: TestDebtSignal[] = [];
-  for (const path of candidates.slice(0, MAX_TEST_FILES)) {
+  const inspected = new Set<string>();
+  const inspect = async (path: string, discovered: boolean) => {
+    inspected.add(path);
     try {
       const stat = await lstat(path);
       // Do not traverse links or special files as a side effect of an ordinary edit.
-      if (!stat.isFile()) continue;
+      if (!stat.isFile()) return;
       const canonical = await realpath(path);
-      if (discovered.has(path) ? !inside(canonicalRoot, canonical) || !await noLinks(path) : !inside(root, canonical)) continue;
+      if (discovered ? !inside(canonicalRoot, canonical) || !await noLinks(path) : !inside(root, canonical)) return;
       if (stat.size > 512 * 1024) {
         // Size alone schedules investigation; it never licenses deletion or claims a full read.
         result.push({ path: relative(root, path).replaceAll("\\", "/"), sha256: null, lines: null,
           bytes: stat.size, repeated_assertions: [], reasons: ["large-test-file"] });
-        continue;
+        return;
       }
       const content = await readFile(path, "utf8");
       const lines = content.split(/\r?\n/u), assertions = new Map<string, number[]>();
@@ -139,13 +161,80 @@ export async function inspectTestDebt(root: string, unit: Pick<OperatorUnit, "re
       const reasons: TestDebtSignal["reasons"] = [];
       if (repeated.length) reasons.push("repeated-assertion");
       if (lines.length >= 500) reasons.push("large-test-file");
-      if (!reasons.length) continue;
+      if (!reasons.length) return;
       result.push({ path: relative(root, path).replaceAll("\\", "/"), sha256: createHash("sha256").update(content).digest("hex"),
         lines: lines.length, bytes: stat.size, repeated_assertions: repeated, reasons });
     } catch (error) {
       // A missing/deleted/unreadable candidate is not a finding and never blocks the Mission.
       if (!unavailable(error)) throw error;
     }
+  };
+  const excluded = (path: string) => options.exclude?.has(relative(root, path).replaceAll("\\", "/")) === true;
+  try {
+    // When explicit files fill a whole page, reserve one slot for inventory and rotate
+    // the explicit inputs. They still precede all automatic candidates in each page.
+    const explicitLimit = directories.length && candidates.length >= limit && limit > 1 ? limit - 1 : limit;
+    const after = cursor.explicitAfter ? candidates.indexOf(resolve(root, cursor.explicitAfter)) : -1;
+    const start = candidates.length > explicitLimit && after >= 0 ? (after + 1) % candidates.length : 0;
+    for (let index = 0; index < candidates.length && inspected.size < explicitLimit; index++) {
+      const path = candidates[(start + index) % candidates.length]!;
+      if (excluded(path)) continue;
+      await inspect(path, false);
+      cursor.explicitAfter = relative(root, path);
+    }
+    let entriesLeft = MAX_WALK_ENTRIES, directoriesLeft = MAX_WALK_DIRECTORIES;
+    const visited = new Set<string>();
+    while (cursor.frames.length && inspected.size < limit && entriesLeft > 0) {
+      const frame = cursor.frames[cursor.frames.length - 1]!;
+      const directory = resolve(root, frame.path);
+      const streamKey = `${cacheKey}\0${scopeKey}\0${directory}`;
+      try {
+        if (!visited.has(directory)) {
+          if (!directoriesLeft) break;
+          directoriesLeft--; visited.add(directory);
+          // Recheck persisted paths and every resumed directory against the current scope.
+          if (!inside(root, directory) || !directories.some(scope => inside(scope, directory)) ||
+              !await noLinks(directory) || !(await lstat(directory)).isDirectory()) {
+            await closeStream(streamKey); cursor.frames.pop(); continue;
+          }
+        }
+        const stream = await inventoryStream(streamKey, directory, frame.after);
+        const entry: Dirent | null = await stream.dir.read();
+        if (!entry) {
+          await closeStream(streamKey);
+          if (stream.seeking) {
+            // The saved entry disappeared. Restart this directory on the next page so
+            // insertion/deletion cannot strand the rest of the tree permanently.
+            frame.after = null;
+            break;
+          }
+          cursor.frames.pop();
+          continue;
+        }
+        entriesLeft--;
+        if (stream.seeking) {
+          if (entry.name === frame.after) stream.seeking = false;
+          continue;
+        }
+        frame.after = entry.name;
+        stream.expected = entry.name;
+        const name = entry.name;
+        if (entry.isSymbolicLink() || name.startsWith(".") || ignoredTrees.has(name.toLowerCase())) continue;
+        const path = join(directory, name);
+        if (entry.isDirectory()) cursor.frames.push({ path: relative(root, path), after: null });
+        else if (entry.isFile() && testPath(path) && !inspected.has(path) && !excluded(path)) await inspect(path, true);
+      } catch (error) {
+        if (!unavailable(error)) throw error;
+        await closeStream(streamKey); cursor.frames.pop();
+      }
+    }
+    return { signals: result, cursor };
+  } finally {
+    if (!options.cacheKey) await closeTestDebtInventory(cacheKey);
   }
-  return result;
+}
+
+/** Stateless callers retain the existing single-page API. */
+export async function inspectTestDebt(root: string, unit: AuditUnit, changed: readonly string[] = []): Promise<TestDebtSignal[]> {
+  return (await inspectTestDebtPage(root, unit, changed)).signals;
 }

@@ -146,3 +146,49 @@ test("planning schedules an existing test signal for its writable unit, not an e
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
+
+test("planning inventory resumes unvisited owners after the 64-signal cap", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/mission-audit-cap-"));
+  try {
+    const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
+    for (let group = 0; group < 5; group++) {
+      const directory = join(root, `scope-${group}`, "test");
+      await mkdir(directory, { recursive: true });
+      for (let index = 0; index < 16; index++) await writeFile(join(directory, `${index}.test.mjs`), text);
+    }
+    await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+    const identities: Record<string, { agent: string; parentID?: string }> = {
+      root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    };
+    const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      children: async () => ({ data: [] }), messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+    } } } as never);
+    const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-user`, agent: identities[id]!.agent }, {
+      message: { id: `${id}-user`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }],
+    });
+    await chat("root", "Maintain the five test scopes.");
+    const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Maintain the five test scopes"] }, { sessionID: "root" }));
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+    const declaration = (version: number) => ({ units: Array.from({ length: 5 }, (_, group) => ({ title: `Scope ${group} version ${version}`,
+      objective: "Maintain the assigned tests", read: ["check.mjs"], write: [`scope-${group}/test/**`], validation: [`node check.mjs ${group}`] })),
+      ...(version ? { reason: "Continue the same work" } : {}) });
+    const plan = (version: number) => hooks.tool!.sortie_v010_plan_units.execute(declaration(version), { sessionID: "coordinator" });
+    const firstPlan = await plan(0);
+    const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+    const before = await missions.required("root");
+    assert.equal(before.testDebtSignals!.length, 64, JSON.stringify({ firstPlan, inventory: before.testDebtInventory, signals: before.testDebtSignals }));
+    assert.ok(before.testDebtSignals!.every(signal => !signal.path.startsWith("scope-4/")));
+    assert.equal(before.testDebtInventory!.nextUnit, 4);
+    await plan(1);
+    const after = await missions.required("root"), run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+    const later = after.testDebtSignals!.filter(signal => signal.run_id === run.runID && signal.path.startsWith("scope-4/"));
+    assert.equal(later.length, 16, "the owner beyond the cap gets the next opportunity");
+    assert.ok(later.every(signal => signal.unit_id === run.units[4]!.unit.id));
+    const handoff = JSON.parse(await readFile(run.units[4]!.handoffPath, "utf8"));
+    assert.ok(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals.some((signal: { path: string; unit_id: string }) =>
+      signal.path.startsWith("scope-4/") && signal.unit_id === run.units[4]!.unit.id));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

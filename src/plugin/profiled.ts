@@ -40,7 +40,8 @@ import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
 import { ProjectMemory, projectMemoryFile, type MemoryChange } from "../core/project-memory.js";
 import { MissionFabricValidationRequired } from "../core/mission-fabric.js";
-import { inspectTestDebt, TEST_DEBT_AUDIT_INSTRUCTION, type MissionTestDebtSignal } from "../core/test-debt-audit.js";
+import { closeTestDebtInventory, inspectTestDebt, inspectTestDebtPage, testDebtInventoryKey,
+  TEST_DEBT_AUDIT_INSTRUCTION, type MissionTestDebtSignal } from "../core/test-debt-audit.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -3261,9 +3262,37 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const continuingAuditRun = previous && same && !sameProcessDefect && !["completed", "cancelled"].includes(previous.phase)
         ? previous.runID : undefined;
       const knownAudits = new Set((mission.testDebtSignals ?? []).filter(item => item.run_id === continuingAuditRun).map(item => item.path));
-      const planningCandidates = mission.kind === "operation" ? [] : (await Promise.all(plan.units.map(async unit =>
-        unit.write.length ? (await inspectTestDebt(input.directory, unit).catch(() => [])).filter(signal => !knownAudits.has(signal.path))
-          .map(signal => ({ ...signal, unit_id: unit.id, trigger: "planning-milestone" as const })) : []))).flat();
+      const planHash = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+      const boundRetry = continuingAuditRun !== undefined && mission.runID === continuingAuditRun;
+      const staged = !boundRetry ? mission.testDebtInventory?.pending?.find(page =>
+        page.planHash === planHash && page.baseRunID === mission.runID) : undefined;
+      const planningCandidates: Omit<MissionTestDebtSignal, "run_id">[] = [];
+      const cursors = structuredClone(mission.testDebtInventory?.cursors ?? {});
+      let nextUnit = (mission.testDebtInventory?.nextUnit ?? 0) % plan.units.length;
+      // A legacy prepared run has immutable handoffs but no staged page. Do not invent
+      // new signals or advance a cursor while retrying that already prepared run.
+      const legacyPrepared = continuingAuditRun !== undefined && mission.runID !== continuingAuditRun && !staged;
+      if (!boundRetry && !staged && !legacyPrepared && mission.kind !== "operation") {
+        const selected = new Set(knownAudits);
+        const start = nextUnit;
+        for (let index = 0; index < plan.units.length; index++) {
+          const unitIndex = (start + index) % plan.units.length, unit = plan.units[unitIndex]!;
+          if (!unit.write.length) continue;
+          const slots = 64 - selected.size;
+          if (slots <= 0) { nextUnit = unitIndex; break; }
+          const key = testDebtInventoryKey(input.directory, unit);
+          const page = await inspectTestDebtPage(input.directory, unit, [], { cursor: cursors[key], cacheKey: `${input.directory}\0${root}`,
+            maxFiles: slots, exclude: selected }).catch(() => undefined);
+          if (!page) continue;
+          cursors[key] = page.cursor;
+          for (const signal of page.signals) {
+            if (selected.has(signal.path)) continue;
+            selected.add(signal.path);
+            planningCandidates.push({ ...signal, unit_id: unit.id, trigger: "planning-milestone" });
+          }
+          nextUnit = (unitIndex + 1) % plan.units.length;
+        }
+      }
       // The first unit to read a test is not necessarily the unit that can edit it.
       // Prefer an existing write scope using the same path semantics as the gate;
       // a scheduling signal is still neither write authority nor proof of cleanup.
@@ -3273,7 +3302,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         gate: await createWriteGate(projectPaths, { version: "0.1.0", task_id: unit.id, read: unit.read,
           write: unit.write, validation: unit.validation }).catch(() => undefined),
       }))) : [];
-      const planningSignals: typeof planningCandidates = [];
+      const planningSignals: typeof planningCandidates = staged ? structuredClone(staged.signals) : [];
       for (const signal of planningCandidates) {
         if (planningSignals.length >= availableAuditSlots) break;
         if (knownAudits.has(signal.path)) continue;
@@ -3285,6 +3314,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           catch { /* Keep looking; the inventory does not alter host permissions. */ }
         }
         planningSignals.push({ ...signal, unit_id: assigned });
+      }
+      if (!boundRetry && !staged && !legacyPrepared && mission.kind !== "operation") {
+        const proposed = { planHash, baseRunID: mission.runID, cursors, nextUnit, signals: planningSignals };
+        // Retain the exact page before preparing immutable handoffs. If registration
+        // fails, a same-plan retry reuses it instead of consuming another page.
+        await missions.update(root, item => {
+          if (item.runID !== mission.runID) throw new Error("mission-test-debt-inventory-stale");
+          // A rejected alternative must not erase a previously prepared run's page.
+          const prepared = previous && previous.runID !== item.runID && !["completed", "cancelled"].includes(previous.phase)
+            ? item.testDebtInventory?.pending?.find(page => page.planHash === previous!.planHash && page.baseRunID === item.runID)
+            : undefined;
+          item.testDebtInventory = { cursors: item.testDebtInventory?.cursors ?? {},
+            nextUnit: item.testDebtInventory?.nextUnit ?? 0,
+            pending: prepared && prepared.planHash !== proposed.planHash ? [prepared, proposed] : [proposed] };
+        });
       }
       const context = { ...await missions.handoffContext(mission),
         ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
@@ -3307,7 +3351,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         item.continuity = mission.continuity;
         item.reviewScope = missionReviewScope(item.reviewScope,
           ...(previous && item.runID === previous.runID ? [previous] : []), state);
-        if (item.runID !== state.runID) item.plans++;
+        if (item.runID !== state.runID) {
+          item.plans++;
+          const page = item.testDebtInventory?.pending?.find(value => value.planHash === planHash && value.baseRunID === item.runID);
+          if (page) {
+            item.testDebtInventory = { cursors: page.cursors, nextUnit: page.nextUnit };
+          }
+        }
         const seen = new Set((item.testDebtSignals ?? []).filter(signal => signal.run_id === state.runID).map(signal => signal.path));
         const slots = Math.max(0, 64 - seen.size);
         const fresh = planningSignals.filter(signal => {
@@ -3320,6 +3370,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (operation) { item.kind = "operation"; item.execution = operation; }
         item.workQuantity = planWorkQuantity(item, raw as Parameters<typeof planWorkQuantity>[1], state, item.workQuantity, workQuantities, input.directory);
       });
+      if (state.units.some(unit => unit.status === "running" && unit.directExecution?.actor === actor)) {
+        return startDirect(root, actor);
+      }
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       const next = await operators.next(root, actor);
       if (!record(next) || !record(next.task)) return JSON.stringify(next);
@@ -3919,7 +3972,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await missions.required(context.sessionID);
         const run = await operators.required(context.sessionID);
         const result = await tools[complete]!.execute({ run_id: run.runID, acceptance_fingerprint: run.acceptanceFingerprint }, context);
-        if (JSON.parse(result).status === "succeeded") await missions.update(context.sessionID, state => { state.phase = "completed"; });
+        if (JSON.parse(result).status === "succeeded") {
+          const completed = await missions.update(context.sessionID, state => { state.phase = "completed"; });
+          await closeTestDebtInventory(`${input.directory}\0${completed.root}`);
+        }
         return result;
       } };
     const ownTools = new Set([memoryTool, startMission, planUnits, startDirectUnit, finishDirectUnit, expandUnit, reviewMission, repairReview, submitMission, completeMission, skipMissionConsultation,

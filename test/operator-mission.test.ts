@@ -19,7 +19,7 @@ import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
-import { inspectTestDebt } from "../dist/core/test-debt-audit.js";
+import { closeTestDebtInventory, inspectTestDebt } from "../dist/core/test-debt-audit.js";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
@@ -221,6 +221,158 @@ test("ordinary direct Mission schedules test debt before validation and retains 
   const reviewPrompt = (await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).review!.task!.prompt;
   assert.match(reviewPrompt, /test_debt_scheduling_signals/);
   assert.match(reviewPrompt, /not proof of duplication, cleanup, detection equivalence or review/);
+}));
+
+test("ordinary Mission inventory advances past unchanged large tests at later planning milestones", async () => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const text = `${"// retained specification\n".repeat(500)}assert.equal(1, 1);\n`;
+  for (let index = 0; index < 40; index++) {
+    await writeFile(join(root, "test", `${String(index).padStart(2, "0")}.test.mjs`), text);
+  }
+  await writeFile(join(root, "test", "priority.test.mjs"), text);
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain the test suite while implementing the change." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain the test suite while implementing the change"] });
+  const declaration = (title: string) => ({ executor: "self", units: [{ title, objective: "Maintain the test suite",
+    read: ["check.mjs", "test/priority.test.mjs"], write: ["test/**"], validation: ["node check.mjs"] }] });
+  const first = await tool("plan_units", declaration("First milestone"));
+  const firstPaths = first.test_debt_audit.signals.map((signal: { path: string }) => signal.path);
+  assert.equal(firstPaths.length, 16);
+  assert.equal(firstPaths[0], "test/priority.test.mjs", "explicit files precede automatically discovered files");
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const saved = (await missions.required("root")).testDebtInventory;
+  const firstRun = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const firstHandoff = await readFile(firstRun.units[0]!.handoffPath, "utf8");
+  await tool("plan_units", declaration("First milestone"));
+  assert.deepEqual((await missions.required("root")).testDebtInventory, saved, "a retry cannot consume another page");
+  assert.equal(await readFile(firstRun.units[0]!.handoffPath, "utf8"), firstHandoff);
+  const second = await tool("plan_units", { ...declaration("Second milestone"), reason: "Continue the same work" });
+  const secondPaths = second.test_debt_audit.signals.map((signal: { path: string }) => signal.path);
+  assert.ok(secondPaths.some((path: string) => !firstPaths.includes(path)),
+    "unchanged size signals in the first batch must not permanently hide later tests");
+  assert.equal(new Set([...firstPaths, ...secondPaths]).size, 31);
+  await writeFile(join(root, "test", "new.test.mjs"), text);
+  await tool("cancel_operator", { reason: "Interrupt this work before continuing" });
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "resume", agent: "dog-operator" }, {
+    message: { id: "resume", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue maintaining the same test suite." }],
+  });
+  await tool("start_mission", { intent: "continue", requirements: ["Maintain the test suite while implementing the change"] });
+  const laterPaths = new Set<string>([...firstPaths, ...secondPaths]);
+  for (let index = 0; index < 4; index++) {
+    const next = await tool("plan_units", { ...declaration(`Continued milestone ${index}`), ...(index ? { reason: "Continue the same work" } : {}) });
+    for (const signal of next.test_debt_audit?.signals ?? []) laterPaths.add(signal.path);
+  }
+  for (let index = 0; index < 40; index++) assert.ok(laterPaths.has(`test/${String(index).padStart(2, "0")}.test.mjs`));
+  assert.ok(laterPaths.has("test/new.test.mjs"), "a newly added test is reached after at most another traversal");
+  await tool("cancel_operator", { reason: "End this isolated fixture" });
+}));
+
+test("ordinary Mission resumes bounded inventory after entry and directory limits", async () => fixture(async root => {
+  const flat = join(root, "flat"), nested = join(root, "nested", "test");
+  await mkdir(flat, { recursive: true }); await mkdir(nested, { recursive: true });
+  for (let index = 0; index < 5000; index++) await writeFile(join(flat, `input-${index}.txt`), "x");
+  for (let index = 0; index < 140; index++) await mkdir(join(nested, `dir-${String(index).padStart(3, "0")}`));
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain both test trees." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain both test trees"] });
+  const plan = (scope: string, index: number) => ({ executor: "self", units: [{ title: `${scope} ${index}`, objective: "Maintain the test tree",
+    read: ["check.mjs"], write: [`${scope}/**`], validation: ["node check.mjs"] }], ...(index ? { reason: "Continue inventory" } : {}) });
+  await tool("plan_units", plan("flat", 0));
+  const mission = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const firstCursor = Object.values((await mission.required("root")).testDebtInventory!.cursors)[0]!;
+  assert.ok(firstCursor.frames.length && firstCursor.frames[0]!.after, "the entry cap retains a continuation, not a completed inventory");
+  await tool("plan_units", plan("flat", 1));
+  await closeTestDebtInventory(`${root}\0root`); // Model a cold host reopening the saved cursor.
+  const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
+  await writeFile(join(flat, "later.test.mjs"), text);
+  let foundFlat = false;
+  for (let index = 2; index <= 9; index++) {
+    await tool("cancel_operator", { reason: "Interrupt before continuing the same work" });
+    await hooks["chat.message"]!({ sessionID: "root", messageID: `resume-${index}`, agent: "dog-operator" }, {
+      message: { id: `resume-${index}`, agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+      parts: [{ type: "text", text: "Continue maintaining both test trees." }],
+    });
+    await tool("start_mission", { intent: "continue", requirements: ["Maintain both test trees"] });
+    const result = await tool("plan_units", plan("flat", index));
+    foundFlat ||= (result.test_debt_audit?.signals ?? []).some((signal: { path: string }) => signal.path === "flat/later.test.mjs");
+  }
+  assert.ok(foundFlat, "a test beyond a 2048-entry page is eventually scheduled despite repeated cancellations");
+  await tool("plan_units", plan("nested", 10));
+  const cursors = Object.values((await mission.required("root")).testDebtInventory!.cursors);
+  assert.ok(cursors.some(cursor => cursor.frames.some(frame => frame.path.startsWith("nested"))),
+    "the directory cap also retains a continuation");
+  await writeFile(join(nested, "dir-139", "later.test.mjs"), text);
+  let foundNested = false;
+  for (let index = 11; index <= 15; index++) {
+    const result = await tool("plan_units", plan("nested", index));
+    foundNested ||= (result.test_debt_audit?.signals ?? []).some((signal: { path: string }) => signal.path === "nested/test/dir-139/later.test.mjs");
+  }
+  assert.ok(foundNested, "a test after the 128-directory page is eventually scheduled");
+  await tool("cancel_operator", { reason: "End this isolated fixture" });
+}));
+
+test("prepared Mission retains the original inventory page across registration and replan failures", async t => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
+  for (let index = 0; index < 24; index++) await writeFile(join(root, "test", `${index}.test.mjs`), text);
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  let hooks = await create();
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain the test suite." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain the test suite"] });
+  const plan = { units: [{ title: "Maintain tests", objective: "Maintain tests", read: ["check.mjs"],
+    write: ["test/**"], validation: ["node check.mjs"] }] };
+  const update = OperatorMissionRuntime.prototype.update;
+  let injected = false;
+  t.mock.method(OperatorMissionRuntime.prototype, "update", function (this: OperatorMissionRuntime, id: string, change: Parameters<typeof update>[1]) {
+    return update.call(this, id, state => {
+      const before = state.runID;
+      change(state);
+      if (!injected && before !== state.runID) { injected = true; throw new Error("injected inventory binding failure"); }
+    });
+  });
+  await assert.rejects(tool("plan_units", plan), /injected inventory binding failure/);
+  t.mock.restoreAll();
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await operators.required("root");
+  const handoff = JSON.parse(await readFile(prepared.units[0]!.handoffPath, "utf8"));
+  const expected = handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals;
+  assert.equal(expected.length, 16);
+  t.mock.method(OperatorRuntime.prototype, "replanMission", async () => { throw new Error("injected replan failure"); });
+  await assert.rejects(tool("plan_units", { ...plan, units: [{ ...plan.units[0], title: "Other proposal" }], reason: "Try a correction" }), /injected replan failure/);
+  t.mock.restoreAll();
+  hooks = await create();
+  await tool("plan_units", plan);
+  const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const registered = mission.testDebtSignals!.filter(signal => signal.run_id === prepared.runID);
+  assert.deepEqual(registered.map(({ run_id: _run, ...signal }) => signal), expected,
+    "the exact original handoff, not the failed proposal's page, is registered");
+  assert.equal((await operators.required("root")).runID, prepared.runID);
+  assert.equal(mission.testDebtInventory!.pending, undefined);
 }));
 
 test("a newly edited test can schedule audit once without treating repeated assertions as proof", async () => fixture(async root => {
