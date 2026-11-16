@@ -3181,6 +3181,9 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
   let cleanup: (() => void) | void;
   try {
     await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "test"));
+    const testText = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+    await writeFile(join(directory, "seed.mjs"), testText);
     fixture.history.length = 0;
     fixture.context.location.directory = directory;
     fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator",
@@ -3197,8 +3200,19 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
     };
     await call("start_mission", { requirements: ["Validated result.txt"] });
     const direct = await call("plan_units", { executor: "self", units: [{ title: "Result", objective: "Create and validate result.txt",
-      read: [], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      read: ["seed.mjs"], write: ["result.txt", "test/**"], validation: ["node check.mjs"] }] });
     assert.equal(direct.status, "direct-unit-running");
+    const shell = { tool: "shell", sessionID: "root", id: "audit-error-shell",
+      input: { command: "cp seed.mjs test/native.test.mjs && false", workdir: directory } };
+    await fixture.toolHooks.get("execute.before")!(shell);
+    await assert.rejects(promisify(execFile)("sh", ["-c", shell.input.command], { cwd: directory }));
+    const nativeError = { ...shell, status: "error", error: { exit: 1, status: "completed" } };
+    await fixture.toolHooks.get("execute.after")!(nativeError);
+    assert.deepEqual(nativeError.error, { exit: 1, status: "completed" }, "the V2 error stays an error");
+    assert.equal("result" in nativeError, false, "no successful native result is manufactured");
+    assert.equal(await readFile(join(directory, "test/native.test.mjs"), "utf8"), testText);
+    assert.ok((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).testDebtSignals
+      ?.some(signal => signal.path === "test/native.test.mjs"));
     const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE), before = await runtime.required("root");
     const plan = fixture.tools.find(tool => tool.name === "sortie_v010_plan_units") as any;
     assert.match(plan.input.properties.executor.description, /units=\"\" in V2/);
@@ -3210,6 +3224,8 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
     assert.equal(after.units[0]!.callID, before.units[0]!.callID, "reservation anchor is retained");
     assert.equal(after.units[0]!.directHandoffs!.length, 1);
     assert.equal(after.dispatched, 0, "handoff returns a Task; it does not fabricate its admission");
+    const continuation = JSON.parse(/^direct_handoff: (.+)$/mu.exec(after.units[0]!.task.prompt)![1]!);
+    assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/native.test.mjs"));
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

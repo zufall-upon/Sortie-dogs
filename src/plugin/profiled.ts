@@ -4880,7 +4880,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
-        if (!ownership && changed.length && typeof output.output === "string" &&
+        if (!ownership && changed.length &&
             (successful && /^(?:write|edit|multiedit|patch|apply_patch)$/iu.test(request.tool) || completedShellWrite)) {
           try {
             const root = await rootFor(id), mission = root ? await missions.read(root) : undefined;
@@ -4903,12 +4903,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                   .map(signal => ({ ...signal, run_id: run.runID, unit_id: unit.unit.id, trigger: "observed-change" }));
                 if (added.length) state.testDebtSignals = [...(state.testDebtSignals ?? []), ...added].slice(-64);
               });
-              if (added.length) output.output += `\n\nSORTIE_TEST_DEBT_AUDIT ${JSON.stringify({ signals: added,
+              if (added.length && typeof output.output === "string") output.output += `\n\nSORTIE_TEST_DEBT_AUDIT ${JSON.stringify({ signals: added,
                 measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } })}\n${TEST_DEBT_AUDIT_INSTRUCTION}`;
             }
           } catch {
             // The native edit already happened. An inventory/storage error cannot turn it into a failed edit.
-            output.output += "\n\nSORTIE_TEST_DEBT_AUDIT_UNAVAILABLE: inventory was not recorded; no audit or cleanup is implied.";
+            if (typeof output.output === "string") output.output += "\n\nSORTIE_TEST_DEBT_AUDIT_UNAVAILABLE: inventory was not recorded; no audit or cleanup is implied.";
           }
         }
         if (!ownership && isShellTool(request.tool)) {

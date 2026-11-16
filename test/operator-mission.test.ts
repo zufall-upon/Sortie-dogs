@@ -243,7 +243,7 @@ test("a newly edited test can schedule audit once without treating repeated asse
   });
   await tool("start_mission", { requirements: ["Add a check"] });
   const started = await tool("plan_units", { executor: "self", units: [{ title: "Add check", objective: "Add the check",
-    read: ["seed.mjs"], write: ["test/new.test.mjs", "test/shell.test.mjs", "test/failing-shell.test.mjs", "test/errored-shell.test.mjs"], validation: ["node test/new.test.mjs"] }] });
+    read: ["seed.mjs"], write: ["test/new.test.mjs", "test/shell.test.mjs", "test/failing-shell.test.mjs", "test/errored-shell.test.mjs", "test/no-output-shell.test.mjs"], validation: ["node test/new.test.mjs"] }] });
   assert.equal(started.test_debt_audit, undefined);
   const initialUnit = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
   const initialHandoff = await readFile(initialUnit.handoffPath, "utf8");
@@ -294,6 +294,17 @@ test("a newly edited test can schedule audit once without treating repeated asse
   assert.equal(erroredOutput.metadata.exit, 1);
   assert.equal(await readFile(join(root, "test", "errored-shell.test.mjs"), "utf8"), text);
   assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/errored-shell.test.mjs"));
+  const noOutputArgs = { command: "cp seed.mjs test/no-output-shell.test.mjs && false", workdir: root };
+  const noOutputRequest = { tool: "shell", sessionID: "root", callID: "no-output-shell-check" };
+  await hooks["tool.execute.before"]!(noOutputRequest, { args: noOutputArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", noOutputArgs.command], { cwd: root }));
+  const noOutput = { status: "error", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...noOutputRequest, args: noOutputArgs }, noOutput);
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/no-output-shell.test.mjs"),
+    "a terminal error without a text result still retains the scheduling signal");
+  assert.equal(noOutput.status, "error");
+  assert.equal(noOutput.metadata.exit, 1);
+  assert.equal("output" in noOutput, false, "recording must not fabricate a native result");
   const yielded = await tool("plan_units", { executor: "worker", handoff_context: "Continue the same requested check." });
   assert.ok(yielded.task, JSON.stringify(yielded));
   const continued = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
@@ -309,6 +320,7 @@ test("a newly edited test can schedule audit once without treating repeated asse
   const continuation = JSON.parse(/^direct_handoff: (.+)$/mu.exec(workerChat.parts[0]!.text)![1]!);
   assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/errored-shell.test.mjs"),
     "the admitted Worker's continuation receives a signal discovered after planning");
+  assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/no-output-shell.test.mjs"));
   assert.ok(continuation.test_debt_audit.signals.every((signal: { unit_id: string }) => signal.unit_id === continued.unit.id));
   assert.match(continuation.test_debt_audit.instruction, /not established as complete/);
   assert.match(continuation.test_debt_audit.instruction, /already.*(?:assessed|handled)/i);
@@ -338,7 +350,7 @@ test("a newly edited test can schedule audit once without treating repeated asse
   await symlink(other, join(root, "test", "link"), process.platform === "win32" ? "junction" : "dir");
   await symlink(join(root, ".."), join(root, "test", "linked-outside"), process.platform === "win32" ? "junction" : "dir");
   const globbed = await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] });
-  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/errored-shell.test.mjs", "test/failing-shell.test.mjs", "test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs", "test/shell.test.mjs"]);
+  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/errored-shell.test.mjs", "test/failing-shell.test.mjs", "test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs", "test/no-output-shell.test.mjs", "test/shell.test.mjs"]);
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/link/**"], validation: [] }), [],
     "a scope starting through a link must not traverse even an in-project target");
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/.opencode/**"], validation: [] }), [],
