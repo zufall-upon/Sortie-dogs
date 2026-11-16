@@ -143,6 +143,14 @@ export function validationEvidenceKey(request: ValidationBudgetRequest): string 
     ...(request.required_execution ? { required_execution: request.required_execution } : {}) })).digest("hex")}`;
 }
 
+/** A join has a stricter identity than legacy reuse: source and host authority must also match. */
+export function validationJoinFingerprint(request: ValidationBudgetRequest, authority: string): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({ version: 1, run_id: request.run_id,
+    source_snapshot: request.source_snapshot, candidate: request.candidate, command: request.command,
+    environment: request.environment, scope: normalizedScope(request.scope), owner: request.owner,
+    expected_evidence: request.expected_evidence.filter(value => !value.startsWith("unit:")).sort(), authority })).digest("hex")}`;
+}
+
 export function validationResultFingerprint(request: ValidationBudgetRequest, outcome: ValidationOutcome,
   exitCode: number | null): string {
   return `sha256:${createHash("sha256").update(JSON.stringify({ version: 1,

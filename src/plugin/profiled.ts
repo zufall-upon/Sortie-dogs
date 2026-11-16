@@ -235,11 +235,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
     const historicalTurnMessages = new Map<string, string>();
     const dispatchTransitions = new Map<string, Promise<unknown>>();
-    async function serializeDispatchTransition<T>(root: string, operation: () => Promise<T>): Promise<T> {
-      const current = (dispatchTransitions.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
-      dispatchTransitions.set(root, current);
-      try { return await current; }
-      finally { if (dispatchTransitions.get(root) === current) dispatchTransitions.delete(root); }
+    async function serializeDispatchTransition<T>(root: string,
+      operation: (yieldWait: <U>(wait: () => Promise<U>) => Promise<U>) => Promise<T>): Promise<T> {
+      let current: Promise<void>, release!: () => void;
+      const enter = async () => {
+        const previous = dispatchTransitions.get(root) ?? Promise.resolve();
+        current = new Promise<void>(resolve => { release = resolve; });
+        dispatchTransitions.set(root, current);
+        await previous.catch(() => undefined);
+      };
+      const leave = () => {
+        release();
+        if (dispatchTransitions.get(root) === current) dispatchTransitions.delete(root);
+      };
+      await enter();
+      try { return await operation(async wait => { leave(); try { return await wait(); } finally { await enter(); } }); }
+      finally { leave(); }
     }
     const retired = new Set<string>();
     const renderedParts = new Map<string, string>();
@@ -598,6 +609,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }) + text.slice(end);
     }
     function translate(value: unknown, outward: boolean): unknown {
+      if (value instanceof AbortSignal) return value;
       if (Array.isArray(value)) return value.map(item => translate(item, outward));
       if (!record(value)) return value;
       return Object.fromEntries(Object.entries(value).map(([key, item]) => {
@@ -5146,7 +5158,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // check and execute under an admission whose writer was already released.
       // Prepared Tasks also remain serialized with proposal approval.
       return root === undefined ? before(request, output)
-        : serializeDispatchTransition(root, () => before(request, output));
+        : serializeDispatchTransition(root, yieldWait => before({ ...request, yieldValidationJoin: yieldWait }, output));
     };
     return hooks;
   };

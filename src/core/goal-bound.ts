@@ -208,7 +208,10 @@ export type GoalFlightEvent =
        readonly operation_id: string; readonly evidence_key: string; readonly scope: ValidationScope | null;
        readonly decision: "ALLOW" | "SKIP" | "DENY"; readonly reason: string; readonly consumed: number; readonly limit: number;
        readonly saved_ms?: number;
+       readonly join_fingerprint?: string;
        readonly reopen?: GoalValidationReopen })
+  | (GoalEventBase & { readonly kind: "validation.joined"; readonly goal_id: string; readonly operation_id: string;
+       readonly owner_reservation_id: string; readonly evidence_key: string; readonly join_fingerprint: string })
   | (GoalEventBase & { readonly kind: "validation.settled"; readonly goal_id: string; readonly reservation_id: string;
        readonly operation_id: string; readonly evidence_key: string; readonly outcome: ValidationOutcome; readonly exit_code: number | null;
        readonly evidence_fingerprint?: string; readonly duration_ms?: number; readonly reason?: string })
@@ -615,6 +618,8 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
       requireState(event.limit > 0 && Number.isSafeInteger(event.limit) && Number.isSafeInteger(event.consumed) &&
         event.consumed >= 0 && event.consumed <= event.limit && event.operation_id.length > 0 && event.evidence_key.length > 0,
         "invalid", "Validation admission is malformed.");
+      requireState(event.join_fingerprint === undefined || event.decision === "ALLOW" && HASH.test(event.join_fingerprint),
+        "invalid", "Only an owner admission may carry a validation join identity.");
       if (event.decision === "ALLOW") {
         const reopen = event.reopen;
         const prior = reopen === undefined ? undefined : validationAdmissions.get(reopen.prior_reservation_id);
@@ -666,6 +671,13 @@ export function reduceGoalFlight(records: readonly GoalFlightEventRecord[]): Goa
             rejected: state.validation_budget.rejected + 1 } };
         }
       }
+    } else if (event.kind === "validation.joined") {
+      const owner = validationAdmissions.get(event.owner_reservation_id);
+      requireState(event.operation_id.length > 0 && HASH.test(event.join_fingerprint) &&
+        owner?.decision === "ALLOW" && owner.operation_id !== event.operation_id &&
+        owner.evidence_key === event.evidence_key && owner.join_fingerprint === event.join_fingerprint &&
+        state.validation_budget.reservations.some(item => item.reservation_id === event.owner_reservation_id),
+        "transition", "Validation join must reference the equivalent active owner.");
     } else if (event.kind === "validation.settled") {
       const reservation = state.validation_budget.reservations.find((entry) => entry.reservation_id === event.reservation_id);
       requireState(reservation?.operation_id === event.operation_id && reservation.evidence_key === event.evidence_key,

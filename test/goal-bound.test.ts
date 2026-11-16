@@ -530,6 +530,64 @@ test("concurrent goal validation admissions observe the locked reservation", asy
   assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 3);
 });
 
+test("joinable validation retains the single owner and returns only its actual terminal observation", async () => {
+  const name = "validation-join", { ledger } = await accepted(name, 8);
+  const other = await RunFlightLedger.openGoal(path.join(root, name, ".sortie-dogs", "run-flight", "root.json"));
+  const request = { run_id: `goal-${name}`, operation_id: "first", source_snapshot: "source", candidate: "candidate",
+    command: ["node", "check"], environment: { platform: "linux", arch: "x64", runtime: "node-22", directory: "/project" },
+    scope: "targeted" as const, owner: "worker" as const, expected_evidence: ["command"],
+    marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const results = await Promise.all([ledger.reserveJoinableValidation(request, 8, "same-host-permission-and-binding"),
+    other.reserveJoinableValidation({ ...request, operation_id: "second" }, 8, "same-host-permission-and-binding")]);
+  const ownerIndex = results.findIndex(item => item.decision === "ALLOW");
+  const owner = results[ownerIndex]!;
+  const waiter = results.find(item => item.decision === "JOIN");
+  assert.ok(owner.decision === "ALLOW" && owner.reservation_id);
+  assert.ok(waiter && waiter.decision === "JOIN");
+  assert.equal(waiter.owner_reservation_id, owner.reservation_id);
+  assert.equal((await ledger.readGoal()).state.validation_budget.consumed, 1);
+  const terminal = other.waitForJoinedValidation(waiter.owner_reservation_id, { timeoutMs: 2000 });
+  const ownerRequest = ownerIndex === 0 ? request : { ...request, operation_id: "second" };
+  await ledger.settleValidation(owner.reservation_id, ownerRequest, "failed", 7);
+  const result = await terminal;
+  assert.equal(result.operation_id, ownerRequest.operation_id);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.exit_code, 7);
+  const persisted = await RunFlightLedger.openGoal(path.join(root, name, ".sortie-dogs", "run-flight", "root.json"));
+  const snapshot = await persisted.readGoal();
+  assert.equal(snapshot.records.filter(({ event }) => event.kind === "validation.joined").length, 1);
+  assert.equal(snapshot.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+  assert.deepEqual(snapshot.state.validation_budget.evidence_keys, []);
+});
+
+test("validation join refuses different source or host authority and waiter cancellation cannot settle the owner", async () => {
+  const { ledger } = await accepted("validation-join-boundaries", 8);
+  const request = { run_id: "goal-validation-join-boundaries", operation_id: "owner", source_snapshot: "source", candidate: "candidate",
+    command: ["node", "check"], environment: { platform: "linux", arch: "x64", runtime: "node-22" },
+    scope: "targeted" as const, owner: "worker" as const, expected_evidence: ["command"],
+    marginal_value: { unmet_criteria: ["criterion"], risk_hypothesis: null }, reason: "acceptance" as const };
+  const owner = await ledger.reserveJoinableValidation(request, 8, "authority-1");
+  assert.ok(owner.decision === "ALLOW" && owner.reservation_id);
+  for (const [changed, authority] of [[{ ...request, operation_id: "other-source", source_snapshot: "other" }, "authority-1"],
+    [{ ...request, operation_id: "other-authority" }, "authority-2"]] as const) {
+    const decision = await ledger.reserveJoinableValidation(changed, 8, authority);
+    assert.equal(decision.decision, "DENY");
+  }
+  const otherEnvironment = await ledger.reserveJoinableValidation({ ...request, operation_id: "other-cwd",
+    environment: { ...request.environment, directory: "/other" } }, 8, "authority-1");
+  assert.equal(otherEnvironment.decision, "ALLOW", "a different cwd must not share the running process");
+  const required = await ledger.reserveJoinableValidation({ ...request, operation_id: "required",
+    required_execution: { admission: "dispatch", call_id: "required" } }, 8, "authority-1");
+  assert.equal(required.decision, "ALLOW", "a required occurrence is executed independently");
+  const abort = new AbortController();
+  const wait = ledger.waitForJoinedValidation(owner.reservation_id, { timeoutMs: 2000, signal: abort.signal });
+  abort.abort();
+  await assert.rejects(wait, /waiter cancelled/u);
+  assert.ok((await ledger.readGoal()).state.validation_budget.reservations.some(item => item.reservation_id === owner.reservation_id));
+  await ledger.settleValidation(owner.reservation_id, request, "passed", 0);
+  assert.equal((await ledger.waitForJoinedValidation(owner.reservation_id, { timeoutMs: 2000 })).outcome, "passed");
+});
+
 test("goal validation evidence becomes reusable only after a passed settlement", async () => {
   const { ledger } = await accepted("validation-settlement-gate", 4);
   const request = { run_id: "goal-validation-settlement-gate", operation_id: "first",

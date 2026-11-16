@@ -202,6 +202,8 @@ export interface OpenCodePluginInput {
   nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void> };
   /** V2 adapter can project and restore native session-scoped correction permissions. */
   reviewerCorrectionPermissions?: boolean;
+  /** Native host permission check for the original shell command before sharing an in-flight result. */
+  authorizeValidationJoin?: (input: { sessionID: string; agent?: string; command: string; directory: string }) => Promise<void>;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -497,6 +499,9 @@ interface HostGoalExecution {
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
+  /** Start binding is retained even if a finished registered check uses a narrower proof recipe. */
+  readonly admissionSource?: string;
+  readonly admissionCandidate?: string;
   readonly dockerWorkspace?: DockerWorkspaceSnapshot;
   readonly operationInputs?: string;
   readonly validationInputs?: string;
@@ -637,8 +642,8 @@ function validationCandidate(source: string, candidate: string): string {
   return goalFingerprint({ source, candidate });
 }
 
-function settledPassNoticeCommand(): string {
-  const script = 'process.stdout.write("SORTIE_VALIDATION_REUSED\\n")';
+function settledPassNoticeCommand(joined = false): string {
+  const script = `process.stdout.write("SORTIE_VALIDATION_${joined ? "JOINED" : "REUSED"}\\n")`;
   if (process.platform === "win32") {
     return `& '${process.execPath.replaceAll("'", "''")}' -e '${script}'`;
   }
@@ -1585,6 +1590,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
   const hostGoalEndOperations = new Map<string, Promise<void>>();
+  const validationJoinWaiters = new Map<string, { sessionID: string; controller: AbortController }>();
   const settledPassNotices = new Map<string, { readonly sessionID: string; readonly command: string }>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
@@ -1977,19 +1983,71 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const continued = { ...request, operation_id: retained[0]!.operation_id };
         validation = { ledger, request: continued, reservation: retained[0]!.reservation_id };
       } else {
-        let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
+        let reservation: Awaited<ReturnType<RunFlightLedger["reserveJoinableValidation"]>>;
         try {
           // A changed candidate produces a new evidence key and must not become a user-facing blocker
           // merely because earlier necessary validations consumed the initial estimate. Duplicate
           // evidence remains denied by reserveValidation before this limit is considered.
           const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
-          reservation = repairResume?.retryAuthorization === null || repairResume === undefined
-            ? await ledger.reserveValidation(request, validationLimit, skipReconciliation)
-            : await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation);
+          const joinable = input.authorizeValidationJoin !== undefined && !dockerRequest && !requiredExecution &&
+            snapshot.binding.freshness !== undefined && ["bash", "shell"].includes(toolInput.tool) &&
+            !/[;&|\n\r`$<>]/u.test(rawCommand) && (repairResume === undefined || repairResume.retryAuthorization === null);
+          const binding = snapshot.binding;
+          const authority = joinable ? goalFingerprint({ projectRoot: authorization.projectRoot,
+            readScopes: authorization.readScopes, writeScopes: authorization.writeScopes,
+            source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
+            source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
+            tool: toolInput.tool }) : undefined;
+          reservation = repairResume?.retryAuthorization !== null && repairResume !== undefined
+            ? await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation)
+            : authority ? await ledger.reserveJoinableValidation(request, validationLimit, authority, skipReconciliation)
+              : await ledger.reserveValidation(request, validationLimit, skipReconciliation);
         } catch (error) {
           throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
         }
-        if (reservation.decision === "SKIP") {
+        if (reservation.decision === "JOIN") {
+          // This is not an execution by the waiter. The host must first authorize the
+          // original command, then observe the owner's native terminal and fresh proof.
+          const controller = new AbortController();
+          const abort = () => controller.abort();
+          toolInput.signal?.addEventListener("abort", abort, { once: true });
+          if (toolInput.signal?.aborted) controller.abort();
+          validationJoinWaiters.set(toolInput.callID, { sessionID: toolInput.sessionID, controller });
+          let terminal: Awaited<ReturnType<RunFlightLedger["waitForJoinedValidation"]>>;
+          const wait = async () => {
+            await input.authorizeValidationJoin!({ sessionID: toolInput.sessionID, agent: toolInput.agent,
+              command: rawCommand, directory });
+            return ledger.waitForJoinedValidation(reservation.owner_reservation_id,
+              { signal: controller.signal, timeoutMs: 30 * 60_000 });
+          };
+          try { terminal = toolInput.yieldValidationJoin ? await toolInput.yieldValidationJoin(wait) : await wait(); }
+          finally {
+            validationJoinWaiters.delete(toolInput.callID);
+            toolInput.signal?.removeEventListener("abort", abort);
+          }
+          await hostGoalEndOperations.get(terminal.operation_id);
+          const execution = hostGoalExecutions.get(terminal.operation_id);
+          const now = (await ledger.readGoal()).state;
+          const currentSnapshot = await refreshProtectedSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined);
+          if (terminal.outcome !== "passed" || terminal.exit_code !== 0 || !execution || execution.root !== root ||
+              execution.validation?.reservation !== reservation.owner_reservation_id || execution.outcome !== "pass" ||
+              execution.exitCode !== 0 || execution.endedAt === undefined || execution.immutableRef === undefined || execution.fresh !== true ||
+              (execution.admissionSource ?? execution.source) !== snapshot.source ||
+              (execution.admissionCandidate ?? execution.candidate) !== snapshot.candidate ||
+              currentSnapshot?.source !== snapshot.source || currentSnapshot.candidate !== snapshot.candidate ||
+              now.goal_id !== goal.goal_id || now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
+              sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
+              controller.signal.aborted) {
+            throw denyValidation(`joined-owner-${terminal.outcome}: native proof unavailable or stale`);
+          }
+          reusedEvidence = observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt,
+            immutableRef: execution.immutableRef, exitCode: 0, outcome: "pass", fresh: true }, now, unitID)
+            .filter(entry => validGoalEvidence(entry, now) && entry.execution.units.includes(unitID));
+          if (!reusedEvidence.length) throw denyValidation("joined-owner-evidence-unavailable");
+          const notice = settledPassNoticeCommand(true);
+          args!.command = notice;
+          settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
+        } else if (reservation.decision === "SKIP") {
           reusedEvidence = reconciliationEvidence;
           const notice = dockerRequest ? "true" : settledPassNoticeCommand();
           args!.command = notice;
@@ -2012,6 +2070,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      admissionSource: snapshot.source, admissionCandidate: snapshot.candidate,
       ...(dockerWorkspace === undefined ? {} : { dockerWorkspace }),
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
@@ -6250,6 +6309,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function expireSession(sessionID: string): void {
+    for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === sessionID) waiter.controller.abort();
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
@@ -6272,6 +6332,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function evictSession(sessionID: string): void {
+    for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === sessionID) waiter.controller.abort();
     pendingDirectReleases.delete(sessionID);
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     goalValidationDefects.delete(sessionID);
@@ -8371,6 +8432,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       touchCoordinatorTaskWatchdog(eventSessionID);
+      if (event.type === "session.interrupted") {
+        for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === eventSessionID) waiter.controller.abort();
+        return;
+      }
       if (event.type === "session.deleted") {
         fastLane.forget(eventSessionID);
         if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {

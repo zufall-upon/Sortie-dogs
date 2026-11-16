@@ -1065,6 +1065,97 @@ export class RunFlightLedger {
     return { ...decision, reservation_id };
   }
 
+  /**
+   * Opt-in admission for hosts able to wait for the actual owner and validate its native proof.
+   * The authority is a host-derived binding for permissions and the protected snapshot recipe;
+   * it is never accepted from a model. Legacy admissions cannot be joined retroactively.
+   */
+  async reserveJoinableValidation(request: ValidationBudgetRequest, limit: number, authority: string,
+    skipReconciliation?: ValidationSkipReconciliation): Promise<
+      (ValidationBudgetDecision & { readonly reservation_id: string | null }) |
+      { readonly decision: "JOIN"; readonly reason: "in-flight"; readonly evidence_key: string;
+        readonly owner_reservation_id: string; readonly consumed: number }> {
+    if (!this.#goalMode || typeof authority !== "string" || authority.length === 0 || authority.length > 4096) {
+      throw new RunFlightLedgerError("invalid", "Validation join requires a goal ledger and host authority.");
+    }
+    const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey, validationJoinFingerprint } =
+      await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request);
+    const joinFingerprint = request.required_execution === undefined ? validationJoinFingerprint(request, authority) : undefined;
+    let result: Awaited<ReturnType<RunFlightLedger["reserveJoinableValidation"]>> | undefined;
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((done) => { resolveTail = done; });
+    await previous;
+    try {
+      await this.#appendGoalLocked((state, records) => {
+        if (state.goal_id === null || request.run_id !== state.goal_id) {
+          throw new RunFlightLedgerError("transition", "Validation join admission does not belong to the active goal.");
+        }
+        const events = records.map(({ event }) => event);
+        const evidence = validationEvidenceState(events);
+        const guidance = passedValidationDurationGuidance(events, evidenceKey);
+        const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+          evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
+        const owner = decision.decision === "DENY" && decision.reason === "duplicate-evidence" && joinFingerprint !== undefined
+          ? state.validation_budget.reservations.find(item => item.evidence_key === evidenceKey) : undefined;
+        const admission = owner && records.find(({ event }) => event.kind === "validation.admission" &&
+          event.decision === "ALLOW" && event.reservation_id === owner.reservation_id)?.event;
+        if (owner && joinFingerprint !== undefined && admission?.kind === "validation.admission" && admission.join_fingerprint === joinFingerprint &&
+            owner.operation_id !== request.operation_id) {
+          result = { decision: "JOIN", reason: "in-flight", evidence_key: evidenceKey,
+            owner_reservation_id: owner.reservation_id, consumed: state.validation_budget.consumed };
+          return { kind: "validation.joined", at: new Date().toISOString(), goal_id: state.goal_id!,
+            operation_id: request.operation_id, owner_reservation_id: owner.reservation_id,
+            evidence_key: evidenceKey, join_fingerprint: joinFingerprint };
+        }
+        const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+        result = { ...decision, reservation_id };
+        return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+          reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+          operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+          scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+          limit, saved_ms: decision.redundant_time_ms,
+          ...(reservation_id && joinFingerprint ? { join_fingerprint: joinFingerprint } : {}) };
+      }, (state, event) => {
+        if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+          this.#assertSkipReconciliation(state, event, skipReconciliation);
+        }
+      });
+    } finally { resolveTail(); }
+    return result!;
+  }
+
+  /** Return only the owner's durable terminal observation, not proof for the waiter. */
+  async waitForJoinedValidation(ownerReservation: string, options: { readonly signal?: AbortSignal; readonly timeoutMs: number }):
+    Promise<Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>> {
+    if (!this.#goalMode || !ownerReservation || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
+      throw new RunFlightLedgerError("invalid", "Invalid validation join wait.");
+    }
+    const deadline = Date.now() + options.timeoutMs;
+    for (;;) {
+      if (options.signal?.aborted) throw new RunFlightLedgerError("transition", "Validation waiter cancelled.");
+      const { records, state } = await this.readGoal();
+      if (options.signal?.aborted) throw new RunFlightLedgerError("transition", "Validation waiter cancelled.");
+      const terminal = records.find(({ event }) => event.kind === "validation.settled" && event.goal_id === state.goal_id &&
+        event.reservation_id === ownerReservation)?.event;
+      if (terminal?.kind === "validation.settled") return terminal;
+      if (!state.validation_budget.reservations.some(item => item.reservation_id === ownerReservation)) {
+        throw new RunFlightLedgerError("transition", "Validation owner is no longer observable.");
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new RunFlightLedgerError("transition", "Validation owner wait timed out.");
+      await new Promise<void>((resolve, reject) => {
+        const signal = options.signal;
+        const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort);
+          reject(new RunFlightLedgerError("transition", "Validation waiter cancelled.")); };
+        const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, Math.min(remaining, 50));
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+    }
+  }
+
   /** Host-authorized one-time retry for interruptions; ordinary failed exits use reserveValidation. */
   async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
     authorization: GoalValidationRetryAuthorization | GoalNativeValidationRetryAuthorization,
@@ -1229,6 +1320,17 @@ export class RunFlightLedger {
       const current = typeof eventInput === "function" || guard !== undefined ? reduceGoalFlight(records) : undefined;
       const event = typeof eventInput === "function" ? eventInput(current!, records) : eventInput;
       if (guard !== undefined) guard(current!, event);
+      if (event.kind === "validation.joined") {
+        const prior = records.find(({ event: stored }) => stored.kind === "validation.joined" &&
+          stored.goal_id === event.goal_id && stored.operation_id === event.operation_id)?.event;
+        if (prior?.kind === "validation.joined") {
+          if (prior.owner_reservation_id !== event.owner_reservation_id || prior.evidence_key !== event.evidence_key ||
+              prior.join_fingerprint !== event.join_fingerprint) {
+            throw new RunFlightLedgerError("transition", "Validation join conflicts with its original owner.");
+          }
+          return current ?? reduceGoalFlight(records);
+        }
+      }
       if (event.kind === "validation.settled") {
         const prior = records.find(({ event: stored }) => stored.kind === "validation.settled" &&
           stored.goal_id === event.goal_id && stored.reservation_id === event.reservation_id)?.event;

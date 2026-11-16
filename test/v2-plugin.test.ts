@@ -198,6 +198,30 @@ function contextFixture() {
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
 
+test("V2 validation join checks the original native shell permission and forwards cancellation", async () => {
+  const fixture = contextFixture();
+  const assertions: unknown[] = [];
+  fixture.context.permission.assert = async input => { assertions.push(input); throw new Error("native permission denied"); };
+  let authorize: NonNullable<Parameters<OpenCodePlugin>[0]["authorizeValidationJoin"]> | undefined;
+  let observedSignal: AbortSignal | undefined;
+  const factory: OpenCodePlugin = async input => {
+    authorize = input.authorizeValidationJoin;
+    return { "tool.execute.before": async request => { observedSignal = request.signal; } };
+  };
+  const cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  try {
+    assert.ok(authorize);
+    await assert.rejects(authorize({ sessionID: "worker", agent: "dog-worker-v010", command: "node candidate.test.mjs",
+      directory: "/project" }), /native permission denied/u);
+    assert.deepEqual(assertions, [{ sessionID: "worker", agent: "dog-worker-v010", action: "shell",
+      resources: ["node candidate.test.mjs"], save: ["node candidate.test.mjs"] }]);
+    const controller = new AbortController();
+    await fixture.toolHooks.get("execute.before")!({ tool: "shell", sessionID: "worker", id: "call",
+      input: { command: "node candidate.test.mjs" }, signal: controller.signal });
+    assert.equal(observedSignal, controller.signal);
+  } finally { cleanup?.(); }
+});
+
 test("V2 native Grip hooks retain direction through context reload and preserve native question answer metadata", async () => {
   const directory = await mkdtemp(resolve("_testenv/v2-grip-"));
   let cleanup: (() => void) | void;
@@ -900,15 +924,15 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario } of [
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
-  { legacy: false, commit: false, cancel: false },
+  { legacy: false, commit: false, cancel: false }, { legacy: false, commit: false, cancel: false, join: true },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -920,10 +944,15 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
     unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  let joinedPermission!: () => void;
+  const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
+    if (joinScenario) fixture.context.permission.assert = async request => {
+      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u); joinedPermission();
+    };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => {
       const hooks = await SortieDogsV010Plugin(input, options);
       const after = hooks["tool.execute.after"];
@@ -1341,8 +1370,29 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
         }
       }
       const validation = await before(child, "shell", { command });
+      let waiter: { sessionID: string; agent: string; tool: string; id: string; input: { command: string } } | undefined;
+      let joined: Promise<void> | undefined;
+      if (joinScenario && index === 0) {
+        waiter = { sessionID: child, agent: agents[child]!.agent, tool: "shell", id: `call_${++counter}`, input: { command } };
+        joined = Promise.resolve(fixture.toolHooks.get("execute.before")!(waiter));
+        await Promise.race([joinPermitted, joined]);
+        const readWhileWaiting = await before(child, "read", { path: "check.mjs" });
+        await after(readWhileWaiting, await readFile(join(directory, "check.mjs"), "utf8"));
+      }
       const checked = await exec(process.execPath, ["check.mjs", finalCandidate ? "ready" : "present"], { cwd: directory });
       await after(validation, checked.stdout, { exit: 0 });
+      if (waiter && joined) {
+        await joined;
+        assert.match(waiter.input.command, /SORTIE_VALIDATION_JOINED/u);
+        await after(waiter, "SORTIE_VALIDATION_JOINED", { exit: 0 });
+        const recorded = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"))
+          .units[0]!.validationRegistration!.checks.find(check => check.callID === waiter!.id);
+        assert.ok(recorded?.reusedEvidenceIDs?.length, "the waiter retains the owner's proof identity, not a new native execution");
+        const joinedLedger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.equal(joinedLedger.records.filter(({ event }) => event.kind === "validation.joined").length, 1);
+        assert.equal(joinedLedger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+      }
       agents[child]!.outcome = "succeeded";
       await after(worker, "Validation passed", { sessionID: child });
       const review = await tool("coordinator", "review_mission", { risk_tags: commit ? ["public-logic"] : [], traces: [`R1: result.txt checked using ${command}`] });

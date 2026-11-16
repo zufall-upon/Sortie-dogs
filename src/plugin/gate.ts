@@ -13,6 +13,9 @@ export interface ToolExecuteBeforeInput {
   sessionID: string;
   callID: string;
   agent?: string;
+  signal?: AbortSignal;
+  /** Host-internal: release Mission admission serialization while awaiting another execution. */
+  yieldValidationJoin?: <T>(wait: () => Promise<T>) => Promise<T>;
 }
 
 export interface ToolExecuteBeforeOutput {
