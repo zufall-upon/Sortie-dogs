@@ -716,6 +716,29 @@ test("CLI global init reports its target, legacy preservation, and invalid combi
   }
 });
 
+test("CLI global init updates both 0.16.29 recovery markers without changing user config", async () => {
+  for (const previous of ["0.16.29-scope-registration-recovery-v2", "0.16.29-multi-scope-recovery-v3"]) {
+    const globalRoot = await fixtureDirectory();
+    try {
+      const env = { OPENCODE_CONFIG_DIR: globalRoot };
+      const args = ["init", "--global", "--profile", "v010"];
+      assert.equal((await runCli(args, env)).exit, 0);
+      const marker = join(globalRoot, "sortie-dogs-v010.version");
+      const config = join(globalRoot, "opencode.json");
+      const settings = JSON.parse(await readFile(config, "utf8"));
+      settings.agent = { "dog-worker-v010": { model: "example/explicit-model" } };
+      const configured = `${JSON.stringify(settings, null, 2)}\n`;
+      await writeFile(config, configured);
+      await writeFile(marker, `${previous}\n`);
+      const updated = await runCli(args, env);
+      assert.equal(updated.exit, 0, updated.stderr);
+      assert.equal(await readFile(marker, "utf8"), `${V010_RUNTIME_ASSET_VERSION}\n`);
+      assert.equal(await readFile(config, "utf8"), configured);
+      assert.equal((await runCli(args, env)).exit, 0);
+    } finally { await clean(globalRoot); }
+  }
+});
+
 test("failed global init unwinds every config-root directory it created", async () => {
   const fixture = await fixtureDirectory();
   const parent = join(fixture, "rollback-root");

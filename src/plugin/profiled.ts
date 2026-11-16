@@ -10,6 +10,7 @@ import { taskChildSessionID } from "./task-result-repair.js";
 import type { MissionImplementationAdmission, RuntimeBridge } from "./runtime-bridge.js";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
@@ -3136,8 +3137,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const replanning = previous && !["completed", "cancelled"].includes(previous.phase) && (!same || sameProcessDefect);
       const activeDirect = previous?.units.find(unit => unit.status === "running" && unit.directExecution?.actor === actor);
       const nextRegistration = plan.units.find(unit => unit.id === activeDirect?.unit.id);
-      const registrationChanged = activeDirect && (JSON.stringify(unitValidationCwd(activeDirect) ?? {}) !==
-        JSON.stringify(nextRegistration?.validation_cwd ?? {}) ||
+      const registrationChanged = activeDirect && (!isDeepStrictEqual(unitValidationCwd(activeDirect) ?? {},
+        nextRegistration?.validation_cwd ?? {}) ||
         JSON.stringify(unitValidation(activeDirect)) !== JSON.stringify(nextRegistration?.validation));
       const registrationPlanHash = previous && activeDirect && directValidationRegistrationPlanHash(previous, plan, activeDirect.unit.id);
       if (previous && activeDirect && (registrationChanged || replanning && registrationPlanHash === previous.planHash)) {
