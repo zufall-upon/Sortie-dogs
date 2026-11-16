@@ -509,10 +509,11 @@ interface HostGoalExecution {
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
   /** Informal test observation, never an acceptance-criterion proof. */
-  readonly managedTest?: { readonly environment: string; readonly equivalence: "unverified-external-inputs";
-    readonly scope: "full" | "focused"; readonly runner: string; readonly identity?: string };
+  readonly managedTest?: Extract<ManagedTestCommand, { scope: "full" | "focused" }> &
+    { readonly environment: string; readonly equivalence: "unverified-external-inputs" };
   /** Classification captured for the command that actually started, not reinterpreted after script changes. */
   readonly testClassification?: ManagedTestCommand;
+  readonly testClassificationEnvironment?: string;
   readonly goalIdentity?: { readonly id: string; readonly revision: number; readonly scopeEpoch: number };
   readonly focusedRetries?: readonly string[];
   readonly reusedEvidence?: readonly GoalEvidence[];
@@ -659,8 +660,24 @@ function settledPassNoticeCommand(joined = false): string {
 }
 
 /** Only turn an actual Node failure location into a runnable, project-local focused command. */
-async function nodeFailureRetries(output: unknown, directory: string): Promise<readonly string[]> {
+async function nodeFailureRetries(output: unknown, directory: string, projectRouter = false): Promise<readonly string[]> {
   if (typeof output !== "string" || output.length > 2_000_000) return [];
+  if (projectRouter) {
+    const retries = new Set<string>();
+    for (const line of output.split(/\r?\n/u)) {
+      if (!line.startsWith("SORTIE_FULL_FILE_OUTPUT ")) continue;
+      try {
+        const item: unknown = JSON.parse(line.slice("SORTIE_FULL_FILE_OUTPUT ".length));
+        if (!isRecord(item) || typeof item.path !== "string" || typeof item.line !== "string" ||
+            !/^\s*not ok \d+ - /u.test(item.line) || !/^test\/(?!windows\/)[\w@./-]+\.test\.ts$/u.test(item.path)) continue;
+        const command = `npm run test:targeted -- ${item.path}`;
+        const classification = await managedTestCommand(command, directory);
+        if (classification.scope === "focused" && classification.runner === "node-project-router") retries.add(command);
+        if (retries.size > 100) return [];
+      } catch { /* Ignore malformed, untrusted output, not the native failure itself. */ }
+    }
+    return [...retries];
+  }
   const candidates = [
     ...output.matchAll(/^\s*location:\s*['"]([^'"\r\n]+):\d+:\d+['"]\s*$/gmu),
     ...output.matchAll(/^not ok \d+ - ([^\r\n]+\.test\.(?:[cm]?js|ts))\s*$/gmu),
@@ -1932,11 +1949,14 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             execution.goalIdentity.scopeEpoch !== goal.scope_epoch || execution.endedAt === undefined || execution.fresh !== true) continue;
         const prior = execution.managedTest ?? execution.testClassification;
         if (!prior || prior.scope === "unknown" || prior.runner !== classification.runner) continue;
+        if (classification.runner === "node-project-router" && (prior.suiteKey !== classification.suiteKey ||
+            (execution.managedTest?.environment ?? execution.testClassificationEnvironment) !== goalFingerprint(process.env))) continue;
         const focused = prior.scope === "focused" ? [execution.command[0]!] : execution.focusedRetries ?? [];
         if (execution.outcome === "fail" && typeof execution.exitCode === "number" && execution.exitCode !== 0) {
           for (const command of focused) {
             const focus = prior.scope === "focused" ? prior : await managedTestCommand(command, directory);
-            if (focus.scope === "focused" && focus.identity) unresolved.set(command, { endedAt: execution.endedAt!, identity: focus.identity });
+            if (focus.scope === "focused" && focus.identity && (classification.runner !== "node-project-router" ||
+                focus.suiteKey === classification.suiteKey)) unresolved.set(command, { endedAt: execution.endedAt!, identity: focus.identity });
           }
         } else if (prior.scope === "focused" && execution.outcome === "pass" && execution.exitCode === 0 && execution.fresh &&
             (execution.admissionSource ?? execution.source) === snapshot.source &&
@@ -1951,14 +1971,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       let focused: string | undefined;
       for (const [command, failure] of unresolved) {
         const current = await classifyAuthorizedTest(authorization, directory, command);
-        if (current?.scope === "focused" && current.identity === failure.identity) { focused = command; break; }
+        if (current?.scope === "focused" && current.identity === failure.identity &&
+            (classification.runner !== "node-project-router" || current.suiteKey === classification.suiteKey)) { focused = command; break; }
         appLogInfo("managed-test.focus-unavailable", toolInput.sessionID, { reason: "focused-command-changed-or-unresolved" });
       }
       if (focused !== undefined) {
         const current = (await ledger.readGoal()).state;
+        const currentFull = classification.runner === "node-project-router"
+          ? await classifyAuthorizedTest(authorization, directory, command) : classification;
         if (current.goal_id !== goal.goal_id || current.revision !== goal.revision || current.scope_epoch !== goal.scope_epoch ||
             current.phase !== "active" || sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended ||
-            authorization.expiresAt <= Date.now()) return;
+            authorization.expiresAt <= Date.now() || currentFull?.scope !== "full" || currentFull.identity !== classification.identity) return;
         throw new Error(`SORTIE_FULL_TEST_DEFERRED: a native test failed; run the focused check first: ${focused}. ` +
           "The full test was not run or passed. A required full check must be formally registered.");
       }
@@ -1983,8 +2006,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
       validation: { ledger, request, reservation: reservation.reservation_id },
       goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch },
-      managedTest: { environment, equivalence: "unverified-external-inputs", scope: classification.scope, runner: classification.runner,
-        identity: classification.identity } });
+      managedTest: { ...classification, environment, equivalence: "unverified-external-inputs" } });
   }
 
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
@@ -2227,7 +2249,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
       ...(goal.goal_id === null ? {} : { goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch } }),
-      ...(testClassification === undefined ? {} : { testClassification }),
+      ...(testClassification === undefined ? {} : { testClassification, testClassificationEnvironment: goalFingerprint(process.env) }),
       admissionSource: snapshot.source, admissionCandidate: snapshot.candidate,
       ...(dockerWorkspace === undefined ? {} : { dockerWorkspace }),
       ...(operationInputs === undefined ? {} : { operationInputs }),
@@ -2319,8 +2341,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const proofFresh = fresh && managedFresh && (!validationBinding || validatedSource === execution.validationSource);
     const observed = proofFresh && validatedSource && validationBinding
       ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
-    const focusedRetries = outcome === "fail" && execution.managedTest?.scope === "full" && execution.managedTest.runner === "node"
-      ? await nodeFailureRetries(output.output, execution.directory) : [];
+    const focusedRetries = outcome === "fail" && execution.managedTest?.scope === "full" &&
+      (execution.managedTest.runner === "node" || execution.managedTest.runner === "node-project-router")
+      ? await nodeFailureRetries(output.output, execution.directory, execution.managedTest.runner === "node-project-router") : [];
     hostGoalExecutions.set(execution.callID, { ...execution,
       ...observed,
       ...(focusedRetries.length === 0 ? {} : { focusedRetries }),

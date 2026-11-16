@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 
@@ -933,12 +933,17 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, managed: true },
   { legacy: false, commit: false, cancel: false, managed: "required" },
   { legacy: false, commit: false, cancel: false, managed: "focused" },
+  { legacy: false, commit: false, cancel: false, managed: "router" },
+  { legacy: false, commit: false, cancel: false, managed: "router-required" },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
+test(managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
+  managedScenario === "router" ? "V2 project router defers covered full after real focused failure" :
+  managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
   managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
   managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
-  `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+  `V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
+{ skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -950,6 +955,7 @@ test(managedScenario === "required" ? "V2 formally required full execution survi
     unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  const originalPath = process.env.PATH;
   let joinedPermission!: () => void;
   const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
@@ -1172,7 +1178,26 @@ test(managedScenario === "required" ? "V2 formally required full execution survi
       await exec("git", ["add", ".gitignore", "check.mjs"], { cwd: directory });
       await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
     }
-    if (managedScenario) {
+    if (managedScenario === "router" || managedScenario === "router-required") {
+      const project = process.cwd(), pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
+      process.env.PATH = `${resolve(project, "node_modules/.bin")}${delimiter}${originalPath ?? ""}`;
+      await mkdir(join(directory, "scripts"), { recursive: true });
+      await mkdir(join(directory, "test/helpers"), { recursive: true });
+      await mkdir(join(directory, "src/cli"), { recursive: true });
+      for (const path of ["scripts/test-router.mjs", "test/helpers/full-test-runner.ts", "test/setup.ts", "tsconfig.json"])
+        await cp(join(project, path), join(directory, path));
+      await writeFile(join(directory, ".gitignore"), "dist/\n_testenv/\nnode_modules/\n");
+      // The project snapshot must not follow the real dependency symlink outside this fixture.
+      // Use the already installed compiler from PATH and a minimal local ambient type root.
+      await mkdir(join(directory, "node_modules/@types/node"), { recursive: true });
+      await writeFile(join(directory, "node_modules/@types/node/index.d.ts"), "export {};\n");
+      await writeFile(join(directory, "src/cli/main.ts"), "export const fixture = true;\n");
+      await writeFile(join(directory, "package.json"), JSON.stringify({ type: "module", scripts: pkg.scripts }));
+      await mkdir(join(directory, "_testenv"), { recursive: true });
+      await writeFile(join(directory, "test/fixture.test.ts"),
+        `import { appendFileSync, readFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';\ntest('managed', () => { appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'); assert.notEqual(readFileSync('result.txt', 'utf8'), 'broken\\n'); });\n`);
+      await exec("npm", ["run", "build"], { cwd: directory });
+    } else if (managedScenario) {
       await writeFile(join(directory, "package.json"), JSON.stringify({ scripts: {
         all: "npm run suite", suite: "node --test", release: "echo release && node --test",
       } }));
@@ -1239,10 +1264,12 @@ test(managedScenario === "required" ? "V2 formally required full execution survi
     let retiredHandoff: string | undefined;
     for (const [index, child] of (commit ? ["first"] : ["first", "second"]).entries()) {
       const finalCandidate = commit || index === 1;
-      const command = managedScenario === "required" ? "node --test" : managedScenario === "focused"
+      const command = managedScenario === "router-required" ? "npm run test:full" : managedScenario === "router"
+        ? "npm run test:targeted -- test/fixture.test.ts" : managedScenario === "required" ? "node --test" : managedScenario === "focused"
         ? "node --test fixture.test.mjs" : `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
-        read: managedScenario ? [directory] : ["check.mjs"], write: ["result.txt"], validation: [command] }],
+        read: managedScenario ? [directory] : ["check.mjs"],
+        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] : ["result.txt"], validation: [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -1376,6 +1403,85 @@ test(managedScenario === "required" ? "V2 formally required full execution survi
       await writeFile(join(directory, "result.txt"), finalCandidate ? "ready\n" : "partial\n");
       await after(patch, "Updated result.txt");
       if (managedScenario) {
+        if (managedScenario === "router" || managedScenario === "router-required") {
+          const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+          const edit = async (from: string, to: string) => {
+            const change = await before(child, "patch", { patchText: `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch` });
+            await writeFile(join(directory, "result.txt"), `${to}\n`); await after(change, "Updated result.txt");
+          };
+          const focusedCommand = "npm run test:targeted -- test/fixture.test.ts";
+          await edit("partial", "broken");
+          if (managedScenario === "router") {
+            const directCommand = "node --test test/fixture.test.ts";
+            const direct = await before(child, "shell", { command: directCommand, workdir: directory });
+            const result = await exec(process.execPath, ["--test", "test/fixture.test.ts"], { cwd: directory, env: environment })
+              .then(() => { throw new Error("direct fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(result.code, 1); await after(direct, result.stdout, { exit: result.code });
+            const different = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(different.input.command, "npm run test:full", "a different runner/setup is not the same selection");
+            await after(different, "not started", { status: "cancelled" });
+          }
+          const focused = await before(child, "shell", { command: focusedCommand, workdir: directory });
+          const failed = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment })
+            .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+          assert.equal(failed.code, 1); await after(focused, failed.stdout, { exit: failed.code });
+          if (managedScenario === "router-required") {
+            const full = await before(child, "shell", { command, workdir: directory });
+            assert.equal(full.input.command, command, "registered full keeps its execution obligation");
+            await after(full, "not started", { status: "cancelled" });
+          } else {
+            await assert.rejects(before(child, "shell", { command: "npm run test:full", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED.*test:targeted/u);
+            const router = join(directory, "scripts/test-router.mjs"), originalRouter = await readFile(router, "utf8");
+            await writeFile(router, `${originalRouter}\n// changed\n`);
+            const changed = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(changed.input.command, "npm run test:full", "changed runner is not suppressed");
+            await after(changed, "not started", { status: "cancelled" });
+            await writeFile(router, originalRouter);
+            const packagePath = join(directory, "package.json"), originalPackage = await readFile(packagePath, "utf8");
+            const withLifecycle = JSON.parse(originalPackage); withLifecycle.scripts["pretest:full"] = "node prepare.mjs";
+            await writeFile(packagePath, JSON.stringify(withLifecycle));
+            const lifecycle = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(lifecycle.input.command, "npm run test:full", "unknown lifecycle effects are not suppressed");
+            await after(lifecycle, "not started", { status: "cancelled" });
+            await writeFile(packagePath, originalPackage);
+            const changedFocus = JSON.parse(originalPackage); changedFocus.scripts["test:targeted"] = "node --test";
+            await writeFile(packagePath, JSON.stringify(changedFocus));
+            const staleFocus = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(staleFocus.input.command, "npm run test:full", "the recorded focused command is no longer the same executable selection");
+            await after(staleFocus, "not started", { status: "cancelled" });
+            await writeFile(packagePath, originalPackage);
+            const oldOptions = process.env.NODE_OPTIONS;
+            try {
+              process.env.NODE_OPTIONS = "--trace-warnings";
+              const alteredEnvironment = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+              assert.equal(alteredEnvironment.input.command, "npm run test:full");
+              await after(alteredEnvironment, "not started", { status: "cancelled" });
+            } finally {
+              if (oldOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = oldOptions;
+            }
+            await edit("broken", "ready");
+            const retry = await before(child, "shell", { command: focusedCommand, workdir: directory });
+            const result = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment });
+            await after(retry, result.stdout, { exit: 0 });
+            const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(full.input.command, "npm run test:full", "fresh focused success removes the deferral, not a full-test PASS");
+            // Exercise the full runner's output format as a synthetic failed hook event.
+            // The actual full command is deliberately not launched in this test.
+            const fullOutput = `SORTIE_FULL_FILE_OUTPUT ${JSON.stringify({ phase: "nonintegration", path: "test/fixture.test.ts", line: "not ok 1 - managed" })}`;
+            await after(full, fullOutput, { exit: 1 });
+            await assert.rejects(before(child, "shell", { command: "npm run test:full", workdir: directory }),
+              /SORTIE_FULL_TEST_DEFERRED.*test:targeted/u, "a reported file failure produces a covered focused retry");
+            const retryAgain = await before(child, "shell", { command: focusedCommand, workdir: directory });
+            const retried = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment });
+            await after(retryAgain, retried.stdout, { exit: 0 });
+            const allowed = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(allowed.input.command, "npm run test:full");
+            await after(allowed, "not started", { status: "cancelled" });
+          }
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"),
+            managedScenario === "router" ? "run\nrun\nrun\nrun\n" : "run\n", "the full command was never started");
+          return;
+        }
         if (managedScenario === "focused") {
           const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
           const edit = async (from: string, to: string) => {
@@ -1553,7 +1659,11 @@ test(managedScenario === "required" ? "V2 formally required full execution survi
     assert.equal(final.requests.length, 1, "Operator correction does not need another user instruction");
     assert.equal(final.requests[0]!.text, original);
     assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
-  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    cleanup?.();
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("V2 interrupted Coordinator Task reconciles its native error despite a live dispatch owner", async () => {

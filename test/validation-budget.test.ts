@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
@@ -39,6 +39,50 @@ test("managed test reachability resolves literal project scripts without claimin
       "npm run missing", "npm run test:windows", "pytest test_example.py --collect-only", "node --test --unknown", "echo done && node --test"]) {
       assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("managed project router uses actual sources, build configuration, cwd and selection", { skip: process.platform === "win32" }, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/managed-router-"));
+  const project = process.cwd();
+  try {
+    const pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
+    const scripts = { ...pkg.scripts, whole: "npm run test:full" };
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await mkdir(join(root, "test/helpers"), { recursive: true });
+    for (const path of ["scripts/test-router.mjs", "test/helpers/full-test-runner.ts", "test/setup.ts", "tsconfig.json"])
+      await cp(join(project, path), join(root, path));
+    await writeFile(join(root, "package.json"), JSON.stringify({ type: "module", scripts }));
+    await writeFile(join(root, "test/check.test.ts"), "// project fixture\n");
+    const full = await managedTestCommand("npm run whole", root);
+    const focused = await managedTestCommand("npm run test:targeted -- test/check.test.ts", root);
+    assert.equal(full.scope, "full"); assert.equal(focused.scope, "focused");
+    assert.equal("runner" in full && full.runner, "node-project-router");
+    assert.equal("suiteKey" in full && full.suiteKey, "suiteKey" in focused && focused.suiteKey);
+    assert.equal((await managedTestCommand("npm run test:full", project)).scope, "full", "real root package and runner");
+    const realFocused = await managedTestCommand("npm run test:targeted -- test/validation-budget.test.ts", project);
+    assert.equal(realFocused.scope, "focused", "real targeted script and file");
+    for (const command of ["npm run test:targeted -- test/missing.test.ts", "npm run test:targeted -- test/check.test.js",
+      "npm run test:targeted -- test/../test/check.test.ts", "npm run test:full -- test/check.test.ts", "npm run test:windows"])
+      assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
+    await writeFile(join(root, "scripts/test-router.mjs"), "// changed runner\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await cp(join(project, "scripts/test-router.mjs"), join(root, "scripts/test-router.mjs"));
+    await writeFile(join(root, "test/helpers/full-test-runner.ts"), "// changed selection\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await cp(join(project, "test/helpers/full-test-runner.ts"), join(root, "test/helpers/full-test-runner.ts"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { ...scripts, prebuild: "node prepare.mjs" } }));
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "unknown build lifecycle remains runnable");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { ...scripts, "pretest:full": "node prepare.mjs" } }));
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts }));
+    await writeFile(join(root, ".npmrc"), "ignore-scripts=true\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await rm(join(root, ".npmrc"));
+    await rm(join(root, "test/check.test.ts"));
+    await symlink(join(project, "test/validation-budget.test.ts"), join(root, "test/check.test.ts"));
+    assert.equal((await managedTestCommand("npm run test:targeted -- test/check.test.ts", root)).scope, "unknown");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
