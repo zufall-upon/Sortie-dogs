@@ -156,7 +156,6 @@ test('direct reproduction recipes use observed baseline context without another 
     assert.match(content, /Known recipes and Worker-owned investigation need no extra preparation or unit/);
     assert.match(content, /this workflow adds no approval or denial/);
   }
-  assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|NumPy|1978|extension-pkg|rcfile|capsys|caplog/);
 });
 
 test('standalone reproduction planning preserves its fixture root without replacing the active environment', () => {

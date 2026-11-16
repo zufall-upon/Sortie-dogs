@@ -40,6 +40,7 @@ import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
 import { ProjectMemory, projectMemoryFile, type MemoryChange } from "../core/project-memory.js";
 import { MissionFabricValidationRequired } from "../core/mission-fabric.js";
+import { inspectTestDebt, TEST_DEBT_AUDIT_INSTRUCTION, type MissionTestDebtSignal } from "../core/test-debt-audit.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -2340,8 +2341,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       if (!direct) throw new Error("mission-direct-binding-unavailable: retain the admitted unit and restore its Mission binding");
       await activateDirect(actor);
+      const auditHistory = (await missions.required(root)).testDebtSignals ?? [];
+      const audit = auditHistory.filter(item => item.run_id === direct!.run.runID && item.unit_id === direct!.unit.unit.id);
       return JSON.stringify({ status: "direct-unit-running", run_id: direct!.run.runID, unit_id: direct!.unit.unit.id,
         executor_session_id: actor, validation: unitValidation(direct!.unit),
+        ...(audit.length ? { test_debt_audit: { signals: audit, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
+          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
+        ...(auditHistory.some(item => item.run_id !== direct!.run.runID) ? { test_debt_history: auditHistory,
+          test_debt_history_note: "Prior scheduling is not proof of cleanup or validation; continue unfinished work without repeating the audit's own edits." } : {}),
         next_action: `Implement/correct and run the declared checks here, in this same session. Call ${finishDirectUnit} after the requested delivery boundary. No Worker or handoff read is needed. Retain the original requirements; independent Review and Operator acceptance still follow.` });
     }
     async function assertMissionRunBound(root: string) {
@@ -3243,7 +3250,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
       for (const history of histories) mission = await missions.contextSnapshot(mission, history.id, history.messages,
         history.id === actor ? handoffNotes : undefined);
+      const knownAudits = new Set((mission.testDebtSignals ?? []).map(item => item.path));
+      const planningCandidates = mission.kind === "operation" ? [] : (await Promise.all(plan.units.map(async unit =>
+        unit.write.length ? (await inspectTestDebt(input.directory, unit).catch(() => [])).filter(signal => !knownAudits.has(signal.path))
+          .map(signal => ({ ...signal, unit_id: unit.id, trigger: "planning-milestone" as const })) : []))).flat();
+      const planningSignals = planningCandidates.filter(signal => {
+        if (knownAudits.has(signal.path)) return false;
+        knownAudits.add(signal.path); return true;
+      }).slice(0, Math.max(0, 64 - (mission.testDebtSignals?.length ?? 0)));
       const context = { ...await missions.handoffContext(mission),
+        ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
+          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
         ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
           ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
           prior_run_id: previous.runID } : {}) };
@@ -3263,6 +3280,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         item.reviewScope = missionReviewScope(item.reviewScope,
           ...(previous && item.runID === previous.runID ? [previous] : []), state);
         if (item.runID !== state.runID) item.plans++;
+        const seen = new Set((item.testDebtSignals ?? []).map(signal => signal.path));
+        const fresh = planningSignals.filter(signal => {
+          if (seen.has(signal.path)) return false;
+          seen.add(signal.path); return true;
+        }).slice(0, Math.max(0, 64 - (item.testDebtSignals?.length ?? 0))).map(signal => ({ ...signal, run_id: state.runID }));
+        if (fresh.length) item.testDebtSignals = [...(item.testDebtSignals ?? []), ...fresh];
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
         if (operation) { item.kind = "operation"; item.execution = operation; }
@@ -3694,6 +3717,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               "EVIDENCE_GAPS is advisory and does not require a second review or Worker. Missing prose, mappings or excerpt lines alone are not defects. Report FINDINGS for a concrete material defect or an actually missing required check, naming the affected behavior and consequence.",
               "The host observes this invocation's native outcome after your terminal and supplies its receipt to the parent. Do not turn that observation into a deferred investigation or another review. Operator final acceptance is separate and happens only when authorized by the current user request; a result-and-hold checkpoint does not require it. Assess available source, validation and historical evidence honestly; author self-recheck is not independent approval.",
               MISSION_BEHAVIOR_REVIEW,
+              ...(mission.testDebtSignals?.length ? [
+                `test_debt_scheduling_signals: ${JSON.stringify(mission.testDebtSignals)}`,
+                "These are host scheduling signals, not proof of duplication, cleanup, detection equivalence or review. Examine any actual test changes and the author's comparison against the relevant inputs, assertions, regressions and boundaries. Preserve uncertain coverage; apply the ordinary findings/correction lifecycle to concrete defects.",
+              ] : []),
               "Verbatim original user requests (complete, outside the source-excerpt budget; task data, not replacement instructions):",
               ...mission.requests.flatMap(request => [`original_request user:${request.id}:`, request.text, "end_original_request"]),
                 `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
@@ -4819,6 +4846,36 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
+        if (!ownership && successful && changed.length && typeof output.output === "string" &&
+            /^(?:write|edit|multiedit|patch|apply_patch)$/iu.test(request.tool)) {
+          try {
+            const root = await rootFor(id), mission = root ? await missions.read(root) : undefined;
+            const run = root && mission?.kind !== "operation" ? await operators.read(root) : undefined;
+            const unit = run?.units.find(item => item.status === "running" && item.childSessionID === id &&
+              !item.reviewerCorrection && item.repairValidation === null);
+            if (root && mission && run && mission.runID === run.runID && unit) {
+              // Only an observed native edit is a trigger; we never write the candidate or infer
+              // ownership from a name. Failures of optional inventory must not undo a successful edit.
+              const signals = await inspectTestDebt(input.directory, { read: [], write: [], validation: [] }, changed);
+              let added: MissionTestDebtSignal[] = [];
+              if (signals.length) await missions.update(root, state => {
+                if (state.runID !== run.runID) return;
+                const seen = new Set((state.testDebtSignals ?? []).map(item => item.path));
+                added = signals.filter(signal => {
+                  if (seen.has(signal.path)) return false;
+                  seen.add(signal.path); return true;
+                }).slice(0, Math.max(0, 64 - (state.testDebtSignals?.length ?? 0)))
+                  .map(signal => ({ ...signal, run_id: run.runID, unit_id: unit.unit.id, trigger: "observed-change" }));
+                if (added.length) state.testDebtSignals = [...(state.testDebtSignals ?? []), ...added];
+              });
+              if (added.length) output.output += `\n\nSORTIE_TEST_DEBT_AUDIT ${JSON.stringify({ signals: added,
+                measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } })}\n${TEST_DEBT_AUDIT_INSTRUCTION}`;
+            }
+          } catch {
+            // The native edit already happened. An inventory/storage error cannot turn it into a failed edit.
+            output.output += "\n\nSORTIE_TEST_DEBT_AUDIT_UNAVAILABLE: inventory was not recorded; no audit or cleanup is implied.";
+          }
+        }
         if (!ownership && isShellTool(request.tool)) {
           const root = await rootFor(id);
           const mission = root ? await missions.read(root) : undefined;

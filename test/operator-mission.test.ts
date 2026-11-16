@@ -19,6 +19,7 @@ import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
+import { inspectTestDebt } from "../dist/core/test-debt-audit.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -132,6 +133,122 @@ test("Operator recovers a registered native check in a linked worktree within a 
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
   assert.ok(run.units[0]!.directExecution!.checks.some(check => check.callID === input.callID && check.exitCode === 0 && check.fresh));
   assert.notEqual((await tool("finish_direct_unit")).status, "direct-unit-awaits-validation");
+}));
+
+test("ordinary direct Mission schedules test debt before validation and retains it for the existing Reviewer", async () => fixture(async root => {
+  const exec = promisify(execFile), history: unknown[] = [];
+  await mkdir(join(root, "test"));
+  const source = join(root, "value.mjs"), check = join(root, "test", "value.test.mjs");
+  const originalSource = "export const double = n => n * 2;\n";
+  const originalTest = 'import assert from "node:assert/strict";\nimport { double } from "../value.mjs";\nassert.strictEqual(double(0), 0);\nconst value = double(21);\nassert.strictEqual(value, 42);\nassert.strictEqual(value, 42);\n';
+  await writeFile(source, originalSource); await writeFile(check, originalTest);
+  const foreign = join(root, "other-task.txt");
+  await writeFile(foreign, "baseline\n");
+  for (const args of [["init", "--quiet"], ["config", "user.name", "test"], ["config", "user.email", "test@example.invalid"],
+    ["add", "--all"], ["commit", "--quiet", "-m", "base"]]) await exec("git", args, { cwd: root });
+  await writeFile(foreign, "pre-existing other task change\n");
+  const command = "node test/value.test.mjs";
+  const probe = async (good: string, broken: string) => {
+    await exec(process.execPath, ["test/value.test.mjs"], { cwd: root });
+    await writeFile(source, broken);
+    await assert.rejects(exec(process.execPath, ["test/value.test.mjs"], { cwd: root }), /41 !== 42/);
+    await writeFile(source, good);
+  };
+  // The pre-change oracle really rejects the same wrong 21 result; it is not a new expected value.
+  await probe(originalSource, "export const double = n => n === 21 ? 41 : n * 2;\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Update the calculation while retaining its behavior." }],
+  });
+  await tool("start_mission", { requirements: ["Update the calculation while retaining its behavior"] });
+  const started = await tool("plan_units", { executor: "self", units: [{ title: "Update calculation", objective: "Preserve the calculation",
+    read: ["value.mjs", "test/value.test.mjs"], write: ["value.mjs", "test/value.test.mjs"], validation: [command] }] });
+  assert.equal(started.status, "direct-unit-running");
+  assert.equal(started.test_debt_audit.signals[0].path, "test/value.test.mjs");
+  assert.deepEqual(started.test_debt_audit.signals[0].repeated_assertions, [[5, 6]]);
+  assert.match(started.test_debt_audit.instruction, /similar lines or size alone do not establish redundancy/);
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
+  assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/value.test.mjs");
+  const edit = async (path: string, oldString: string, newString: string, callID: string) => {
+    const args = { filePath: path, oldString, newString }, request = { tool: "edit", sessionID: "root", callID };
+    await hooks["tool.execute.before"]!(request, { args });
+    await writeFile(path, (await readFile(path, "utf8")).replace(oldString, newString));
+    const output = { output: "edited" };
+    await hooks["tool.execute.after"]!({ ...request, args }, output);
+    return output.output;
+  };
+  const updatedSource = "export const double = n => n + n;\n";
+  await edit(source, originalSource, updatedSource, "source-edit");
+  // Simulate the existing author applying a source-backed consolidation; the host does not edit files.
+  const response = await edit(check, "assert.strictEqual(value, 42);\nassert.strictEqual(value, 42);", "assert.strictEqual(value, 42);", "audit-edit");
+  assert.doesNotMatch(response, /SORTIE_TEST_DEBT_AUDIT/, "the audit's own change must not schedule itself again");
+  assert.match(await readFile(check, "utf8"), /assert\.strictEqual\(double\(0\), 0\)/);
+  assert.equal(await readFile(foreign, "utf8"), "pre-existing other task change\n");
+  await probe(updatedSource, "export const double = n => n === 21 ? 41 : n + n;\n");
+  const input = { tool: "shell", sessionID: "root", callID: "validation" }, args = { command, workdir: root }, start = Date.now();
+  await hooks["tool.execute.before"]!(input, { args });
+  const checked = await exec(process.execPath, ["test/value.test.mjs"], { cwd: root });
+  await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: input.callID,
+    state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+  assert.notEqual((await tool("finish_direct_unit")).status, "direct-unit-awaits-validation");
+  const review = await tool("review_mission", { risk_tags: ["public-logic"] });
+  assert.equal(review.status, "review-required");
+  const reviewPrompt = (await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).review!.task!.prompt;
+  assert.match(reviewPrompt, /test_debt_scheduling_signals/);
+  assert.match(reviewPrompt, /not proof of duplication, cleanup, detection equivalence or review/);
+}));
+
+test("a newly edited test can schedule audit once without treating repeated assertions as proof", async () => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const history: unknown[] = [], check = join(root, "test", "new.test.mjs");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Add a check" }],
+  });
+  await tool("start_mission", { requirements: ["Add a check"] });
+  const started = await tool("plan_units", { executor: "self", units: [{ title: "Add check", objective: "Add the check",
+    read: [], write: ["test/new.test.mjs"], validation: ["node test/new.test.mjs"] }] });
+  assert.equal(started.test_debt_audit, undefined);
+  const text = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+  const args = { filePath: check, content: text }, request = { tool: "write", sessionID: "root", callID: "write-check" };
+  await hooks["tool.execute.before"]!(request, { args });
+  await writeFile(check, text);
+  const output = { output: "written" };
+  await hooks["tool.execute.after"]!({ ...request, args }, output);
+  assert.match(output.output, /SORTIE_TEST_DEBT_AUDIT/);
+  assert.match(output.output, /similar lines or size alone do not establish redundancy/);
+  assert.equal(await readFile(check, "utf8"), text, "inventory must not edit or delete the author's test");
+  const cold = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  assert.equal((await cold.required("root")).testDebtSignals?.[0]?.trigger, "observed-change");
+  const again = { output: "written" };
+  await hooks["tool.execute.after"]!({ ...request, args }, again);
+  assert.doesNotMatch(again.output, /SORTIE_TEST_DEBT_AUDIT/);
+  const large = join(root, "test", "large.test.mjs");
+  await writeFile(large, "x".repeat(512 * 1024 + 1));
+  const largeSignals = await inspectTestDebt(root, { read: [large], write: [], validation: [] });
+  assert.deepEqual(largeSignals[0]!.reasons, ["large-test-file"]);
+  assert.equal(largeSignals[0]!.lines, null, "large files are signaled without claiming a full inventory");
+  assert.equal(largeSignals[0]!.sha256, null);
+  const other = join(root, "other");
+  await mkdir(join(other, "test"), { recursive: true });
+  await writeFile(join(other, "test", "new.test.mjs"), text);
+  const unit = { read: [], write: [], validation: ["node   test/new.test.mjs"],
+    validation_cwd: { "node test/new.test.mjs": other } };
+  assert.equal((await inspectTestDebt(root, unit))[0]!.path, "other/test/new.test.mjs");
+  assert.equal((await inspectTestDebt(root, { ...unit, validation_cwd: { "node test/new.test.mjs": root } }))[0]!.path,
+    "test/new.test.mjs", "each inspection uses the current registered cwd, not an earlier setting");
 }));
 
 test("Worker acceptance observations use each saved admission and cwd, including historical units", async () => fixture(async directory => {

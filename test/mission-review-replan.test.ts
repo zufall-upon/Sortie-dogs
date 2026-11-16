@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -22,6 +22,8 @@ test("failed implementation then read-only validation and test-only replan keep 
     }
     await writeFile(join(root, "source.js"), "return oldValue;\n");
     await writeFile(join(root, "check.mjs"), "console.log('validation');\n");
+    await mkdir(join(root, "test"));
+    await writeFile(join(root, "test", "existing.test.mjs"), "assert.equal(value, 1);\nassert.equal(value, 1);\n");
     await exec("git", ["add", "--all"], { cwd: root });
     await exec("git", ["commit", "--quiet", "-m", "base"], { cwd: root });
     const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
@@ -45,7 +47,7 @@ test("failed implementation then read-only validation and test-only replan keep 
     const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
     for (const [index, write] of [["source.js"], [], ["test.js"]].entries()) {
       const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: `Unit ${index}`, objective: "Finish the source candidate",
-        read: ["check.mjs"], write, validation: [`node check.mjs ${index}`] }], ...(index ? { reason: "Correct the previous unit and validate" } : {}) }, { sessionID: "coordinator" }));
+        read: index === 0 ? ["check.mjs", "test/existing.test.mjs"] : ["check.mjs"], write, validation: [`node check.mjs ${index}`] }], ...(index ? { reason: "Correct the previous unit and validate" } : {}) }, { sessionID: "coordinator" }));
       const worker = `worker-${index}`, callID = `worker-call-${index}`;
       identities[worker] = { agent: "dog-worker-v010", parentID: "coordinator" };
       const task = { args: structuredClone(next.task) };
@@ -53,6 +55,11 @@ test("failed implementation then read-only validation and test-only replan keep 
       await chat(worker, task.args.prompt);
       const unit = (await currentRun()).units[0]!;
       assert.deepEqual(unit.unit.write, write, "retained review scope must not expand the new Worker grant");
+      if (index === 0) {
+        const handoff = JSON.parse(await readFile(unit.handoffPath, "utf8"));
+        assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/existing.test.mjs");
+        assert.match(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.instruction, /do not modify unowned work/);
+      }
       await hooks["tool.execute.before"]!({ tool: "read", sessionID: worker, callID: `handoff-${index}` }, { args: { filePath: unit.handoffPath } });
       await hooks["tool.execute.after"]!({ tool: "read", sessionID: worker, callID: `handoff-${index}`, args: { filePath: unit.handoffPath } }, { output: "inspected" });
       await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: worker });
