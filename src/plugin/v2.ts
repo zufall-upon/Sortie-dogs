@@ -671,15 +671,19 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
   const selectedChildModels = new Set<string>();
   const selectionKey = (parent: string, role: string, prompt: string) => `${parent}\0${role}\0${prompt}`;
   const correctionPermissions = (sessionID: string) => syncReviewerCorrectionPermissions(context, hooks, sessionID);
-  const reconcileCorrectionPermissions = async (sessionID: string) => {
+  const reconcileCorrectionPermissions = async (sessionID: string, retainParentRecovery = false) => {
+    const deferred: Array<{ child_session_id: string; error: string }> = [];
     for (const child of await hooks.reviewerCorrectionSessions?.(sessionID) ?? []) {
       try { await correctionPermissions(child); }
       catch (error) {
-        if (!(error instanceof ReviewerCorrectionProjectionError)) throw error;
-        console.warn("[sortie-dogs-v010] Reviewer correction deferred; Operator recovery remains available", error.message);
+        if (!retainParentRecovery && !(error instanceof ReviewerCorrectionProjectionError)) throw error;
+        const message = error instanceof Error ? error.message : "native-reviewer-correction-recovery-failed";
+        deferred.push({ child_session_id: child, error: message });
+        console.warn("[sortie-dogs-v010] Reviewer correction deferred; Operator recovery remains available", message);
       }
     }
     await correctionPermissions(sessionID);
+    return deferred;
   };
   // The V1 config hook is not invoked by OpenCode V2. Apply only missing role
   // defaults in its native registry; a user's configured agent model wins.
@@ -768,15 +772,16 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         options: { codemode: name === "sortie_v010_extend_mission_budget" },
         execute: async (input, execution) => {
           await background.reconcile(String(execution.sessionID ?? ""));
-          let content: string;
+          let content: string, deferred: Array<{ child_session_id: string; error: string }> = [];
           try { content = await definition.execute(legacyToolArgs(input, definition.args), {
             sessionID: String(execution.sessionID ?? ""), ...(typeof execution.id === "string" ? { callID: execution.id } : {}), ...(typeof execution.agent === "string" ? { agent: execution.agent } : {}),
             ...(execution.signal instanceof AbortSignal ? { signal: execution.signal } : {}) }); }
-          finally { await reconcileCorrectionPermissions(String(execution.sessionID ?? "")); }
+          finally { deferred = await reconcileCorrectionPermissions(String(execution.sessionID ?? ""), name === "sortie_v010_operator_status"); }
           if (name !== "sortie_v010_operator_status") return { content };
           const status: unknown = JSON.parse(content);
           return { content: record(status) ? serializeOperatorStatus({ ...status,
-            runtime: { ...loadedAdapter, host_version: context.app?.version ?? null } }) : content };
+            runtime: { ...loadedAdapter, host_version: context.app?.version ?? null,
+              ...(deferred.length ? { reviewer_correction_recovery: deferred } : {}) } }) : content };
         } });
     }
   });
@@ -901,7 +906,7 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       parts: legacyUserParts(legacyText, event.prompt.files, String(event.sessionID), String(event.messageID ?? "")) };
     await hooks["chat.message"]!({ sessionID: String(event.sessionID), messageID: String(event.messageID ?? ""),
       ...(typeof info.agent === "string" ? { agent: info.agent } : {}), model }, output);
-    await reconcileCorrectionPermissions(String(event.sessionID));
+    await reconcileCorrectionPermissions(String(event.sessionID), true);
     // Native explicit selections and configured role models already won above. Legacy fixed serial
     // routing must not undo them at prompt admission (including same-child resumes).
     if (typeof info.parentID === "string" && selectedChildModels.has(String(event.sessionID))) output.message.model = model;
@@ -935,7 +940,9 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     await hooks["experimental.chat.system.transform"]!({ sessionID: String(event.sessionID ?? "") }, output);
     const reconciliation = background.reconciliationNotice(String(event.sessionID ?? ""));
     if (reconciliation) (output.system ??= []).push(reconciliation);
-    await reconcileCorrectionPermissions(String(event.sessionID));
+    const deferred = await reconcileCorrectionPermissions(String(event.sessionID), true);
+    if (deferred.length) output.system.push(`Reviewer correction recovery is deferred: ${JSON.stringify(deferred)}. ` +
+      "Its registration and original identity remain available for retry. Continue using Operator recovery controls; do not infer correction success or reset the Mission.");
     if (record(event.tools)) {
       const correcting = correctionAgent(event.agent) && !!await hooks.reviewerCorrectionScope?.(String(event.sessionID));
       const logicalRole = canonicalAgent(V010_RUNTIME_PROFILE, String(event.agent));
