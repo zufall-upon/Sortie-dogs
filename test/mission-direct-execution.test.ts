@@ -223,7 +223,7 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
 
 const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "replan-cwd-order", "scope-registration-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "replan-cwd-order", "scope-registration-legacy", "scope-registration-empty", "scope-registration-empty-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "scope-multi-registration" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -233,6 +233,7 @@ for (const actor of ["root", "coordinator"]) for (const mode of [...directModes,
   const oldChain = mode.startsWith("handoff-registration-chain");
   const missingMiddle = mode === "handoff-registration-chain-missing";
   const external = ["external-cwd", "registration", "registration-with-cwd"].includes(mode);
+  const emptyScopeRegistration = mode.startsWith("scope-registration-empty");
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(nonGit ? join(tmpdir(), "mission-direct-") : resolve("_testenv/mission-direct-"));
   const externalDirectory = external ? await mkdtemp(join(tmpdir(), "mission-direct-external-")) : undefined;
@@ -323,7 +324,7 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
     }
     const declaration = { title: "Fix result", objective: "Create result.txt accepted by check.mjs",
       read: ["check.mjs", ...(mode === "generated-read-output" ? ["emit.mjs", "reports/**"] : []), ...(externalDirectory ? [join(externalDirectory, "check.mjs")] : []), ...(mode === "junction" ? ["profile/**"] : [])],
-      write: mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
+      write: emptyScopeRegistration ? [] : mode === "non-git-root" ? [directory + "/**"] : [resultPath, "reports/**", ...(mode === "junction" ? ["profile/**"] : [])],
       validation: mode === "replan-cwd-order" ? ["node check.mjs", "node check.mjs --second"] : registeredSuffix ? ["node check.mjs", "node check.mjs --old-middle", "node check.mjs --last"]
         : [mode === "recipe-registration" ? "node check.mjs --expected-eight" : "node check.mjs"],
       ...(mode === "replan-cwd-order" ? { validation_cwd: { "node check.mjs": directory, "node check.mjs --second": directory } } :
@@ -908,14 +909,19 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       }
       return;
     }
+    if (emptyScopeRegistration) {
+      assert.equal(await check(), 1, "the original read-only check activates its admission and records the actual failure");
+      await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id,
+        paths: [resultPath, "reports/**"], reason: "Retain the requested result and diagnostic reports from an initially read-only unit" }, { sessionID: actor });
+    }
     await write("fixed\n");
-    if (mode === "scope-registration" || mode === "scope-registration-legacy") {
+    if (mode.startsWith("scope-registration")) {
       const old = await readRun();
       const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
       for (const path of ["extra-one.txt", "extra-two.txt"]) {
         await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id, paths: [path], reason: "In-request output" }, { sessionID: actor });
       }
-      if (mode === "scope-registration-legacy") {
+      if (mode.endsWith("-legacy")) {
         // Simulate an admission expanded by an older runtime before this field existed.
         const path = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).statePath("root");
         const saved = JSON.parse(await readFile(path, "utf8"));
@@ -924,13 +930,16 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
         await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id, paths: ["extra-three.txt"], reason: "Another in-request output after upgrade" }, { sessionID: actor });
       }
       hooks = await create(); // Registration must also work after the persisted admission is reloaded.
-      const corrected = { ...declaration, write: [...declaration.write, "extra-one.txt", "extra-two.txt", ...(mode === "scope-registration-legacy" ? ["extra-three.txt"] : [])], validation: ["node check.mjs --corrected"] };
+      const corrected = { ...declaration, write: [...(emptyScopeRegistration ? [resultPath, "reports/**"] : declaration.write), "extra-one.txt", "extra-two.txt", ...(mode.endsWith("-legacy") ? ["extra-three.txt"] : [])], validation: ["node check.mjs --corrected"] };
       await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [{ ...corrected, write: [...corrected.write, "unapproved.txt"] }] }, { sessionID: actor }), /contract-mismatch/);
+      await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [{ ...corrected, read: ["different-check.mjs"] }] }, { sessionID: actor }), /contract-mismatch/);
       const registered = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [corrected] }, { sessionID: actor }));
       assert.equal(registered.status, "direct-unit-registration-corrected");
       const kept = await readRun();
       assert.equal(kept.runID, old.runID);
+      assert.equal(kept.planHash, old.planHash);
       assert.equal(kept.units[0]!.callID, old.units[0]!.callID);
+      assert.deepEqual(kept.units[0]!.directExecution!.checks, old.units[0]!.directExecution!.checks, "registration preserves the original native observations");
       assert.deepEqual(kept.units[0]!.unit.write, corrected.write);
       assert.deepEqual(kept.units[0]!.initialWriteScope, declaration.write);
       assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);

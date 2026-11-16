@@ -510,17 +510,30 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
   legacyWriteScopes?: ReadonlyMap<string, readonly string[]>): string {
   const original = state.units.find(item => item.unit.id === unitID)?.unit;
   const proposed = plan.units.find(item => item.id === unitID);
-  const criteria = plan.goal_declaration.criteria;
-  const goal = Array.isArray(criteria) ? { ...plan.goal_declaration, criteria: criteria.map(criterion =>
-    record(criterion) && criterion.criterion_id === unitID && criterion.validation_command === proposed?.validation.at(-1)
-      ? { ...criterion, validation_command: original?.validation.at(-1) } : criterion) } : plan.goal_declaration;
-  return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
+  const scopedUnits = plan.units.map((next, index) => {
     const prior = state.units[index]?.unit;
     const initialWrite = state.units[index]?.initialWriteScope ?? (prior ? legacyWriteScopes?.get(prior.id) : undefined);
     // A scope extension is authorized separately; normalize only the exact current
     // scope back to the frozen plan identity. Other scope edits still fail the hash.
-    const normalized = prior && initialWrite && JSON.stringify(next.write) === JSON.stringify(prior.write)
+    return prior && prior.id === next.id && initialWrite && JSON.stringify(next.write) === JSON.stringify(prior.write)
       ? { ...next, write: initialWrite } : next;
+  });
+  const criteria = plan.goal_declaration.criteria;
+  const goal = Array.isArray(criteria) ? { ...plan.goal_declaration, criteria: criteria.map(criterion => {
+    if (!record(criterion)) return criterion;
+    const index = plan.units.findIndex(unit => unit.id === criterion.criterion_id);
+    const next = plan.units[index], normalized = scopedUnits[index];
+    // missionPlan derives this label from the first write (or read). An initially
+    // read-only unit gains a new label on its first authorized output; that is not
+    // a goal change. A separately changed entrypoint must still fail the hash.
+    const entrypoint = (unit: OperatorUnit) => (unit.write[0] ?? unit.read[0] ?? unit.id).slice(0, 512);
+    const restored = next && normalized && normalized !== next && criterion.entrypoint === entrypoint(next)
+      ? { ...criterion, entrypoint: entrypoint(normalized) } : criterion;
+    return criterion.criterion_id === unitID && criterion.validation_command === proposed?.validation.at(-1)
+      ? { ...restored, validation_command: original?.validation.at(-1) } : restored;
+  }) } : plan.goal_declaration;
+  return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: scopedUnits.map((normalized, index) => {
+    const prior = state.units[index]?.unit, next = plan.units[index]!;
     if (!prior || prior.id !== unitID || next.id !== unitID) return normalized;
     // Preserve the frozen property order even when the proposal omits cwd:
     // appending it after acceptance_indices changes JSON identity by itself.
