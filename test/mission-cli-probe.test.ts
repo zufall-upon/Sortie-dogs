@@ -1302,6 +1302,36 @@ for (const phase of ["closed", "closed-stubborn", "signalled", "active"] as cons
   });
 }
 
+test("owned fixture parent cancellation stops its detached writer", { skip: process.platform !== "linux", timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mission-cancel-fixture-"));
+  const inspector = spawn(process.execPath, [resolve("test/fixtures/owned-group-inspection.mjs"), directory, "listing-timeout"],
+    { env: { ...process.env, SORTIE_TEST_INSPECTION_READY: "1" }, stdio: "ignore" });
+  let writerPID: number | undefined;
+  try {
+    const deadline = Date.now() + 5_000;
+    while (writerPID === undefined && Date.now() < deadline) {
+      const ready = await readFile(join(directory, "inspection-ready.json"), "utf8").catch(() => undefined);
+      if (ready) writerPID = JSON.parse(ready).writerPID;
+      else await new Promise(done => setTimeout(done, 20));
+    }
+    assert(writerPID, "fixture writer must start before cancellation");
+    const closed = new Promise(done => inspector.once("close", done));
+    inspector.kill("SIGKILL");
+    await closed;
+    let stopped = false;
+    while (Date.now() < deadline && !stopped) {
+      stopped = await readFile(`/proc/${writerPID}/stat`, "utf8").then(value =>
+        ["Z", "X"].includes(value.slice(value.lastIndexOf(")") + 2).split(" ")[0]!), error => error.code === "ENOENT");
+      if (!stopped) await new Promise(done => setTimeout(done, 20));
+    }
+    assert.equal(stopped, true, "detached writer must stop even when its owning inspector is killed");
+  } finally {
+    inspector.kill("SIGKILL");
+    if (writerPID) try { process.kill(writerPID, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 for (const fault of ["foreign-read", "owned-read", "signal-denied", "listing-unavailable", "listing-timeout", "listing-interrupt-SIGINT", "listing-interrupt-SIGTERM"] as const) {
   test(`owned group inspection handles ${fault} without hiding an uncertain cleanup`,
     { skip: process.platform !== "linux", timeout: 20_000 }, async () => {
