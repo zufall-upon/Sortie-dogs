@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -15,6 +17,8 @@ import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
+import { runCodexMission } from "../dist/codex/run-mission.js";
 import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
@@ -71,6 +75,189 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+for (const storage of ["0.1", "0.2"] as const) test(`Operator status and continuation recover at the goal event capacity (${storage})`, async t => fixture(async directory => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+  const history: any[] = [];
+  const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator", outcome: "running" } }),
+    messages: async ({ path }: any) => ({ data: path.id === "root" ? history : [] }),
+    children: async () => ({ data: [] }),
+  } } } as never);
+  let hooks = await create();
+  const chat = (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "fixture", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue the same goal" }],
+  });
+  await chat("original");
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Preserve the result"] }, { sessionID: "root" });
+  const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory,
+    `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(file), initial = (await ledger.readGoal()).state, goal = initial.goal_id!;
+  const at = "2026-09-08T00:00:00.000Z";
+  const command = "node verify.mjs";
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goal, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: initial.acceptance_fingerprint!, origin_user_message_id: "original", session_id: "root",
+    selected_agent: initial.selected_agent!, delivery: initial.delivery!, budget: initial.budget!,
+    acceptance_contract: { criteria: [{ criterion_id: "proof", target: "result", entrypoint: "verify", workload: "fixture",
+      oracle_coverage: ["result"], build_boundary: "not-applicable", source: "source", candidate: "candidate",
+      source_binding: "current-protected", candidate_binding: "current-protected", fixture: "fixture", proof_scope: "requested-full",
+      expected_outcome: "pass", validation_command: command }] } });
+  const proofState = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "proved",
+    reservation_id: "proved", session_id: "root", ticket_id: null });
+  const proofPaths = Array.from({ length: 500 }, (_, index) => `test/fixtures/${"component/".repeat(15)}${index}.txt`);
+  const proof = evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint("proof"), command: [command],
+    startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true, source: goalFingerprint("source"),
+    candidate: goalFingerprint("candidate"), binding: { manifest_hash: goalFingerprint("manifest"), project_root: directory,
+      manifest_path: "manifest.json", source_paths: proofPaths, candidate_paths: proofPaths } }, proofState, "proved");
+  assert.equal(proof.length, 1);
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "proved", reservation_id: "proved", receipt_id: "proof-receipt",
+    disposition: "succeeded", result_class: "acceptance", progress_fingerprint: goalFingerprint(proof), evidence: proof, elapsed_ms: 4, cost_usd: 0.25 });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", session_id: "root", ticket_id: null });
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", receipt_id: "failure",
+    disposition: "failed", result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 5, cost_usd: null,
+    native_session_id: "unpriced-child" });
+  await ledger.appendGoal({ kind: "validation.admission", at, goal_id: goal, reservation_id: "unresolved-validation",
+    operation_id: "unresolved-request", evidence_key: goalFingerprint("unresolved"), scope: "canonical", decision: "ALLOW",
+    reason: "fixture", consumed: 1, limit: 4 });
+  const reservations = ["live", "terminal"].map(unit_id => ({ unit_id, call: `${unit_id}-call`,
+    reservation_id: goalFingerprint({ goal_id: goal, unit_id, call_id: `${unit_id}-call` }) }));
+  for (const reservation of reservations) await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal,
+    unit_id: reservation.unit_id, reservation_id: reservation.reservation_id, session_id: "root", ticket_id: null });
+  const doc = JSON.parse(await readFile(file, "utf8"));
+  while (doc.goal_events.length < 2048) {
+    const sequence = doc.goal_events.length + 1, previous_hash = doc.goal_events.at(-1).event_hash;
+    const event = { kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: `past-${sequence}`,
+      session_id: "root", selected_agent: "dog-operator" };
+    doc.goal_events.push({ sequence, previous_hash, event_hash: goalFingerprint({ sequence, previous_hash, event }), event });
+  }
+  if (storage === "0.2") {
+    const first = doc.goal_events[0], bytes = Buffer.from(JSON.stringify(first.event));
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await mkdir(`${file}.blobs`, { recursive: true }); await writeFile(join(`${file}.blobs`, sha256), bytes);
+    const { event: _event, ...record } = first;
+    doc.goal_events[0] = { ...record, event_blob: { bytes: bytes.length, chunks: [{ sha256, bytes: bytes.length }] } };
+    doc.schema_version = storage;
+  }
+  await writeFile(file, JSON.stringify(doc));
+  const original = await readFile(file), prior = await ledger.readGoal();
+  const status = () => hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" });
+  const observed = JSON.parse(await status());
+  assert.equal(observed.budget.reserved_units, 2);
+  assert.equal(observed.budget.consumed_units, 2);
+  assert.equal(observed.budget.settled_cost_usd, null);
+  assert.deepEqual(await readFile(file), original, "status alone neither spends nor appends");
+  assert.deepEqual(await ledger.readGoal(), prior);
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "terminal-call",
+    state: { status: "completed", input: { subagent_type: "dog-worker-v010", prompt: "task_id: terminal" }, time: { start: 1, end: 2 } } }] });
+  if (storage === "0.1") {
+    const originalLink = fs.link;
+    const link = t.mock.method(fs, "link", async (...args: Parameters<typeof fs.link>) => {
+      if (String(args[1]).startsWith(`${file}.blobs`)) throw new Error("page publication failure");
+      return Reflect.apply(originalLink, fs, args);
+    });
+    syncBuiltinESMExports();
+    try { await assert.rejects(status(), /page publication failure/); }
+    finally { link.mock.restore(); syncBuiltinESMExports(); }
+    assert.deepEqual(await readFile(file), original);
+    assert.deepEqual(await ledger.readGoal(), prior, "failed publication retains history, reservations and unknown spend");
+    hooks = await create();
+    const originalRename = fs.rename;
+    const rename = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+      if (String(args[1]) === file) throw new Error("page index rename failure");
+      return Reflect.apply(originalRename, fs, args);
+    });
+    syncBuiltinESMExports();
+    try { await assert.rejects(status(), /page index rename failure/); }
+    finally { rename.mock.restore(); syncBuiltinESMExports(); }
+    assert.deepEqual(await readFile(file), original);
+    assert.deepEqual(await ledger.readGoal(), prior);
+    hooks = await create();
+  }
+  const recovered = JSON.parse(await status()), after = await ledger.readGoal();
+  assert.deepEqual(after.records.slice(0, prior.records.length), prior.records, "every old event, sequence and hash survives");
+  assert.equal(after.records.length, 2049);
+  assert.equal(recovered.budget.consumed_units, 3);
+  assert.equal(recovered.budget.reserved_units, 1);
+  assert.equal(recovered.budget.settled_cost_usd, null);
+  assert.deepEqual(after.state.outstanding_reservations.map(item => item.unit_id), ["live"], "another live owner is not released");
+  assert.deepEqual(after.state.validation_budget, prior.state.validation_budget, "unresolved validation remains unresolved");
+  assert.deepEqual(after.state.evidence_refs, prior.state.evidence_refs);
+  assert.deepEqual(after.state.satisfied_criteria, ["proof"]);
+  assert.deepEqual(after.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.event,
+    prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.event);
+  const settlement = after.records.at(-1)!.event;
+  assert.equal(settlement.kind, "unit.settled");
+  if (settlement.kind !== "unit.settled") throw new Error("expected recovered settlement");
+  assert.equal(settlement.disposition, "failed"); assert.equal(settlement.result_class, "process-defect");
+  assert.deepEqual(settlement.evidence, []); assert.equal(settlement.cost_usd, null);
+  hooks = await create();
+  await status(); assert.deepEqual(await ledger.readGoal(), after, "cold status never repeats recovery or charges");
+  const oversizedOld = join(directory, `invalid-${storage}.json`);
+  const invalidOldBody = JSON.stringify({ ...doc, goal_events: [...doc.goal_events, after.records.at(-1)] });
+  await writeFile(oversizedOld, invalidOldBody);
+  await assert.rejects(RunFlightLedger.readGoalFile(oversizedOld), /closed schema/, "old formats still reject more than 2048 records");
+  assert.equal(await readFile(oversizedOld, "utf8"), invalidOldBody);
+  const chunksBeforeContinuation = (await fs.readdir(`${file}.blobs`)).sort();
+  await chat("continued-after-capacity");
+  assert.deepEqual((await fs.readdir(`${file}.blobs`)).sort(), chunksBeforeContinuation,
+    "a small tail append does not leave another unreachable page blob");
+  const continued = await ledger.readGoal();
+  assert.deepEqual(continued.records.slice(0, after.records.length), after.records);
+  assert.equal(continued.records.at(-1)!.event.kind, "goal.user-continued");
+  assert.equal(continued.state.consumed_units, after.state.consumed_units);
+  assert.deepEqual(continued.state.outstanding_reservations, after.state.outstanding_reservations);
+  const body = await readFile(file, "utf8"), paged = JSON.parse(body);
+  assert.equal(paged.schema_version, "0.3");
+  assert.ok(paged.goal_events.length > 1 && paged.goal_events.every((page: any) => page.count <= 128));
+  assert.ok(Array.isArray(paged.goal_events.at(-1).records), "the incomplete tail stays inline");
+  // An old 0.1/0.2 reader must reject the new version instead of rewriting it.
+  assert.notEqual(paged.schema_version, "0.1"); assert.notEqual(paged.schema_version, "0.2");
+  const chunk = join(`${file}.blobs`, paged.goal_events[0].records_blob.chunks[0].sha256);
+  const chunkBytes = await readFile(chunk);
+  const proofSequence = prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.sequence;
+  const proofRecord = JSON.parse(chunkBytes.toString("utf8")).find((record: any) => record.sequence === proofSequence);
+  assert.ok(proofRecord.event_blob, "large original evidence is still a separately verified event blob inside its page");
+  const proofChunk = join(`${file}.blobs`, proofRecord.event_blob.chunks[0].sha256), proofBytes = await readFile(proofChunk);
+  await rm(proofChunk);
+  await assert.rejects(status(), /blob chunk is missing/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(proofChunk, proofBytes);
+  await rm(chunk);
+  await assert.rejects(status(), /blob chunk is missing/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(chunk, chunkBytes);
+  const corrupted = Buffer.from(chunkBytes); corrupted[0] = corrupted[0]! ^ 1;
+  await writeFile(chunk, corrupted);
+  await assert.rejects(status(), /blob chunk hash mismatch/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(chunk, chunkBytes);
+  const invalid = JSON.parse(body); invalid.goal_events[0].first_sequence = 2;
+  await writeFile(file, JSON.stringify(invalid));
+  await assert.rejects(status(), /pages are malformed/);
+  const invalidReference = JSON.parse(body); invalidReference.goal_events[0].records_blob.chunks[0].sha256 = "../outside";
+  await writeFile(file, JSON.stringify(invalidReference));
+  await assert.rejects(status(), /blob chunk reference is malformed/);
+  const alteredPage = JSON.parse(chunkBytes.toString("utf8"));
+  alteredPage.at(-1).event.origin_user_message_id = "tampered";
+  const alteredBytes = Buffer.from(JSON.stringify(alteredPage)), alteredHash = createHash("sha256").update(alteredBytes).digest("hex");
+  await writeFile(join(`${file}.blobs`, alteredHash), alteredBytes);
+  const invalidChain = JSON.parse(body);
+  invalidChain.goal_events[0].records_blob = { bytes: alteredBytes.length, chunks: [{ sha256: alteredHash, bytes: alteredBytes.length }] };
+  await writeFile(file, JSON.stringify(invalidChain));
+  await assert.rejects(status(), /hash chain is malformed/, "valid blob hash does not excuse a changed historical event");
+  await writeFile(file, body);
+  assert.deepEqual(await ledger.readGoal(), continued);
+  if (storage === "0.1") {
+    await ledger.appendGoal({ kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: "codex-unknown",
+      session_id: "root", selected_agent: "codex" });
+    const manifest = join(directory, ".git", "codex-capacity-inventory.json");
+    await writeFile(manifest, JSON.stringify({ version: "0.1.0", task_id: "codex-test", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] }));
+    await assert.rejects(runCodexMission({ projectRoot: directory, manifestPath: manifest, prompt: "Do not resend", executable: "must-not-start" }),
+      /codex-mission-outcome-unknown:no-resend/, "paged goal remains visible to the existing Codex inventory caller");
+  }
+}));
 
 test("Operator recovers a registered native check in a linked worktree within a broad Location", async () => fixture(async root => {
   const exec = promisify(execFile), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other"),

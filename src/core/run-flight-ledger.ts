@@ -269,11 +269,18 @@ function recordHash(sequence: number, previousHash: string | null, event: unknow
 // This is a storage version, not the version of the logical goal events. A 0.1
 // reader rejects it under the same lock rather than rewriting an unknown format.
 const GOAL_BLOB_STORAGE_VERSION = "0.2";
+// A page contains complete, ordered goal records, not a summary or a new event.
+// Older readers reject this version rather than silently truncating its history.
+const GOAL_PAGED_STORAGE_VERSION = "0.3";
 const GOAL_BLOB_CHUNK_BYTES = 1024 * 1024;
 const GOAL_BLOB_INLINE_BYTES = 64 * 1024;
+const GOAL_PAGE_RECORDS = 128;
+const MAX_GOAL_PAGES = 256;
 type GoalBlobChunk = { readonly sha256: string; readonly bytes: number };
 type GoalBlobRecord = { readonly sequence: number; readonly previous_hash: string | null; readonly event_hash: string;
   readonly event_blob: { readonly bytes: number; readonly chunks: readonly GoalBlobChunk[] } };
+type GoalPage = { readonly first_sequence: number; readonly count: number } &
+  ({ readonly records_blob: GoalBlobRecord["event_blob"] } | { readonly records: readonly (GoalFlightEventRecord | GoalBlobRecord)[] });
 
 function chunkHash(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
 
@@ -348,8 +355,11 @@ async function storeGoalBlob(filePath: string, data: Buffer): Promise<GoalBlobRe
 }
 
 async function goalStorageBody(filePath: string, records: readonly GoalFlightEventRecord[]): Promise<string> {
-  const legacy = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: records });
-  if (Buffer.byteLength(legacy) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return legacy;
+  if (records.length > GOAL_PAGE_RECORDS * MAX_GOAL_PAGES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  if (records.length <= MAX_RUN_FLIGHT_EVENTS) {
+    const legacy = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: records });
+    if (Buffer.byteLength(legacy) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return legacy;
+  }
   const blobs = new Map<number, GoalBlobRecord>();
   const encode = () => canonical({ schema_version: GOAL_BLOB_STORAGE_VERSION,
     goal_events: records.map((record, index) => blobs.get(index) ?? record) });
@@ -363,10 +373,26 @@ async function goalStorageBody(filePath: string, records: readonly GoalFlightEve
       blobs.set(index, { sequence: record.sequence, previous_hash: record.previous_hash, event_hash: record.event_hash,
         event_blob: await storeGoalBlob(filePath, data) });
     }
-    const body = encode();
-    if (Buffer.byteLength(body) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return body;
+    if (records.length <= MAX_RUN_FLIGHT_EVENTS) {
+      const body = encode();
+      if (Buffer.byteLength(body) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return body;
+    } else break;
   }
-  throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  // Page references reuse the same immutable, verified chunks as event blobs.
+  // Full pages have stable contents across appends. Keep a normally sized tail
+  // inline so each append does not leave another unreachable immutable blob.
+  const pages: GoalPage[] = [];
+  for (let start = 0; start < records.length; start += GOAL_PAGE_RECORDS) {
+    const page = records.slice(start, start + GOAL_PAGE_RECORDS).map((record, offset) => blobs.get(start + offset) ?? record);
+    const data = Buffer.from(canonical(page));
+    if (data.length > MAX_GOAL_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger page capacity exceeded.");
+    if (page.length < GOAL_PAGE_RECORDS && data.length <= MAX_GOAL_FLIGHT_LEDGER_BYTES / 2) {
+      pages.push({ first_sequence: start + 1, count: page.length, records: page });
+    } else pages.push({ first_sequence: start + 1, count: page.length, records_blob: await storeGoalBlob(filePath, data) });
+  }
+  const body = canonical({ schema_version: GOAL_PAGED_STORAGE_VERSION, goal_events: pages });
+  if (Buffer.byteLength(body) > MAX_GOAL_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  return body;
 }
 
 export function diagnosisContractHash(value: unknown): string {
@@ -1418,7 +1444,6 @@ export class RunFlightLedger {
           error.code === "budget" ? "budget" : error.code === "invalid" ? "invalid" : "transition", error.message);
         throw error;
       }
-      if (next.length > MAX_RUN_FLIGHT_EVENTS) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
       const body = await goalStorageBody(this.#filePath, next);
       const temporary = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`;
       await writeFile(temporary, body, { encoding: "utf8", flag: "wx" });
@@ -1447,14 +1472,42 @@ export class RunFlightLedger {
     let document: unknown;
     try { document = JSON.parse(raw); } catch { throw new RunFlightLedgerError("invalid", "Goal ledger is not valid JSON."); }
     if (!isObject(document) || !only(document, ["schema_version", "goal_events"]) ||
-      (document.schema_version !== GOAL_BOUND_SCHEMA_VERSION && document.schema_version !== GOAL_BLOB_STORAGE_VERSION) ||
-      !Array.isArray(document.goal_events) || document.goal_events.length > MAX_RUN_FLIGHT_EVENTS) {
+      (document.schema_version !== GOAL_BOUND_SCHEMA_VERSION && document.schema_version !== GOAL_BLOB_STORAGE_VERSION &&
+        document.schema_version !== GOAL_PAGED_STORAGE_VERSION) || !Array.isArray(document.goal_events) ||
+      document.goal_events.length > (document.schema_version === GOAL_PAGED_STORAGE_VERSION ? MAX_GOAL_PAGES : MAX_RUN_FLIGHT_EVENTS)) {
       throw new RunFlightLedgerError("invalid", "Goal ledger document does not match the closed schema.");
     }
+    const storedRecords: unknown[] = [];
+    if (document.schema_version === GOAL_PAGED_STORAGE_VERSION) {
+      if (document.goal_events.length === 0) throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+      for (const [index, page] of document.goal_events.entries()) {
+        if (!isObject(page) || !only(page, ["first_sequence", "count", "records_blob", "records"]) ||
+            page.first_sequence !== index * GOAL_PAGE_RECORDS + 1 || !Number.isSafeInteger(page.count) ||
+            Number(page.count) < 1 || Number(page.count) > GOAL_PAGE_RECORDS ||
+            (index < document.goal_events.length - 1 && page.count !== GOAL_PAGE_RECORDS)) {
+          throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+        }
+        let pageRecords: unknown;
+        if (Object.hasOwn(page, "records")) {
+          if (Object.hasOwn(page, "records_blob") || index !== document.goal_events.length - 1 || page.count === GOAL_PAGE_RECORDS) {
+            throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+          }
+          pageRecords = page.records;
+        } else {
+          if (!isObject(page.records_blob) || !Number.isSafeInteger(page.records_blob.bytes) ||
+              Number(page.records_blob.bytes) < 1 || Number(page.records_blob.bytes) > MAX_GOAL_FLIGHT_LEDGER_BYTES) {
+            throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+          }
+          pageRecords = await readGoalBlob(this.#filePath, page.records_blob);
+        }
+        if (!Array.isArray(pageRecords) || pageRecords.length !== page.count) throw new RunFlightLedgerError("invalid", "Goal ledger page contents are malformed.");
+        storedRecords.push(...pageRecords);
+      }
+    } else storedRecords.push(...document.goal_events);
     const records: GoalFlightEventRecord[] = [];
-    for (const stored of document.goal_events) {
+    for (const stored of storedRecords) {
       if (isObject(stored) && Object.hasOwn(stored, "event_blob")) {
-        if (document.schema_version !== GOAL_BLOB_STORAGE_VERSION || !only(stored, ["sequence", "previous_hash", "event_hash", "event_blob"])) {
+        if (document.schema_version === GOAL_BOUND_SCHEMA_VERSION || !only(stored, ["sequence", "previous_hash", "event_hash", "event_blob"])) {
           throw new RunFlightLedgerError("invalid", "Goal ledger blob record does not match the closed schema.");
         }
         records.push({ sequence: stored.sequence, previous_hash: stored.previous_hash, event_hash: stored.event_hash,
