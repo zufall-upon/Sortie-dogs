@@ -96,3 +96,46 @@ test("failed implementation then read-only validation and test-only replan keep 
     assert.equal((await missions.start("root", ["Independent mission"])).reviewScope, undefined, "new missions start fresh");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("planning schedules an existing test signal for its writable unit, not an earlier reader", async () => {
+  for (const scope of ["file", "directory", "absolute"] as const) {
+    await mkdir(resolve("_testenv"), { recursive: true });
+    const root = await mkdtemp(resolve("_testenv/mission-audit-owner-"));
+    try {
+      await mkdir(join(root, "test"));
+      await writeFile(join(root, "source.mjs"), "export const value = 1;\n");
+      const testFile = join(root, "test", "value.test.mjs");
+      await writeFile(testFile, 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n');
+      const identities: Record<string, { agent: string; parentID?: string }> = {
+        root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+      };
+      const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+        children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+          .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+        messages: async () => ({ data: [] }), abort: async () => ({ data: true }),
+      } } } as never);
+      const chat = async (id: string, text: string) => hooks["chat.message"]!({ sessionID: id, messageID: `${id}-user`, agent: identities[id]!.agent }, {
+        message: { id: `${id}-user`, agent: identities[id]!.agent, model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }],
+      });
+      await chat("root", "Implement the calculation and improve its tests.");
+      const started = JSON.parse(await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Implement the calculation and improve its tests"] }, { sessionID: "root" }));
+      await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+      await chat("coordinator", started.task.prompt);
+      const writerScope = scope === "file" ? "test/value.test.mjs" : scope === "directory" ? "test/**" : testFile;
+      await hooks.tool!.sortie_v010_plan_units.execute({ units: [
+        { title: "Implement calculation", objective: "Implement source only", read: ["test/value.test.mjs"], write: ["source.mjs"], validation: ["node test/value.test.mjs --source"] },
+        { title: "Improve tests", objective: "Improve tests", read: ["source.mjs"], write: [writerScope], validation: ["node --check source.mjs"] },
+      ] }, { sessionID: "coordinator" });
+      const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+      const signal = (await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).testDebtSignals![0]!;
+      assert.equal(signal.path, "test/value.test.mjs");
+      assert.equal(signal.unit_id, run.units[1]!.unit.id, scope);
+      assert.deepEqual(run.units[0]!.unit.write, ["source.mjs"], "assignment does not expand write scope");
+      assert.deepEqual(run.units[1]!.unit.write, [writerScope]);
+      const handoff = JSON.parse(await readFile(run.units[1]!.handoffPath, "utf8"));
+      assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].unit_id, run.units[1]!.unit.id);
+      assert.match(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.instruction, /Act only on signals for your own unit/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});

@@ -16,7 +16,7 @@ import { goalFingerprint } from "../core/goal-bound.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { reportText, resolveReportLocale } from "./report-locale.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool, WriteDeniedError } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, createProjectPaths, createWriteGate, extractWritePaths, isShellTool, WriteDeniedError } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
@@ -3254,10 +3254,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const planningCandidates = mission.kind === "operation" ? [] : (await Promise.all(plan.units.map(async unit =>
         unit.write.length ? (await inspectTestDebt(input.directory, unit).catch(() => [])).filter(signal => !knownAudits.has(signal.path))
           .map(signal => ({ ...signal, unit_id: unit.id, trigger: "planning-milestone" as const })) : []))).flat();
-      const planningSignals = planningCandidates.filter(signal => {
-        if (knownAudits.has(signal.path)) return false;
-        knownAudits.add(signal.path); return true;
-      }).slice(0, Math.max(0, 64 - (mission.testDebtSignals?.length ?? 0)));
+      // The first unit to read a test is not necessarily the unit that can edit it.
+      // Prefer an existing write scope using the same path semantics as the gate;
+      // a scheduling signal is still neither write authority nor proof of cleanup.
+      const availableAuditSlots = Math.max(0, 64 - (mission.testDebtSignals?.length ?? 0));
+      const projectPaths = planningCandidates.length && availableAuditSlots ? await createProjectPaths(input.directory).catch(() => undefined) : undefined;
+      const planningGates = projectPaths ? await Promise.all(plan.units.map(async unit => ({ unit,
+        gate: await createWriteGate(projectPaths, { version: "0.1.0", task_id: unit.id, read: unit.read,
+          write: unit.write, validation: unit.validation }).catch(() => undefined),
+      }))) : [];
+      const planningSignals: typeof planningCandidates = [];
+      for (const signal of planningCandidates) {
+        if (planningSignals.length >= availableAuditSlots) break;
+        if (knownAudits.has(signal.path)) continue;
+        knownAudits.add(signal.path);
+        let assigned = signal.unit_id;
+        for (const { unit, gate } of planningGates) {
+          if (!gate) continue;
+          try { await gate.checkPath(resolve(input.directory, signal.path)); assigned = unit.id; break; }
+          catch { /* Keep looking; the inventory does not alter host permissions. */ }
+        }
+        planningSignals.push({ ...signal, unit_id: assigned });
+      }
       const context = { ...await missions.handoffContext(mission),
         ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
           measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
