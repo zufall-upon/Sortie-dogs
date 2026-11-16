@@ -71,15 +71,22 @@ const unit = { title: "Fix result", objective: "Implement the requested result w
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
 
 test("Operator recovers a registered native check in a linked worktree within a broad Location", async () => fixture(async root => {
-  const exec = promisify(execFile), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other");
-  await mkdir(repository);
+  const exec = promisify(execFile), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other"),
+    component = join(root, "component-source");
+  await mkdir(repository); await mkdir(component);
+  await exec("git", ["init", "--quiet"], { cwd: component });
+  await writeFile(join(component, "payload.txt"), "component expected\n");
+  await exec("git", ["add", "."], { cwd: component });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: component });
   await exec("git", ["init", "--quiet"], { cwd: repository });
   await writeFile(join(repository, "input.txt"), "expected\n");
-  await writeFile(join(repository, "check.mjs"), 'import assert from "node:assert/strict";import {readFileSync} from "node:fs";assert.equal(readFileSync("input.txt","utf8"),"expected\\n");console.log("USEFUL_CHECK_PASSED");\n');
+  await writeFile(join(repository, "check.mjs"), 'import assert from "node:assert/strict";import {readFileSync} from "node:fs";assert.equal(readFileSync("input.txt","utf8"),"expected\\n");assert.equal(readFileSync("component/payload.txt","utf8"),"component expected\\n");console.log("USEFUL_CHECK_PASSED");\n');
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", component, "component"], { cwd: repository });
   await exec("git", ["add", "."], { cwd: repository });
   await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repository });
   await exec("git", ["worktree", "add", "--detach", checkout], { cwd: repository });
   await exec("git", ["worktree", "add", "--detach", other], { cwd: repository });
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"], { cwd: checkout });
   const marker = join(checkout, ".git"), savedMarker = await readFile(marker);
   const history: unknown[] = [];
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
@@ -92,7 +99,7 @@ test("Operator recovers a registered native check in a linked worktree within a 
     parts: [{ type: "text", text: "Check the linked checkout" }],
   });
   const command = "node check.mjs", plan = { executor: "self", units: [{ title: "Check", objective: "Check input",
-    read: ["checkout/check.mjs", "checkout/input.txt"], write: ["checkout/**"], validation: [command], validation_cwd: { [command]: checkout } }] };
+    read: ["checkout/check.mjs", "checkout/input.txt", "checkout/component/payload.txt"], write: ["checkout/**"], validation: [command], validation_cwd: { [command]: checkout } }] };
   const call = (callID: string) => ({ tool: "shell", sessionID: "root", callID });
   const args = { command, workdir: checkout };
   await chat("request"); await tool("start_mission", { requirements: ["Check the linked checkout"] });

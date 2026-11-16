@@ -18,7 +18,7 @@ import { canonicalDeclaredValidationMembers, canonicalObservedValidationMembers,
 import { isDockerContainerID, isDockerWorkspacePath } from "./docker-validation.js";
 import { currentSnapshotProtection, isRuntimeControlPath, refreshProtectedSnapshot, snapshotControlExclusion, snapshotScratchExclusion, validationInputSnapshot } from "./protected-snapshot.js";
 import type { DirectHandoffValidationCheck, ReviewerCorrectionCheck } from "./runtime-bridge.js";
-import { isLocallyControlledNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
+import { isLocallyControlledNestedGitdir, isWritableNestedGitdir, pinnedGitArguments, sanitizedNestedGitError, trustedNestedGitdir, trustedSubmoduleGitdir } from "./git-submodule-safety.js";
 
 const exec = promisify(execFile);
 const notRepository = (error: unknown) => /fatal: not a git repository \(or (?:any of the parent directories|any parent up to mount point [^\r\n)]+)\)(?:: \.git)?/u
@@ -29,6 +29,7 @@ type GitComparison = "diff" | "status";
 type FilterlessGit = ((args: string[]) => Promise<string>) & {
   submoduleIgnore(path: string, command: GitComparison): SubmoduleIgnore;
   originalGitdir?: string;
+  projectRoot: string;
 };
 
 async function copyGitIndex(source: string, destination: string, optional = false): Promise<void> {
@@ -57,10 +58,11 @@ async function copyGitIndex(source: string, destination: string, optional = fals
 
 /** Run worktree comparisons with a private index and an overriding attributes file.
  * Git's --no-ext-diff/--no-textconv do not disable clean or process filters. */
-async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>, gitdir?: string): Promise<T> {
+async function withFilterlessGit<T>(directory: string, action: (git: FilterlessGit) => Promise<T>, gitdir?: string,
+  projectRoot = directory): Promise<T> {
   // Missing promised objects are unavailable input, not permission to fetch or run a remote helper.
   const readEnv = gitReadEnvironment();
-  const sanitize = isLocallyControlledNestedGitdir(directory, gitdir);
+  const sanitize = isLocallyControlledNestedGitdir(directory, gitdir) || await isWritableNestedGitdir(projectRoot, gitdir);
   const original = async (args: string[]) => {
     try {
       return (await exec("git", [...pinnedGitArguments(directory, gitdir), "-c", "core.fsmonitor=false", ...args],
@@ -171,7 +173,7 @@ async function withFilterlessGit<T>(directory: string, action: (git: FilterlessG
           ...effective, ...submodules, ...prefixes, "-c", "core.bare=false", "-c", "core.fsmonitor=false", ...args],
           { cwd: directory, env, maxBuffer: 8 * 1024 * 1024 })).stdout;
       } catch (error) { throw sanitize ? sanitizedNestedGitError(error) : error; }
-    }, { submoduleIgnore, originalGitdir: gitdir });
+    }, { submoduleIgnore, originalGitdir: gitdir, projectRoot });
     return await action(safeGit);
   } finally { await rm(privateGit, { recursive: true, force: true }); }
 }
@@ -212,7 +214,7 @@ async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: 
     if (!accessible) { pin?.(path, indexedHead); continue; }
     const marker = await lstat(join(root, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     if (!marker) { pin?.(path, indexedHead); continue; } // An uninitialized submodule has no worktree to inspect.
-    const gitdir = await trustedSubmoduleGitdir(directory, root, git.originalGitdir);
+    const gitdir = await trustedSubmoduleGitdir(directory, root, git.originalGitdir, git.projectRoot);
     if (!gitdir) throw new Error(`untrusted Git submodule metadata: ${path}`);
     const found = await withFilterlessGit(root, async subGit => {
       const head = (await subGit(["rev-parse", "--verify", "HEAD"])).trim();
@@ -222,7 +224,7 @@ async function dirtyGitSubmodules(directory: string, git: FilterlessGit, paths: 
         pin ? (child, nestedHead) => pin(`${path}/${child}`, nestedHead) : undefined);
       const modified = Boolean(status || nested.length);
       return { head, modified, diff: modified ? (await currentGitDiff(subGit, ["."])) + submoduleDiff(nested) : "" };
-    }, gitdir);
+    }, gitdir, git.projectRoot);
     pin?.(path, found.head);
     if (command === "diff" && found.head !== indexedHead) {
       // Compare the effective worktree gitlink, not an intermediate staged
@@ -962,11 +964,12 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
     const marker = await lstat(join(absolute, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     const gitdir = marker ? await trustedNestedGitdir(directory, absolute) : undefined;
+    const sanitize = isLocallyControlledNestedGitdir(absolute, gitdir) || await isWritableNestedGitdir(directory, gitdir);
     const scopedGit = async (args: string[]) => {
       try {
         return (await exec("git", [...pinnedGitArguments(absolute, gitdir), "-c", "core.fsmonitor=false", ...args],
           { cwd: absolute, maxBuffer: 8 * 1024 * 1024 })).stdout;
-      } catch (error) { throw isLocallyControlledNestedGitdir(absolute, gitdir) ? sanitizedNestedGitError(error) : error; }
+      } catch (error) { throw sanitize ? sanitizedNestedGitError(error) : error; }
     };
     const tracked = await scopedGit(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...pathspec]);
     const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
@@ -985,7 +988,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       for (const item of dirty) currentFiles.add(prefix(item.path));
       for (const path of patches.keys()) currentFiles.add(prefix(path));
       return (await currentGitDiff(git, pathspec)) + [...patches.values()].join("") + submoduleDiff(dirty);
-    }, gitdir);
+    }, gitdir, directory);
     if (delta) scopedDiff += `\n--- repository output: ${path} ---\n${delta}`;
   };
   for (const [absolute, paths] of nested) {

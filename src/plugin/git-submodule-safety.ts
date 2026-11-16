@@ -65,6 +65,16 @@ const missingGitPath = async (path: string) => lstat(path).catch((error: NodeJS.
   return undefined;
 });
 
+/** The Location's own Git metadata is protected; other metadata inside it can be writable. */
+export async function isWritableNestedGitdir(projectRoot: string, gitdir?: string): Promise<boolean> {
+  if (!gitdir) return false;
+  const logicalRoot = resolve(projectRoot), logicalRootGit = join(logicalRoot, ".git");
+  const root = await realpath(projectRoot);
+  const rootGit = await realpath(logicalRootGit).catch(() => undefined);
+  return (inside(logicalRoot, gitdir) || inside(root, gitdir)) &&
+    !inside(logicalRootGit, gitdir) && (!rootGit || !inside(rootGit, gitdir));
+}
+
 async function inspectWritableGitPath(path: string, fail: () => Error): Promise<void> {
   const info = await missingGitPath(path);
   if (!info) return;
@@ -102,15 +112,17 @@ async function trustedStandaloneGitdir(root: string, marker: string, initial: St
 /** A tracked submodule must refer to its own protected superproject metadata, not an
  * arbitrary repository selected by a Worker-writable .git file. Return the verified
  * gitdir so subsequent Git commands cannot race a replacement of that marker. */
-export async function trustedSubmoduleGitdir(directory: string, child: string, parentGitdir?: string): Promise<string | undefined> {
+export async function trustedSubmoduleGitdir(directory: string, child: string, parentGitdir?: string,
+  projectRoot = directory): Promise<string | undefined> {
   const scoped = relative(directory, child).replaceAll("\\", "/");
   if (!scoped || scoped === ".." || scoped.startsWith("../") || isAbsolute(scoped)) return undefined;
   const env = { ...process.env, GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" };
+  const sanitize = isLocallyControlledNestedGitdir(directory, parentGitdir) || await isWritableNestedGitdir(projectRoot, parentGitdir);
   const git = async (args: string[]) => {
     try {
       return (await exec("git", [...pinnedGitArguments(directory, parentGitdir), "-c", "core.fsmonitor=false", ...args],
         { cwd: directory, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 })).stdout;
-    } catch (error) { throw isLocallyControlledNestedGitdir(directory, parentGitdir) ? sanitizedNestedGitError(error) : error; }
+    } catch (error) { throw sanitize ? sanitizedNestedGitError(error) : error; }
   };
   let stage: string;
   try { stage = await git(["ls-files", "--stage", "-z", "--", scoped]); }
@@ -129,8 +141,8 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
     const line = (value: string) => value.replace(/\r?\n$/u, "");
     const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(await readPointer(marker, info));
     if (!match) throw fail();
-    const [top, common, modules] = await Promise.all([
-      git(["rev-parse", "--show-toplevel"]), git(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    const [top, modulesPath, modules] = await Promise.all([
+      git(["rev-parse", "--show-toplevel"]), git(["rev-parse", "--path-format=absolute", "--git-path", "modules"]),
       git(["config", "--blob=:.gitmodules", "--null", "--list"]),
     ]);
     const names = modules.split("\0").filter(Boolean).flatMap(entry => {
@@ -139,7 +151,13 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
       return name && canonical(resolve(line(top), value)) === canonical(child) ? [name] : [];
     });
     if (names.length !== 1) throw fail();
-    const logicalModules = resolve(line(common), "modules");
+    // Git places modules of a linked worktree beneath that worktree's gitdir,
+    // not necessarily beneath its common Git directory.
+    const logicalModules = resolve(line(modulesPath));
+    const logicalExpected = resolve(logicalModules, names[0]!);
+    if (!inside(logicalModules, logicalExpected)) throw fail();
+    const lexicalWritable = await isWritableNestedGitdir(projectRoot, logicalModules);
+    if (lexicalWritable && !(await lstat(logicalModules)).isDirectory()) throw fail();
     const modulesRoot = await realpath(logicalModules);
     const expectedPath = resolve(modulesRoot, names[0]!);
     const actualPath = resolve(child, match[1]!);
@@ -148,11 +166,22 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
     const expected = await realpath(expectedPath);
     const actual = await realpath(actualPath);
     if (!inside(modulesRoot, expected) || canonical(expected) !== canonical(actual)) throw fail();
-    // An edited .gitmodules/index must not redirect one gitlink to a different
-    // protected module. The protected module's own config binds its worktree.
-    const worktree = line(await git(["config", "--no-includes", "--file", join(expected, "config"), "--get", "core.worktree"]));
-    const declaredWorktree = resolve(expected, worktree), physicalChild = await realpath(child);
-    if (canonical(declaredWorktree) !== canonical(child) && canonical(declaredWorktree) !== canonical(physicalChild)) throw fail();
+    const writable = lexicalWritable || await isWritableNestedGitdir(projectRoot, modulesRoot);
+    if (writable) {
+      // Neither the module root nor an intermediate name may redirect Git through
+      // a symlink, even if the resolved target happens to be inside the Location.
+      let path = logicalModules;
+      if (!(await lstat(path)).isDirectory()) throw fail();
+      for (const part of relative(logicalModules, logicalExpected).split(sep).filter(Boolean)) {
+        path = join(path, part);
+        if (!(await lstat(path)).isDirectory()) throw fail();
+      }
+      const before = await lstat(expected);
+      await inspectWritableGitPath(expected, fail);
+      if (await missingGitPath(join(expected, "objects", "info", "alternates"))) throw fail();
+      const after = await lstat(expected);
+      if (!after.isDirectory() || after.dev !== before.dev || after.ino !== before.ino) throw fail();
+    }
     const commonFile = join(expected, "commondir");
     const commonContent = await readPointer(commonFile).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
@@ -160,7 +189,13 @@ export async function trustedSubmoduleGitdir(directory: string, child: string, p
     if (commonContent !== undefined) {
       const commonPath = resolve(expected, line(commonContent));
       if (!inside(expected, commonPath) || !inside(expected, await realpath(commonPath))) throw fail();
+      if (writable && await missingGitPath(join(commonPath, "objects", "info", "alternates"))) throw fail();
     }
+    // An edited .gitmodules/index must not redirect one gitlink to a different
+    // module. Its own config binds the worktree after writable metadata is checked.
+    const worktree = line(await git(["config", "--no-includes", "--file", join(expected, "config"), "--get", "core.worktree"]));
+    const declaredWorktree = resolve(expected, worktree), physicalChild = await realpath(child);
+    if (canonical(declaredWorktree) !== canonical(child) && canonical(declaredWorktree) !== canonical(physicalChild)) throw fail();
     return expected;
   } catch { throw fail(); }
 }
@@ -177,7 +212,7 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
     parent = next;
   }
   const parentGitdir = canonical(parent) === canonical(root) ? undefined : await trustedNestedGitdir(root, parent);
-  const submodule = await trustedSubmoduleGitdir(parent, child, parentGitdir);
+  const submodule = await trustedSubmoduleGitdir(parent, child, parentGitdir, root);
   if (submodule) return submodule;
   const marker = join(child, ".git");
   const info = await lstat(marker).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });

@@ -515,6 +515,44 @@ for (const placement of ["outside", "inside"] as const) test(`linked worktree va
   assert.equal(JSON.stringify(pinned.binding), saved);
 }));
 
+test("linked worktree submodule snapshot retains tracked inputs and captured per-call scratch", async () => fixture(async root => {
+  const source = join(root, "source"), repository = join(root, "repository"), checkout = join(root, "checkout"), child = join(checkout, "component");
+  await mkdir(source); await mkdir(repository);
+  await exec("git", ["init", "--quiet"], { cwd: source });
+  await mkdir(join(source, "scratch")); await writeFile(join(source, "scratch", "tracked.txt"), "tracked component input");
+  await exec("git", ["add", "."], { cwd: source });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: source });
+  await exec("git", ["init", "--quiet"], { cwd: repository });
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "component"], { cwd: repository });
+  await exec("git", ["add", "."], { cwd: repository });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: repository });
+  await exec("git", ["worktree", "add", "--quiet", "--detach", checkout], { cwd: repository });
+  await exec("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"], { cwd: checkout });
+  const command = "TMPDIR=./scratch node check.mjs", other = "node other-check.mjs", manifestPath = join(root, "manifest.json");
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**"], write: ["checkout/component/**"], validation: [command, other] });
+  await writeFile(manifestPath, bytes);
+  const auth = { projectRoot: root, manifestPath, manifestHash: hash(bytes) };
+  const pinned = await protectedSnapshot(auth, { directory: child, command });
+  assert.ok(pinned?.binding.freshness);
+  const tracked = join(child, "scratch", "tracked.txt"), generated = join(child, "scratch", "generated.log");
+  assert.ok(pinned.binding.freshness.protected_paths.includes(tracked));
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(inputs);
+  await writeFile(generated, "scratch output");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  await writeFile(tracked, "changed component input");
+  assert.notEqual(await validationInputSnapshot(root, pinned.binding), inputs);
+  await writeFile(tracked, "tracked component input");
+  const otherCall = await protectedSnapshot(auth, { directory: child, command: other });
+  assert.ok(otherCall?.binding.freshness);
+  assert.deepEqual(otherCall.binding.freshness.scratch_paths, []);
+  await writeFile(generated, "changed scratch output");
+  assert.notEqual((await refreshProtectedSnapshot(root, otherCall.binding))?.source, otherCall.source);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), { source: pinned.source, candidate: pinned.candidate });
+  assert.equal(JSON.stringify(pinned.binding), saved);
+}));
+
 test("a whole-Location grant protects tracked scratch inputs from the fixed validation cwd", async () => fixture(async root => {
   const checkout = join(root, "checkout"), scratch = join(checkout, "scratch");
   await mkdir(scratch, { recursive: true });

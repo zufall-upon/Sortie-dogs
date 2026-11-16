@@ -1108,6 +1108,102 @@ test("linked worktrees inside a broad Location preserve review while rejecting r
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("linked worktree submodules use their own modules path and reject writable metadata redirects", async () => {
+  const area = await mkdtemp(resolve("_testenv/review-linked-submodule-"));
+  const root = join(area, "location"), repository = join(root, "repository"), checkout = join(root, "checkout"),
+    source = join(area, "source"), secret = join(area, "private"), child = join(checkout, "component");
+  const commit = async (directory: string) => git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "--quiet", "-m", "base"], { cwd: directory });
+  try {
+    await mkdir(repository, { recursive: true }); await mkdir(source); await mkdir(secret);
+    for (const [directory, content] of [[source, "public component\n"], [secret, "REVIEW_PRIVATE_SUBMODULE_SENTINEL\n"]]) {
+      await git("git", ["init", "--quiet"], { cwd: directory });
+      await writeFile(join(directory, "payload.txt"), content);
+      await git("git", ["add", "."], { cwd: directory }); await commit(directory);
+    }
+    await git("git", ["init", "--quiet"], { cwd: repository });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", source, "component"], { cwd: repository });
+    await git("git", ["add", "."], { cwd: repository }); await commit(repository);
+    await git("git", ["worktree", "add", "--quiet", "--detach", checkout], { cwd: repository });
+    await git("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet"], { cwd: checkout });
+    const marker = join(child, ".git"), originalMarker = await fs.readFile(marker);
+    const modules = (await git("git", ["rev-parse", "--path-format=absolute", "--git-path", "modules"], { cwd: checkout })).stdout.trim();
+    const worktreeModule = join(modules, "component"), commonModule = join(repository, ".git", "modules", "component");
+    assert.notEqual(worktreeModule, commonModule);
+    const run = { units: [{ unit: { read: [], write: ["checkout/**"] }, hashes: [] }] } as never;
+    const narrow = { units: [{ unit: { read: [], write: ["checkout/component/**"] }, hashes: [] }] } as never;
+    const protection = () => currentSnapshotProtection(root, { read: [], write: ["checkout/component/**"] }, child);
+    const rejected = async (reason = /untrusted Git submodule metadata/) => {
+      await assert.rejects(protection(), reason);
+      for (const scope of [run, narrow]) {
+        await assert.rejects(missionReviewSource(root, scope), error => {
+          assert.match(String(error), reason);
+          assert.doesNotMatch(String(error), /REVIEW_PRIVATE_SUBMODULE_SENTINEL/);
+          return true;
+        });
+      }
+    };
+    await writeFile(join(child, "payload.txt"), "modified public component\n");
+    assert.ok((await protection()).includes(join(child, "payload.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /\+modified public component/);
+    assert.match((await missionReviewSource(root, narrow)).excerpt, /\+modified public component/);
+
+    // Protected top-level metadata may legitimately use a local alternate.
+    const commonAlternate = join(commonModule, "objects", "info", "alternates");
+    await writeFile(commonAlternate, join(source, ".git", "objects") + "\n");
+    assert.ok((await currentSnapshotProtection(repository, { read: [], write: ["component/**"] }, join(repository, "component")))
+      .includes(join(repository, "component", "payload.txt")));
+    if (process.platform !== "win32") {
+      // The same metadata is writable when its checkout is nested in a Location,
+      // including when that Location is accessed by a symbolic alias.
+      const alias = join(area, "location-alias"); await symlink(root, alias, "dir");
+      const repositoryRun = { units: [{ unit: { read: [], write: ["repository/**"] }, hashes: [] }] } as never;
+      await assert.rejects(missionReviewSource(alias, repositoryRun), /untrusted Git submodule metadata/);
+    }
+    await rm(commonAlternate);
+
+    // Reproduce the original shared-module redirect, including its forged binding.
+    const commonConfig = await fs.readFile(join(commonModule, "config")), commonHead = await fs.readFile(join(commonModule, "HEAD"));
+    await writeFile(marker, `gitdir: ${commonModule}\n`);
+    await git("git", ["config", "--file", join(commonModule, "config"), "core.worktree", child], { cwd: repository });
+    const secretHead = (await git("git", ["rev-parse", "HEAD"], { cwd: secret })).stdout.trim();
+    await writeFile(join(commonModule, "HEAD"), secretHead + "\n");
+    await writeFile(commonAlternate, join(secret, ".git", "objects") + "\n");
+    assert.match((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "payload.txt"], { cwd: child })).stdout,
+      /REVIEW_PRIVATE_SUBMODULE_SENTINEL/);
+    await rejected();
+    await writeFile(marker, originalMarker); await writeFile(join(commonModule, "config"), commonConfig);
+    await writeFile(join(commonModule, "HEAD"), commonHead); await rm(commonAlternate);
+
+    // Also reject an alternate in the *correct* worktree-specific module, not
+    // merely the incorrect common-module path used by the reproduction above.
+    const head = await fs.readFile(join(worktreeModule, "HEAD")), alternate = join(worktreeModule, "objects", "info", "alternates");
+    await writeFile(join(worktreeModule, "HEAD"), secretHead + "\n");
+    await writeFile(alternate, join(secret, ".git", "objects") + "\n");
+    assert.match((await git("git", ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "payload.txt"], { cwd: child })).stdout,
+      /REVIEW_PRIVATE_SUBMODULE_SENTINEL/);
+    await rejected();
+    await rm(alternate); await writeFile(join(worktreeModule, "HEAD"), head);
+    await writeFile(join(worktreeModule, "commondir"), join(secret, ".git") + "\n");
+    await rejected(); await rm(join(worktreeModule, "commondir"));
+    if (process.platform !== "win32") {
+      const link = join(worktreeModule, "refs", "fixture-link");
+      await symlink(join(secret, ".git", "HEAD"), link);
+      await rejected(/untrusted nested Git metadata/); await rm(link);
+    }
+    assert.ok((await protection()).includes(join(child, "payload.txt")));
+    assert.match((await missionReviewSource(root, run)).excerpt, /\+modified public component/);
+    const configFixture = join(area, "module-config"), config = join(worktreeModule, "config");
+    await writeFile(configFixture, "[diff]\n\talgorithm = module-config-fixture\n");
+    await appendFile(config, `\n[include]\n\tpath = ${configFixture}\n`);
+    await assert.rejects(missionReviewSource(root, run), error => {
+      assert.match(String(error), /git-inspection: cannot inspect nested Git repository/);
+      assert.doesNotMatch(JSON.stringify(error), /module-config-fixture/);
+      return true;
+    });
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
 test("Git pointer checks bound reads and reject unrelated paths before resolving them", async t => {
   const area = await mkdtemp(join(tmpdir(), "review-git-pointer-"));
   const root = join(area, "root"), source = join(area, "source"), nested = join(root, "nested");
