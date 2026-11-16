@@ -415,7 +415,7 @@ Preserve established assertions and project test discovery. This is placement gu
 /** Test changes are judged by detection value, not by the number or names of tests. */
 export const MISSION_TEST_GATE_AUTHOR = `Before adding or changing tests, inspect relevant existing tests: compare inputs, boundaries, assertions and failure detection.
 Reuse or strengthen them when sufficient; preserve distinct specification, boundary, regression, public API and security coverage. No count limit.`;
-export const MISSION_TEST_GATE_WORKER = `Compare existing test inputs, boundaries, assertions, failures; reuse if sufficient; keep unique coverage.`;
+export const MISSION_TEST_GATE_WORKER = `Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage.`;
 
 /** Preserve explicit public behavior and its caller preconditions when removing passive effects. */
 const MISSION_EXPLICIT_EFFECT_PRESERVATION = `When removing implicit initialization effects, preserve established explicit opt-in behavior unless the request changes it.
@@ -817,6 +817,6 @@ Do not spawn nested subagents, amend, push/publish. Return changes, command/exit
 rerun reasons, unresolved/untested behavior; no proof doc.
 No repeat denial. Unrecoverable PROCESS_DEFECT: local: + diagnostic or proven
 TRUE_BLOCKER: external: / TRUE_BLOCKER: user-decision:.
-Prose: latest user language (previous if unclear); protocol/code/quotes verbatim.
+Prose: user's latest instruction language (previous if unclear); protocol/code/quotes verbatim.
 `;
 }

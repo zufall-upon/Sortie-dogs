@@ -478,7 +478,7 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
   }]));
   const task = (await operators.next("root", "root") as { task: { prompt: string; subagent_type: string } }).task;
   assert.equal(task.subagent_type, "dog-worker-v010");
-  assert.match(worker, /Compare existing test inputs, boundaries, assertions, failures; reuse if sufficient; keep unique coverage/u,
+  assert.match(worker, /Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage/u,
     "the ordinary implementation Worker receives the test-value guidance");
   await operators.admitWorker("root", "root", "worker-call", task as never);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);

@@ -242,7 +242,7 @@ test('ordinary Mission authors and Reviewer compare test detection value without
   assert.match(coordinator, /No count limit/);
   const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
   assert.equal(worker.split(MISSION_TEST_GATE_WORKER).length, 2);
-  assert.match(worker, /Compare existing test inputs, boundaries, assertions, failures; reuse if sufficient; keep unique coverage/);
+  assert.match(worker, /Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage/);
   const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
   assert.match(reviewer, /compare relevant existing tests by inputs, boundaries, assertions and failure detection/);
   assert.match(reviewer, /not names or counts/);
