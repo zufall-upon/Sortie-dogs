@@ -26,7 +26,7 @@ invoke Sortie when a task needs coordinated execution and an evidence-backed res
 [![Node.js](https://img.shields.io/node/v/sortie-dogs)](https://www.npmjs.com/package/sortie-dogs)
 [![MIT License](https://img.shields.io/npm/l/sortie-dogs)](LICENSE)
 
-**Release notes: [v0.16.27](docs/releases/v0.16.27.md)**
+**Release notes: [v0.16.27](https://github.com/zufall-upon/Sortie-dogs/releases/tag/v0.16.27)**
 · [GitHub releases](https://github.com/zufall-upon/Sortie-dogs/releases)
 · [Execution vision](docs/v0.14.0-execution-vision.md)
 
@@ -213,9 +213,9 @@ model choices are not current setup instructions.
   stalls, allowing a method to change without dropping required work or checks.
   [Design](docs/purpose-aligned-autonomy.md) · [Release](docs/releases/v0.16.0.md) ·
   [Recovery](docs/releases/v0.16.3.md)
-- **v0.17.x (planned):** Integrate Test Gate into ordinary Missions, apply Test Debt Audit
-  cleanup at milestones, and use Full Test Guard to prevent equivalent managed long tests
-  from running twice. These capabilities are not implemented or measured.
+- **v0.17.x (planned):** Prevent unnecessary test growth in ordinary Missions, automatically
+  apply and validate safe test debt cleanup at milestones, and assess long-running full tests
+  before execution while preventing duplicate concurrent runs. Not implemented or measured.
   [Vision](docs/v0.17.x-test-optimization-vision.md) · [Details](#test-optimization-vision)
 
 ## Mission workflow
@@ -457,8 +457,7 @@ follow the [manual removal guide](docs/uninstall.md), never delete the entire `.
 
 ## Support
 
-[GitHub Sponsors](https://github.com/sponsors/zufall-upon) — sponsorships become available
-once the maintainer's Sponsors profile is approved and published.
+[GitHub Sponsors](https://github.com/sponsors/zufall-upon) — optional support for ongoing development.
 
 [☕ Support development / 開発を応援する](https://ko-fi.com/zufallupon)
 
