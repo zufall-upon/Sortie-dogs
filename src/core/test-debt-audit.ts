@@ -80,10 +80,11 @@ function inventoryInputs(root: string, unit: AuditUnit, changed: readonly string
   return { candidates, directories };
 }
 
-/** A changed scope or validation cwd gets its own cursor, never an earlier grant. */
+/** Directory traversal and explicit-file rotation share only the same ordered inputs. */
 export function testDebtInventoryKey(root: string, unit: AuditUnit): string {
   root = resolve(root);
-  return createHash("sha256").update(JSON.stringify([root, inventoryInputs(root, unit, []).directories])).digest("hex");
+  const { candidates, directories } = inventoryInputs(root, unit, []);
+  return createHash("sha256").update(JSON.stringify([root, directories, candidates])).digest("hex");
 }
 
 // Directory streams are an optimization, not durable state. After a host restart a stream

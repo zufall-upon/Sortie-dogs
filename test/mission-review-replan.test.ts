@@ -10,6 +10,7 @@ import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { MISSION_BEHAVIOR_REVIEW } from "../dist/runtime-mission-assets.js";
 import { runtimeAssets } from "../dist/runtime-assets-v010.js";
+import { closeTestDebtInventory } from "../dist/core/test-debt-audit.js";
 
 const exec = promisify(execFile);
 
@@ -190,5 +191,28 @@ test("planning inventory resumes unvisited owners after the 64-signal cap", asyn
     const handoff = JSON.parse(await readFile(run.units[4]!.handoffPath, "utf8"));
     assert.ok(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals.some((signal: { path: string; unit_id: string }) =>
       signal.path.startsWith("scope-4/") && signal.unit_id === run.units[4]!.unit.id));
-  } finally { await rm(root, { recursive: true, force: true }); }
+
+    // The directory scopes may match while the explicit validation inputs differ.
+    // Neither owner's checkpoint may reset the other's larger explicit selection.
+    await mkdir(join(root, "src")); await mkdir(join(root, "explicit"));
+    const selections = ["a", "b"].map(group => Array.from({ length: 20 }, (_, index) =>
+      `explicit/${group}-${String(index).padStart(2, "0")}.test.mjs`));
+    for (const path of selections.flat()) await writeFile(join(root, path), text);
+    const seen = new Set<string>();
+    for (let milestone = 0; milestone < 3; milestone++) {
+      const proposed = { units: selections.map((paths, index) => ({ title: `Explicit ${index} milestone ${milestone}`,
+        objective: "Maintain the assigned test selection", read: ["check.mjs"], write: ["src/**"],
+        validation: [`node --test ${paths.join(" ")}`] })), reason: "Continue the same work with explicit test selections" };
+      await hooks.tool!.sortie_v010_plan_units.execute(proposed, { sessionID: "coordinator" });
+      const current = await missions.required("root");
+      for (const signal of current.testDebtSignals ?? []) if (signal.path.startsWith("explicit/")) seen.add(signal.path);
+      await hooks.tool!.sortie_v010_plan_units.execute(proposed, { sessionID: "coordinator" });
+      assert.deepEqual((await missions.required("root")).testDebtInventory, current.testDebtInventory,
+        "an unchanged plan still cannot advance either explicit selection");
+    }
+    for (const path of selections.flat()) assert.ok(seen.has(path), `the explicit inventory must eventually reach ${path}`);
+  } finally {
+    await closeTestDebtInventory(`${root}\0root`);
+    await rm(root, { recursive: true, force: true });
+  }
 });
