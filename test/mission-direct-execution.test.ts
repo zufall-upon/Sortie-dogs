@@ -221,7 +221,7 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
   } finally { await rm(directory, { recursive: true, force: true }); await rm(external, { recursive: true, force: true }); }
 });
 
-const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
 for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
@@ -874,6 +874,24 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       return;
     }
     await write("fixed\n");
+    if (mode === "scope-registration") {
+      const old = await readRun();
+      const budget = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget;
+      for (const path of ["extra-one.txt", "extra-two.txt"]) {
+        await hooks.tool!.sortie_v010_expand_unit.execute({ unit_id: planned.unit_id, paths: [path], reason: "In-request output" }, { sessionID: actor });
+      }
+      hooks = await create(); // Registration must also work after the persisted admission is reloaded.
+      const corrected = { ...declaration, write: [...declaration.write, "extra-one.txt", "extra-two.txt"], validation: ["node check.mjs --corrected"] };
+      await assert.rejects(hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [{ ...corrected, write: [...corrected.write, "unapproved.txt"] }] }, { sessionID: actor }), /contract-mismatch/);
+      const registered = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ executor: "self", reason: "Correct check", units: [corrected] }, { sessionID: actor }));
+      assert.equal(registered.status, "direct-unit-registration-corrected");
+      const kept = await readRun();
+      assert.equal(kept.runID, old.runID);
+      assert.equal(kept.units[0]!.callID, old.units[0]!.callID);
+      assert.deepEqual(kept.units[0]!.unit.write, corrected.write);
+      assert.deepEqual(JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({}, { sessionID: "root" })).budget, budget);
+      checkCommand = "node check.mjs --corrected";
+    }
     if (mode === "recipe-registration") {
       assert.equal(await check(), 1, "wrong registered condition really fails");
       assert.equal(await check(directory, "node check.mjs"), 0, "correct diagnostic succeeds before registration but is not formal");

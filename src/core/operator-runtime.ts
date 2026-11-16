@@ -128,6 +128,8 @@ type OperatorPhase = "prepared" | "running" | "awaiting-decision" | "awaiting-ac
 interface UnitState {
   readonly fabricRoot?: string;
   readonly unit: OperatorUnit;
+  /** Original plan identity before an in-place write-scope expansion. */
+  initialWriteScope?: readonly string[];
   task: OperatorTask;
   readonly handoffPath: string;
   readonly manifestPath: string;
@@ -513,10 +515,15 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
       ? { ...criterion, validation_command: original?.validation.at(-1) } : criterion) } : plan.goal_declaration;
   return hash(JSON.stringify({ ...plan, goal_declaration: goal, units: plan.units.map((next, index) => {
     const prior = state.units[index]?.unit;
-    if (!prior || prior.id !== unitID || next.id !== unitID) return next;
+    const initialWrite = state.units[index]?.initialWriteScope;
+    // A scope extension is authorized separately; normalize only the exact current
+    // scope back to the frozen plan identity. Other scope edits still fail the hash.
+    const normalized = prior && initialWrite && JSON.stringify(next.write) === JSON.stringify(prior.write)
+      ? { ...next, write: initialWrite } : next;
+    if (!prior || prior.id !== unitID || next.id !== unitID) return normalized;
     // Preserve the frozen property order even when the proposal omits cwd:
     // appending it after acceptance_indices changes JSON identity by itself.
-    const restored = { ...prior, ...next, validation: prior.validation };
+    const restored = { ...prior, ...normalized, validation: prior.validation };
     if (prior.validation_cwd) restored.validation_cwd = prior.validation_cwd;
     else delete restored.validation_cwd;
     return restored;
@@ -674,6 +681,7 @@ export class OperatorRuntime {
            (typeof state.pendingScopeExpansionApprovalTurnID !== "string" || state.pendingScopeExpansionApprovalTurnID.length === 0 ||
              /[\r\n]/u.test(state.pendingScopeExpansionApprovalTurnID))) ||
          !this.validContractRepairState(state.contractRepair, state.units) || !state.units.every(unit =>
+          (unit.initialWriteScope === undefined || strings(unit.initialWriteScope)) &&
           Number.isSafeInteger(unit.repairValidationAttempts) && unit.repairValidationAttempts >= 0 && unit.repairValidationAttempts <= 2 &&
           this.validRepairValidationState(unit.repairValidation))) {
       throw new Error("operator-state-invalid");
@@ -2089,6 +2097,7 @@ export class OperatorRuntime {
         await writeFile(unit.manifestPath, nextManifest);
         await writeFile(unit.handoffPath, nextHandoff);
         rollback = await activate(manifest);
+        unit.initialWriteScope ??= unit.unit.write;
         (unit as { unit: OperatorUnit }).unit = { ...unit.unit, write };
         if (unit.reviewerCorrection) unit.reviewerCorrection = { ...unit.reviewerCorrection, writeUnion: write };
         unit.hashes = [hash(nextHandoff), hash(nextManifest), unit.hashes[2]!];
