@@ -1804,6 +1804,7 @@ export class OperatorRuntime {
       const continuation = { actor, unit_id: unit.unit.id, at: segment.handedOffAt,
         instruction: "Continue existing changes and remaining action. The authoritative handoff retains the exact original requirements. This continuation's validation/validation_cwd is the effective registration, superseding only the frozen check recipe. Reuse current source-bound checks; inspect missing facts only. Handoff itself is not validation.",
         continuity: context.continuity,
+        ...(context.test_debt_audit ? { test_debt_audit: context.test_debt_audit } : {}),
         checks: segment.checks.map(({ callID, command, directory, exitCode, startedAt, endedAt }) =>
           ({ callID, command, directory, exitCode, startedAt, endedAt })),
         validation: segment.validation, validation_cwd: unitValidationCwd(unit), details_ref: this.statePath(root) };

@@ -226,9 +226,15 @@ test("ordinary direct Mission schedules test debt before validation and retains 
 test("a newly edited test can schedule audit once without treating repeated assertions as proof", async () => fixture(async root => {
   await mkdir(join(root, "test"));
   const history: unknown[] = [], check = join(root, "test", "new.test.mjs");
+  const shellCheck = join(root, "test", "shell.test.mjs");
+  const text = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+  await writeFile(join(root, "seed.mjs"), text);
+  const identities: Record<string, { agent: string; parentID?: string }> = { root: { agent: "dog-operator" } };
   const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
-    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
-    children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+      .filter(([, identity]) => identity.parentID === path.id).map(([id, identity]) => ({ id, ...identity })) }),
+    messages: async () => ({ data: history }),
   } } } as never);
   const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
   await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
@@ -237,9 +243,10 @@ test("a newly edited test can schedule audit once without treating repeated asse
   });
   await tool("start_mission", { requirements: ["Add a check"] });
   const started = await tool("plan_units", { executor: "self", units: [{ title: "Add check", objective: "Add the check",
-    read: [], write: ["test/new.test.mjs"], validation: ["node test/new.test.mjs"] }] });
+    read: ["seed.mjs"], write: ["test/new.test.mjs", "test/shell.test.mjs", "test/failing-shell.test.mjs", "test/errored-shell.test.mjs"], validation: ["node test/new.test.mjs"] }] });
   assert.equal(started.test_debt_audit, undefined);
-  const text = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+  const initialUnit = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+  const initialHandoff = await readFile(initialUnit.handoffPath, "utf8");
   const args = { filePath: check, content: text }, request = { tool: "write", sessionID: "root", callID: "write-check" };
   await hooks["tool.execute.before"]!(request, { args });
   await writeFile(check, text);
@@ -253,6 +260,59 @@ test("a newly edited test can schedule audit once without treating repeated asse
   const again = { output: "written" };
   await hooks["tool.execute.after"]!({ ...request, args }, again);
   assert.doesNotMatch(again.output, /SORTIE_TEST_DEBT_AUDIT/);
+  const shellArgs = { command: "cp seed.mjs test/shell.test.mjs", workdir: root };
+  const shellRequest = { tool: "shell", sessionID: "root", callID: "shell-check" };
+  await hooks["tool.execute.before"]!(shellRequest, { args: shellArgs });
+  await promisify(execFile)("cp", ["seed.mjs", "test/shell.test.mjs"], { cwd: root });
+  const shellOutput = { output: "", metadata: { exit: 0, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...shellRequest, args: shellArgs }, shellOutput);
+  assert.match(shellOutput.output, /SORTIE_TEST_DEBT_AUDIT/);
+  assert.equal(await readFile(shellCheck, "utf8"), text, "inventory never changes a shell-written test");
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/shell.test.mjs"));
+  const failedArgs = { command: "cp seed.mjs test/failing-shell.test.mjs && false", workdir: root };
+  const failedRequest = { tool: "shell", sessionID: "root", callID: "failed-shell-check" };
+  await hooks["tool.execute.before"]!(failedRequest, { args: failedArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", failedArgs.command], { cwd: root }));
+  const failedOutput = { output: "", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...failedRequest, args: failedArgs }, failedOutput);
+  assert.match(failedOutput.output, /SORTIE_TEST_DEBT_AUDIT/, "a failed shell can still leave a changed test");
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/failing-shell.test.mjs"));
+  const erroredArgs = { command: "cp seed.mjs test/errored-shell.test.mjs && false", workdir: root };
+  const erroredRequest = { tool: "shell", sessionID: "root", callID: "errored-shell-check" };
+  await hooks["tool.execute.before"]!(erroredRequest, { args: erroredArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", erroredArgs.command], { cwd: root }));
+  const noExit = { status: "error", output: "execution interrupted", metadata: {} };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, noExit);
+  assert.doesNotMatch(noExit.output, /SORTIE_TEST_DEBT_AUDIT/, "an error without terminal exit is not a completed shell");
+  const pending = { status: "error", output: "execution pending", metadata: { exit: 1, status: "pending" } };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, pending);
+  assert.doesNotMatch(pending.output, /SORTIE_TEST_DEBT_AUDIT/, "a pending result is not a terminal shell");
+  const erroredOutput = { status: "error", output: "command failed", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, erroredOutput);
+  assert.match(erroredOutput.output, /SORTIE_TEST_DEBT_AUDIT/, "native error status does not erase a terminal shell's changes");
+  assert.equal(erroredOutput.status, "error", "audit notification must not turn the failure into success");
+  assert.equal(erroredOutput.metadata.exit, 1);
+  assert.equal(await readFile(join(root, "test", "errored-shell.test.mjs"), "utf8"), text);
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/errored-shell.test.mjs"));
+  const yielded = await tool("plan_units", { executor: "worker", handoff_context: "Continue the same requested check." });
+  assert.ok(yielded.task, JSON.stringify(yielded));
+  const continued = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+  assert.equal(await readFile(continued.handoffPath, "utf8"), initialHandoff, "the frozen controls are byte-for-byte unchanged");
+  const frozen = JSON.parse(initialHandoff);
+  assert.equal(frozen.ext["sortie-dogs/mission-context"].test_debt_audit, undefined, "the original controls stay immutable");
+  identities.worker = { agent: "dog-worker-v010", parentID: "root" };
+  const dispatched = { args: structuredClone(yielded.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-task" }, dispatched);
+  const workerChat = { message: { id: "worker-request", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: dispatched.args.prompt }] };
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: "dog-worker-v010" }, workerChat);
+  const continuation = JSON.parse(/^direct_handoff: (.+)$/mu.exec(workerChat.parts[0]!.text)![1]!);
+  assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/errored-shell.test.mjs"),
+    "the admitted Worker's continuation receives a signal discovered after planning");
+  assert.ok(continuation.test_debt_audit.signals.every((signal: { unit_id: string }) => signal.unit_id === continued.unit.id));
+  assert.match(continuation.test_debt_audit.instruction, /not established as complete/);
+  assert.match(continuation.test_debt_audit.instruction, /already.*(?:assessed|handled)/i);
+  assert.equal(continuation.unit_id, continued.unit.id);
   const large = join(root, "test", "large.test.mjs");
   await writeFile(large, "x".repeat(512 * 1024 + 1));
   const largeSignals = await inspectTestDebt(root, { read: [large], write: [], validation: [] });
@@ -278,7 +338,7 @@ test("a newly edited test can schedule audit once without treating repeated asse
   await symlink(other, join(root, "test", "link"), process.platform === "win32" ? "junction" : "dir");
   await symlink(join(root, ".."), join(root, "test", "linked-outside"), process.platform === "win32" ? "junction" : "dir");
   const globbed = await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] });
-  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs"]);
+  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/errored-shell.test.mjs", "test/failing-shell.test.mjs", "test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs", "test/shell.test.mjs"]);
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/link/**"], validation: [] }), [],
     "a scope starting through a link must not traverse even an in-project target");
   assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/.opencode/**"], validation: [] }), [],

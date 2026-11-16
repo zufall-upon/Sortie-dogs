@@ -2403,7 +2403,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // direct admission can exist even when its writer could not bind because another
         // live owner overlaps. Do not require that contested binding to hand it off.
         const mission = await missions.retainContext(root, actor, history, notes);
-        await operators.handoffDirect(root, actor, await missions.handoffContext(mission));
+        const context = await missions.handoffContext(mission);
+        const audit = (mission.testDebtSignals ?? []).filter(signal =>
+          signal.run_id === direct.run.runID && signal.unit_id === direct.unit.unit.id);
+        if (audit.length) context.test_debt_audit = { signals: audit,
+          instruction: `${TEST_DEBT_AUDIT_INSTRUCTION} On continuation, if a signal was already assessed, reuse the actual comparison and checks; do not repeat completed audit work. Otherwise continue the unfinished assessment before final validation.`,
+          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } };
+        await operators.handoffDirect(root, actor, context);
       }
       const run = await operators.required(root);
       const unit = run.units.find(item => item.status !== "succeeded");
@@ -4655,8 +4661,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (root && await settleNativeFabricCheck(root, id, request.callID, args, output)) return;
         }
         const successful = output.status !== "error" && output.status !== "cancelled";
+        // A completed shell can leave files behind even if its tool result is an error.
+        // An error without a terminal exit is not evidence that a command ran to completion.
+        const shellMetadata = record(output.metadata) ? output.metadata : {};
+        const completedShellWrite = isShellTool(request.tool) && Number.isSafeInteger(shellMetadata.exit) &&
+          !["running", "pending", "unknown"].includes(String(shellMetadata.status));
         const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
-        const observed = successful ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
+        const observed = successful || completedShellWrite ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
         const changed = observed.paths.map(relativePath);
         if (changed.length) observeActorWork(input.directory, id, { kind: "change", paths: changed, callID: request.callID });
         if (successful && request.tool === "read" && typeof (args.filePath ?? args.path) === "string") {
@@ -4869,8 +4880,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
-        if (!ownership && successful && changed.length && typeof output.output === "string" &&
-            /^(?:write|edit|multiedit|patch|apply_patch)$/iu.test(request.tool)) {
+        if (!ownership && changed.length && typeof output.output === "string" &&
+            (successful && /^(?:write|edit|multiedit|patch|apply_patch)$/iu.test(request.tool) || completedShellWrite)) {
           try {
             const root = await rootFor(id), mission = root ? await missions.read(root) : undefined;
             const run = root && mission?.kind !== "operation" ? await operators.read(root) : undefined;
