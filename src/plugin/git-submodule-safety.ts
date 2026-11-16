@@ -65,6 +65,18 @@ const missingGitPath = async (path: string) => lstat(path).catch((error: NodeJS.
   return undefined;
 });
 
+// An alternate is unsafe for Git-based inspection, but a caller that only hashes
+// declared filesystem paths can conservatively protect the whole checkout instead.
+// The checkout identity prevents an ancestor's failure from authorizing a child.
+class AlternateObjectStoreError extends Error {}
+class NestedGitAlternatesError extends Error {
+  constructor(root: string, readonly checkout: string) {
+    super(`not a git repository: untrusted nested Git metadata: ${relative(root, checkout)}`);
+  }
+}
+export const hasNestedGitAlternates = (error: unknown, checkout: string): boolean =>
+  error instanceof NestedGitAlternatesError && canonical(error.checkout) === canonical(checkout);
+
 /** The Location's own Git metadata is protected; other metadata inside it can be writable. */
 export async function isWritableNestedGitdir(projectRoot: string, gitdir?: string): Promise<boolean> {
   if (!gitdir) return false;
@@ -102,11 +114,12 @@ async function trustedStandaloneGitdir(root: string, marker: string, initial: St
     for (const name of ["HEAD", "index", "config", "config.worktree", "packed-refs", "shallow", "refs", "objects", "info"]) {
       await inspectWritableGitPath(join(marker, name), fail);
     }
-    if (await missingGitPath(join(marker, "objects", "info", "alternates"))) throw fail();
+    const alternates = await missingGitPath(join(marker, "objects", "info", "alternates"));
     const after = await lstat(marker);
     if (!after.isDirectory() || after.dev !== initial.dev || after.ino !== initial.ino) throw fail();
+    if (alternates) throw new AlternateObjectStoreError();
     return marker;
-  } catch { throw fail(); }
+  } catch (error) { if (error instanceof AlternateObjectStoreError) throw error; throw fail(); }
 }
 
 /** A tracked submodule must refer to its own protected superproject metadata, not an
@@ -217,7 +230,13 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
   const marker = join(child, ".git");
   const info = await lstat(marker).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
   if (!info) return undefined;
-  if (info.isDirectory()) return trustedStandaloneGitdir(root, marker, info);
+  if (info.isDirectory()) {
+    try { return await trustedStandaloneGitdir(root, marker, info); }
+    catch (error) {
+      if (error instanceof AlternateObjectStoreError) throw new NestedGitAlternatesError(root, child);
+      throw error;
+    }
+  }
   const fail = () => new Error(`not a git repository: untrusted nested Git metadata: ${relative(root, child)}`);
   if (!info.isFile()) throw fail();
   try {
@@ -243,13 +262,16 @@ export async function trustedNestedGitdir(projectRoot: string, child: string): P
     if (inside(await realpath(root), gitdir) && (!rootGit || !inside(rootGit, gitdir))) {
       const initial = await lstat(common);
       if (!initial.isDirectory()) throw fail();
-      await trustedStandaloneGitdir(root, common, initial);
+      let alternates = false;
+      try { await trustedStandaloneGitdir(root, common, initial); }
+      catch (error) { if (error instanceof AlternateObjectStoreError) alternates = true; else throw error; }
       const entry = await lstat(gitdir);
       if (!entry.isDirectory()) throw fail();
       await inspectWritableGitPath(gitdir, fail);
       const after = await lstat(gitdir);
       if (!after.isDirectory() || after.dev !== entry.dev || after.ino !== entry.ino) throw fail();
+      if (alternates) throw new NestedGitAlternatesError(root, child);
     }
     return gitdir;
-  } catch { throw fail(); }
+  } catch (error) { if (error instanceof NestedGitAlternatesError) throw error; throw fail(); }
 }

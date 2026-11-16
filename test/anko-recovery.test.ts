@@ -8,6 +8,7 @@ import { SortieDogsV010Plugin } from "../dist/plugin/profiled.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { OperatorMissionRuntime } from "../dist/core/operator-mission.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
+import { refreshProtectedSnapshot } from "../dist/plugin/protected-snapshot.js";
 
 const exec = promisify(execFile);
 
@@ -217,6 +218,97 @@ test("a registered check reports an unavailable source binding before execution 
   assert.equal((await f.runtime.required("root")).units[0].validationRegistration.checks[0].fresh, true);
   await f.finish();
   assert.equal((await f.runtime.required("root")).units[0].status, "succeeded");
+}));
+
+test("registered shell check replans and continues a Worker in a shared-clone linked worktree", async () => fixture(async f => {
+  const origin = join(f.directory, "origin"), repository = join(f.directory, "repository"), checkout = join(f.directory, "checkout");
+  const fixtureRoot = join(f.directory, "fixture-p"), sentinel = join(fixtureRoot, "started"), broken = join(fixtureRoot, "broken");
+  await mkdir(join(origin, "tools"), { recursive: true }); await mkdir(fixtureRoot);
+  await exec("git", ["init", "--quiet"], { cwd: origin });
+  await writeFile(join(origin, "input.txt"), "expected\n");
+  await writeFile(join(origin, "tools", "test-hosted-controller.py"), [
+    "import pathlib, sys",
+    "assert pathlib.Path('input.txt').read_text() == 'expected\\n'",
+    "assert sys.argv[1] == '--fixture-root' and len(sys.argv[3:]) == 3",
+    "pathlib.Path(sys.argv[2], 'started').write_text('checked')",
+    "print('FIXTURE_CHECK_PASSED')",
+  ].join("\n") + "\n");
+  await exec("git", ["add", "."], { cwd: origin });
+  await exec("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "base"], { cwd: origin });
+  await exec("git", ["clone", "--quiet", "--shared", origin, repository], { cwd: f.directory });
+  await exec("git", ["worktree", "add", "--quiet", "--detach", checkout], { cwd: repository });
+  const tests = ["test_windows_cpu_package_checks_packaged_caller", "test_windows_only_journal_and_selected_receipt_clean_exact_input",
+    "test_windows_only_selection_tamper_and_missing_receipt_never_delete"];
+  const python = process.platform === "win32" ? "python" : "/usr/bin/python3";
+  const command = `${python} -B tools/test-hosted-controller.py --fixture-root ${fixtureRoot} ${tests.join(" ")}`;
+  const scope = { title: "Check", objective: "Check the linked checkout", read: ["checkout/input.txt", "checkout/tools/test-hosted-controller.py"],
+    write: ["checkout/tools/test-hosted-controller.py", "fixture-p/**"], validation: [command], validation_cwd: { [command]: checkout } };
+  f.agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+  f.agents.worker.parentID = "coordinator";
+  const started = await f.start();
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+  await f.chat("coordinator", started.task.prompt);
+  const plan = await f.tool("plan_units", { units: [scope] }, "coordinator");
+  const task = { args: structuredClone(plan.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, task);
+  await f.chat("worker", task.args.prompt);
+  const first = (await f.runtime.required("root")).units[0];
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { args: { filePath: first.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker", callID: "handoff-read" }, { output: await readFile(first.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: first.manifestPath }, "worker")).status, "bound");
+  const missionID = (await f.missions.required("root")).id;
+  await symlink(join(f.directory, "missing"), broken);
+  const args = { command, workdir: checkout };
+  await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "rejected-check" }, { args }),
+    /mission-validation-snapshot-unavailable:.*source-or-candidate-unavailable/);
+  await assert.rejects(readFile(sentinel), { code: "ENOENT" }, "the actual command has not started");
+  assert.deepEqual((await f.runtime.required("root")).units[0].validationRegistration.checks, []);
+  f.history.coordinator = [{ info: { role: "assistant", sessionID: "coordinator" }, parts: [{ type: "tool", tool: "task", callID: "worker-call",
+    state: { status: "completed", input: task.args, metadata: { sessionId: "worker" } } }] }];
+  f.agents.worker.outcome = "succeeded";
+  await f.hooks["tool.execute.after"]({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+    { output: "Binding rejected before validation", metadata: { sessionId: "worker" } });
+  const failed = await f.tool("operator_status");
+  assert.equal(failed.units[0].status, "failed");
+  assert.equal(failed.units[0].result_class, "process-defect");
+  assert.equal(failed.budget.consumed_units, 1);
+  await assert.rejects(f.tool("retry_mission_unit", { unit_id: "unit-1" }, "coordinator"), /operator-mission-normal-remediation-unavailable/);
+  await assert.rejects(f.tool("finish_direct_unit", {}, "coordinator"), /mission-direct-unit-not-running/);
+  await rm(broken); await writeFile(join(fixtureRoot, "result.txt"), "retained result\n");
+  const next = await f.tool("plan_units", { units: [{ ...scope, title: "Complete unstarted check",
+    objective: "Retain the existing result and run the previously unstarted check" }],
+    reason: "Continue after repairing the unavailable source binding" }, "coordinator");
+  assert.ok(next.task, JSON.stringify(next));
+  assert.equal((await f.missions.required("root")).id, missionID);
+  assert.deepEqual((await f.tool("operator_status")).budget, failed.budget);
+  f.agents.worker2 = { agent: "dog-worker-v010", parentID: "coordinator" };
+  const task2 = { args: structuredClone(next.task) };
+  await f.hooks["tool.execute.before"]({ tool: "task", sessionID: "coordinator", callID: "worker2-call" }, task2);
+  await f.chat("worker2", task2.args.prompt);
+  const current = (await f.runtime.required("root")).units[0];
+  await f.hooks["tool.execute.before"]({ tool: "read", sessionID: "worker2", callID: "handoff2-read" }, { args: { filePath: current.handoffPath } });
+  await f.hooks["tool.execute.after"]({ tool: "read", sessionID: "worker2", callID: "handoff2-read" }, { output: await readFile(current.handoffPath, "utf8") });
+  assert.equal((await f.tool("bind_write_gate", { project_root: f.directory, manifest_path: current.manifestPath }, "worker2")).status, "bound");
+  await f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker2", callID: "continued-check" }, { args });
+  const result = await exec(python, ["-B", "tools/test-hosted-controller.py", "--fixture-root", fixtureRoot, ...tests], { cwd: checkout });
+  assert.match(result.stdout, /FIXTURE_CHECK_PASSED/);
+  await f.hooks["tool.execute.after"]({ tool: "shell", sessionID: "worker2", callID: "continued-check", args },
+    { output: result.stdout, metadata: { exit: 0, status: "completed" } });
+  const check = (await f.runtime.required("root")).units[0].validationRegistration.checks[0];
+  assert.equal(check.callID, "continued-check"); assert.equal(check.directory, checkout);
+  assert.equal(check.exitCode, 0); assert.equal(check.fresh, true);
+  assert.equal(await readFile(sentinel, "utf8"), "checked");
+  assert.equal(await readFile(join(fixtureRoot, "result.txt"), "utf8"), "retained result\n");
+  await writeFile(join(checkout, "input.txt"), "changed after check\n");
+  assert.notEqual((await refreshProtectedSnapshot(f.directory, check.binding))?.source, check.source,
+    "the continued Worker's proof becomes stale when its declared input changes");
+  await writeFile(join(checkout, "input.txt"), "expected\n");
+  f.agents.worker2.outcome = "succeeded";
+  await f.hooks["tool.execute.after"]({ tool: "task", sessionID: "coordinator", callID: "worker2-call" },
+    { output: "Completed registered check", metadata: { sessionId: "worker2" } });
+  const settled = await f.tool("operator_status");
+  assert.equal(settled.units[0].status, "succeeded");
+  assert.equal(settled.budget.consumed_units, 2); assert.equal(settled.budget.reserved_units, 0);
 }));
 
 test("another loaded adapter binds the same Worker's registered check after handoff", async () => fixture(async f => {

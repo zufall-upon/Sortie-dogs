@@ -1867,14 +1867,26 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const correction = correcting && dispatchCallID && members
       ? { taskID: authorization.taskID, dispatchCallID, commands: members,
         ...(registered && !direct && !reviewerCorrection ? { nativeWorker: true } : {}) } : undefined;
-    const admittedSnapshot = dockerRequest
-      ? await protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd).catch(() => undefined)
-      : await protectedSnapshot(authorization, { directory, command: args!.command as string }).catch(() => undefined);
+    let snapshotReason = "snapshot-recipe-unavailable";
+    const admittedSnapshot = await (dockerRequest
+      ? protectedDockerSnapshot(authorization, dockerRequest.containerID, dockerRequest.cwd)
+      : protectedSnapshot(authorization, { directory, command: args!.command as string, onUnavailable: reason => { snapshotReason = reason; } }))
+      .catch((error: unknown) => {
+        // Never echo arbitrary paths, Git stderr or values from the execution environment.
+        const message = error instanceof Error ? error.message : "";
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        snapshotReason = /^not a git repository: untrusted nested Git metadata(?::|$)/u.test(message) ? "untrusted-nested-git-metadata"
+          : /^untrusted Git submodule metadata(?::|$)/u.test(message) ? "untrusted-submodule-metadata"
+          : error instanceof SyntaxError ? "invalid-snapshot-manifest"
+          : typeof code === "string" && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "ELOOP", "EIO"].includes(code) ? `filesystem-${code}`
+          : "snapshot-exception";
+        return undefined;
+      });
     if (admittedSnapshot === undefined) {
       // A registered native check without a start-time source binding cannot
       // become formal evidence later. Surface the failure before the potentially
       // expensive command runs instead of silently discarding its result.
-      if (correction) throw new Error("mission-validation-snapshot-unavailable: cannot bind the registered check to its current source and candidate");
+      if (correction) throw new Error(`mission-validation-snapshot-unavailable: cannot bind the registered check to its current source and candidate (${snapshotReason})`);
       return;
     }
     const dockerWorkspace = admittedSnapshot.binding.docker_workspace;
