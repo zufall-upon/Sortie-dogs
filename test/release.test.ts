@@ -107,7 +107,7 @@ test('preflight runs the target release test without release side effects', asyn
   });
 });
 
-for (const line of [13, 14, 15, 16]) test(`v0.${line} rejects the legacy batch that commits after package/global apply`, async () => {
+for (const line of [13, 14, 15, 16, 17]) test(`v0.${line} rejects the legacy batch that commits after package/global apply`, async () => {
   const manifest = { schema: 1, repository: 'fixture/repo', remote: 'origin', branch: 'main', releaseProfile: `v0${line}`,
     npm: 'npm', gh: 'gh', globalRoot: resolve('_testenv/global'), files: ['package.json', 'package-lock.json', 'README.md'],
     versionTextFiles: ['README.md'], targetTests: ['test/release.test.ts'], notesFile: 'docs/release-batch.md' };

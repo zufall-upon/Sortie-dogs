@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
@@ -1965,7 +1965,23 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           try {
             const metadata = await lstat(path);
             if (metadata.isSymbolicLink()) {
-              const actual = await realpath(path).catch(() => undefined);
+              let actual: string | undefined;
+              try { actual = await realpath(path); }
+              catch (error) {
+                if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) break;
+                const link = await readlink(path).catch(() => undefined);
+                if (link === undefined) break;
+                // Resolving an embedded parent lexically can skip an intervening symlink
+                // or non-directory. Leave that ambiguous case on the conservative path.
+                const linkParts = link.split(process.platform === "win32" ? /[\\/]/u : /\//u).filter(part => part && part !== ".");
+                let component = false, embeddedParent = false;
+                for (const part of linkParts) {
+                  if (part === ".." && component) embeddedParent = true;
+                  if (part !== "..") component = true;
+                }
+                if (embeddedParent) break;
+                actual = resolve(dirname(path), link);
+              }
               if (!actual) break;
               target = resolve(actual, ...parts.slice(index + 1));
               followed = true;

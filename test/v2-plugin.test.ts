@@ -1567,6 +1567,37 @@ test('requires exclusive execution', async () => {
           await rename(join(directory, "fixture.test.mjs"), join(directory, "renamed.test.mjs"));
           try {
             if (process.platform !== "win32") {
+              await context.test("a dangling in-scope selection remains unavailable when omitted from the snapshot", async () => {
+                const control = join(directory, ".opencode"), link = join(control, "focused.test.mjs"), target = join(control, "target.test.mjs");
+                await mkdir(control, { recursive: true });
+                await writeFile(target, source);
+                await symlink("target.test.mjs", link);
+                try {
+                  const selected = "node --test .opencode/focused.test.mjs";
+                  const attempt = await before(child, "shell", { command: selected, workdir: directory });
+                  const failure = await exec(process.execPath, ["--test", ".opencode/focused.test.mjs"], { cwd: directory, env: environment })
+                    .then(() => { throw new Error("linked fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+                  assert.equal(failure.code, 1); await after(attempt, failure.stdout, { exit: failure.code });
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+                  await rm(target);
+                  const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+                  assert.equal(full.input.command, "npm run all", "the removed in-scope target cannot be retried");
+                  await after(full, "not started", { status: "cancelled" });
+                  const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+                  const recordedAttempt = history[child]!.flatMap(message => (message.content as any[]) ?? []).find(part => part.id === attempt.id);
+                  assert.equal(recordedAttempt?.state.metadata.exit, 1, "the native failed attempt remains in history");
+                  assert.ok(checks.some(check => check.callID === focused.id && check.exitCode === 1));
+                  assert.ok(!checks.some(check => check.exitCode === 0), "absence does not create a passing check");
+                  await rm(link);
+                  await symlink("../../outside.test.mjs", link);
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                    "an out-of-scope target is not proof of absence");
+                  await rm(link);
+                  await symlink("unresolved/../missing.test.mjs", link);
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                    "an embedded parent in a dangling link is ambiguous");
+                } finally { await rm(link, { force: true }); await rm(target, { force: true }); }
+              });
               await symlink("renamed.test.mjs", fixturePath);
               try {
                 await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
@@ -1623,7 +1654,8 @@ test('requires exclusive execution', async () => {
           const full = await before(child, "shell", { command: "node --test", workdir: directory });
           const fullResult = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
           await after(full, fullResult.stdout, { exit: 0 });
-          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\nrun\nrun\n");
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"),
+            process.platform === "win32" ? "run\nrun\nrun\nrun\n" : "run\nrun\nrun\nrun\nrun\n");
           const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === focused.id && check.exitCode === 1));
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === retry.id && check.exitCode === 0));

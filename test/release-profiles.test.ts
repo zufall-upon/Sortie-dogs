@@ -32,7 +32,7 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.equal(fastFirst.runtimeProfile, "v010", "the v0.13 release retains the actual Mission runtime");
   assert.equal(fastFirst.markerFile, V010_RUNTIME_PROFILE.markerFile);
   assert.equal(fastFirst.markerExport, "V010_RUNTIME_ASSET_VERSION");
-  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.16.31-reviewer-transform-recovery-v1");
+  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.17.0-test-optimization-v1");
   assert.deepEqual(githubReleaseFlags(fastFirst), ["--target", "main"]);
   assert.equal(missionReleaseSmokeMode(fastFirst.id), "start", "candidate smoke observes Worker/model, not a claimed solution");
   assert.equal(missionReleaseSmokeMode(restored.id), "complete", "historical v012 contract remains intact");
@@ -58,6 +58,15 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.equal(missionReleaseSmokeMode(purpose.id), "start");
   assert.deepEqual(githubReleaseFlags(purpose), ["--target", "main"]);
   assert.throws(() => validateReleaseProfile(purpose, "0.15.3", "main", root, isolated), /profile/);
+  const optimization = releaseProfile("v017");
+  validateReleaseProfile(optimization, "0.17.0", "main", root, isolated);
+  assert.equal(optimization.runtimeProfile, "v010");
+  assert.equal(optimization.markerFile, V010_RUNTIME_PROFILE.markerFile);
+  assert.equal(optimization.markerExport, "V010_RUNTIME_ASSET_VERSION");
+  assert.equal(missionReleaseSmokeMode(optimization.id), "start");
+  assert.deepEqual(githubReleaseFlags(optimization), ["--target", "main"]);
+  assert.throws(() => validateReleaseProfile(optimization, "0.16.31", "main", root, isolated), /profile/);
+  assert.throws(() => validateReleaseProfile(purpose, "0.17.0", "main", root, isolated), /profile/);
   assert.throws(() => validateReleaseProfile(memory, "0.16.0", "main", root, isolated), /profile/);
   assert.throws(() => validateReleaseProfile(fastFirst, "0.12.25", "main", root, isolated), /profile/);
   assert.throws(() => validateReleaseProfile(fastFirst, "0.13.0", "release/v0.13", root, isolated), /target/);
@@ -102,6 +111,8 @@ test("v0.14.6 startup requires Terra max while historical releases still require
   assert.equal(v013StartupReceipt(observed).workerModel.id, "gpt-6.1-terra");
   assert.equal(v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.15.0-project-memory-v1" }).version, "0.15.0");
   assert.equal(v013StartupReceipt({ ...observed, package_version: "0.16.0", runtime_marker: "0.16.0-purpose-aligned-v2" }).version, "0.16.0");
+  assert.equal(v013StartupReceipt({ ...observed, package_version: "0.17.0", runtime_marker: "0.17.0-test-optimization-v1" }).version, "0.17.0");
+  assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.17.0", runtime_marker: "0.16.31-reviewer-transform-recovery-v1" }), /marker/u);
   assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.16.0", runtime_marker: "0.15.3-external-review-links-v1" }), /marker/u);
   assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.14.9-optional-kofi-v1" }), /marker/u);
   for (const model of [
