@@ -1919,9 +1919,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return managedTestCommand(command, directory);
   }
 
-  // Only definitive absence in the admitted project/read scopes makes a Node retry
+  // Only definitive absence in the admitted project/read scopes makes a literal retry
   // unavailable. Inaccessible or out-of-scope paths are not proof of absence.
-  async function missingNodeSelection(authorization: SessionAuthorization, directory: string,
+  async function missingLiteralSelection(authorization: SessionAuthorization, directory: string,
     selection: readonly string[] | undefined): Promise<boolean> {
     if (!selection?.length) return false;
     const root = await realpath(authorization.projectRoot).catch(() => undefined);
@@ -2048,7 +2048,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       for (const [command, failure] of unresolved) {
         const current = await classifyAuthorizedTest(authorization, directory, command);
         if (current?.scope === "focused" && current.identity === failure.identity &&
-            (current.runner !== "node" || !await missingNodeSelection(authorization, directory, current.selection)) &&
+            !await missingLiteralSelection(authorization, directory, current.selection) &&
             (classification.runner !== "node-project-router" || current.suiteKey === classification.suiteKey)) { focused = command; break; }
         appLogInfo("managed-test.focus-unavailable", toolInput.sessionID, { reason: "focused-command-changed-or-unresolved" });
       }

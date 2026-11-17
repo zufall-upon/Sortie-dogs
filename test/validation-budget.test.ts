@@ -33,6 +33,22 @@ test("managed test reachability resolves literal project scripts without claimin
     if (original.scope !== "focused" || direct.scope !== "focused") throw new Error("focused classification required");
     assert.deepEqual(original.selection, ["example.test.mjs"]);
     assert.deepEqual(direct.selection, ["example.test.mjs"]);
+    for (const [command, selection] of [
+      ["pytest test_example.py -q", ["test_example.py"]],
+      ["python3 -m pytest test_example.py::TestExample::test_value -q", ["test_example.py"]],
+      ["go test ./package", ["./package"]],
+      ["go test ./.../subpackage", undefined],
+      ["go test ./prefix.../subpackage", undefined],
+      ["jest example.test.js", undefined],
+      ["vitest run example.test.js", undefined],
+    ] as const) {
+      const classified = await managedTestCommand(command, root);
+      assert.equal(classified.scope, "focused");
+      if (classified.scope !== "focused") throw new Error("focused classification required");
+      assert.deepEqual(classified.selection, selection, "only literal filesystem operands have availability checks");
+      assert.equal(classified.identity, createHash("sha256").update(JSON.stringify({ command, directory: root, definitions: [] })).digest("hex"),
+        "exposing an existing literal selection preserves its previous command identity");
+    }
     for (const [classified, command, definitions] of [
       [original, "npm run quick", [{ name: "quick", source: "node --test example.test.mjs" }]],
       [direct, "node --test example.test.mjs", []],

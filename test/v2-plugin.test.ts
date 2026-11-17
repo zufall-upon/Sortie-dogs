@@ -1627,6 +1627,41 @@ test('requires exclusive execution', async () => {
           const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === focused.id && check.exitCode === 1));
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === retry.id && check.exitCode === 0));
+          for (const selection of [
+            { runner: "pytest", path: "test_removed.py", focused: "python3 -m pytest test_removed.py -q", full: "python3 -m pytest -q", directory: false },
+            { runner: "go", path: "removed-package", focused: "go test ./removed-package", full: "go test ./...", directory: true },
+          ]) await context.test(`obsolete ${selection.runner} literal selection does not permanently defer full`, async () => {
+            const path = join(directory, selection.path), moved = `${path}.saved`;
+            if (selection.directory) await mkdir(path);
+            await writeFile(selection.directory ? join(path, "failure_test.go") : path, "retained failing input\n");
+            const failed = await before(child, "shell", { command: selection.focused, workdir: directory });
+            // Supply the native terminal through the public adapter; this checks routing,
+            // not pytest/Go installation or the runner's own failure detection.
+            await after(failed, "retained native failure", { exit: 1 });
+            await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+            await rename(path, moved);
+            try {
+              const full = await before(child, "shell", { command: selection.full, workdir: directory });
+              assert.equal(full.input.command, selection.full, "the obsolete literal selection cannot require a successful retry");
+              await after(full, "not started", { status: "cancelled" });
+              const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+                `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+              const terminals = ledger.records.flatMap(({ event }) => event.kind === "validation.settled" && event.operation_id === failed.id ? [event] : []);
+              assert.deepEqual(terminals.map(event => [event.outcome, event.exit_code]), [["failed", 1]],
+                "allowing full neither settles the old failure again nor turns it into PASS");
+            } finally { await rename(moved, path); }
+            await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+              "restoring the original selection restores focused priority");
+            if (selection.runner === "go") {
+              const pattern = await before(child, "shell", { command: "go test ./.../subpackage", workdir: directory });
+              await after(pattern, "retained native pattern failure", { exit: 1 });
+              await rename(path, moved);
+              try {
+                await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                  "a Go package pattern is not a missing literal directory");
+              } finally { await rename(moved, path); }
+            }
+          });
           return;
         }
         if (managedScenario === "required") {

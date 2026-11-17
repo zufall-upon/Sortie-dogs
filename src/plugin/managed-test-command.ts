@@ -5,7 +5,9 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 
 export type ManagedTestCommand =
   | { readonly scope: "full" | "focused"; readonly runner: "node" | "pytest" | "go" | "cargo" | "jest" | "vitest" | "node-project-router";
-      readonly identity?: string; readonly suiteKey?: string; readonly selection?: readonly string[] }
+      readonly identity?: string; readonly suiteKey?: string;
+      /** Literal filesystem operands only; runner patterns and pytest node IDs are not paths. */
+      readonly selection?: readonly string[] }
   | { readonly scope: "unknown"; readonly reason: string };
 
 const unknown = (reason: string): ManagedTestCommand => ({ scope: "unknown", reason });
@@ -151,12 +153,14 @@ function runnerCommand(parts: readonly string[]): ManagedTestCommand {
     if (options.every(value => ["-q", "-v", "-x", "--quiet", "--verbose"].includes(value))) return { scope: "full", runner: "pytest" };
     if (options.some(value => /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value)) &&
         options.every(value => ["-q", "-v", "-x", "--quiet", "--verbose"].includes(value) ||
-          /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value))) return { scope: "focused", runner: "pytest" };
+          /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value))) return { scope: "focused", runner: "pytest",
+      selection: options.filter(value => /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value)).map(value => value.split("::")[0]!) };
     return unknown("pytest-selection-not-resolved");
   }
   if (program === "go" && args[0] === "test") {
     if (args.length === 2 && args[1] === "./...") return { scope: "full", runner: "go" };
-    if (args.length === 2 && /^\.\/[\w./-]+$/u.test(args[1]!) && !args[1]!.endsWith("/...")) return { scope: "focused", runner: "go" };
+    if (args.length === 2 && /^\.\/[\w./-]+$/u.test(args[1]!) && !args[1]!.endsWith("/..."))
+      return { scope: "focused", runner: "go", ...(args[1]!.includes("...") ? {} : { selection: [args[1]!] }) };
     return unknown("go-selection-not-resolved");
   }
   if (program === "cargo" && args[0] === "test") {
@@ -218,7 +222,7 @@ export async function managedTestCommand(command: string, directory: string): Pr
   };
   const result = await visit(initial, new Set());
   return result.scope === "unknown" ? result : { ...result,
-    // Node selections were already bound by the literal command and script definitions.
+    // Literal selections were already bound by the command and script definitions.
     // Keep their previous identity while exposing the parsed paths for availability checks.
     identity: createHash("sha256").update(JSON.stringify({ command, directory, definitions, suiteKey: result.suiteKey,
       selection: result.runner === "node-project-router" ? result.selection : undefined })).digest("hex") };
