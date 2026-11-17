@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -27,6 +28,18 @@ test("managed test reachability resolves literal project scripts without claimin
       assert.equal("runner" in resolved ? resolved.runner : undefined, runner, command);
     }
     const original = await managedTestCommand("npm run quick", root);
+    const direct = await managedTestCommand("node --test example.test.mjs", root);
+    assert.equal(original.scope, "focused"); assert.equal(direct.scope, "focused");
+    if (original.scope !== "focused" || direct.scope !== "focused") throw new Error("focused classification required");
+    assert.deepEqual(original.selection, ["example.test.mjs"]);
+    assert.deepEqual(direct.selection, ["example.test.mjs"]);
+    for (const [classified, command, definitions] of [
+      [original, "npm run quick", [{ name: "quick", source: "node --test example.test.mjs" }]],
+      [direct, "node --test example.test.mjs", []],
+    ] as const) {
+      assert.equal(classified.identity, createHash("sha256").update(JSON.stringify({ command, directory: root, definitions })).digest("hex"),
+        "exposing the selection does not change the existing Node identity");
+    }
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { quick: "node --test another.test.mjs" } }));
     const changed = await managedTestCommand("npm run quick", root);
     assert.equal(original.scope, "focused"); assert.equal(changed.scope, "focused");

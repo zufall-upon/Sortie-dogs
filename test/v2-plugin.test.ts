@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import Ajv from "ajv";
 import { legacyToolArgs } from "../dist/plugin/tool-schema.js";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
@@ -1563,6 +1563,59 @@ test('requires exclusive execution', async () => {
             .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
           assert.equal(failed.code, 1); await after(focused, failed.stdout, { exit: failed.code });
           await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+          const fixturePath = join(directory, "fixture.test.mjs"), source = await readFile(fixturePath);
+          await rename(join(directory, "fixture.test.mjs"), join(directory, "renamed.test.mjs"));
+          try {
+            if (process.platform !== "win32") {
+              await symlink("renamed.test.mjs", fixturePath);
+              try {
+                await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                  "an existing symlink is not proof the focused selection is missing");
+              } finally { await rm(fixturePath); }
+              await symlink("missing.test.mjs", fixturePath);
+              try {
+                const missingTarget = await before(child, "shell", { command: "npm run all", workdir: directory });
+                assert.equal(missingTarget.input.command, "npm run all", "a missing in-scope symlink target is unavailable");
+                await after(missingTarget, "not started", { status: "cancelled" });
+              } finally { await rm(fixturePath); }
+            }
+            const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+            assert.equal(full.input.command, "npm run all", "the obsolete retry does not block the full command");
+            const result = await exec("npm", ["run", "all"], { cwd: directory, env: environment })
+              .then(() => { throw new Error("renamed fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(result.code, 1); assert.match(result.stdout, /not ok/u);
+            await after(full, result.stdout, { exit: result.code });
+          } finally {
+            await rename(join(directory, "renamed.test.mjs"), join(directory, "fixture.test.mjs"));
+          }
+          await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+            "restoring the failed selection restores its deferral");
+          await rm(fixturePath);
+          try {
+            const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+            assert.equal(full.input.command, "npm run all", "a deleted selection does not block the full command");
+            await after(full, "not started", { status: "cancelled" });
+            const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.ok(checks.some(check => check.callID === focused.id && check.exitCode === 1));
+            assert.ok(!checks.some(check => check.exitCode === 0), "absence does not turn a previous failure into a pass");
+          } finally { await writeFile(fixturePath, source); }
+          await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+          const nested = join(directory, "nested");
+          await mkdir(nested);
+          for (const selection of ["../fixture.test.mjs", "../nested/../fixture.test.mjs"]) {
+            const relativeAttempt = await before(child, "shell", { command: `node --test ${selection}`, workdir: nested });
+            const relativeFailure = await exec(process.execPath, ["--test", selection], { cwd: nested, env: environment })
+              .then(() => { throw new Error("nested fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(relativeFailure.code, 1); assert.match(relativeFailure.stdout, /ENOENT/u);
+            await after(relativeAttempt, relativeFailure.stdout, { exit: relativeFailure.code });
+          }
+          await assert.rejects(before(child, "shell", { command: "node --test", workdir: nested }), /SORTIE_FULL_TEST_DEFERRED/u);
+          await rename(fixturePath, join(directory, "renamed.test.mjs"));
+          try {
+            const full = await before(child, "shell", { command: "node --test", workdir: nested });
+            assert.equal(full.input.command, "node --test", "a parent-relative selection can also disappear");
+            await after(full, "not started", { status: "cancelled" });
+          } finally { await rename(join(directory, "renamed.test.mjs"), fixturePath); }
           await edit("broken", "ready");
           const retry = await before(child, "shell", { command, workdir: directory });
           const result = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment });
@@ -1570,7 +1623,7 @@ test('requires exclusive execution', async () => {
           const full = await before(child, "shell", { command: "node --test", workdir: directory });
           const fullResult = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
           await after(full, fullResult.stdout, { exit: 0 });
-          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\nrun\n");
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\nrun\nrun\n");
           const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === focused.id && check.exitCode === 1));
           assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === retry.id && check.exitCode === 0));
@@ -1630,6 +1683,14 @@ test('requires exclusive execution', async () => {
         await after(failure, failed.stdout, { exit: failed.code });
         for (const command of ["node --test", "npm run all"]) await assert.rejects(
           before(child, "shell", { command, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED:.*node --test fixture\.test\.mjs/u);
+        await rename(join(directory, "fixture.test.mjs"), join(directory, "renamed.test.mjs"));
+        try {
+          const withoutOldSelection = await before(child, "shell", { command: "npm run all", workdir: directory });
+          assert.equal(withoutOldSelection.input.command, "npm run all", "a full-output-derived retry also becomes unavailable");
+          await after(withoutOldSelection, "not started", { status: "cancelled" });
+        } finally { await rename(join(directory, "renamed.test.mjs"), join(directory, "fixture.test.mjs")); }
+        await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }),
+          /SORTIE_FULL_TEST_DEFERRED:.*node --test fixture\.test\.mjs/u);
         const unrelated = await before(child, "shell", { command: "npm run release", workdir: directory });
         assert.equal(unrelated.input.command, "npm run release", "opaque release operations are not silently suppressed");
         await after(unrelated, "not started", { status: "cancelled" });

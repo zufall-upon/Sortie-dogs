@@ -142,7 +142,8 @@ function runnerCommand(parts: readonly string[]): ManagedTestCommand {
   if (program === "node") {
     if (args[0] !== "--test") return unknown("node-entrypoint-not-recognized");
     if (args.length === 1) return { scope: "full", runner: "node" };
-    if (args.slice(1).every(value => /^[\w@./-]+\.test\.(?:[cm]?js|ts)$/u.test(value))) return { scope: "focused", runner: "node" };
+    if (args.slice(1).every(value => /^[\w@./-]+\.test\.(?:[cm]?js|ts)$/u.test(value)))
+      return { scope: "focused", runner: "node", selection: args.slice(1) };
     return unknown("node-test-options-not-resolved");
   }
   if (program === "pytest" || (program === "python" || program === "python3") && args[0] === "-m" && args[1] === "pytest") {
@@ -217,5 +218,8 @@ export async function managedTestCommand(command: string, directory: string): Pr
   };
   const result = await visit(initial, new Set());
   return result.scope === "unknown" ? result : { ...result,
-    identity: createHash("sha256").update(JSON.stringify({ command, directory, definitions, suiteKey: result.suiteKey, selection: result.selection })).digest("hex") };
+    // Node selections were already bound by the literal command and script definitions.
+    // Keep their previous identity while exposing the parsed paths for availability checks.
+    identity: createHash("sha256").update(JSON.stringify({ command, directory, definitions, suiteKey: result.suiteKey,
+      selection: result.runner === "node-project-router" ? result.selection : undefined })).digest("hex") };
 }

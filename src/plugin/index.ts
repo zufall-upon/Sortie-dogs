@@ -1919,6 +1919,70 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     return managedTestCommand(command, directory);
   }
 
+  // Only definitive absence in the admitted project/read scopes makes a Node retry
+  // unavailable. Inaccessible or out-of-scope paths are not proof of absence.
+  async function missingNodeSelection(authorization: SessionAuthorization, directory: string,
+    selection: readonly string[] | undefined): Promise<boolean> {
+    if (!selection?.length) return false;
+    const root = await realpath(authorization.projectRoot).catch(() => undefined);
+    const cwd = await realpath(directory).catch(() => undefined);
+    const scopes = await Promise.all(authorization.readScopes.map(scope => realpath(scope).catch(() => undefined)));
+    if (!root || !cwd) return false;
+    const contains = (parent: string, child: string) => {
+      const path = relative(parent, child);
+      return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+    };
+    for (const name of selection) {
+      const parts = name.split(/[\\/]/u).filter(part => part && part !== ".");
+      let component = false, embeddedParent = false;
+      for (const part of parts) {
+        if (part === ".." && component) embeddedParent = true;
+        if (part !== "..") component = true;
+      }
+      let target = resolve(cwd, name);
+      if (embeddedParent) {
+        // Check the original path before collapsing an embedded '..': a symlink
+        // can make lexical normalization describe a different file.
+        if (isAbsolute(name)) continue;
+        let parent = cwd, safe = true;
+        for (const part of parts.slice(0, -1)) {
+          parent = part === ".." ? dirname(parent) : join(parent, part);
+          if (!contains(root, parent) || !scopes.some(scope => scope && contains(scope, parent))) { safe = false; break; }
+          if (part !== "..") {
+            const metadata = await lstat(parent).catch(() => undefined);
+            if (!metadata?.isDirectory() || metadata.isSymbolicLink()) { safe = false; break; }
+          }
+        }
+        if (!safe) continue;
+        target = join(parent, parts.at(-1)!);
+      }
+      for (let links = 0; links <= 40; links++) {
+        if (!contains(root, target) || !scopes.some(scope => scope && contains(scope, target))) break;
+        const parts = relative(root, target).split(sep).filter(Boolean);
+        let path = root, followed = false;
+        for (const [index, part] of parts.entries()) {
+          path = join(path, part);
+          try {
+            const metadata = await lstat(path);
+            if (metadata.isSymbolicLink()) {
+              const actual = await realpath(path).catch(() => undefined);
+              if (!actual) break;
+              target = resolve(actual, ...parts.slice(index + 1));
+              followed = true;
+              break;
+            }
+            if (index < parts.length - 1 && !metadata.isDirectory()) return true;
+          } catch (error) {
+            if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return true;
+            break;
+          }
+        }
+        if (!followed) break;
+      }
+    }
+    return false;
+  }
+
   async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
     authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
     // Only ordinary Mission shells with a live, project-wide read binding are managed.
@@ -1984,6 +2048,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       for (const [command, failure] of unresolved) {
         const current = await classifyAuthorizedTest(authorization, directory, command);
         if (current?.scope === "focused" && current.identity === failure.identity &&
+            (current.runner !== "node" || !await missingNodeSelection(authorization, directory, current.selection)) &&
             (classification.runner !== "node-project-router" || current.suiteKey === classification.suiteKey)) { focused = command; break; }
         appLogInfo("managed-test.focus-unavailable", toolInput.sessionID, { reason: "focused-command-changed-or-unresolved" });
       }
