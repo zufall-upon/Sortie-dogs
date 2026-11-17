@@ -412,6 +412,11 @@ export const MISSION_REGRESSION_PLACEMENT = `Prefer an existing relevant test su
 If a new test module is needed, prefer a distinctive behavior-specific name over automatically mirroring the implementation module.
 Preserve established assertions and project test discovery. This is placement guidance, not another test, unit or review requirement.`;
 
+/** Test changes are judged by detection value, not by the number or names of tests. */
+export const MISSION_TEST_GATE_AUTHOR = `Before adding or changing tests, inspect relevant existing tests: compare inputs, boundaries, assertions and failure detection.
+Reuse or strengthen them when sufficient; preserve distinct specification, boundary, regression, public API and security coverage. No count limit.`;
+export const MISSION_TEST_GATE_WORKER = `Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage.`;
+
 /** Preserve explicit public behavior and its caller preconditions when removing passive effects. */
 const MISSION_EXPLICIT_EFFECT_PRESERVATION = `When removing implicit initialization effects, preserve established explicit opt-in behavior unless the request changes it.
 Trace its real caller-visible effect from existing source/tests; flags or internal state alone are not that behavior.
@@ -426,6 +431,10 @@ that asserts the implementation's current result can encode the defect rather th
 the pre-change contract unless the request changes it; do not invent a universal failure-result convention.
 For changed observable behavior, inspect affected public caller assertions/output snapshots found by search, not only implementation-local fixtures.
 Reconcile expected outputs with the original requirements and reuse adequate checks; no extra review round.
+For added or changed tests, compare relevant existing tests by inputs, boundaries, assertions and failure detection,
+not names or counts. Inspect duplication, weak or meaningless assertions, excessive mocks and unnecessary
+implementation-detail coupling. Preserve distinct specification, boundary, regression, public API and security coverage;
+address concrete material defects through the existing correction lifecycle, not a separate agent or review round.
 ${MISSION_CLIENT_STATE_CHECK}
 ${MISSION_REPRESENTATION_ORACLE}
 ${MISSION_TYPE_FAMILY_ORACLE}
@@ -668,6 +677,7 @@ ${MISSION_TYPE_FAMILY_ORACLE}
 ${MISSION_RETURN_CONTRACT}
 ${MISSION_MUTATION_CONTRACT}
 ${MISSION_REGRESSION_PLACEMENT}
+${MISSION_TEST_GATE_AUTHOR}
 ${MISSION_EXPLICIT_EFFECT_PRESERVATION}
 For read-only verification, use write: []; do not invent an output file or request write access to inputs.
 If declared build or tests create known generated paths, include those outputs in the initial write scope;
@@ -800,6 +810,7 @@ Use bounded documented setup in ${TOOL_ENVIRONMENT}/; reuse, never delete.
 User missing-only: installed/incompatible is not missing.
 Per-call modes: check retained creation/use for captured vs current settings.
 Tests: existing suites/subtests or distinctive regression entry names.
+${MISSION_TEST_GATE_WORKER}
 ${WORKER_VALIDATION_WORKFLOW}No fake success.
 Parent: independent Review after return, not before execution; no review-before-commit gate.
 Do not spawn nested subagents, amend, push/publish. Return changes, command/exit/elapsed,

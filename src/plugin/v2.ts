@@ -98,6 +98,7 @@ export interface OpenCodeV2Context {
   };
   readonly permission: {
     hook(name: "evaluate", callback: (event: JsonObject) => Promise<void> | void): Promise<Registration>;
+    assert?(input: { sessionID: string; agent?: string; action: string; resources: string[]; save: string[] }): Promise<void>;
   };
   readonly provider?: { list(input?: unknown): Promise<unknown> };
   readonly model?: { list(input?: unknown): Promise<unknown> };
@@ -794,7 +795,8 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
     }
     const mapped = { args: legacyToolInput(event.tool, event.input) };
     await hooks["tool.execute.before"]!({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
-      callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}) }, mapped);
+      callID: String(event.id ?? ""), ...(typeof event.agent === "string" ? { agent: event.agent } : {}),
+      ...(event.signal instanceof AbortSignal ? { signal: event.signal } : {}) }, mapped);
     event.input = v2ToolInput(event.tool, record(mapped.args) ? mapped.args : {});
     if (event.tool === "subagent" && hooks.nativeTaskJoin?.(String(event.id ?? ""), false)) return;
     if (event.tool === "subagent" && record(event.input) && typeof event.input.sessionID === "string" && event.input.agent === "dog-reviewer-v010") {
@@ -1037,7 +1039,11 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
         (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
         hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
           nativeBackground: background, returnReportTransport: "tool-result",
-          reviewerCorrectionPermissions: !!context.agent?.get && !!context.storage && !!context.session.switchAgent }, context.options ?? {});
+          reviewerCorrectionPermissions: !!context.agent?.get && !!context.storage && !!context.session.switchAgent,
+          ...(context.permission.assert ? { authorizeValidationJoin: async (request: { sessionID: string; agent?: string; command: string }) => {
+            await context.permission.assert!({ sessionID: request.sessionID, ...(request.agent ? { agent: request.agent } : {}),
+              action: "shell", resources: [request.command], save: [request.command] });
+          } } : {}) }, context.options ?? {});
         await registerV2Hooks(context, hooks, background, liveState);
         // Recreate exact durable correction profiles at plugin setup, before resumed native Steps
         // resolve their agent/tool snapshots. Storage.scan is part of Plugin 2.0.18's public domain.
@@ -1069,6 +1075,9 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
           if (id === undefined) return;
           try {
             if (String(event.type).startsWith("session.execution.") || event.type === "session.inbox.enqueued" || event.type === "session.idle") await background.event(event);
+            if (event.type === "session.execution.interrupted") {
+              await hooks.event?.({ event: { type: "session.interrupted", properties: { sessionID: id } } });
+            }
             if (event.type === "session.deleted") {
               await context.storage?.remove?.(childSelectionKey(id));
               liveState.delete(id);

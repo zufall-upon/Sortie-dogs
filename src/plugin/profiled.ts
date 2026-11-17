@@ -13,10 +13,11 @@ import { readFile, realpath } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
+import { RunFlightLedgerError } from "../core/run-flight-ledger.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { reportText, resolveReportLocale } from "./report-locale.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
-import { normalizeCommand, canonicalObservedValidationMembers, extractWritePaths, isShellTool, WriteDeniedError } from "./gate.js";
+import { normalizeCommand, canonicalObservedValidationMembers, createProjectPaths, createWriteGate, extractWritePaths, isShellTool, WriteDeniedError } from "./gate.js";
 import { normalizeExecutionScope, normalizeManifestScope, normalizeRelativePath } from "../core/path.js";
 import { OperatorMissionRuntime, missionAcceptanceSummary, missionPacket, missionPlan, missionReviewAccepted, missionReviewIndependent, missionReviewScope, missionReviewTask,
   missionCommandOutcome, missionConversationContext, missionExecutionComplete, missionExecutionRecoveryAction, missionExecutionStatus, missionOperationCommandMatch,
@@ -40,6 +41,8 @@ import { DEFAULT_TERMINAL_RESCUE_MODEL } from "./terminal-rescue-host.js";
 import { readHostModels, type OpenCodeModelAvailabilityClient } from "./model-routing-hook.js";
 import { ProjectMemory, projectMemoryFile, type MemoryChange } from "../core/project-memory.js";
 import { MissionFabricValidationRequired } from "../core/mission-fabric.js";
+import { closeTestDebtInventory, inspectTestDebt, inspectTestDebtPage, testDebtInventoryKey,
+  TEST_DEBT_AUDIT_INSTRUCTION, type MissionTestDebtSignal } from "../core/test-debt-audit.js";
 
 const SERIAL_CAPABILITIES = new Set([
   "sortie_bind_write_gate", "sortie_release_write_gate", "sortie_check_contract",
@@ -120,6 +123,8 @@ export function previewModelCatalog(
   ];
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const goalLedgerCapacityError = (error: unknown): error is RunFlightLedgerError => error instanceof RunFlightLedgerError && error.code === "capacity" &&
+  ["Goal ledger capacity exceeded.", "Goal ledger page capacity exceeded."].includes(error.message);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 
 function missionConsultationDetails(role: "advisor" | "scout", prompt: string) {
@@ -235,11 +240,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const operatorTurnLifecycle = new Map<string, "historical" | "cancelled">();
     const historicalTurnMessages = new Map<string, string>();
     const dispatchTransitions = new Map<string, Promise<unknown>>();
-    async function serializeDispatchTransition<T>(root: string, operation: () => Promise<T>): Promise<T> {
-      const current = (dispatchTransitions.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
-      dispatchTransitions.set(root, current);
-      try { return await current; }
-      finally { if (dispatchTransitions.get(root) === current) dispatchTransitions.delete(root); }
+    async function serializeDispatchTransition<T>(root: string,
+      operation: (yieldWait: <U>(wait: () => Promise<U>) => Promise<U>) => Promise<T>): Promise<T> {
+      let current: Promise<void>, release!: () => void;
+      const enter = async () => {
+        const previous = dispatchTransitions.get(root) ?? Promise.resolve();
+        current = new Promise<void>(resolve => { release = resolve; });
+        dispatchTransitions.set(root, current);
+        await previous.catch(() => undefined);
+      };
+      const leave = () => {
+        release();
+        if (dispatchTransitions.get(root) === current) dispatchTransitions.delete(root);
+      };
+      await enter();
+      try { return await operation(async wait => { leave(); try { return await wait(); } finally { await enter(); } }); }
+      finally { leave(); }
     }
     const retired = new Set<string>();
     const renderedParts = new Map<string, string>();
@@ -598,6 +614,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }) + text.slice(end);
     }
     function translate(value: unknown, outward: boolean): unknown {
+      if (value instanceof AbortSignal) return value;
       if (Array.isArray(value)) return value.map(item => translate(item, outward));
       if (!record(value)) return value;
       return Object.fromEntries(Object.entries(value).map(([key, item]) => {
@@ -1749,6 +1766,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         completed_units: units.filter(unit => unit.status === "succeeded").length, total_units: units.length,
         budget_remaining_units: budget?.remaining_units ?? null,
         budget: packet.budget, accounting_scope: packet.accounting_scope, attempts: packet.attempts,
+        ...(packet.ledger_diagnostic ? { ledger_diagnostic: packet.ledger_diagnostic } : {}),
         next_action: typeof packet.next_action === "string" ? packet.next_action : null,
         ...(record(packet.acceptance_summary) ? { observations: {
           operation: packet.acceptance_summary.operation,
@@ -1775,10 +1793,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { view: optionalStringSchema, confirmed_conditions: conditionsSchema as never }, execute: async (args, context) => {
         const view = (args as { view?: unknown }).view;
         const root = await rootFor(context.sessionID);
+        try {
         let mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
         if (mission && (args as Record<string, unknown>).confirmed_conditions !== undefined) {
           mission = await missions.recordLaunchConditions(root!, (args as Record<string, unknown>).confirmed_conditions);
         }
+        // V2 retains failed background settlements for retry; awaiting() then
+        // suppresses ordinary lifecycle recovery. Surface its real capacity error
+        // after preserving explicitly supplied Mission conditions, without a Task.
+        const backgroundError = root ? input.nativeBackground?.reconciliationError?.(root) : undefined;
+        if (goalLedgerCapacityError(backgroundError)) throw backgroundError;
         // Observation is available to every owned role. Only the root reconciles dispatch above.
         if (mission) {
           const budget = await control!.currentBudget(root!);
@@ -1840,6 +1864,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 dispatch_instruction: "Pass this short Task reference verbatim; the host expands it only inside the directly claimed proposal child." } : {}),
               next_action: proposalNextAction }
               : { status: "absent", profile: profile.id }) });
+        } catch (error) {
+          if (!root || !goalLedgerCapacityError(error)) throw error;
+          // A valid full goal ledger can still be read even when lifecycle/usage reconciliation
+          // cannot append. Never use this unreconciled snapshot for planning or dispatch.
+          const budget = await control!.currentBudget(root, { diagnosticOnly: true });
+          const mission = await missions.read(root), run = await operators.read(root);
+          const runPacket = run ? operators.packet(run) : undefined;
+          const packet: Record<string, unknown> = { ...(mission ? missionDispatchPacket(mission, run) : record(runPacket) ? runPacket : { profile: profile.id }),
+            status: "goal-ledger-capacity", budget,
+            ...(mission ? { coordinator_dispatch: "blocked-capacity" } : {}),
+            ledger_diagnostic: { error: error.message, mode: "read-only", reconciliation: "incomplete" },
+            next_action: "Do not dispatch or assume pending reservations or costs are settled. Preserve the ledger and its .blobs together; recovery needs a compatible runtime able to append without discarding history or resetting budget." };
+          delete packet.task;
+          if (view === "progress" && mission) return serializeOperatorStatus(missionProgress(mission, run, budget, packet));
+          return serializeOperatorStatus(packet);
+        }
       } };
     tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a required closed set: use reason=plain for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
       args: { reason: { type: "string", enum: ["plain", "review-blocking", "acceptance-remediation"] } as never }, execute: async (args, context) => {
@@ -2328,8 +2368,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       if (!direct) throw new Error("mission-direct-binding-unavailable: retain the admitted unit and restore its Mission binding");
       await activateDirect(actor);
+      const auditHistory = (await missions.required(root)).testDebtSignals ?? [];
+      const audit = auditHistory.filter(item => item.run_id === direct!.run.runID && item.unit_id === direct!.unit.unit.id);
       return JSON.stringify({ status: "direct-unit-running", run_id: direct!.run.runID, unit_id: direct!.unit.unit.id,
         executor_session_id: actor, validation: unitValidation(direct!.unit),
+        ...(audit.length ? { test_debt_audit: { signals: audit, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
+          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
+        ...(auditHistory.some(item => item.run_id !== direct!.run.runID) ? { test_debt_history: auditHistory,
+          test_debt_history_note: "Prior scheduling is not proof of cleanup or validation; continue unfinished work without repeating the audit's own edits." } : {}),
         next_action: `Implement/correct and run the declared checks here, in this same session. Call ${finishDirectUnit} after the requested delivery boundary. No Worker or handoff read is needed. Retain the original requirements; independent Review and Operator acceptance still follow.` });
     }
     async function assertMissionRunBound(root: string) {
@@ -2384,7 +2430,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // direct admission can exist even when its writer could not bind because another
         // live owner overlaps. Do not require that contested binding to hand it off.
         const mission = await missions.retainContext(root, actor, history, notes);
-        await operators.handoffDirect(root, actor, await missions.handoffContext(mission));
+        const context = await missions.handoffContext(mission);
+        const audit = (mission.testDebtSignals ?? []).filter(signal =>
+          signal.run_id === direct.run.runID && signal.unit_id === direct.unit.unit.id);
+        if (audit.length) context.test_debt_audit = { signals: audit,
+          instruction: `${TEST_DEBT_AUDIT_INSTRUCTION} On continuation, if a signal was already assessed, reuse the actual comparison and checks; do not repeat completed audit work. Otherwise continue the unfinished assessment before final validation.`,
+          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } };
+        await operators.handoffDirect(root, actor, context);
       }
       const run = await operators.required(root);
       const unit = run.units.find(item => item.status !== "succeeded");
@@ -3231,13 +3283,113 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const histories = await Promise.all([...new Set([root, actor])].map(async id => ({ id, messages: await missionHistory(id) })));
       for (const history of histories) mission = await missions.contextSnapshot(mission, history.id, history.messages,
         history.id === actor ? handoffNotes : undefined);
-      const context = { ...await missions.handoffContext(mission),
-        ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
-          ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
-          prior_run_id: previous.runID } : {}) };
-      const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
-      const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context, { sameProcessDefect })
-        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
+      // A retry of the same prepared run is idempotent. A later planning milestone is
+      // a new opportunity to inspect unfinished debt; history is not proof of cleanup.
+      const continuingAuditRun = previous && same && !sameProcessDefect && !["completed", "cancelled"].includes(previous.phase)
+        ? previous.runID : undefined;
+      const knownAudits = new Set((mission.testDebtSignals ?? []).filter(item => item.run_id === continuingAuditRun).map(item => item.path));
+      const planHash = createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+      const boundRetry = continuingAuditRun !== undefined && mission.runID === continuingAuditRun;
+      const staged = !boundRetry ? mission.testDebtInventory?.pending?.find(page =>
+        page.planHash === planHash && page.baseRunID === mission.runID) : undefined;
+      const planningCandidates: Omit<MissionTestDebtSignal, "run_id">[] = [];
+      const cursors = structuredClone(mission.testDebtInventory?.cursors ?? {});
+      let nextUnit = (mission.testDebtInventory?.nextUnit ?? 0) % plan.units.length;
+      // A legacy prepared run has immutable handoffs but no staged page. Do not invent
+      // new signals or advance a cursor while retrying that already prepared run.
+      const legacyPrepared = continuingAuditRun !== undefined && mission.runID !== continuingAuditRun && !staged;
+      if (!boundRetry && !staged && !legacyPrepared && mission.kind !== "operation") {
+        const selected = new Set(knownAudits);
+        const start = nextUnit;
+        for (let index = 0; index < plan.units.length; index++) {
+          const unitIndex = (start + index) % plan.units.length, unit = plan.units[unitIndex]!;
+          if (!unit.write.length) continue;
+          const slots = 64 - selected.size;
+          if (slots <= 0) { nextUnit = unitIndex; break; }
+          const key = testDebtInventoryKey(input.directory, unit);
+          const page = await inspectTestDebtPage(input.directory, unit, [], { cursor: cursors[key], cacheKey: `${input.directory}\0${root}`,
+            maxFiles: slots, exclude: selected }).catch(() => undefined);
+          if (!page) continue;
+          cursors[key] = page.cursor;
+          for (const signal of page.signals) {
+            if (selected.has(signal.path)) continue;
+            selected.add(signal.path);
+            planningCandidates.push({ ...signal, unit_id: unit.id, trigger: "planning-milestone" });
+          }
+          nextUnit = (unitIndex + 1) % plan.units.length;
+        }
+      }
+      // The first unit to read a test is not necessarily the unit that can edit it.
+      // Prefer an existing write scope using the same path semantics as the gate;
+      // a scheduling signal is still neither write authority nor proof of cleanup.
+      const availableAuditSlots = Math.max(0, 64 - knownAudits.size);
+      const projectPaths = planningCandidates.length && availableAuditSlots ? await createProjectPaths(input.directory).catch(() => undefined) : undefined;
+      const planningGates = projectPaths ? await Promise.all(plan.units.map(async unit => ({ unit,
+        gate: await createWriteGate(projectPaths, { version: "0.1.0", task_id: unit.id, read: unit.read,
+          write: unit.write, validation: unit.validation }).catch(() => undefined),
+      }))) : [];
+      const planningSignals: typeof planningCandidates = staged ? structuredClone(staged.signals) : [];
+      for (const signal of planningCandidates) {
+        if (planningSignals.length >= availableAuditSlots) break;
+        if (knownAudits.has(signal.path)) continue;
+        knownAudits.add(signal.path);
+        let assigned = signal.unit_id;
+        for (const { unit, gate } of planningGates) {
+          if (!gate) continue;
+          try { await gate.checkPath(resolve(input.directory, signal.path)); assigned = unit.id; break; }
+          catch { /* Keep looking; the inventory does not alter host permissions. */ }
+        }
+        planningSignals.push({ ...signal, unit_id: assigned });
+      }
+      const inventoryStage: { active: boolean; prior?: OperatorMission["testDebtInventory"]; staged?: OperatorMission["testDebtInventory"] } = { active: false };
+      if (!boundRetry && !staged && !legacyPrepared && mission.kind !== "operation") {
+        const proposed = { planHash, baseRunID: mission.runID, cursors, nextUnit, signals: planningSignals };
+        // Retain the exact page before preparing immutable handoffs. If registration
+        // fails, a same-plan retry reuses it instead of consuming another page.
+        await missions.update(root, item => {
+          if (item.runID !== mission.runID) throw new Error("mission-test-debt-inventory-stale");
+          // A rejected alternative must not erase a previously prepared run's page.
+          const prepared = previous && previous.runID !== item.runID && !["completed", "cancelled"].includes(previous.phase)
+            ? item.testDebtInventory?.pending?.find(page => page.planHash === previous!.planHash && page.baseRunID === item.runID)
+            : undefined;
+          inventoryStage.prior = structuredClone(item.testDebtInventory);
+          item.testDebtInventory = { cursors: item.testDebtInventory?.cursors ?? {},
+            nextUnit: item.testDebtInventory?.nextUnit ?? 0,
+            pending: prepared && prepared.planHash !== proposed.planHash ? [prepared, proposed] : [proposed] };
+          inventoryStage.staged = structuredClone(item.testDebtInventory);
+          inventoryStage.active = true;
+        });
+      }
+      let state: OperatorState;
+      try {
+        const context = { ...await missions.handoffContext(mission),
+          ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
+            measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
+          ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
+            ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
+            prior_run_id: previous.runID } : {}) };
+        const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
+        state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context, { sameProcessDefect })
+          : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
+      } catch (error) {
+        if (inventoryStage.active) {
+          // If preparation did not switch the durable run, restore exactly the prior page.
+          // If it did switch, or its state cannot be read, retain the staged page for recovery.
+          const observed = await operators.read(root).then(value => ({ readable: true as const, value }), () => ({ readable: false as const }));
+          if (observed.readable && observed.value?.runID === previous?.runID) {
+            try {
+              await missions.update(root, item => {
+                if (item.runID !== mission.runID || !isDeepStrictEqual(item.testDebtInventory, inventoryStage.staged)) return;
+                if (inventoryStage.prior === undefined) delete item.testDebtInventory;
+                else item.testDebtInventory = inventoryStage.prior;
+              });
+            } catch (rollbackError) {
+              throw new AggregateError([error, rollbackError], "mission-test-debt-inventory-rollback-failed");
+            }
+          }
+        }
+        throw error;
+      }
       // prepareMission retains an identical prepared run after either registration stage
       // fails. Verify its pinned controls, then idempotently register the same declaration;
       // only the durable Mission binding below makes it eligible for admission.
@@ -3250,12 +3402,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         item.continuity = mission.continuity;
         item.reviewScope = missionReviewScope(item.reviewScope,
           ...(previous && item.runID === previous.runID ? [previous] : []), state);
-        if (item.runID !== state.runID) item.plans++;
+        if (item.runID !== state.runID) {
+          item.plans++;
+          const page = item.testDebtInventory?.pending?.find(value => value.planHash === planHash && value.baseRunID === item.runID);
+          if (page) {
+            item.testDebtInventory = { cursors: page.cursors, nextUnit: page.nextUnit };
+          }
+        }
+        const seen = new Set((item.testDebtSignals ?? []).filter(signal => signal.run_id === state.runID).map(signal => signal.path));
+        const slots = Math.max(0, 64 - seen.size);
+        const fresh = planningSignals.filter(signal => {
+          if (seen.has(signal.path)) return false;
+          seen.add(signal.path); return true;
+        }).slice(0, slots).map(signal => ({ ...signal, run_id: state.runID }));
+        if (fresh.length) item.testDebtSignals = [...(item.testDebtSignals ?? []), ...fresh].slice(-64);
         item.runID = state.runID; item.phase = "running"; item.submission = null;
         delete item.supersededRunID;
         if (operation) { item.kind = "operation"; item.execution = operation; }
         item.workQuantity = planWorkQuantity(item, raw as Parameters<typeof planWorkQuantity>[1], state, item.workQuantity, workQuantities, input.directory);
       });
+      if (state.units.some(unit => unit.status === "running" && unit.directExecution?.actor === actor)) {
+        return startDirect(root, actor);
+      }
       control!.enableUnits(root, state.units.filter(unit => unit.status === "pending").length);
       const next = await operators.next(root, actor);
       if (!record(next) || !record(next.task)) return JSON.stringify(next);
@@ -3548,7 +3716,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           required: ["path", "offset", "limit"] }, description: "Focused excerpts from existing project files or declared external inputs/outputs. Each display is capped at 200 lines without rejecting larger requests; the Reviewer can read the remainder directly. Project references need not be in the unit read/write scope. Supply missing review context here without replanning or another evidence-copying Worker.", "x-sortie-optional": true } as never,
         traces: { ...stringList, description: "Optional concise implementation notes. No R-ID labels or per-requirement proof required.", "x-sortie-optional": true } as never }, execute: async (args, context) => {
         const { root } = await missionAuthority(context.sessionID);
-        return serializeDispatchTransition(root, async () => {
+        return serializeDispatchTransition(root, async yieldWait => {
           let { mission } = await missionAuthority(context.sessionID);
           const reconciled = await reconcileReview(root, mission);
           mission = reconciled.mission;
@@ -3556,6 +3724,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             next_action: "Join the existing native Reviewer. Its current call and prompt remain authoritative; no replacement, revalidation or new conversation." });
           await control!.currentBudget(root, { reconcileUsage: false });
           const run = await operators.required(root);
+          // Review needs this very same declared occurrence, not a second shell run.
+          // An active Worker remains the sole writer and its native result is the only proof.
+          const running = !run.fabric && run.phase === "running" ? run.units.filter(unit => unit.status === "running") : [];
+          if (running.length === 1 && running[0]!.childSessionID && running[0]!.callID &&
+              !running[0]!.directExecution && !running[0]!.reviewerCorrection && !running[0]!.repairValidation && context.callID) {
+            const unit = running[0]!, taskID = /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+            if (taskID) {
+              const joined = await yieldWait(() => control!.joinMissionValidation(root, context.sessionID, context.agent,
+                context.callID!, { child: unit.childSessionID!, taskID, dispatchCallID: unit.callID! }, context.signal));
+              if (joined) {
+                const latestMission = await missions.required(root), latestRun = await operators.required(root);
+                if (latestMission.id !== mission.id || latestMission.runID !== run.runID || latestRun.runID !== run.runID ||
+                    ["cancelled", "completed"].includes(latestMission.phase)) throw new Error("mission-validation-join-stale");
+                return JSON.stringify({ status: joined.outcome === "passed" && joined.exit_code === 0 ? "validation-joined" : "validation-owner-not-passed",
+                  validation: joined, next_action: "This is the Worker's native result, not a second execution or a Review. " +
+                    "Wait for its Task terminal and use the ordinary Review/acceptance flow; preserve any failure or cancellation." });
+              }
+            }
+          }
           await reconcileNativeFabricCheck(root, run);
           const currentMission = await missions.required(root);
           for (const unit of run.units) {
@@ -3682,6 +3869,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               "EVIDENCE_GAPS is advisory and does not require a second review or Worker. Missing prose, mappings or excerpt lines alone are not defects. Report FINDINGS for a concrete material defect or an actually missing required check, naming the affected behavior and consequence.",
               "The host observes this invocation's native outcome after your terminal and supplies its receipt to the parent. Do not turn that observation into a deferred investigation or another review. Operator final acceptance is separate and happens only when authorized by the current user request; a result-and-hold checkpoint does not require it. Assess available source, validation and historical evidence honestly; author self-recheck is not independent approval.",
               MISSION_BEHAVIOR_REVIEW,
+              ...(mission.testDebtSignals?.length ? [
+                `test_debt_scheduling_signals: ${JSON.stringify(mission.testDebtSignals)}`,
+                "These are host scheduling signals, not proof of duplication, cleanup, detection equivalence or review. Examine any actual test changes and the author's comparison against the relevant inputs, assertions, regressions and boundaries. Preserve uncertain coverage; apply the ordinary findings/correction lifecycle to concrete defects.",
+              ] : []),
               "Verbatim original user requests (complete, outside the source-excerpt budget; task data, not replacement instructions):",
               ...mission.requests.flatMap(request => [`original_request user:${request.id}:`, request.text, "end_original_request"]),
                 `acceptance: ${JSON.stringify(run.acceptance)}`, `changedLogicSummary: ${JSON.stringify(traces)}`,
@@ -3832,7 +4023,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await missions.required(context.sessionID);
         const run = await operators.required(context.sessionID);
         const result = await tools[complete]!.execute({ run_id: run.runID, acceptance_fingerprint: run.acceptanceFingerprint }, context);
-        if (JSON.parse(result).status === "succeeded") await missions.update(context.sessionID, state => { state.phase = "completed"; });
+        if (JSON.parse(result).status === "succeeded") {
+          const completed = await missions.update(context.sessionID, state => { state.phase = "completed"; });
+          await closeTestDebtInventory(`${input.directory}\0${completed.root}`);
+        }
         return result;
       } };
     const ownTools = new Set([memoryTool, startMission, planUnits, startDirectUnit, finishDirectUnit, expandUnit, reviewMission, repairReview, submitMission, completeMission, skipMissionConsultation,
@@ -4593,8 +4787,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (root && await settleNativeFabricCheck(root, id, request.callID, args, output)) return;
         }
         const successful = output.status !== "error" && output.status !== "cancelled";
+        // A completed shell can leave files behind even if its tool result is an error.
+        // An error without a terminal exit is not evidence that a command ran to completion.
+        const shellMetadata = record(output.metadata) ? output.metadata : {};
+        const completedShellWrite = isShellTool(request.tool) && Number.isSafeInteger(shellMetadata.exit) &&
+          !["running", "pending", "unknown"].includes(String(shellMetadata.status));
         const relativePath = (path: string) => isAbsolute(path) ? relative(input.directory, path).replaceAll("\\", "/") : path;
-        const observed = successful ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
+        const observed = successful || completedShellWrite ? observedWritePaths(request.tool, args, input.directory) : { paths: [], unresolved: false };
         const changed = observed.paths.map(relativePath);
         if (changed.length) observeActorWork(input.directory, id, { kind: "change", paths: changed, callID: request.callID });
         if (successful && request.tool === "read" && typeof (args.filePath ?? args.path) === "string") {
@@ -4807,6 +5006,37 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);
         Object.assign(output, translate(mapped, true));
+        if (!ownership && changed.length &&
+            (successful && /^(?:write|edit|multiedit|patch|apply_patch)$/iu.test(request.tool) || completedShellWrite)) {
+          try {
+            const root = await rootFor(id), mission = root ? await missions.read(root) : undefined;
+            const run = root && mission?.kind !== "operation" ? await operators.read(root) : undefined;
+            const unit = run?.units.find(item => item.status === "running" && item.childSessionID === id &&
+              !item.reviewerCorrection && item.repairValidation === null);
+            if (root && mission && run && mission.runID === run.runID && unit) {
+              // Only an observed native edit is a trigger; we never write the candidate or infer
+              // ownership from a name. Failures of optional inventory must not undo a successful edit.
+              const signals = await inspectTestDebt(input.directory, { read: [], write: [], validation: [] }, changed);
+              let added: MissionTestDebtSignal[] = [];
+              if (signals.length) await missions.update(root, state => {
+                if (state.runID !== run.runID) return;
+                const seen = new Set((state.testDebtSignals ?? []).filter(item => item.run_id === run.runID).map(item => item.path));
+                const slots = Math.max(0, 64 - seen.size);
+                added = signals.filter(signal => {
+                  if (seen.has(signal.path)) return false;
+                  seen.add(signal.path); return true;
+                }).slice(0, slots)
+                  .map(signal => ({ ...signal, run_id: run.runID, unit_id: unit.unit.id, trigger: "observed-change" }));
+                if (added.length) state.testDebtSignals = [...(state.testDebtSignals ?? []), ...added].slice(-64);
+              });
+              if (added.length && typeof output.output === "string") output.output += `\n\nSORTIE_TEST_DEBT_AUDIT ${JSON.stringify({ signals: added,
+                measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } })}\n${TEST_DEBT_AUDIT_INSTRUCTION}`;
+            }
+          } catch {
+            // The native edit already happened. An inventory/storage error cannot turn it into a failed edit.
+            if (typeof output.output === "string") output.output += "\n\nSORTIE_TEST_DEBT_AUDIT_UNAVAILABLE: inventory was not recorded; no audit or cleanup is implied.";
+          }
+        }
         if (!ownership && isShellTool(request.tool)) {
           const root = await rootFor(id);
           const mission = root ? await missions.read(root) : undefined;
@@ -5146,7 +5376,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // check and execute under an admission whose writer was already released.
       // Prepared Tasks also remain serialized with proposal approval.
       return root === undefined ? before(request, output)
-        : serializeDispatchTransition(root, () => before(request, output));
+        : serializeDispatchTransition(root, yieldWait => before({ ...request, yieldValidationJoin: yieldWait }, output));
     };
     return hooks;
   };

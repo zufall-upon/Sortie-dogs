@@ -1,7 +1,149 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { CONTRACT_TEXT_LIMITS } from "../dist/core/contract-limits.js";
 import { decideValidationBudget, selectValidationScope, validationEvidenceKey, validationEvidenceState, validationResultFingerprint, type ValidationBudgetRequest } from "../dist/core/validation-budget.js";
+import { managedTestCommand } from "../dist/plugin/managed-test-command.js";
+import { copyManagedRouterFixture } from "./helpers/managed-router-fixture.ts";
+
+test("managed test reachability resolves literal project scripts without claiming opaque commands", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/managed-command-"));
+  try {
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: {
+      all: "npm run unit", unit: "node --test", quick: "node --test example.test.mjs",
+      cycle: "npm run cycle", release: "echo release && node --test", opaque: "node scripts/test-router.mjs full",
+      protected: "node --test", preprotected: "node prepare.mjs", "test:windows": "node --test",
+    } }));
+    for (const [command, scope, runner] of [
+      ["npm run all", "full", "node"], ["npm run quick", "focused", "node"],
+      ["python3 -m pytest -q", "full", "pytest"], ["go test ./...", "full", "go"],
+      ["cargo test --workspace", "full", "cargo"], ["vitest run", "full", "vitest"], ["jest", "full", "jest"],
+      ["node --test example.test.mjs", "focused", "node"], ["pytest test_example.py -q", "focused", "pytest"],
+    ]) {
+      const resolved = await managedTestCommand(command!, root);
+      assert.equal(resolved.scope, scope, command);
+      assert.equal("runner" in resolved ? resolved.runner : undefined, runner, command);
+    }
+    const original = await managedTestCommand("npm run quick", root);
+    const direct = await managedTestCommand("node --test example.test.mjs", root);
+    assert.equal(original.scope, "focused"); assert.equal(direct.scope, "focused");
+    if (original.scope !== "focused" || direct.scope !== "focused") throw new Error("focused classification required");
+    assert.deepEqual(original.selection, ["example.test.mjs"]);
+    assert.deepEqual(direct.selection, ["example.test.mjs"]);
+    for (const [command, selection] of [
+      ["pytest test_example.py -q", ["test_example.py"]],
+      ["go test ./package", ["./package"]],
+      ["go test ./.../subpackage", undefined],
+      ["go test ./prefix.../subpackage", undefined],
+      ["jest example.test.js", undefined],
+      ["vitest run example.test.js", undefined],
+    ] as const) {
+      const classified = await managedTestCommand(command, root);
+      assert.equal(classified.scope, "focused");
+      if (classified.scope !== "focused") throw new Error("focused classification required");
+      assert.deepEqual(classified.selection, selection, "only literal filesystem operands have availability checks");
+      assert.equal(classified.identity, createHash("sha256").update(JSON.stringify({ command, directory: root, definitions: [] })).digest("hex"),
+        "exposing an existing literal selection preserves its previous command identity");
+    }
+    for (const [classified, command, definitions] of [
+      [original, "npm run quick", [{ name: "quick", source: "node --test example.test.mjs" }]],
+      [direct, "node --test example.test.mjs", []],
+    ] as const) {
+      assert.equal(classified.identity, createHash("sha256").update(JSON.stringify({ command, directory: root, definitions })).digest("hex"),
+        "exposing the selection does not change the existing Node identity");
+    }
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { quick: "node --test another.test.mjs" } }));
+    const changed = await managedTestCommand("npm run quick", root);
+    assert.equal(original.scope, "focused"); assert.equal(changed.scope, "focused");
+    assert.notEqual("identity" in original && original.identity, "identity" in changed && changed.identity,
+      "the same script name does not retain an earlier definition's identity");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: {
+      cycle: "npm run cycle", release: "echo release && node --test", opaque: "node scripts/test-router.mjs full",
+      protected: "node --test", preprotected: "node prepare.mjs", "test:windows": "node --test",
+    } }));
+    for (const command of ["npm run cycle", "npm run release", "npm run opaque", "npm run protected",
+      "npm run missing", "npm run test:windows", "pytest test_example.py --collect-only", "pytest test_example.py::test_before -q",
+      "python3 -m pytest test_example.py::TestExample::test_value -q", "pytest test_example.py::TestExample -q",
+      "pytest test_example.py::test_value[one] -q", "pytest test_example.py test_other.py::test_value -q",
+      "node --test --unknown", "echo done && node --test"]) {
+      assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("managed project router uses actual sources, build configuration, cwd and selection", { skip: process.platform === "win32" }, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/managed-router-"));
+  const project = process.cwd();
+  const originalEnvironment = { HOME: process.env.HOME, npm_config_userconfig: process.env.npm_config_userconfig,
+    npm_config_globalconfig: process.env.npm_config_globalconfig };
+  try {
+    process.env.HOME = join(root, "home");
+    process.env.npm_config_userconfig = join(root, "home/.npmrc");
+    process.env.npm_config_globalconfig = join(root, "global.npmrc");
+    await mkdir(process.env.HOME, { recursive: true });
+    const pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
+    const scripts = { ...pkg.scripts, whole: "npm run test:full" };
+    await copyManagedRouterFixture(project, root);
+    await writeFile(join(root, "package.json"), JSON.stringify({ type: "module", scripts }));
+    await writeFile(join(root, "test/check.test.ts"), "// project fixture\n");
+    const full = await managedTestCommand("npm run whole", root);
+    const focused = await managedTestCommand("npm run test:targeted -- test/check.test.ts", root);
+    assert.equal(full.scope, "full"); assert.equal(focused.scope, "focused");
+    assert.equal("runner" in full && full.runner, "node-project-router");
+    assert.equal("suiteKey" in full && full.suiteKey, "suiteKey" in focused && focused.suiteKey);
+    const projectScope = (await lstat(join(project, "node_modules"))).isSymbolicLink() ? "unknown" : "full";
+    assert.equal((await managedTestCommand("npm run test:full", project)).scope, projectScope, "external dependency trees are not inspected project-local tooling");
+    const realFocused = await managedTestCommand("npm run test:targeted -- test/validation-budget.test.ts", project);
+    assert.equal(realFocused.scope, projectScope === "full" ? "focused" : "unknown", "real targeted script and file");
+    await writeFile(join(root, "test/companion.test.ts"), "// companion fixture\n");
+    for (const command of ["npm run test:targeted -- test/missing.test.ts", "npm run test:targeted -- test/check.test.js",
+      "npm run test:targeted -- test/../test/check.test.ts", "npm run test:full -- test/check.test.ts", "npm run test:windows",
+      "npm run test:targeted -- test/check.test.ts test/companion.test.ts"])
+      assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
+    for (const config of [process.env.npm_config_userconfig, process.env.npm_config_globalconfig]) {
+      await writeFile(config, "script-shell=/custom/shell\n");
+      assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "uninspected effective npm config remains native");
+      await rm(config);
+    }
+    const shellOption = process.env["npm_config_script-shell"];
+    try {
+      process.env["npm_config_script-shell"] = "/custom/shell";
+      assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "npm also accepts dashed option names in its environment");
+    } finally {
+      if (shellOption === undefined) delete process.env["npm_config_script-shell"]; else process.env["npm_config_script-shell"] = shellOption;
+    }
+    const compiler = join(root, "node_modules/typescript/bin/tsc"), originalCompiler = await readFile(compiler);
+    await writeFile(compiler, "#!/bin/sh\nexit 0\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "a local compiler wrapper is not the inspected CLI");
+    await writeFile(compiler, originalCompiler);
+    await writeFile(join(root, "scripts/test-router.mjs"), "// changed runner\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await cp(join(project, "scripts/test-router.mjs"), join(root, "scripts/test-router.mjs"));
+    await writeFile(join(root, "test/helpers/full-test-runner.ts"), "// changed selection\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await cp(join(project, "test/helpers/full-test-runner.ts"), join(root, "test/helpers/full-test-runner.ts"));
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { ...scripts, prebuild: "node prepare.mjs" } }));
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown", "unknown build lifecycle remains runnable");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { ...scripts, "pretest:full": "node prepare.mjs" } }));
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await writeFile(join(root, "package.json"), JSON.stringify({ scripts }));
+    await writeFile(join(root, ".npmrc"), "ignore-scripts=true\n");
+    assert.equal((await managedTestCommand("npm run whole", root)).scope, "unknown");
+    await rm(join(root, ".npmrc"));
+    await rm(join(root, "test/check.test.ts"));
+    await symlink(join(project, "test/validation-budget.test.ts"), join(root, "test/check.test.ts"));
+    assert.equal((await managedTestCommand("npm run test:targeted -- test/check.test.ts", root)).scope, "unknown");
+  } finally {
+    for (const [key, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 const request = (extra: Partial<ValidationBudgetRequest> = {}): ValidationBudgetRequest => ({
   run_id: "run", operation_id: "operation", source_snapshot: "base", candidate: "candidate",

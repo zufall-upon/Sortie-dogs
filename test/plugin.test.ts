@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join, relative } from "node:path";
@@ -5021,8 +5022,13 @@ for (const registered of [false, true]) test(`serial settled-pass reuse reconcil
     assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
 
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "first-check" }, { args: { command } });
-    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
-      { output: "passed", metadata: { exit: 0 } });
+    await Promise.all([
+      hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "first-check", args: { command } },
+        { output: "passed", metadata: { exit: 0 } }),
+      hooks.event!({ event: { type: "message.part.updated", properties: { sessionID: child,
+        part: { type: "tool", tool: "bash", callID: "first-check",
+          state: { status: "completed", input: { command }, output: "passed", metadata: { exit: 0 } } } } } }),
+    ]);
     captureRegistration = registered;
     const duplicate = { args: { command } };
     await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "duplicate-check" }, duplicate);
@@ -5054,6 +5060,270 @@ for (const registered of [false, true]) test(`serial settled-pass reuse reconcil
     assert.equal(settlement?.disposition, "succeeded");
     assert.equal(settlement?.evidence.length, 1);
     assert.deepEqual(settlement?.evidence[0].execution.command, [command]);
+  });
+});
+
+for (const scenario of ["passed", "failed", "stale", "cancelled", "owner-cancelled", "permission-denied"] as const) test(`native in-flight validation joins the owner without a second check: ${scenario}`, async () => {
+  await withProject(`goal-validation-join-${scenario}`, async directory => {
+    const failed = scenario === "failed";
+    const command = "node candidate.test.mjs";
+    const taskID = "join-unit", child = "join-child", manifest = "join-unit.json";
+    const handoff = join(directory, "handoff.join-unit.json");
+    await writeFile(join(directory, "candidate.txt"), "candidate\n");
+    await writeFile(join(directory, "candidate.test.mjs"),
+      `import { appendFileSync, existsSync } from 'node:fs'; appendFileSync('.git/check-count', 'run\\n');
+process.stdout.write('started\\n'); const deadline = Date.now() + 5000;
+while (!existsSync('.git/release') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+process.exit(existsSync('.git/release') ? ${failed ? 7 : 0} : 124);\n`);
+    await writeFile(join(directory, manifest), JSON.stringify({ ...operationManifest(["candidate.txt"]),
+      task_id: taskID, read: ["candidate.test.mjs"], validation: [command] }));
+    await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(directory, manifest), id: taskID }));
+    let permissionChecked!: () => void;
+    const permitted = new Promise<void>(resolve => { permissionChecked = resolve; });
+    const hooks = await SortieDogsPlugin({ directory, authorizeValidationJoin: async request => {
+      assert.equal(request.sessionID, child); assert.equal(request.command, command); permissionChecked();
+      if (scenario === "permission-denied") throw new Error("native permission denied");
+    }, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+        ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+      messages: async () => ({ data: [] }),
+    } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text: "validate the candidate" }],
+    });
+    const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+      "source_manifest: [candidate.test.mjs]", `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+      `validation: { level: targeted, command: ${command}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+      "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+      "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID },
+      { args: { subagent_type: "dog-worker", prompt } });
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+    await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+    });
+    await inspectHandoffWithRead(hooks, handoff, child);
+    assert.equal((await executeBindWriteGate(hooks, directory, child, manifest)).status, "bound");
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "owner" }, { args: { command } });
+    const processOwner = spawn(process.execPath, ["candidate.test.mjs"], { cwd: directory });
+    const processExit = new Promise<number | null>((resolve, reject) => {
+      processOwner.once("error", reject); processOwner.once("close", resolve);
+    });
+    await new Promise<void>((resolve, reject) => { processOwner.stdout.once("data", () => resolve()); processOwner.once("error", reject); });
+    const duplicate = { args: { command } };
+    const controller = new AbortController();
+    const waiting = hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "waiter", signal: controller.signal }, duplicate);
+    if (scenario === "permission-denied") await assert.rejects(waiting, /native permission denied/u);
+    else await Promise.race([permitted, waiting]);
+    assert.equal(processOwner.exitCode, null, "the owner process is still running when the waiter joins");
+    if (scenario === "cancelled") {
+      controller.abort();
+      await assert.rejects(waiting, /waiter cancelled/u);
+    }
+    if (scenario === "stale") await writeFile(join(directory, "candidate.test.mjs"), "// changed during validation\n");
+    await writeFile(join(directory, ".git", "release"), "release");
+    const outcome = await processExit;
+    assert.equal(outcome, failed ? 7 : 0);
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "owner", args: { command } },
+      { output: failed ? "failed" : "passed", metadata: { exit: outcome, ...(scenario === "owner-cancelled" ? { status: "cancelled" } : {}) } });
+    if (failed || scenario === "stale" || scenario === "owner-cancelled") await assert.rejects(waiting,
+      failed ? /joined-owner-failed/u : scenario === "owner-cancelled" ? /joined-owner-cancelled/u : /native proof unavailable or stale/u);
+    else if (scenario === "passed") {
+      await waiting;
+      assert.match(duplicate.args.command, /SORTIE_VALIDATION_JOINED/u);
+      await execFileAsync(process.platform === "win32" ? "powershell.exe" : "sh",
+        process.platform === "win32" ? ["-NoProfile", "-Command", duplicate.args.command] : ["-c", duplicate.args.command], { cwd: directory });
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "waiter", args: duplicate.args },
+        { output: "SORTIE_VALIDATION_JOINED", metadata: { exit: 0 } });
+    }
+    assert.equal(await readFile(join(directory, ".git", "check-count"), "utf8"), "run\n");
+    const ledger = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
+      `${createHash("sha256").update("root").digest("hex")}.json`), "utf8"));
+    assert.equal(ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "validation.joined").length, 1);
+    assert.equal(ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "validation.settled").length, 1);
+  });
+});
+
+for (const scenario of ["passed", "failed", "concurrent", "owner-cancelled", "owner-error", "external-state"] as const) test(`undeclared full runner preserves native execution with unverified inputs: ${scenario}`, async () => {
+  await withProject(`managed-full-${scenario}`, async directory => {
+    let serviceReady = true, serviceRequests = 0;
+    const service = createServer((_request, response) => { serviceRequests++; response.end(serviceReady ? "ready" : "broken"); });
+    await new Promise<void>(resolve => service.listen(0, "127.0.0.1", resolve));
+    const address = service.address();
+    assert.ok(address && typeof address === "object");
+    try {
+      const command = "node --test", formal = "node -e 1";
+      await mkdir(join(directory, ".git", "sortie-dogs", "guard-fixture"), { recursive: true });
+      await writeFile(join(directory, ".git", "HEAD"), "ref: refs/heads/fixture\n");
+      await writeFile(join(directory, "candidate.test.mjs"), `import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { appendFileSync, existsSync } from 'node:fs';
+test('owner', async () => { appendFileSync('.git/sortie-dogs/guard-fixture/check-count', 'run\\n');
+  process.stdout.write('owner-started\\n'); const deadline = Date.now() + 10000;
+  while (!existsSync('.git/sortie-dogs/guard-fixture/release') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  if (!existsSync('.git/sortie-dogs/guard-fixture/release') || ${scenario === "failed"}) throw new Error('fixture failure');
+  assert.equal(await (await fetch('http://127.0.0.1:${address.port}')).text(), 'ready');
+});\n`);
+      const ids = ["first", "second"];
+      for (const id of ids) {
+        await writeFile(join(directory, `${id}.json`), JSON.stringify({ ...operationManifest([]), task_id: id,
+          read: [directory], validation: [formal] }));
+        await writeFile(join(directory, `handoff.${id}.json`), JSON.stringify({ ...writeGateHandoff(directory, `${id}.json`), id }));
+      }
+      const hooks = await SortieDogsPlugin({ directory, runtimeBridge: { profile: STABLE_RUNTIME_PROFILE,
+        assetVersion: RUNTIME_ASSET_VERSION, allowsInvestigativeShell: async () => true,
+        ownsMissionParallelDispatch: async () => true, ownsValidationRegistration: async () => true,
+        reviewerCorrectionValidationMembers: async () => undefined },
+      authorizeValidationJoin: async () => { throw new Error("unverified tests must not join"); }, client: { session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+          ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }),
+        messages: async () => ({ data: [] }),
+      } } as never });
+      await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+        message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+        parts: [{ type: "text", text: "validate the candidate" }],
+      });
+      for (const id of ids) {
+        const child = `${id}-child`, handoff = join(directory, `handoff.${id}.json`);
+        const prompt = [`task_id: ${id}`, "role: implementation", `project_root: ${directory}`, `handoff_path: ${handoff}`,
+          `source_manifest: [${directory}]`, `operation_manifest: ${id}.json`, "acceptance: candidate passes",
+          `validation: { level: targeted, command: ${formal}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+          "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+          "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+          "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+          "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+          "usable_path_established: false", "controlled_change: false", "goal_budget_units: 4"].join("\n");
+        await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: id },
+          { args: { subagent_type: "dog-worker", prompt } });
+        await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory } } } });
+        await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+          message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+        });
+        await inspectHandoffWithRead(hooks, handoff, child);
+        assert.equal((await executeBindWriteGate(hooks, directory, child, `${id}.json`)).status, "bound");
+      }
+      const ownerArgs = { args: { command } };
+      await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "first-child", callID: "owner" }, ownerArgs);
+      assert.equal(ownerArgs.args.command, command);
+      // Node refuses recursive --test when its parent's own test-runner marker is inherited.
+      const childEnvironment = { ...process.env }; delete childEnvironment.NODE_TEST_CONTEXT;
+      const owner = spawn(process.execPath, ["--test"], { cwd: directory, env: childEnvironment });
+      const ownerExit = new Promise<number | null>((resolve, reject) => { owner.once("error", reject); owner.once("close", resolve); });
+      const deadline = Date.now() + 5000;
+      while (!await stat(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count")).catch(() => undefined)) {
+        if (owner.exitCode !== null || Date.now() >= deadline) throw new Error("native owner did not start the fixture");
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      const waiterArgs = { args: { command } };
+      if (scenario === "concurrent") {
+        const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "second-run", signal: controller.signal }, waiterArgs);
+          assert.equal(owner.exitCode, null, "an in-flight test is not an equivalent observation by default");
+        } finally {
+          clearTimeout(timeout);
+          await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
+        }
+      } else await writeFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "release"), "release");
+      const exit = await ownerExit;
+      assert.equal(exit, scenario === "failed" ? 1 : 0);
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "first-child", callID: "owner", args: ownerArgs.args },
+        { output: "native owner terminal", metadata: { exit,
+          ...(scenario === "owner-cancelled" ? { status: "cancelled" } : scenario === "owner-error" ? { status: "error" } : {}) } });
+      if (scenario === "external-state") serviceReady = false;
+      if (scenario !== "concurrent") await hooks["tool.execute.before"]!(
+        { tool: "bash", sessionID: "second-child", callID: "second-run" }, waiterArgs);
+      const second = await execFileAsync(process.platform === "win32" ? "powershell.exe" : "sh",
+        process.platform === "win32" ? ["-NoProfile", "-Command", waiterArgs.args.command] : ["-c", waiterArgs.args.command],
+        { cwd: directory, env: childEnvironment }).then(result => ({ exit: 0, output: result.stdout }),
+          error => ({ exit: error.code, output: error.stdout }));
+      await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "second-run", args: waiterArgs.args },
+        { output: second.output, metadata: { exit: second.exit } });
+      assert.equal(second.exit, scenario === "external-state" || scenario === "failed" ? 1 : 0,
+        "an unchanged project must still observe the current external service");
+      assert.equal(waiterArgs.args.command, command, "unverified observations must not substitute a successful notice");
+      assert.equal(serviceRequests, scenario === "failed" ? 0 : 2);
+      if (scenario === "passed") {
+        const arbitrary = { args: { command: "printf 'not a test'" } };
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "arbitrary" }, arbitrary);
+        assert.equal(arbitrary.args.command, "printf 'not a test'");
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "arbitrary", args: arbitrary.args },
+          { output: "not a test", metadata: { exit: 0 } });
+        const opaque = { args: { command: "npm run test:full" } };
+        await hooks["tool.execute.before"]!({ tool: "bash", sessionID: "second-child", callID: "opaque" }, opaque);
+        assert.equal(opaque.args.command, "npm run test:full", "opaque scripts are not claimed as controlled");
+        await hooks["tool.execute.after"]!({ tool: "bash", sessionID: "second-child", callID: "opaque", args: opaque.args },
+          { status: "cancelled", output: "not started", metadata: {} });
+      }
+      assert.equal(await readFile(join(directory, ".git", "sortie-dogs", "guard-fixture", "check-count"), "utf8"), "run\nrun\n");
+      const ledger = JSON.parse(await readFile(join(directory, ".git", "sortie-dogs", "run-flight",
+        `${createHash("sha256").update("root").digest("hex")}.json`), "utf8"));
+      const events = ledger.goal_events.map(({ event }: { event: { kind: string } }) => event);
+      assert.equal(events.filter((event: { kind: string }) => event.kind === "validation.joined").length, 0);
+      assert.deepEqual(events.filter((event: { kind: string }) => event.kind === "validation.admission")
+        .map((event: { decision: string }) => event.decision), ["ALLOW", "ALLOW"]);
+      const settled = events.find((event: { kind: string; operation_id?: string }) => event.kind === "validation.settled" && event.operation_id === "owner");
+      assert.equal(settled.outcome, scenario === "failed" ? "failed" : scenario === "owner-cancelled" ? "cancelled" :
+        scenario === "owner-error" ? "interrupted" : "passed");
+      const secondSettled = events.find((event: { kind: string; operation_id?: string }) =>
+        event.kind === "validation.settled" && event.operation_id === "second-run");
+      assert.equal(secondSettled.outcome, second.exit === 1 ? "failed" : "passed");
+      assert.equal(events.some((event: { kind: string }) => event.kind === "unit.settled"), false);
+    } finally {
+      await new Promise<void>((resolve, reject) => service.close(error => error ? reject(error) : resolve()));
+    }
+  });
+});
+
+test("undeclared full runner leaves a genuine linked Git worktree executable without assuming its metadata", async () => {
+  await withProject("managed-full-linked-worktree", async directory => {
+    await execFileAsync("git", ["init", "-q", directory]);
+    await execFileAsync("git", ["-C", directory, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+      "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "base"]);
+    const linked = join(directory, "linked");
+    await execFileAsync("git", ["-C", directory, "worktree", "add", "--detach", "-q", linked, "HEAD"]);
+    const marker = await readFile(join(linked, ".git"), "utf8");
+    const formal = "node -e 1", taskID = "linked-unit", child = "linked-child", manifest = "linked-unit.json";
+    const handoff = join(linked, "handoff.linked-unit.json");
+    await writeFile(join(linked, manifest), JSON.stringify({ ...operationManifest([]), task_id: taskID, read: [linked], validation: [formal] }));
+    await writeFile(handoff, JSON.stringify({ ...writeGateHandoff(linked, manifest), id: taskID }));
+    const hooks = await SortieDogsPlugin({ directory: linked, runtimeBridge: { profile: STABLE_RUNTIME_PROFILE,
+      assetVersion: RUNTIME_ASSET_VERSION, allowsInvestigativeShell: async () => true,
+      ownsValidationRegistration: async () => true, reviewerCorrectionValidationMembers: async () => undefined },
+      authorizeValidationJoin: async () => { throw new Error("unsupported worktree must not join"); }, client: { session: {
+        get: async ({ path }: { path: { id: string } }) => ({ data: path.id === "root"
+          ? { agent: "dog-coordinator" } : { agent: "dog-worker", parentID: "root" } }), messages: async () => ({ data: [] }),
+      } } as never });
+    await hooks["chat.message"]!({ sessionID: "root", agent: "dog-coordinator", messageID: "goal-user" }, {
+      message: { id: "goal-user", agent: "dog-coordinator", model: { providerID: "openai", modelID: "gpt-6-sol" } },
+      parts: [{ type: "text", text: "validate the linked worktree" }],
+    });
+    const prompt = [`task_id: ${taskID}`, "role: implementation", `project_root: ${linked}`, `handoff_path: ${handoff}`,
+      `source_manifest: [${linked}]`, `operation_manifest: ${manifest}`, "acceptance: candidate passes",
+      `validation: { level: targeted, command: ${formal}, diagnostics: [] }`, `goal_acceptance_fingerprint: sha256:${"a".repeat(64)}`,
+      "goal_criterion_id: candidate", "goal_target: candidate", "goal_entrypoint: fixture", "goal_workload: one unit",
+      "goal_oracle_coverage:\n  - acceptance", "goal_build_boundary: not-applicable", "goal_source: current protected source",
+      "goal_candidate: current protected candidate", "goal_source_binding: current-protected", "goal_candidate_binding: current-protected",
+      "goal_fixture: fixture", "goal_proof_scope: document-deliverable", "goal_expected_outcome: pass", "delivery_intent: implementation",
+      "usable_path_established: false", "controlled_change: false", "goal_budget_units: 2"].join("\n");
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: taskID }, { args: { subagent_type: "dog-worker", prompt } });
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: child, parentID: "root", directory: linked } } } });
+    await hooks["chat.message"]!({ sessionID: child, agent: "dog-worker", parentID: "root" } as never, {
+      message: { agent: "dog-worker", model: { providerID: "host", modelID: "selected" } }, parts: [{ type: "text", text: prompt }],
+    });
+    await inspectHandoffWithRead(hooks, handoff, child);
+    assert.equal((await executeBindWriteGate(hooks, linked, child, manifest)).status, "bound");
+    const testCall = { args: { command: "node --test" } };
+    await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: "linked-test" }, testCall);
+    assert.equal(testCall.args.command, "node --test");
+    await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: "linked-test", args: testCall.args },
+      { status: "cancelled", output: "not started", metadata: {} });
+    assert.equal(await readFile(join(linked, ".git"), "utf8"), marker);
+    assert.ok((await execFileAsync("git", ["-C", linked, "rev-parse", "--verify", "HEAD"])).stdout.trim());
   });
 });
 
@@ -5150,7 +5420,8 @@ test("validation admission-only failures do not consume no-progress and cannot e
         await writeFile(join(directory, "candidate.txt"), `candidate revision ${index}\n`);
         await hooks["tool.execute.before"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}` }, { args: { command } });
         await hooks["tool.execute.after"]!({ tool: "bash", sessionID: child, callID: `first-check-${index}`, args: { command } },
-          { output: index === 0 ? "failed" : "host execution unavailable", metadata: index === 0 ? { exit: 1 } : {} });
+          index === 0 ? { output: "failed", metadata: { exit: 1 } }
+            : { status: index === 1 ? "error" : "cancelled", output: "host execution unavailable", metadata: { exit: 0 } });
         if (index === 0) {
           // A settled nonzero exit now permits a fresh attempt. A later host failure or denial
           // must still preserve the earlier real failed check at the unit boundary.
@@ -5172,6 +5443,10 @@ test("validation admission-only failures do not consume no-progress and cannot e
     }
     const path = join(directory, ".git", "sortie-dogs", "run-flight", `${createHash("sha256").update("root").digest("hex")}.json`);
     const ledger = JSON.parse(await readFile(path, "utf8"));
+    const checks = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "validation.settled");
+    assert.deepEqual(checks.map(({ event }: { event: { outcome: string; exit_code: number | null } }) => [event.outcome, event.exit_code]),
+      [["failed", 1], ["interrupted", null], ["interrupted", null], ["cancelled", null]],
+      "host error or cancellation must not become PASS even if metadata contains zero");
     const settled = ledger.goal_events.filter(({ event }: { event: { kind: string } }) => event.kind === "unit.settled");
     assert.deepEqual(settled.map(({ event }: { event: { result_class: string } }) => event.result_class),
       ["acceptance", "process-defect", "process-defect", "process-defect", "process-defect"]);

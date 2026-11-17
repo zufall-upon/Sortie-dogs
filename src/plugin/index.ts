@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { GOAL_DECLARATION_FORMAT, GOAL_DELIVERY_INTENTS, GOAL_DELIVERY_MODES, GOAL_CRITERION_ENUMS, expandGoalDeclaration } from "../core/goal-declaration-format.js";
@@ -142,6 +142,7 @@ import { reviewerCorrectionValidationFresh } from "./mission-review.js";
 import { evidenceFromObservedExecution } from "../core/observed-goal-evidence.js";
 import { receiptBoundTerminalText } from "./receipt-presentation.js";
 import { operationInputSnapshot, protectedDockerSnapshot, protectedSnapshot, refreshProtectedSnapshot, validatedSourceSnapshot, validationInputSnapshot } from "./protected-snapshot.js";
+import { managedTestCommand, type ManagedTestCommand } from "./managed-test-command.js";
 import { isDockerContainerID, isDockerWorkspacePath, type DockerWorkspaceSnapshot } from "./docker-validation.js";
 import { settledUnitUsage } from "./unit-usage.js";
 import { goalCompletionReadiness, type CompletionReadiness } from "./goal-completion.js";
@@ -199,9 +200,12 @@ export interface OpenCodePluginInput {
   /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
   returnReportTransport?: "tool-result";
   /** Native background Job ownership, persisted by the V2 adapter. */
-  nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void> };
+  nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void>;
+    reconciliationError?(sessionID: string): unknown };
   /** V2 adapter can project and restore native session-scoped correction permissions. */
   reviewerCorrectionPermissions?: boolean;
+  /** Native host permission check for the original shell command before sharing an in-flight result. */
+  authorizeValidationJoin?: (input: { sessionID: string; agent?: string; command: string; directory: string }) => Promise<void>;
   /** The host SDK client. Absent in hosts that construct the plugin without one. */
   client?: SessionMessageReader & RunMetricsClient & ContinuationClient & OpenCodeModelAvailabilityClient & {
     app?: {
@@ -497,11 +501,25 @@ interface HostGoalExecution {
   readonly binding: NonNullable<GoalEvidence["protected_binding"]>;
   readonly source: string;
   readonly candidate: string;
+  /** Start binding is retained even if a finished registered check uses a narrower proof recipe. */
+  readonly admissionSource?: string;
+  readonly admissionCandidate?: string;
   readonly dockerWorkspace?: DockerWorkspaceSnapshot;
   readonly operationInputs?: string;
   readonly validationInputs?: string;
   readonly validationSource?: string;
   readonly validation?: { readonly ledger: RunFlightLedger; readonly request: ValidationBudgetRequest; readonly reservation: string };
+  /** Captured at the owner's actual admission, never reconstructed from current settings. */
+  readonly joinAuthority?: string;
+  readonly joinEnvironment?: string;
+  /** Informal test observation, never an acceptance-criterion proof. */
+  readonly managedTest?: Extract<ManagedTestCommand, { scope: "full" | "focused" }> &
+    { readonly environment: string; readonly equivalence: "unverified-external-inputs" };
+  /** Classification captured for the command that actually started, not reinterpreted after script changes. */
+  readonly testClassification?: ManagedTestCommand;
+  readonly testClassificationEnvironment?: string;
+  readonly goalIdentity?: { readonly id: string; readonly revision: number; readonly scopeEpoch: number };
+  readonly focusedRetries?: readonly string[];
   readonly reusedEvidence?: readonly GoalEvidence[];
   readonly correction?: { readonly taskID: string; readonly dispatchCallID: string; readonly commands: readonly string[]; readonly nativeWorker?: boolean };
   endedAt?: string;
@@ -615,6 +633,14 @@ function validationEnvironment(directory?: string, dockerWorkspace?: DockerWorks
     ...(directory ? { directory } : {}) };
 }
 
+/** Only foreground calls with known native options can share an execution. */
+function validationJoinOptions(args: Record<string, unknown>): { timeout: number | null } | undefined {
+  if (Object.keys(args).some(key => !["command", "workdir", "timeout", "description", "background"].includes(key)) ||
+      args.background !== undefined && args.background !== false ||
+      args.timeout !== undefined && (typeof args.timeout !== "number" || !Number.isFinite(args.timeout) || args.timeout <= 0)) return undefined;
+  return { timeout: typeof args.timeout === "number" ? args.timeout : null };
+}
+
 function dockerToolExitCode(output: TaskResultRepairOutput): number | null | undefined {
   const metadata = isRecord(output.metadata) ? output.metadata : undefined;
   const status = output.status ?? metadata?.status;
@@ -637,12 +663,50 @@ function validationCandidate(source: string, candidate: string): string {
   return goalFingerprint({ source, candidate });
 }
 
-function settledPassNoticeCommand(): string {
-  const script = 'process.stdout.write("SORTIE_VALIDATION_REUSED\\n")';
+function settledPassNoticeCommand(joined = false): string {
+  const script = `process.stdout.write("SORTIE_VALIDATION_${joined ? "JOINED" : "REUSED"}\\n")`;
   if (process.platform === "win32") {
     return `& '${process.execPath.replaceAll("'", "''")}' -e '${script}'`;
   }
   return `'${process.execPath.replaceAll("'", `'\\''`)}' -e '${script}'`;
+}
+
+/** Only turn an actual Node failure location into a runnable, project-local focused command. */
+async function nodeFailureRetries(output: unknown, directory: string, projectRouter = false): Promise<readonly string[]> {
+  if (typeof output !== "string" || output.length > 2_000_000) return [];
+  if (projectRouter) {
+    const retries = new Set<string>();
+    for (const line of output.split(/\r?\n/u)) {
+      if (!line.startsWith("SORTIE_FULL_FILE_OUTPUT ")) continue;
+      try {
+        const item: unknown = JSON.parse(line.slice("SORTIE_FULL_FILE_OUTPUT ".length));
+        if (!isRecord(item) || typeof item.path !== "string" || typeof item.line !== "string" ||
+            !/^\s*not ok \d+ - /u.test(item.line) || !/^test\/(?!windows\/)[\w@./-]+\.test\.ts$/u.test(item.path)) continue;
+        const command = `npm run test:targeted -- ${item.path}`;
+        const classification = await managedTestCommand(command, directory);
+        if (classification.scope === "focused" && classification.runner === "node-project-router") retries.add(command);
+        if (retries.size > 100) return [];
+      } catch { /* Ignore malformed, untrusted output, not the native failure itself. */ }
+    }
+    return [...retries];
+  }
+  const candidates = [
+    ...output.matchAll(/^\s*location:\s*['"]([^'"\r\n]+):\d+:\d+['"]\s*$/gmu),
+    ...output.matchAll(/^not ok \d+ - ([^\r\n]+\.test\.(?:[cm]?js|ts))\s*$/gmu),
+  ];
+  const retries = new Set<string>();
+  for (const match of candidates) {
+    const path = resolve(directory, match[1]!);
+    const local = relative(directory, path).replaceAll("\\", "/");
+    if (!/^[\w@./-]+\.test\.(?:[cm]?js|ts)$/u.test(local) || local.startsWith("../")) continue;
+    try {
+      const resolved = await realpath(path), relativeReal = relative(await realpath(directory), resolved);
+      if (relativeReal === ".." || relativeReal.startsWith(`..${sep}`) || isAbsolute(relativeReal) || !(await stat(resolved)).isFile()) continue;
+      retries.add(`node --test ${local}`);
+      if (retries.size > 100) return [];
+    } catch { /* A diagnostic location is not necessarily an accessible test file. */ }
+  }
+  return [...retries];
 }
 
 function proposeExperienceRoute(requestJson: string): string {
@@ -1584,6 +1648,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     callID: string | null }>();
   const goalReservationRecoveries = new Map<string, Promise<void>>();
   const hostGoalExecutions = new Map<string, HostGoalExecution>();
+  const hostGoalEndOperations = new Map<string, Promise<void>>();
+  const validationJoinWaiters = new Map<string, { sessionID: string; controller: AbortController }>();
   const settledPassNotices = new Map<string, { readonly sessionID: string; readonly command: string }>();
   const goalValidationDefects = new Set<string>();
   const goalDeclarationAuthority = new Map<string, string>();
@@ -1831,6 +1897,211 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     scheduledGoalRecoveries.set(sessionID, operation);
   }
 
+  async function classifyAuthorizedTest(authorization: SessionAuthorization, directory: string,
+    command: string): Promise<ManagedTestCommand | undefined> {
+    const coversDirectory = authorization.readScopes.some(scope => {
+      const path = relative(scope, directory);
+      return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+    });
+    const localDirectory = relative(authorization.projectRoot, directory);
+    if (!coversDirectory || localDirectory === ".." || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) return undefined;
+    if (/^(?:npm|pnpm|yarn)\s/u.test(command)) {
+      // Do not read a package through a directory symlink outside the admitted project/read scopes.
+      const actual = await realpath(directory).catch(() => undefined);
+      const project = await realpath(authorization.projectRoot).catch(() => undefined);
+      const scopes = await Promise.all(authorization.readScopes.map(scope => realpath(scope).catch(() => undefined)));
+      const contains = (parent: string, child: string) => {
+        const path = relative(parent, child);
+        return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+      };
+      if (!actual || !project || !contains(project, actual) || !scopes.some(scope => scope && contains(scope, actual))) return undefined;
+    }
+    return managedTestCommand(command, directory);
+  }
+
+  // Only definitive absence in the admitted project/read scopes makes a literal retry
+  // unavailable. Inaccessible or out-of-scope paths are not proof of absence.
+  async function missingLiteralSelection(authorization: SessionAuthorization, directory: string,
+    selection: readonly string[] | undefined): Promise<boolean> {
+    if (!selection?.length) return false;
+    const root = await realpath(authorization.projectRoot).catch(() => undefined);
+    const cwd = await realpath(directory).catch(() => undefined);
+    const scopes = await Promise.all(authorization.readScopes.map(scope => realpath(scope).catch(() => undefined)));
+    if (!root || !cwd) return false;
+    const contains = (parent: string, child: string) => {
+      const path = relative(parent, child);
+      return path === "" || path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+    };
+    for (const name of selection) {
+      const parts = name.split(/[\\/]/u).filter(part => part && part !== ".");
+      let component = false, embeddedParent = false;
+      for (const part of parts) {
+        if (part === ".." && component) embeddedParent = true;
+        if (part !== "..") component = true;
+      }
+      let target = resolve(cwd, name);
+      if (embeddedParent) {
+        // Check the original path before collapsing an embedded '..': a symlink
+        // can make lexical normalization describe a different file.
+        if (isAbsolute(name)) continue;
+        let parent = cwd, safe = true;
+        for (const part of parts.slice(0, -1)) {
+          parent = part === ".." ? dirname(parent) : join(parent, part);
+          if (!contains(root, parent) || !scopes.some(scope => scope && contains(scope, parent))) { safe = false; break; }
+          if (part !== "..") {
+            const metadata = await lstat(parent).catch(() => undefined);
+            if (!metadata?.isDirectory() || metadata.isSymbolicLink()) { safe = false; break; }
+          }
+        }
+        if (!safe) continue;
+        target = join(parent, parts.at(-1)!);
+      }
+      for (let links = 0; links <= 40; links++) {
+        if (!contains(root, target) || !scopes.some(scope => scope && contains(scope, target))) break;
+        const parts = relative(root, target).split(sep).filter(Boolean);
+        let path = root, followed = false;
+        for (const [index, part] of parts.entries()) {
+          path = join(path, part);
+          try {
+            const metadata = await lstat(path);
+            if (metadata.isSymbolicLink()) {
+              let actual: string | undefined;
+              try { actual = await realpath(path); }
+              catch (error) {
+                if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) break;
+                const link = await readlink(path).catch(() => undefined);
+                if (link === undefined) break;
+                // Resolving an embedded parent lexically can skip an intervening symlink
+                // or non-directory. Leave that ambiguous case on the conservative path.
+                const linkParts = link.split(process.platform === "win32" ? /[\\/]/u : /\//u).filter(part => part && part !== ".");
+                let component = false, embeddedParent = false;
+                for (const part of linkParts) {
+                  if (part === ".." && component) embeddedParent = true;
+                  if (part !== "..") component = true;
+                }
+                if (embeddedParent) break;
+                actual = resolve(dirname(path), link);
+              }
+              if (!actual) break;
+              target = resolve(actual, ...parts.slice(index + 1));
+              followed = true;
+              break;
+            }
+            if (index < parts.length - 1 && !metadata.isDirectory()) return true;
+          } catch (error) {
+            if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return true;
+            break;
+          }
+        }
+        if (!followed) break;
+      }
+    }
+    return false;
+  }
+
+  async function recordManagedTestStart(toolInput: ToolExecuteBeforeInput, args: Record<string, unknown>,
+    authorization: SessionAuthorization, root: string, directory: string, command: string): Promise<void> {
+    // Only ordinary Mission shells with a live, project-wide read binding are managed.
+    if (!["bash", "shell"].includes(toolInput.tool) ||
+        activeSessions.get(toolInput.sessionID)?.parallel === "valid" ||
+        activeSessions.get(toolInput.sessionID)?.released || activeSessionStatus(toolInput.sessionID) !== "active" ||
+        authorization.expiresAt <= Date.now() ||
+        await input.runtimeBridge?.allowsInvestigativeShell?.(toolInput.sessionID) !== true ||
+        Object.keys(args).some(key => !["command", "workdir", "timeout", "description"].includes(key))) return;
+    const classification = await classifyAuthorizedTest(authorization, directory, command);
+    if (!classification) return;
+    if (classification.scope === "unknown") {
+      appLogInfo("managed-test.unresolved", toolInput.sessionID, { reason: classification.reason });
+      return;
+    }
+    const ledger = await goalLedger(root), initial = await ledger.readGoal(), goal = initial.state;
+    if (goal.goal_id === null || goal.phase !== "active" ||
+        !goal.outstanding_reservations.some(item => item.unit_id === authorization.taskID && item.session_id === root) ||
+        goal.acceptance_contract?.criteria.some(criterion => criterion.proof_scope === "requested-full" &&
+          goalValidationCommand(goal, criterion) === command)) return;
+    // Observe only commands admitted by the original write gate. Native shell permissions
+    // still apply to the unchanged command at its actual execution.
+    const admittedGate = await authorizedGate(toolInput.sessionID);
+    if (!admittedGate || admittedGate !== authorization.gate) return;
+    await admittedGate.check(toolInput, { args }, { investigativeShell: true,
+      assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
+    const snapshot = await protectedSnapshot(authorization, { directory, command }).catch(() => undefined);
+    if (!snapshot?.binding.freshness || sessionAuthorizations.get(toolInput.sessionID) !== authorization ||
+        authorization.suspended || authorization.gate !== admittedGate || authorization.expiresAt <= Date.now()) return;
+    if (classification.scope === "full") {
+      // A real, same-Mission failure is a reason to focus, not a reusable PASS. A later
+      // native focused success clears it only for the actual current candidate. Required
+      // declared occurrences never enter this undeclared-command path.
+      const unresolved = new Map<string, { endedAt: string; identity: string }>();
+      const executions = [...hostGoalExecutions.values()].filter(execution => execution.endedAt !== undefined)
+        .sort((left, right) => left.endedAt!.localeCompare(right.endedAt!));
+      for (const execution of executions) {
+        if (execution.root !== root || execution.sessionID !== toolInput.sessionID || execution.directory !== directory ||
+            execution.goalIdentity?.id !== goal.goal_id || execution.goalIdentity.revision !== goal.revision ||
+            execution.goalIdentity.scopeEpoch !== goal.scope_epoch || execution.endedAt === undefined || execution.fresh !== true) continue;
+        const prior = execution.managedTest ?? execution.testClassification;
+        if (!prior || prior.scope === "unknown" || prior.runner !== classification.runner) continue;
+        if (classification.runner === "node-project-router" && (prior.suiteKey !== classification.suiteKey ||
+            (execution.managedTest?.environment ?? execution.testClassificationEnvironment) !== goalFingerprint(process.env))) continue;
+        const focused = prior.scope === "focused" ? [execution.command[0]!] : execution.focusedRetries ?? [];
+        if (execution.outcome === "fail" && typeof execution.exitCode === "number" && execution.exitCode !== 0) {
+          for (const command of focused) {
+            const focus = prior.scope === "focused" ? prior : await managedTestCommand(command, directory);
+            if (focus.scope === "focused" && focus.identity && (classification.runner !== "node-project-router" ||
+                focus.suiteKey === classification.suiteKey)) unresolved.set(command, { endedAt: execution.endedAt!, identity: focus.identity });
+          }
+        } else if (prior.scope === "focused" && execution.outcome === "pass" && execution.exitCode === 0 && execution.fresh &&
+            (execution.admissionSource ?? execution.source) === snapshot.source &&
+            (execution.admissionCandidate ?? execution.candidate) === snapshot.candidate &&
+            (!execution.managedTest || execution.managedTest.environment === goalFingerprint(process.env))) {
+          for (const command of focused) {
+            const failure = unresolved.get(command);
+            if (failure !== undefined && execution.startedAt > failure.endedAt && prior.identity === failure.identity) unresolved.delete(command);
+          }
+        }
+      }
+      let focused: string | undefined;
+      for (const [command, failure] of unresolved) {
+        const current = await classifyAuthorizedTest(authorization, directory, command);
+        if (current?.scope === "focused" && current.identity === failure.identity &&
+            !await missingLiteralSelection(authorization, directory, current.selection) &&
+            (classification.runner !== "node-project-router" || current.suiteKey === classification.suiteKey)) { focused = command; break; }
+        appLogInfo("managed-test.focus-unavailable", toolInput.sessionID, { reason: "focused-command-changed-or-unresolved" });
+      }
+      if (focused !== undefined) {
+        const current = (await ledger.readGoal()).state;
+        const currentFull = classification.runner === "node-project-router"
+          ? await classifyAuthorizedTest(authorization, directory, command) : classification;
+        if (current.goal_id !== goal.goal_id || current.revision !== goal.revision || current.scope_epoch !== goal.scope_epoch ||
+            current.phase !== "active" || sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended ||
+            authorization.expiresAt <= Date.now() || currentFull?.scope !== "full" || currentFull.identity !== classification.identity) return;
+        throw new Error(`SORTIE_FULL_TEST_DEFERRED: a native test failed; run the focused check first: ${focused}. ` +
+          "The full test was not run or passed. A required full check must be formally registered.");
+      }
+    }
+    const environment = goalFingerprint(process.env);
+    const binding = snapshot.binding;
+    // An undeclared test can read services, global dependencies, runtime-control paths or
+    // other unbound inputs. A project snapshot and a runner name cannot prove equivalence
+    // or authorize skipping a requested occurrence. Record the native run, never replace
+    // it with a JOIN/reuse notice. Declared validation keeps its separate opt-in contract.
+    const request: ValidationBudgetRequest = { run_id: goal.goal_id, operation_id: toolInput.callID,
+      source_snapshot: snapshot.source, candidate: validationCandidate(snapshot.source, snapshot.candidate),
+      command: [command], environment: validationEnvironment(directory),
+      scope: "related", owner: "worker", expected_evidence: ["managed-test-observation"],
+      marginal_value: { unmet_criteria: [], risk_hypothesis: "unfiltered test: external inputs and execution obligations unverified" },
+      reason: "preflight", required_execution: { admission: authorization.dispatchCallID ?? authorization.taskID, call_id: toolInput.callID } };
+    const limit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1, goal.validation_budget.limit ?? 0);
+    const reservation = await ledger.reserveValidation(request, limit);
+    if (reservation.decision !== "ALLOW" || !reservation.reservation_id) return;
+    hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot, sessionID: toolInput.sessionID,
+      callID: toolInput.callID, tool: toolInput.tool, command: [command], directory, startedAt: new Date().toISOString(),
+      binding, source: snapshot.source, candidate: snapshot.candidate, owner: "worker",
+      validation: { ledger, request, reservation: reservation.reservation_id },
+      goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch },
+      managedTest: { ...classification, environment, equivalence: "unverified-external-inputs" } });
+  }
+
   async function recordHostGoalStart(toolInput: ToolExecuteBeforeInput, output: ToolExecuteBeforeOutput): Promise<void> {
     const direct = await input.runtimeBridge?.directMissionExecution?.(toolInput.sessionID);
     if (toolInput.tool === "task" || isCoordinatorSession(toolInput.sessionID) && !direct || parallelChildBindings.has(toolInput.sessionID)) return;
@@ -1856,6 +2127,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     // recipe at actual native start; never retrofit it to older external-cwd history.
     const members = correcting ? await input.runtimeBridge?.reviewerCorrectionValidationMembers?.(toolInput.sessionID, rawCommand, directory)
       : canonicalDeclaredValidationMembers(rawCommand, authorization.validationCommands);
+    if (!direct && !reviewerCorrection && !members && !authorization.validationCommands.has(rawCommand)) {
+      await recordManagedTestStart(toolInput, args!, authorization, goalRoot(owner), directory, rawCommand);
+      return;
+    }
     if (correcting && !members) return;
     if (members && await input.runtimeBridge?.missionValidationDirectoryMatches?.(owner, authorization.taskID,
         toolInput.sessionID, members, directory) === false) return;
@@ -1896,6 +2171,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const goalSnapshot = await ledger.readGoal(), goal = goalSnapshot.state;
     let validation: HostGoalExecution["validation"];
     let reusedEvidence: readonly GoalEvidence[] | undefined;
+    let joinAuthority: string | undefined, joinEnvironment: string | undefined;
     const unitID = authorization.taskID;
     const repairResume = operatorContractRepairResumes.get(root);
     const criteria = goal.acceptance_contract?.criteria.filter((criterion) =>
@@ -1951,6 +2227,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           entry.execution.command.length === 1 && entry.execution.command[0] === rawCommand)
         .map(entry => ({ ...entry, execution: { ...entry.execution, units: [unitID] } }));
       const live = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
+        execution.managedTest === undefined &&
         execution.sessionID === toolInput.sessionID && (execution.directory === directory || dockerWorkspace !== undefined &&
           execution.dockerWorkspace?.container_id === dockerWorkspace.container_id && execution.dockerWorkspace.cwd === dockerWorkspace.cwd) &&
         execution.endedAt !== undefined && execution.exitCode === 0 &&
@@ -1976,19 +2253,75 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         const continued = { ...request, operation_id: retained[0]!.operation_id };
         validation = { ledger, request: continued, reservation: retained[0]!.reservation_id };
       } else {
-        let reservation: Awaited<ReturnType<RunFlightLedger["reserveValidation"]>>;
+        let reservation: Awaited<ReturnType<RunFlightLedger["reserveJoinableValidation"]>>;
+        const environment = goalFingerprint(process.env);
         try {
           // A changed candidate produces a new evidence key and must not become a user-facing blocker
           // merely because earlier necessary validations consumed the initial estimate. Duplicate
           // evidence remains denied by reserveValidation before this limit is considered.
           const validationLimit = Math.max(goal.budget?.max_units ?? 1, goal.validation_budget.consumed + 1);
-          reservation = repairResume?.retryAuthorization === null || repairResume === undefined
-            ? await ledger.reserveValidation(request, validationLimit, skipReconciliation)
-            : await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation);
+          const mode = validationJoinOptions(args!);
+          const joinable = input.authorizeValidationJoin !== undefined && !dockerRequest && !requiredExecution && mode !== undefined &&
+            snapshot.binding.freshness !== undefined && ["bash", "shell"].includes(toolInput.tool) &&
+            !/[;&|\n\r`$<>]/u.test(rawCommand) && (repairResume === undefined || repairResume.retryAuthorization === null);
+          const binding = snapshot.binding;
+          const authority = joinable ? goalFingerprint({ projectRoot: authorization.projectRoot,
+            readScopes: authorization.readScopes, writeScopes: authorization.writeScopes,
+            source_policy: binding.source_policy, candidate_policy: binding.candidate_policy,
+            source_paths: binding.source_paths, candidate_paths: binding.candidate_paths, freshness: binding.freshness,
+            tool: toolInput.tool, environment, mode }) : undefined;
+          reservation = repairResume?.retryAuthorization !== null && repairResume !== undefined
+            ? await ledger.reserveInterruptedValidationRetry(request, validationLimit, repairResume.retryAuthorization, skipReconciliation)
+            : authority ? await ledger.reserveJoinableValidation(request, validationLimit, authority, skipReconciliation)
+              : await ledger.reserveValidation(request, validationLimit, skipReconciliation);
+          if (reservation.decision === "ALLOW" && authority) { joinAuthority = authority; joinEnvironment = environment; }
         } catch (error) {
           throw denyValidation(`authority-unavailable:${error instanceof Error ? error.name : "unknown"}`);
         }
-        if (reservation.decision === "SKIP") {
+        if (reservation.decision === "JOIN") {
+          // This is not an execution by the waiter. The host must first authorize the
+          // original command, then observe the owner's native terminal and fresh proof.
+          const controller = new AbortController();
+          const abort = () => controller.abort();
+          toolInput.signal?.addEventListener("abort", abort, { once: true });
+          if (toolInput.signal?.aborted) controller.abort();
+          validationJoinWaiters.set(toolInput.callID, { sessionID: toolInput.sessionID, controller });
+          let terminal: Awaited<ReturnType<RunFlightLedger["waitForJoinedValidation"]>>;
+          const wait = async () => {
+            await input.authorizeValidationJoin!({ sessionID: toolInput.sessionID, agent: toolInput.agent,
+              command: rawCommand, directory });
+            return ledger.waitForJoinedValidation(reservation.owner_reservation_id,
+              { signal: controller.signal, timeoutMs: 30 * 60_000 });
+          };
+          try { terminal = toolInput.yieldValidationJoin ? await toolInput.yieldValidationJoin(wait) : await wait(); }
+          finally {
+            validationJoinWaiters.delete(toolInput.callID);
+            toolInput.signal?.removeEventListener("abort", abort);
+          }
+          await hostGoalEndOperations.get(terminal.operation_id);
+          const execution = hostGoalExecutions.get(terminal.operation_id);
+          const now = (await ledger.readGoal()).state;
+          const currentSnapshot = await refreshProtectedSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined);
+          if (terminal.outcome !== "passed" || terminal.exit_code !== 0 || !execution || execution.root !== root ||
+              execution.validation?.reservation !== reservation.owner_reservation_id || execution.outcome !== "pass" ||
+              execution.exitCode !== 0 || execution.endedAt === undefined || execution.immutableRef === undefined || execution.fresh !== true ||
+              (execution.admissionSource ?? execution.source) !== snapshot.source ||
+              (execution.admissionCandidate ?? execution.candidate) !== snapshot.candidate ||
+              currentSnapshot?.source !== snapshot.source || currentSnapshot.candidate !== snapshot.candidate ||
+              now.goal_id !== goal.goal_id || now.revision !== goal.revision || now.scope_epoch !== goal.scope_epoch ||
+              goalFingerprint(process.env) !== environment ||
+              sessionAuthorizations.get(toolInput.sessionID) !== authorization || authorization.suspended || authorization.expiresAt <= Date.now() ||
+              controller.signal.aborted) {
+            throw denyValidation(`joined-owner-${terminal.outcome}: native proof unavailable or stale`);
+          }
+          reusedEvidence = observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt,
+            immutableRef: execution.immutableRef, exitCode: 0, outcome: "pass", fresh: true }, now, unitID)
+            .filter(entry => validGoalEvidence(entry, now) && entry.execution.units.includes(unitID));
+          if (!reusedEvidence.length) throw denyValidation("joined-owner-evidence-unavailable");
+          const notice = settledPassNoticeCommand(true);
+          args!.command = notice;
+          settledPassNotices.set(toolInput.callID, { sessionID: toolInput.sessionID, command: notice });
+        } else if (reservation.decision === "SKIP") {
           reusedEvidence = reconciliationEvidence;
           const notice = dockerRequest ? "true" : settledPassNoticeCommand();
           args!.command = notice;
@@ -2007,33 +2340,121 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       ? await validationInputSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
     const validationSource = correction && validationInputs !== undefined
       ? await validatedSourceSnapshot(authorization.projectRoot, snapshot.binding).catch(() => undefined) : undefined;
+    const testClassification = !dockerWorkspace && ["bash", "shell"].includes(toolInput.tool)
+      ? await classifyAuthorizedTest(authorization, directory, rawCommand) : undefined;
     hostGoalExecutions.set(toolInput.callID, { root, projectRoot: authorization.projectRoot,
       sessionID: toolInput.sessionID,
       callID: toolInput.callID, tool: toolInput.tool, command: [rawCommand], directory, startedAt: new Date().toISOString(),
       binding: snapshot.binding, source: snapshot.source, candidate: snapshot.candidate,
+      ...(goal.goal_id === null ? {} : { goalIdentity: { id: goal.goal_id, revision: goal.revision, scopeEpoch: goal.scope_epoch } }),
+      ...(testClassification === undefined ? {} : { testClassification, testClassificationEnvironment: goalFingerprint(process.env) }),
+      admissionSource: snapshot.source, admissionCandidate: snapshot.candidate,
       ...(dockerWorkspace === undefined ? {} : { dockerWorkspace }),
       ...(operationInputs === undefined ? {} : { operationInputs }),
       ...(validationInputs === undefined ? {} : { validationInputs }),
       ...(validationSource === undefined ? {} : { validationSource }),
       owner: validation?.request.owner ?? "worker", validation,
+      ...(joinAuthority && joinEnvironment ? { joinAuthority, joinEnvironment } : {}),
       ...(correction ? { correction } : {}),
       ...(reusedEvidence === undefined ? {} : { reusedEvidence }) });
   }
 
+  /** A controller can await the running Worker's exact registered check, without becoming a writer. */
+  async function joinMissionValidation(root: string, actor: string, agent: string | undefined, callID: string,
+    owner: { child: string; taskID: string; dispatchCallID: string }, signal?: AbortSignal) {
+    if (!input.authorizeValidationJoin || !callID || actor === owner.child) return undefined;
+    const authorization = sessionAuthorizations.get(owner.child);
+    if (!authorization || authorization.rootSessionID !== root || authorization.taskID !== owner.taskID ||
+        authorization.dispatchCallID !== owner.dispatchCallID || authorization.suspended || authorization.expiresAt <= Date.now() ||
+        activeSessionStatus(owner.child) !== "active") return undefined;
+    const candidates = [...hostGoalExecutions.values()].filter(execution => execution.root === root &&
+      execution.sessionID === owner.child && execution.endedAt === undefined && execution.correction?.nativeWorker === true &&
+      execution.correction.taskID === owner.taskID && execution.correction.dispatchCallID === owner.dispatchCallID &&
+      execution.validation && !execution.validation.request.required_execution && execution.joinAuthority && execution.joinEnvironment);
+    if (candidates.length !== 1) return undefined;
+    const execution = candidates[0]!, validation = execution.validation!, authority = execution.joinAuthority!;
+    const environment = execution.joinEnvironment!, ledger = validation.ledger;
+    const current = async () => {
+      if (goalFingerprint(process.env) !== environment || sessionAuthorizations.get(owner.child) !== authorization ||
+          authorization.suspended || authorization.expiresAt <= Date.now()) return false;
+      const snapshot = await refreshProtectedSnapshot(authorization.projectRoot, execution.binding).catch(() => undefined);
+      const goal = (await ledger.readGoal()).state;
+      return snapshot?.source === (execution.admissionSource ?? execution.source) &&
+        snapshot.candidate === (execution.admissionCandidate ?? execution.candidate) &&
+        goal.goal_id === execution.goalIdentity?.id && goal.revision === execution.goalIdentity.revision &&
+        goal.scope_epoch === execution.goalIdentity.scopeEpoch && goal.phase === "active";
+    };
+    if (!await current()) return undefined;
+    const controller = new AbortController(), abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    validationJoinWaiters.set(callID, { sessionID: actor, controller });
+    try {
+      await input.authorizeValidationJoin({ sessionID: actor, agent, command: execution.command[0]!, directory: execution.directory });
+      if (controller.signal.aborted) throw new Error("Validation waiter cancelled.");
+      if (!await current()) return undefined;
+      const request = { ...validation.request, operation_id: callID };
+      if (!await ledger.joinActiveValidation(request, validation.reservation, authority)) return undefined;
+      const terminal = await ledger.waitForJoinedValidation(validation.reservation, { signal: controller.signal, timeoutMs: 30 * 60_000 });
+      await hostGoalEndOperations.get(terminal.operation_id);
+      const observed = hostGoalExecutions.get(terminal.operation_id);
+      if (terminal.operation_id !== execution.callID || !observed || observed.validation?.reservation !== validation.reservation) {
+        throw new Error("SORTIE_VALIDATION_JOINED_OWNER_UNAVAILABLE");
+      }
+      if (terminal.outcome !== "passed" || terminal.exit_code !== 0) return { owner_session_id: owner.child,
+        owner_call_id: execution.callID, command: execution.command[0]!, outcome: terminal.outcome,
+        exit_code: terminal.exit_code, evidence_ids: [] };
+      if (!await current() || controller.signal.aborted || observed.outcome !== "pass" || observed.exitCode !== 0 ||
+          observed.endedAt === undefined || observed.immutableRef === undefined || observed.fresh !== true) {
+        throw new Error("SORTIE_VALIDATION_JOINED_OWNER_STALE");
+      }
+      const goal = (await ledger.readGoal()).state;
+      const evidence = observedHostGoalEvidence({ ...observed, endedAt: observed.endedAt, immutableRef: observed.immutableRef,
+        exitCode: 0, outcome: "pass", fresh: true }, goal, owner.taskID).filter(item => validGoalEvidence(item, goal));
+      if (!evidence.length) throw new Error("SORTIE_VALIDATION_JOINED_OWNER_EVIDENCE_UNAVAILABLE");
+      return { owner_session_id: owner.child, owner_call_id: execution.callID, command: execution.command[0]!,
+        outcome: terminal.outcome, exit_code: terminal.exit_code, evidence_ids: evidence.map(item => item.evidence_id) };
+    } finally {
+      validationJoinWaiters.delete(callID);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
   async function recordHostGoalEnd(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
+    timing?: HostToolTiming): Promise<void> {
+    const callID = toolInput.callID;
+    if (callID === undefined) return;
+    const pending = hostGoalEndOperations.get(callID);
+    if (pending !== undefined) return await pending;
+    const operation = recordHostGoalEndOnce(toolInput, output, timing);
+    hostGoalEndOperations.set(callID, operation);
+    try { await operation; } finally {
+      if (hostGoalEndOperations.get(callID) === operation) hostGoalEndOperations.delete(callID);
+    }
+  }
+
+  async function recordHostGoalEndOnce(toolInput: TaskToolExecuteAfterInput, output: TaskResultRepairOutput,
     timing?: HostToolTiming): Promise<void> {
     const execution = hostGoalExecutions.get(toolInput.callID ?? "");
     if (execution === undefined || execution.endedAt !== undefined) return;
     const metadata = isRecord(output.metadata) ? output.metadata : undefined;
     const rawExit = metadata?.exit;
-    const exitCode = execution.dockerWorkspace ? dockerToolExitCode(output)
+    const reportedExit = execution.dockerWorkspace ? dockerToolExitCode(output)
       : typeof rawExit === "number" && Number.isSafeInteger(rawExit) ? rawExit : undefined;
-    const rawStatus = metadata?.status ?? output.status;
-    const outcome = exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip" : exitCode !== undefined ? "fail"
-      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancel" : undefined;
-    const validationOutcome: ValidationOutcome = exitCode === 0 ? "passed" : exitCode !== undefined ? "failed"
-      : rawStatus === "cancel" || rawStatus === "cancelled" ? "cancelled" : "interrupted";
-    if (execution.validation !== undefined) {
+    const statuses = [metadata?.status, output.status].filter((value): value is string => typeof value === "string")
+      .map(value => value.toLowerCase());
+    const cancelled = statuses.some(value => ["cancel", "cancelled", "canceled"].includes(value));
+    const timedOut = statuses.some(value => ["timeout", "timed-out"].includes(value));
+    const interrupted = statuses.some(value => ["interrupted", "aborted"].includes(value));
+    const badStatus = cancelled || timedOut || interrupted || statuses.some(value => ["error", "failed"].includes(value));
+    // An unknown Docker exit is not a failed exit, and a zero attached to an error or
+    // cancellation is contradictory metadata, not proof that the command passed.
+    const exitCode = typeof reportedExit === "number" && !(reportedExit === 0 && badStatus) ? reportedExit : undefined;
+    const outcome = cancelled ? "cancel" : exitCode === 0 ? execution.reusedEvidence === undefined ? "pass" : "skip"
+      : exitCode !== undefined ? "fail" : undefined;
+    const validationOutcome: ValidationOutcome = cancelled ? "cancelled" : timedOut ? "timeout" : interrupted ? "interrupted"
+      : exitCode === 0 ? "passed" : exitCode !== undefined ? "failed" : "interrupted";
+    if (execution.validation !== undefined && execution.managedTest === undefined) {
       const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
         Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start
         ? Math.round(timing.end - timing.start) : undefined;
@@ -2055,6 +2476,17 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         : execution.validationInputs !== undefined
           ? await validationInputSnapshot(execution.projectRoot, execution.binding).catch(() => undefined) === execution.validationInputs
           : refreshed.source === execution.source);
+    const managedFresh = execution.managedTest === undefined || refreshed !== undefined &&
+      refreshed.source === execution.source && refreshed.candidate === execution.candidate &&
+      goalFingerprint(process.env) === execution.managedTest.environment;
+    if (execution.validation !== undefined && execution.managedTest !== undefined) {
+      const duration = typeof timing?.start === "number" && typeof timing.end === "number" &&
+        Number.isFinite(timing.start) && Number.isFinite(timing.end) && timing.end >= timing.start
+        ? Math.round(timing.end - timing.start) : undefined;
+      await execution.validation.ledger.settleValidation(execution.validation.reservation, execution.validation.request,
+        validationOutcome === "passed" && !managedFresh ? "interrupted" : validationOutcome,
+        validationOutcome === "passed" && !managedFresh ? null : exitCode ?? null, duration);
+    }
     const immutableRef = outcome === undefined || execution.reusedEvidence !== undefined ? undefined : goalFingerprint({ root: execution.root,
       child_session_id: execution.sessionID, call_id: execution.callID, command: execution.command, directory: execution.directory,
       started_at: observedStartedAt, ended_at: endedAt, exit_code: exitCode ?? null, outcome,
@@ -2066,11 +2498,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const validationBinding = execution.correction && fresh && !generated && execution.validationSource !== undefined
       ? { ...execution.binding, validation_policy: "inputs-and-concrete-outputs-v1" as const } : undefined;
     const validatedSource = validationBinding && await validatedSourceSnapshot(execution.projectRoot, validationBinding).catch(() => undefined);
-    const proofFresh = fresh && (!validationBinding || validatedSource === execution.validationSource);
+    const joinFresh = execution.joinEnvironment === undefined || goalFingerprint(process.env) === execution.joinEnvironment;
+    const proofFresh = fresh && managedFresh && joinFresh && (!validationBinding || validatedSource === execution.validationSource);
     const observed = proofFresh && validatedSource && validationBinding
       ? { binding: validationBinding, source: validatedSource, candidate: validatedSource } : refreshed;
+    const focusedRetries = outcome === "fail" && execution.managedTest?.scope === "full" &&
+      (execution.managedTest.runner === "node" || execution.managedTest.runner === "node-project-router")
+      ? await nodeFailureRetries(output.output, execution.directory, execution.managedTest.runner === "node-project-router") : [];
     hostGoalExecutions.set(execution.callID, { ...execution,
       ...observed,
+      ...(focusedRetries.length === 0 ? {} : { focusedRetries }),
       startedAt: observedStartedAt, endedAt, exitCode: exitCode ?? null,
       ...(outcome === undefined ? {} : { outcome }), ...(immutableRef === undefined ? {} : { immutableRef }), fresh: proofFresh });
     if (execution.correction) {
@@ -2954,6 +3391,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const childSessionID = taskChildSessionID(output);
     const observedEvidence = [...hostGoalExecutions.values()]
       .filter((execution) => childSessionID !== undefined && execution.sessionID === childSessionID &&
+        execution.managedTest === undefined &&
         execution.root === reservation.root && execution.endedAt !== undefined &&
         execution.startedAt.length > 0 && Date.parse(execution.startedAt) >= reservation.started - 1000 &&
         execution.fresh === true && (execution.reusedEvidence !== undefined
@@ -3157,7 +3595,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     const prior = snapshot.records.map(record => record.event).find(event => event.kind === "unit.evidence-reconciled" && event.previous_receipt_id === defect.receipt_id);
     const savedBinding = prior?.kind === "unit.evidence-reconciled" ? prior.evidence[0]?.protected_binding :
       [...hostGoalExecutions.values()].find(execution => execution.root === root && execution.sessionID === request.childSessionID &&
-        execution.endedAt !== undefined && execution.fresh === true)?.binding;
+        execution.managedTest === undefined && execution.endedAt !== undefined && execution.fresh === true)?.binding;
     const projectRoot = request.projectRoot ?? input.directory;
     const refreshedBinding = savedBinding && await refreshProtectedSnapshot(projectRoot, savedBinding);
     // Historical admissions without a saved recipe must retain the old full manifest/path recipe.
@@ -3172,7 +3610,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       return prior.evidence;
     }
     const liveEvidence = [...hostGoalExecutions.values()]
-      .filter(execution => execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
+      .filter(execution => execution.managedTest === undefined && execution.root === root && execution.sessionID === request.childSessionID && execution.endedAt !== undefined &&
         execution.exitCode === 0 && execution.outcome === "pass" && execution.immutableRef !== undefined && execution.fresh === true &&
         execution.source === current.source && execution.candidate === current.candidate)
       .flatMap(execution => observedHostGoalEvidence({ ...execution, endedAt: execution.endedAt!, exitCode: 0,
@@ -6228,6 +6666,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function expireSession(sessionID: string): void {
+    for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === sessionID) waiter.controller.abort();
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     activeSessions.delete(sessionID);
     sessionOperationMetrics.delete(sessionID);
@@ -6250,6 +6689,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   }
 
   function evictSession(sessionID: string): void {
+    for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === sessionID) waiter.controller.abort();
     pendingDirectReleases.delete(sessionID);
     for (const key of inspectionOperations.keys()) if (key.startsWith(`${sessionID}\u0000`)) inspectionOperations.delete(key);
     goalValidationDefects.delete(sessionID);
@@ -8212,6 +8652,12 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             assertWritePaths: paths => input.runtimeBridge?.assertMissionWrite?.(toolInput.sessionID, paths) ?? Promise.resolve() });
       } catch (error) {
         activeState?.inFlightCalls.delete(toolInput.callID);
+        const managed = hostGoalExecutions.get(toolInput.callID);
+        if (managed?.managedTest && managed.endedAt === undefined) {
+          // Admission precedes the normal gate. If that later gate rejects the original
+          // call, settle the reservation as interrupted rather than leaving a phantom owner.
+          await recordHostGoalEnd(toolInput, { status: "error", output: "Native admission did not start." });
+        }
         if (error instanceof WriteDeniedError) goalValidationDefects.add(toolInput.sessionID);
         if (!(error instanceof WriteDeniedError) || error.reason === "repeated-denial") throw error;
         const signature = denialSignature(toolInput, output, error.reason, sessionAuthorizations.get(toolInput.sessionID));
@@ -8349,6 +8795,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         return;
       }
       touchCoordinatorTaskWatchdog(eventSessionID);
+      if (event.type === "session.interrupted") {
+        for (const waiter of validationJoinWaiters.values()) if (waiter.sessionID === eventSessionID) waiter.controller.abort();
+        return;
+      }
       if (event.type === "session.deleted") {
         fastLane.forget(eventSessionID);
         if (reflectionStore !== undefined && reflectionConfiguration?.layers.run && reflectionOwnedRoots.has(eventSessionID)) {
@@ -8853,14 +9303,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     currentBudget: async (root, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
-      // Planning must account for terminal native Tasks before reserving new units.
-      // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
-      await recoverCompletedGoalReservations(root);
-      // Terminal proof/Review only needs lifecycle recovery, not duplicate pricing history reads.
-      if (options?.reconcileUsage !== false) await reconcileUnitUsage(root);
-      const state = await currentGoal(root);
+      if (!options?.diagnosticOnly) {
+        // Planning must account for terminal native Tasks before reserving new units.
+        // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
+        await recoverCompletedGoalReservations(root);
+        // Terminal proof/Review only needs lifecycle recovery, not duplicate pricing history reads.
+        if (options?.reconcileUsage !== false) await reconcileUnitUsage(root);
+      }
+      const diagnostic = options?.diagnosticOnly ? await (await goalLedger(root)).readGoal() : undefined;
+      const state = diagnostic?.state ?? await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
+      // Keep the native whole-line status prefix usable; omitted entries remain in the ledger.
+      const boundedDiagnostic = <T>(items: readonly T[]) => {
+        const shown: T[] = [];
+        for (const item of items) {
+          if (shown.length >= 8 || Buffer.byteLength(JSON.stringify([...shown, item])) > 4096) break;
+          shown.push(item);
+        }
+        return { shown, omitted: items.length - shown.length };
+      };
+      const pending = diagnostic ? boundedDiagnostic(state.outstanding_reservations) : undefined;
+      const validations = diagnostic ? boundedDiagnostic(state.validation_budget.reservations) : undefined;
+      const failedRecords = diagnostic?.records.flatMap(({ event }) => event.kind === "unit.settled" && event.disposition !== "succeeded"
+        ? [{ goal_id: event.goal_id, unit_id: event.unit_id, disposition: event.disposition, result_class: event.result_class, recorded_cost_usd: event.cost_usd }] : []) ?? [];
+      const failures = diagnostic ? boundedDiagnostic(failedRecords.slice(-8)) : undefined;
       const snapshot = { max_units: state.budget.max_units, consumed_units: state.consumed_units,
         reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved),
         settled_time_ms: state.consumed_time_ms, time_limit_ms: state.budget.time_ms,
@@ -8868,7 +9335,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_scope: "worker-only", campaign_remaining_usd: null,
-        cost_note: "Implementation token-price estimates from complete native usage; direct-author segments and scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_note: "Implementation token-price estimates from complete native usage; direct-author segments and scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution.",
+        ...(diagnostic ? { ledger_diagnostic: { reconciliation: "incomplete", outstanding_reservations: pending!.shown,
+          outstanding_reservations_omitted: pending!.omitted, validation_reservations: validations!.shown,
+          validation_reservations_omitted: validations!.omitted, recent_failed_settlements: failures!.shown,
+          recent_failed_settlements_omitted: failedRecords.length - failures!.shown.length } } : {}) };
       return snapshot;
     },
     extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
@@ -9213,6 +9684,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     reserveMissionFabricValidation: async (root, candidate, actor, callID) =>
       (await import("./mission-fabric-validation.js")).reserveFabricValidation(await goalLedger(root), candidate, actor, callID),
+    joinMissionValidation,
     settleMissionFabricValidation: async (root, candidate, actor, callID, outcome, exit, duration) =>
       (await import("./mission-fabric-validation.js")).settleFabricValidation(await goalLedger(root), candidate, actor, callID, outcome, exit, duration),
     completionReadiness: async root => {

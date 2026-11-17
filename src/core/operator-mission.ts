@@ -12,6 +12,7 @@ import { applyPendingWork, rememberWorkMission, rememberedWorkRun } from "./work
 import { appendPurposeDecision, purposeDecisionView, type PurposeDecision } from "./mission-purpose.js";
 import type { MissionGrip } from "./grip.js";
 import { currentMissionVision, retainMissionVision, type MissionVision } from "./mission-vision.js";
+import type { MissionTestDebtSignal, TestDebtInventoryCursor } from "./test-debt-audit.js";
 export { missionValidationCommand } from "./mission-validation-command.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -257,6 +258,12 @@ export interface OperatorMission {
   attempts?: MissionAttempt[];
   /** Native mutating-tool observations, not inference from a role name or a write estimate. */
   sourceAuthors?: string[];
+  /** Host-observed scheduling signals, not author findings, validation, or Review. */
+  testDebtSignals?: MissionTestDebtSignal[];
+  /** A bounded page per planning milestone; pending pages are not committed before plan registration. */
+  testDebtInventory?: { cursors: Record<string, TestDebtInventoryCursor>; nextUnit: number;
+    pending?: { planHash: string; baseRunID: string | null; cursors: Record<string, TestDebtInventoryCursor>; nextUnit: number;
+      signals: Omit<MissionTestDebtSignal, "run_id">[] }[] };
   /** One bounded Astra Rescue per eligible unit; validation, independent review and root acceptance remain separate. */
   rescue?: MissionTerminalRescue;
   /** A cancelled run replaced by a later real user turn; never reuse its acceptance or evidence. */
@@ -592,6 +599,8 @@ export class OperatorMissionRuntime {
       ...(state.grip?.pending ? { grip: state.grip } : {}),
       ...(state.preferredExecutor ? { preferred_executor: state.preferredExecutor } : {}),
       launch_conditions: state.launchConditions ?? [],
+      ...(state.testDebtSignals?.length ? { test_debt_history: { signals: state.testDebtSignals,
+        meaning: "Scheduling observations only; do not infer cleanup, validation, or review from them. Retain any unfinished work without immediately rescheduling the audit's own edits." } } : {}),
       conversation: sources.some(source => source.session_id === state.root && source.entries > 0 && !("snapshot_available" in source)) ? [] : state.context ?? [],
       continuity: { notes: state.continuity?.notes, sources, progress: state.progress,
         purpose_decisions: purposeDecisionView(state),
@@ -812,6 +821,9 @@ export class OperatorMissionRuntime {
       if (previous?.phase === "cancelled" && !replaceRequirements &&
           previous.requirements.every((requirement, index) => state.requirements[index]?.text === requirement.text)) {
         state.workQuantity = planWorkQuantity(state, [], undefined, previous.workQuantity);
+        if (previous.testDebtInventory) state.testDebtInventory = {
+          cursors: structuredClone(previous.testDebtInventory.cursors), nextUnit: previous.testDebtInventory.nextUnit };
+        if (previous.testDebtSignals?.length) state.testDebtSignals = structuredClone(previous.testDebtSignals);
       }
       retainMissionVision(state, options.vision);
       await this.save(this.file(root), state);

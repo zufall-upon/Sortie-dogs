@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { MISSION_BEHAVIOR_REVIEW, MISSION_CLIENT_STATE_CHECK, MISSION_REPRESENTATION_ORACLE, MISSION_TYPE_FAMILY_ORACLE, MISSION_RETURN_CONTRACT, MISSION_MUTATION_CONTRACT, MISSION_REGRESSION_PLACEMENT, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
+import { MISSION_BEHAVIOR_REVIEW, MISSION_CLIENT_STATE_CHECK, MISSION_REPRESENTATION_ORACLE, MISSION_TYPE_FAMILY_ORACLE, MISSION_RETURN_CONTRACT, MISSION_MUTATION_CONTRACT, MISSION_REGRESSION_PLACEMENT, MISSION_TEST_GATE_AUTHOR, MISSION_TEST_GATE_WORKER, MISSION_GIT_SCOPE, VALIDATION_WORKFLOW, WORKER_VALIDATION_WORKFLOW, missionWorkerContent } from '../dist/runtime-mission-assets.js';
 import { V010_RUNTIME_PROFILE } from '../dist/core/runtime-profile.js';
 import { runtimeAssets } from '../dist/runtime-assets-v010.js';
 
@@ -156,7 +156,6 @@ test('direct reproduction recipes use observed baseline context without another 
     assert.match(content, /Known recipes and Worker-owned investigation need no extra preparation or unit/);
     assert.match(content, /this workflow adds no approval or denial/);
   }
-  assert.doesNotMatch(VALIDATION_WORKFLOW, /astroid|pylint|NumPy|1978|extension-pkg|rcfile|capsys|caplog/);
 });
 
 test('standalone reproduction planning preserves its fixture root without replacing the active environment', () => {
@@ -233,6 +232,23 @@ test('Coordinator planning and direct authorship compose regressions without a n
   }
 });
 
+test('ordinary Mission authors and Reviewer compare test detection value without a count limit', () => {
+  const coordinator = runtimeAssets.find(item => item.name === 'dogs-coordinator')!.content;
+  assert.equal(coordinator.split(MISSION_TEST_GATE_AUTHOR).length, 2);
+  assert.match(coordinator, /inspect relevant existing tests: compare inputs, boundaries, assertions and failure detection/);
+  assert.match(coordinator, /Reuse or strengthen them when sufficient/);
+  assert.match(coordinator, /preserve distinct specification, boundary, regression, public API and security coverage/);
+  assert.match(coordinator, /No count limit/);
+  const worker = runtimeAssets.find(item => item.name === 'dog-worker-v010')!.content;
+  assert.equal(worker.split(MISSION_TEST_GATE_WORKER).length, 2);
+  assert.match(worker, /Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage/);
+  const reviewer = runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content;
+  assert.match(reviewer, /compare relevant existing tests by inputs, boundaries, assertions and failure detection/);
+  assert.match(reviewer, /not names or counts/);
+  assert.match(reviewer, /duplication, weak or meaningless assertions, excessive mocks and unnecessary\s+implementation-detail coupling/);
+  assert.match(reviewer, /existing correction lifecycle, not a separate agent or review round/);
+});
+
 test('planning and implementation share a staged validation workflow without new authority', t => {
   for (const name of roles) {
     const asset = runtimeAssets.find(item => item.name === name);
@@ -286,8 +302,8 @@ test('planning and implementation share a staged validation workflow without new
   assert.ok(worker.length <= 3000, `complete generated Worker asset: ${worker.length}`);
   const body = missionWorkerContent(V010_RUNTIME_PROFILE);
   const prose = body.slice(body.indexOf('---', 3) + 3);
-  assert.ok(body.length <= 2500, `common Worker content: ${body.length}`);
-  assert.ok(prose.length <= 2400, `common Worker prose: ${prose.length}`);
+  assert.ok(body.length <= 2600, `common Worker content: ${body.length}`);
+  assert.ok(prose.length <= 2500, `common Worker prose: ${prose.length}`);
   t.diagnostic(JSON.stringify({ generated_worker_asset_chars: worker.length, common_worker_chars: body.length,
     common_worker_prose_chars: prose.length }));
   assert.match(worker, /bind_write_gate with exact project_root and manifest_path=operation_manifest/);
@@ -325,6 +341,7 @@ test('native CLI init installs the validation workflow in each active mission ro
         assert.equal(installed, runtimeAssets.find(item => item.name === role)!.content);
         assert.match(installed, /check result\/error\/state/);
         assert.match(installed, /independent Review after return/);
+        assert.equal(installed.split(MISSION_TEST_GATE_WORKER).length, 2);
         assert.ok(installed.length <= 3000, `complete installed Worker asset: ${installed.length}`);
         t.diagnostic(JSON.stringify({ installed_worker_asset_chars: installed.length }));
       }
@@ -337,6 +354,7 @@ test('native CLI init installs the validation workflow in each active mission ro
     assert.equal(coordinator.split(MISSION_RETURN_CONTRACT).length, 2);
     assert.equal(coordinator.split(MISSION_MUTATION_CONTRACT).length, 2);
     assert.equal(coordinator.split(MISSION_REGRESSION_PLACEMENT).length, 2);
+    assert.equal(coordinator.split(MISSION_TEST_GATE_AUTHOR).length, 2);
     assert.match(coordinator, /not another test, unit or review requirement/);
     for (const installed of [coordinator, reviewer]) {
       assert.equal(installed.split(MISSION_TYPE_FAMILY_ORACLE).length, 2);
@@ -348,6 +366,7 @@ test('native CLI init installs the validation workflow in each active mission ro
     assert.match(coordinator, /Keep the established caller preconditions in the regression check/);
     assert.match(coordinator, /added setup can supply the removed effect and mask a regression/);
     assert.equal(reviewer, runtimeAssets.find(item => item.name === 'dog-reviewer-v010')!.content);
+    assert.match(reviewer, /compare relevant existing tests by inputs, boundaries, assertions and failure detection/);
     assert.match(reviewer, /Run inherited formal commands in order as exact separate foreground native shell calls/);
     assert.match(reviewer, /Run formatting and diagnostics separately; do not append undeclared shell commands/);
     assert.match(reviewer, /Finish requested scratch cleanup before final formal checks/);

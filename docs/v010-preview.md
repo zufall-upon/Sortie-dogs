@@ -169,6 +169,16 @@ cannot authorize verification. Older preview versions may not understand the new
 reconciliation event: rollback does not rewrite run ledgers; continue a recovered
 run with this or a compatible newer runtime.
 
+Goal ledgers retain older 0.1/0.2 history, but after migration to paged 0.3 an
+older reader cannot continue or recover that ledger; use a 0.3-compatible runtime.
+Keep the ledger file and its `.blobs` directory together when backing up or moving
+it. Paging remains bounded to 256 pages of 128 events (and 16 MiB per index or
+page). At that limit a new append can be refused. If automatic reservation or
+cost reconciliation cannot append, `operator_status` returns an unreconciled,
+read-only capacity diagnostic: pending reservations and unknown costs remain
+pending, not released or settled. Preserve the history and budget; do not delete,
+summarize, or reset the ledger to make room.
+
 ### Restarted admission and canonical return reports
 
 Before dispatching the next unit after a host restart, the preview restores the

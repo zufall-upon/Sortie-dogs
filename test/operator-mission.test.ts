@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -13,12 +15,17 @@ import { missionCoordinatorContent, missionOperatorContent, missionWorkerContent
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
-import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
+import { NativeBackgroundLifecycle } from "../dist/plugin/native-background.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
+import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
+import { runCodexMission } from "../dist/codex/run-mission.js";
 import { V010_RUNTIME_ASSET_VERSION } from "../dist/asset-version.js";
 import type { RuntimeBridge } from "../dist/plugin/runtime-bridge.js";
 import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/core/mission-purpose.js";
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
+import { closeTestDebtInventory, inspectTestDebt, inspectTestDebtPage } from "../dist/core/test-debt-audit.js";
+import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -69,6 +76,336 @@ async function fixture(run: (directory: string) => Promise<void>) {
 const unit = { title: "Fix result", objective: "Implement the requested result without changing the oracle", read: ["check.mjs"],
   write: ["src"], validation: ["node check.mjs"] };
 const independentReviewAcceptance = "After implementation and formal validation, the Coordinator must dispatch an independent Dog-Reviewer with review_mission and risk_tags [public-logic] to examine root cause and public logic, then reflect all FINDINGS; this SourceReview is post-validation and must not block Worker dispatch.";
+
+for (const storage of ["0.1", "0.2"] as const) test(`Operator status and continuation recover at the goal event capacity (${storage})`, async t => fixture(async directory => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+  const history: any[] = [];
+  const create = () => SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator", outcome: "running" } }),
+    messages: async ({ path }: any) => ({ data: path.id === "root" ? history : [] }),
+    children: async () => ({ data: [] }),
+  } } } as never);
+  let hooks = await create();
+  const chat = (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "fixture", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue the same goal" }],
+  });
+  await chat("original");
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Preserve the result"] }, { sessionID: "root" });
+  const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory,
+    `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(file), initial = (await ledger.readGoal()).state, goal = initial.goal_id!;
+  const at = "2026-09-08T00:00:00.000Z";
+  const command = "node verify.mjs";
+  await ledger.appendGoal({ kind: "goal.revised", at, goal_id: goal, revision: 2, scope_epoch: 2,
+    acceptance_fingerprint: initial.acceptance_fingerprint!, origin_user_message_id: "original", session_id: "root",
+    selected_agent: initial.selected_agent!, delivery: initial.delivery!, budget: initial.budget!,
+    acceptance_contract: { criteria: [{ criterion_id: "proof", target: "result", entrypoint: "verify", workload: "fixture",
+      oracle_coverage: ["result"], build_boundary: "not-applicable", source: "source", candidate: "candidate",
+      source_binding: "current-protected", candidate_binding: "current-protected", fixture: "fixture", proof_scope: "requested-full",
+      expected_outcome: "pass", validation_command: command }] } });
+  const proofState = await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "proved",
+    reservation_id: "proved", session_id: "root", ticket_id: null });
+  const proofPaths = Array.from({ length: 500 }, (_, index) => `test/fixtures/${"component/".repeat(15)}${index}.txt`);
+  const proof = evidenceFromObservedExecution({ owner: "coordinator", immutableRef: goalFingerprint("proof"), command: [command],
+    startedAt: at, endedAt: at, exitCode: 0, outcome: "pass", fresh: true, source: goalFingerprint("source"),
+    candidate: goalFingerprint("candidate"), binding: { manifest_hash: goalFingerprint("manifest"), project_root: directory,
+      manifest_path: "manifest.json", source_paths: proofPaths, candidate_paths: proofPaths } }, proofState, "proved");
+  assert.equal(proof.length, 1);
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "proved", reservation_id: "proved", receipt_id: "proof-receipt",
+    disposition: "succeeded", result_class: "acceptance", progress_fingerprint: goalFingerprint(proof), evidence: proof, elapsed_ms: 4, cost_usd: 0.25 });
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", session_id: "root", ticket_id: null });
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", receipt_id: "failure",
+    disposition: "failed", result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 5, cost_usd: null,
+    native_session_id: "unpriced-child" });
+  await ledger.appendGoal({ kind: "validation.admission", at, goal_id: goal, reservation_id: "unresolved-validation",
+    operation_id: "unresolved-request", evidence_key: goalFingerprint("unresolved"), scope: "canonical", decision: "ALLOW",
+    reason: "fixture", consumed: 1, limit: 4 });
+  const reservations = ["live", "terminal"].map(unit_id => ({ unit_id, call: `${unit_id}-call`,
+    reservation_id: goalFingerprint({ goal_id: goal, unit_id, call_id: `${unit_id}-call` }) }));
+  for (const reservation of reservations) await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal,
+    unit_id: reservation.unit_id, reservation_id: reservation.reservation_id, session_id: "root", ticket_id: null });
+  const doc = JSON.parse(await readFile(file, "utf8"));
+  while (doc.goal_events.length < 2048) {
+    const sequence = doc.goal_events.length + 1, previous_hash = doc.goal_events.at(-1).event_hash;
+    const event = { kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: `past-${sequence}`,
+      session_id: "root", selected_agent: "dog-operator" };
+    doc.goal_events.push({ sequence, previous_hash, event_hash: goalFingerprint({ sequence, previous_hash, event }), event });
+  }
+  if (storage === "0.2") {
+    const first = doc.goal_events[0], bytes = Buffer.from(JSON.stringify(first.event));
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await mkdir(`${file}.blobs`, { recursive: true }); await writeFile(join(`${file}.blobs`, sha256), bytes);
+    const { event: _event, ...record } = first;
+    doc.goal_events[0] = { ...record, event_blob: { bytes: bytes.length, chunks: [{ sha256, bytes: bytes.length }] } };
+    doc.schema_version = storage;
+  }
+  await writeFile(file, JSON.stringify(doc));
+  const original = await readFile(file), prior = await ledger.readGoal();
+  const status = () => hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" });
+  const observed = JSON.parse(await status());
+  assert.equal(observed.budget.reserved_units, 2);
+  assert.equal(observed.budget.consumed_units, 2);
+  assert.equal(observed.budget.settled_cost_usd, null);
+  assert.deepEqual(await readFile(file), original, "status alone neither spends nor appends");
+  assert.deepEqual(await ledger.readGoal(), prior);
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "terminal-call",
+    state: { status: "completed", input: { subagent_type: "dog-worker-v010", prompt: "task_id: terminal" }, time: { start: 1, end: 2 } } }] });
+  if (storage === "0.1") {
+    const originalLink = fs.link;
+    const link = t.mock.method(fs, "link", async (...args: Parameters<typeof fs.link>) => {
+      if (String(args[1]).startsWith(`${file}.blobs`)) throw new Error("page publication failure");
+      return Reflect.apply(originalLink, fs, args);
+    });
+    syncBuiltinESMExports();
+    try { await assert.rejects(status(), /page publication failure/); }
+    finally { link.mock.restore(); syncBuiltinESMExports(); }
+    assert.deepEqual(await readFile(file), original);
+    assert.deepEqual(await ledger.readGoal(), prior, "failed publication retains history, reservations and unknown spend");
+    hooks = await create();
+    const originalRename = fs.rename;
+    const rename = t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+      if (String(args[1]) === file) throw new Error("page index rename failure");
+      return Reflect.apply(originalRename, fs, args);
+    });
+    syncBuiltinESMExports();
+    try { await assert.rejects(status(), /page index rename failure/); }
+    finally { rename.mock.restore(); syncBuiltinESMExports(); }
+    assert.deepEqual(await readFile(file), original);
+    assert.deepEqual(await ledger.readGoal(), prior);
+    hooks = await create();
+  }
+  const recovered = JSON.parse(await status()), after = await ledger.readGoal();
+  assert.deepEqual(after.records.slice(0, prior.records.length), prior.records, "every old event, sequence and hash survives");
+  assert.equal(after.records.length, 2049);
+  assert.equal(recovered.budget.consumed_units, 3);
+  assert.equal(recovered.budget.reserved_units, 1);
+  assert.equal(recovered.budget.settled_cost_usd, null);
+  assert.deepEqual(after.state.outstanding_reservations.map(item => item.unit_id), ["live"], "another live owner is not released");
+  assert.deepEqual(after.state.validation_budget, prior.state.validation_budget, "unresolved validation remains unresolved");
+  assert.deepEqual(after.state.evidence_refs, prior.state.evidence_refs);
+  assert.deepEqual(after.state.satisfied_criteria, ["proof"]);
+  assert.deepEqual(after.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.event,
+    prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.event);
+  const settlement = after.records.at(-1)!.event;
+  assert.equal(settlement.kind, "unit.settled");
+  if (settlement.kind !== "unit.settled") throw new Error("expected recovered settlement");
+  assert.equal(settlement.disposition, "failed"); assert.equal(settlement.result_class, "process-defect");
+  assert.deepEqual(settlement.evidence, []); assert.equal(settlement.cost_usd, null);
+  hooks = await create();
+  await status(); assert.deepEqual(await ledger.readGoal(), after, "cold status never repeats recovery or charges");
+  const oversizedOld = join(directory, `invalid-${storage}.json`);
+  const invalidOldBody = JSON.stringify({ ...doc, goal_events: [...doc.goal_events, after.records.at(-1)] });
+  await writeFile(oversizedOld, invalidOldBody);
+  await assert.rejects(RunFlightLedger.readGoalFile(oversizedOld), /closed schema/, "old formats still reject more than 2048 records");
+  assert.equal(await readFile(oversizedOld, "utf8"), invalidOldBody);
+  const chunksBeforeContinuation = (await fs.readdir(`${file}.blobs`)).sort();
+  await chat("continued-after-capacity");
+  assert.deepEqual((await fs.readdir(`${file}.blobs`)).sort(), chunksBeforeContinuation,
+    "a small tail append does not leave another unreachable page blob");
+  const continued = await ledger.readGoal();
+  assert.deepEqual(continued.records.slice(0, after.records.length), after.records);
+  assert.equal(continued.records.at(-1)!.event.kind, "goal.user-continued");
+  assert.equal(continued.state.consumed_units, after.state.consumed_units);
+  assert.deepEqual(continued.state.outstanding_reservations, after.state.outstanding_reservations);
+  const body = await readFile(file, "utf8"), paged = JSON.parse(body);
+  assert.equal(paged.schema_version, "0.3");
+  assert.ok(paged.goal_events.length > 1 && paged.goal_events.every((page: any) => page.count <= 128));
+  assert.ok(Array.isArray(paged.goal_events.at(-1).records), "the incomplete tail stays inline");
+  const chunk = join(`${file}.blobs`, paged.goal_events[0].records_blob.chunks[0].sha256);
+  const chunkBytes = await readFile(chunk);
+  const proofSequence = prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.sequence;
+  const proofRecord = JSON.parse(chunkBytes.toString("utf8")).find((record: any) => record.sequence === proofSequence);
+  assert.ok(proofRecord.event_blob, "large original evidence is still a separately verified event blob inside its page");
+  const proofChunk = join(`${file}.blobs`, proofRecord.event_blob.chunks[0].sha256), proofBytes = await readFile(proofChunk);
+  await rm(proofChunk);
+  await assert.rejects(status(), /blob chunk is missing/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(proofChunk, proofBytes);
+  await rm(chunk);
+  await assert.rejects(status(), /blob chunk is missing/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(chunk, chunkBytes);
+  const corrupted = Buffer.from(chunkBytes); corrupted[0] = corrupted[0]! ^ 1;
+  await writeFile(chunk, corrupted);
+  await assert.rejects(status(), /blob chunk hash mismatch/);
+  assert.equal(await readFile(file, "utf8"), body);
+  await writeFile(chunk, chunkBytes);
+  const invalid = JSON.parse(body); invalid.goal_events[0].first_sequence = 2;
+  await writeFile(file, JSON.stringify(invalid));
+  await assert.rejects(status(), /pages are malformed/);
+  const invalidReference = JSON.parse(body); invalidReference.goal_events[0].records_blob.chunks[0].sha256 = "../outside";
+  await writeFile(file, JSON.stringify(invalidReference));
+  await assert.rejects(status(), /blob chunk reference is malformed/);
+  const alteredPage = JSON.parse(chunkBytes.toString("utf8"));
+  alteredPage.at(-1).event.origin_user_message_id = "tampered";
+  const alteredBytes = Buffer.from(JSON.stringify(alteredPage)), alteredHash = createHash("sha256").update(alteredBytes).digest("hex");
+  await writeFile(join(`${file}.blobs`, alteredHash), alteredBytes);
+  const invalidChain = JSON.parse(body);
+  invalidChain.goal_events[0].records_blob = { bytes: alteredBytes.length, chunks: [{ sha256: alteredHash, bytes: alteredBytes.length }] };
+  await writeFile(file, JSON.stringify(invalidChain));
+  await assert.rejects(status(), /hash chain is malformed/, "valid blob hash does not excuse a changed historical event");
+  await writeFile(file, body);
+  assert.deepEqual(await ledger.readGoal(), continued);
+  if (storage === "0.1") {
+    await ledger.appendGoal({ kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: "codex-unknown",
+      session_id: "root", selected_agent: "codex" });
+    const manifest = join(directory, ".git", "codex-capacity-inventory.json");
+    await writeFile(manifest, JSON.stringify({ version: "0.1.0", task_id: "codex-test", read: ["check.mjs"],
+      write: ["result.txt"], validation: ["node check.mjs"] }));
+    await assert.rejects(runCodexMission({ projectRoot: directory, manifestPath: manifest, prompt: "Do not resend", executable: "must-not-start" }),
+      /codex-mission-outcome-unknown:no-resend/, "paged goal remains visible to the existing Codex inventory caller");
+  }
+}));
+
+test("Operator status and continuation recover at the goal event capacity (paged limit diagnostic)", async t => fixture(async directory => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+  const history: any[] = [];
+  let priceAvailable = false;
+  const session = {
+    get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator", outcome: "running" } }),
+    messages: async ({ path }: any) => ({ data: path.id === "root" ? history : path.id === "unpriced-child" && priceAvailable
+      ? [{ info: { id: "priced-request", role: "assistant", providerID: "openai", modelID: "gpt-6-luna-fast",
+        time: { created: 2000, completed: 3000 }, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } }]
+      : [] }),
+    children: async () => ({ data: [] }),
+  };
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session } } as never);
+  const chat = (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "fixture", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue the same goal" }],
+  });
+  await chat("original");
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Preserve the result"] }, { sessionID: "root" });
+  const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory,
+    `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(file), initial = (await ledger.readGoal()).state, goal = initial.goal_id!;
+  const at = "2026-09-08T00:00:00.000Z";
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", session_id: "root", ticket_id: null });
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", receipt_id: "failure",
+    disposition: "failed", result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 5, cost_usd: null,
+    native_session_id: "unpriced-child" });
+  await ledger.appendGoal({ kind: "validation.admission", at, goal_id: goal, reservation_id: "unresolved-validation",
+    operation_id: "unresolved-request", evidence_key: goalFingerprint("unresolved"), scope: "canonical", decision: "ALLOW",
+    reason: "fixture", consumed: 1, limit: 4 });
+  const pendingUnits = ["live", "terminal", ...Array.from({ length: 9 }, (_, index) => `extra-${index}-${"x".repeat(460)}`)];
+  for (const unit_id of pendingUnits) await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id,
+    reservation_id: goalFingerprint({ goal_id: goal, unit_id, call_id: `${unit_id}-call` }), session_id: "root", ticket_id: null });
+  const records: any[] = [...(await ledger.readGoal()).records];
+  while (records.length < 32768) {
+    const sequence = records.length + 1, previous_hash = records.at(-1).event_hash;
+    const event = { kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: `past-${sequence}`,
+      session_id: "root", selected_agent: "dog-operator" };
+    records.push({ sequence, previous_hash, event_hash: goalFingerprint({ sequence, previous_hash, event }), event });
+  }
+  await mkdir(`${file}.blobs`, { recursive: true });
+  const pages = [];
+  for (let start = 0; start < records.length; start += 128) {
+    const bytes = Buffer.from(JSON.stringify(records.slice(start, start + 128)));
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(join(`${file}.blobs`, sha256), bytes);
+    pages.push({ first_sequence: start + 1, count: 128, records_blob: { bytes: bytes.length, chunks: [{ sha256, bytes: bytes.length }] } });
+  }
+  await writeFile(file, JSON.stringify({ schema_version: "0.3", goal_events: pages }));
+  const before = await ledger.readGoal(), original = await readFile(file), blobs = (await fs.readdir(`${file}.blobs`)).sort();
+  const rawStatus = (view: string) => hooks.tool!.sortie_v010_operator_status.execute({ view }, { sessionID: "root" });
+  const status = async (view: string) => JSON.parse(await rawStatus(view));
+  const beforeTerminal = await status("full");
+  assert.equal(beforeTerminal.budget.reserved_units, pendingUnits.length);
+  assert.equal(beforeTerminal.budget.settled_cost_usd, null);
+  const retainedConditions = { entrypoint: "existing-runner", source: "user:original", applies_to: "retained invocation" };
+  await hooks.tool!.sortie_v010_operator_status.execute({ confirmed_conditions: retainedConditions }, { sessionID: "root" });
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "terminal-call",
+    state: { status: "completed", input: { subagent_type: "dog-worker-v010", prompt: "task_id: terminal" }, time: { start: 1, end: 2 } } }] });
+  const originalOpen = fs.open;
+  let lockFailure: Error = new Error("unrelated recovery I/O failure");
+  const open = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === `${file}.lock`) throw lockFailure;
+    return Reflect.apply(originalOpen, fs, args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(status("full"), /unrelated recovery I\/O failure/);
+    lockFailure = new RunFlightLedgerError("capacity", "Ledger byte capacity exceeded.");
+    await assert.rejects(status("full"), /Ledger byte capacity exceeded/, "ordinary Run ledger capacity is not a Goal diagnostic");
+  }
+  finally { open.mock.restore(); syncBuiltinESMExports(); }
+  for (const view of ["full", "progress"]) {
+    const raw = await rawStatus(view), diagnostic = JSON.parse(raw);
+    assert.equal(view === "progress" ? diagnostic.stage : diagnostic.status, "goal-ledger-capacity");
+    assert.equal(diagnostic.ledger_diagnostic.mode, "read-only");
+    assert.equal(diagnostic.ledger_diagnostic.reconciliation, "incomplete");
+    assert.match(diagnostic.next_action, /Do not dispatch/);
+    assert.ok(Buffer.byteLength(raw.slice(0, raw.indexOf('"next_action"'))) < 51200, "native output keeps the diagnostic action visible");
+    assert.equal(diagnostic.task, undefined);
+    assert.equal(diagnostic.budget.consumed_units, 1);
+    assert.equal(diagnostic.budget.reserved_units, pendingUnits.length);
+    assert.equal(diagnostic.budget.settled_cost_usd, null);
+    assert.equal(diagnostic.budget.cost_status, "unknown-usage");
+    const shown = diagnostic.budget.ledger_diagnostic.outstanding_reservations;
+    assert.deepEqual(shown.slice(0, 2).map((item: any) => item.unit_id), ["live", "terminal"]);
+    assert.equal(diagnostic.budget.ledger_diagnostic.outstanding_reservations_omitted, pendingUnits.length - shown.length);
+    assert.ok(diagnostic.budget.ledger_diagnostic.outstanding_reservations_omitted > 0, "bounded output points back to retained records");
+    assert.equal(diagnostic.budget.ledger_diagnostic.validation_reservations[0].reservation_id, "unresolved-validation");
+    assert.equal(diagnostic.budget.ledger_diagnostic.validation_reservations_omitted, 0);
+    assert.deepEqual(diagnostic.budget.ledger_diagnostic.recent_failed_settlements,
+      [{ goal_id: goal, unit_id: "failed", disposition: "failed", result_class: "acceptance", recorded_cost_usd: null }]);
+    if (view === "full") assert.equal(diagnostic.coordinator_dispatch, "blocked-capacity");
+  }
+  await assert.rejects(chat("cannot-continue-at-capacity"), /Goal ledger capacity exceeded/);
+  // V2 retains a failed native background settlement instead of throwing it from
+  // reconcile(). Its pending dispatch must not hide the capacity diagnostic.
+  history.length = 0;
+  const backgroundStorage = new Map<string, unknown>(), childHistory: any[] = [];
+  let backgroundHooks: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+  const background = new NativeBackgroundLifecycle({
+    storage: { get: async (key: string) => structuredClone(backgroundStorage.get(key)),
+      set: async (key: string, value: unknown) => { backgroundStorage.set(key, structuredClone(value)); } },
+    session: { get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID }),
+      context: async () => childHistory },
+  } as never, async (dispatch, text) => {
+    await backgroundHooks["tool.execute.after"]!({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
+      args: { subagent_type: dispatch.agent, prompt: dispatch.input.prompt } },
+    { status: "completed", output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+  });
+  backgroundHooks = await SortieDogsV010Plugin({ directory, client: { session }, nativeBackground: background } as never);
+  backgroundHooks.backgroundOwner!("terminal-call", { core: { reservation: { root: "root", unitID: "terminal",
+    reservationID: goalFingerprint({ goal_id: goal, unit_id: "terminal", call_id: "terminal-call" }), started: 1 }, executions: [] } });
+  await background.admit("root", "terminal-call", { agent: "dog-worker-v010", prompt: "Preserve native result", sessionID: "native-terminal" });
+  await background.launched("root", "terminal-call", "native-terminal", true);
+  childHistory.push({ id: "native-result", type: "assistant", finish: "stop", content: [{ type: "text", text: "Retained result" }] });
+  await background.reconcile("root");
+  assert.match(background.reconciliationNotice("root")!, /Goal ledger capacity exceeded/);
+  assert.equal(await background.awaiting("root"), true);
+  for (const view of ["full", "progress", ""]) {
+    const diagnostic = JSON.parse(await backgroundHooks.tool!.sortie_v010_operator_status.execute({ view }, { sessionID: "root" }));
+    assert.equal(view === "progress" ? diagnostic.stage : diagnostic.status, "goal-ledger-capacity",
+      "a retained native background failure reaches the public status diagnostic");
+    assert.equal(diagnostic.ledger_diagnostic.reconciliation, "incomplete");
+    assert.equal(diagnostic.task, undefined);
+    assert.match(diagnostic.next_action, /Do not dispatch/);
+    assert.equal(diagnostic.budget.consumed_units, 1);
+    assert.equal(diagnostic.budget.reserved_units, pendingUnits.length);
+    assert.equal(diagnostic.budget.settled_cost_usd, null);
+  }
+  const nativeDispatch = (await backgroundStorage.get("v2-background-dispatches:root") as any[])[0];
+  assert.equal(nativeDispatch.terminal, "succeeded");
+  assert.notEqual(nativeDispatch.settled, true, "diagnosis never fabricates native accounting settlement");
+  const addedConditions = { inputs: ["existing-input"], source: "runner metadata", applies_to: retainedConditions.applies_to };
+  await backgroundHooks.tool!.sortie_v010_operator_status.execute({ confirmed_conditions: addedConditions }, { sessionID: "root" });
+  const launchConditions = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).launchConditions!;
+  assert.deepEqual(launchConditions.map(({ recordedAt: _at, ...conditions }) => conditions), [retainedConditions, addedConditions],
+    "capacity diagnostics preserve the explicit status opt-in and existing client-owned conditions");
+  // Pricing can independently need an append even when no terminal reservation is recoverable.
+  history.length = 0; priceAvailable = true;
+  const pricingDiagnostic = await status("full");
+  assert.equal(pricingDiagnostic.status, "goal-ledger-capacity");
+  assert.equal(pricingDiagnostic.budget.settled_cost_usd, null);
+  assert.equal(pricingDiagnostic.budget.reserved_units, pendingUnits.length);
+  assert.deepEqual(await readFile(file), original);
+  assert.deepEqual((await fs.readdir(`${file}.blobs`)).sort(), blobs);
+  assert.deepEqual(await ledger.readGoal(), before, "no history, failed outcome, reservation or unknown cost is rewritten");
+}));
 
 test("Operator recovers a registered native check in a linked worktree within a broad Location", async () => fixture(async root => {
   const exec = promisify(execFile), repository = join(root, "repository"), checkout = join(root, "checkout"), other = join(root, "other"),
@@ -132,6 +469,433 @@ test("Operator recovers a registered native check in a linked worktree within a 
   const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
   assert.ok(run.units[0]!.directExecution!.checks.some(check => check.callID === input.callID && check.exitCode === 0 && check.fresh));
   assert.notEqual((await tool("finish_direct_unit")).status, "direct-unit-awaits-validation");
+}));
+
+test("ordinary direct Mission schedules test debt before validation and retains it for the existing Reviewer", async () => fixture(async root => {
+  const exec = promisify(execFile), history: unknown[] = [];
+  await mkdir(join(root, "test"));
+  const source = join(root, "value.mjs"), check = join(root, "test", "value.test.mjs");
+  const originalSource = "export const double = n => n * 2;\n";
+  const originalTest = 'import assert from "node:assert/strict";\nimport { double } from "../value.mjs";\nassert.strictEqual(double(0), 0);\nassert.strictEqual(double(0), 0);\nconst value = double(21);\nassert.strictEqual(value, 42);\nassert.strictEqual(value, 42);\n';
+  await writeFile(source, originalSource); await writeFile(check, originalTest);
+  await writeFile(join(root, "check.mjs"), 'import "./test/value.test.mjs";\n');
+  const outsideTest = join(root, "outside.test.mjs");
+  await writeFile(outsideTest, "assert.equal(1, 1);\nassert.equal(1, 1);\n");
+  await mkdir(join(root, "test", "node_modules"));
+  await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), "assert.equal(2, 2);\nassert.equal(2, 2);\n");
+  await mkdir(join(root, "test", ".opencode"));
+  await writeFile(join(root, "test", ".opencode", "private.test.mjs"), "assert.equal(3, 3);\nassert.equal(3, 3);\n");
+  await writeFile(join(root, "test", ".state.test.mjs"), "assert.equal(4, 4);\nassert.equal(4, 4);\n");
+  const foreign = join(root, "other-task.txt");
+  await writeFile(foreign, "baseline\n");
+  for (const args of [["init", "--quiet"], ["config", "user.name", "test"], ["config", "user.email", "test@example.invalid"],
+    ["add", "--all"], ["commit", "--quiet", "-m", "base"]]) await exec("git", args, { cwd: root });
+  await writeFile(foreign, "pre-existing other task change\n");
+  const command = "node check.mjs";
+  const probe = async (good: string, broken: string) => {
+    await exec(process.execPath, ["test/value.test.mjs"], { cwd: root });
+    await writeFile(source, broken);
+    await assert.rejects(exec(process.execPath, ["test/value.test.mjs"], { cwd: root }), /41 !== 42/);
+    await writeFile(source, good);
+  };
+  // The pre-change oracle really rejects the same wrong 21 result; it is not a new expected value.
+  await probe(originalSource, "export const double = n => n === 21 ? 41 : n * 2;\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: history }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Update the calculation while retaining its behavior." }],
+  });
+  await tool("start_mission", { requirements: ["Update the calculation while retaining its behavior"], prohibited_write: ["outside.test.mjs"] });
+  const started = await tool("plan_units", { executor: "self", units: [{ title: "Update calculation", objective: "Preserve the calculation",
+    read: ["value.mjs", "check.mjs"], write: ["value.mjs", "test/**"], validation: [command] }] });
+  assert.equal(started.status, "direct-unit-running");
+  assert.deepEqual(started.test_debt_audit.signals.map((signal: { path: string }) => signal.path), ["test/value.test.mjs"],
+    "the glob discovers the in-scope test without inspecting dependency or hidden entries");
+  assert.deepEqual(started.test_debt_audit.signals[0].repeated_assertions, [[3, 4], [6, 7]]);
+  assert.match(started.test_debt_audit.instruction, /similar lines or size alone do not establish redundancy/);
+  const run = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const handoff = JSON.parse(await readFile(run.units[0]!.handoffPath, "utf8"));
+  assert.equal(handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals[0].path, "test/value.test.mjs");
+  const gate = await createWriteGate(await createProjectPaths(root), JSON.parse(await readFile(run.units[0]!.manifestPath, "utf8")));
+  await gate.checkPath(check);
+  await assert.rejects(gate.checkPath(outsideTest), (error: { reason?: string }) => error.reason === "manifest-scope");
+  const edit = async (path: string, oldString: string, newString: string, callID: string) => {
+    const args = { filePath: path, oldString, newString }, request = { tool: "edit", sessionID: "root", callID };
+    await hooks["tool.execute.before"]!(request, { args });
+    await writeFile(path, (await readFile(path, "utf8")).replace(oldString, newString));
+    const output = { output: "edited" };
+    await hooks["tool.execute.after"]!({ ...request, args }, output);
+    return output.output;
+  };
+  const updatedSource = "export const double = n => n + n;\n";
+  await edit(source, originalSource, updatedSource, "source-edit");
+  await assert.rejects(hooks["tool.execute.before"]!({ tool: "edit", sessionID: "root", callID: "outside-edit" },
+    { args: { filePath: outsideTest, oldString: "1", newString: "3" } }), /mission-explicit-write-prohibition/);
+  assert.equal(await readFile(outsideTest, "utf8"), "assert.equal(1, 1);\nassert.equal(1, 1);\n");
+  // Simulate the existing author applying a source-backed consolidation; the host does not edit files.
+  const response = await edit(check, "assert.strictEqual(value, 42);\nassert.strictEqual(value, 42);", "assert.strictEqual(value, 42);", "audit-edit");
+  assert.doesNotMatch(response, /SORTIE_TEST_DEBT_AUDIT/, "the audit's own change must not schedule itself again");
+  assert.deepEqual((await inspectTestDebt(root, { read: [check], write: [], validation: [] }))[0]!.repeated_assertions, [[3, 4]],
+    "suppression applies even when the edited file still has a scheduling signal");
+  assert.match(await readFile(check, "utf8"), /assert\.strictEqual\(double\(0\), 0\)/);
+  assert.equal(await readFile(foreign, "utf8"), "pre-existing other task change\n");
+  await probe(updatedSource, "export const double = n => n === 21 ? 41 : n + n;\n");
+  const input = { tool: "shell", sessionID: "root", callID: "validation" }, args = { command, workdir: root }, start = Date.now();
+  await hooks["tool.execute.before"]!(input, { args });
+  const checked = await exec(process.execPath, ["check.mjs"], { cwd: root });
+  await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: input.callID,
+    state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start, end: Date.now() } } }] });
+  assert.notEqual((await tool("finish_direct_unit")).status, "direct-unit-awaits-validation");
+  const review = await tool("review_mission", { risk_tags: ["public-logic"] });
+  assert.equal(review.status, "review-required");
+  const reviewPrompt = (await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).review!.task!.prompt;
+  assert.match(reviewPrompt, /test_debt_scheduling_signals/);
+  assert.match(reviewPrompt, /not proof of duplication, cleanup, detection equivalence or review/);
+}));
+
+test("ordinary Mission inventory advances past unchanged large tests at later planning milestones", async () => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const text = `${"// retained specification\n".repeat(500)}assert.equal(1, 1);\n`;
+  for (let index = 0; index < 40; index++) {
+    await writeFile(join(root, "test", `${String(index).padStart(2, "0")}.test.mjs`), text);
+  }
+  await writeFile(join(root, "test", "priority.test.mjs"), text);
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain the test suite while implementing the change." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain the test suite while implementing the change"] });
+  const declaration = (title: string) => ({ executor: "self", units: [{ title, objective: "Maintain the test suite",
+    read: ["check.mjs", "test/priority.test.mjs"], write: ["test/**"], validation: ["node check.mjs"] }] });
+  const first = await tool("plan_units", declaration("First milestone"));
+  const firstPaths = first.test_debt_audit.signals.map((signal: { path: string }) => signal.path);
+  assert.equal(firstPaths.length, 16);
+  assert.equal(firstPaths[0], "test/priority.test.mjs", "explicit files precede automatically discovered files");
+  const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const saved = (await missions.required("root")).testDebtInventory;
+  const firstRun = await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const firstHandoff = await readFile(firstRun.units[0]!.handoffPath, "utf8");
+  await tool("plan_units", declaration("First milestone"));
+  assert.deepEqual((await missions.required("root")).testDebtInventory, saved, "a retry cannot consume another page");
+  assert.equal(await readFile(firstRun.units[0]!.handoffPath, "utf8"), firstHandoff);
+  const second = await tool("plan_units", { ...declaration("Second milestone"), reason: "Continue the same work" });
+  const secondPaths = second.test_debt_audit.signals.map((signal: { path: string }) => signal.path);
+  assert.ok(secondPaths.some((path: string) => !firstPaths.includes(path)),
+    "unchanged size signals in the first batch must not permanently hide later tests");
+  assert.equal(new Set([...firstPaths, ...secondPaths]).size, 31);
+  await writeFile(join(root, "test", "new.test.mjs"), text);
+  await tool("cancel_operator", { reason: "Interrupt this work before continuing" });
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "resume", agent: "dog-operator" }, {
+    message: { id: "resume", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue maintaining the same test suite." }],
+  });
+  await tool("start_mission", { intent: "continue", requirements: ["Maintain the test suite while implementing the change"] });
+  const laterPaths = new Set<string>([...firstPaths, ...secondPaths]);
+  for (let index = 0; index < 4; index++) {
+    const next = await tool("plan_units", { ...declaration(`Continued milestone ${index}`), ...(index ? { reason: "Continue the same work" } : {}) });
+    for (const signal of next.test_debt_audit?.signals ?? []) laterPaths.add(signal.path);
+  }
+  for (let index = 0; index < 40; index++) assert.ok(laterPaths.has(`test/${String(index).padStart(2, "0")}.test.mjs`));
+  assert.ok(laterPaths.has("test/new.test.mjs"), "a newly added test is reached after at most another traversal");
+  await tool("cancel_operator", { reason: "End this isolated fixture" });
+}));
+
+test("ordinary Mission resumes bounded inventory after entry and directory limits", async () => fixture(async root => {
+  const flat = join(root, "flat"), nested = join(root, "nested", "test");
+  await mkdir(flat, { recursive: true }); await mkdir(nested, { recursive: true });
+  for (let index = 0; index < 5000; index++) await writeFile(join(flat, `input-${index}.txt`), "x");
+  for (let index = 0; index < 140; index++) await mkdir(join(nested, `dir-${String(index).padStart(3, "0")}`));
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain both test trees." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain both test trees"] });
+  const plan = (scope: string, index: number) => ({ executor: "self", units: [{ title: `${scope} ${index}`, objective: "Maintain the test tree",
+    read: ["check.mjs"], write: [`${scope}/**`], validation: ["node check.mjs"] }], ...(index ? { reason: "Continue inventory" } : {}) });
+  await tool("plan_units", plan("flat", 0));
+  const mission = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  const firstCursor = Object.values((await mission.required("root")).testDebtInventory!.cursors)[0]!;
+  assert.ok(firstCursor.frames.length && firstCursor.frames[0]!.after, "the entry cap retains a continuation, not a completed inventory");
+  await tool("plan_units", plan("flat", 1));
+  await closeTestDebtInventory(`${root}\0root`); // Model a cold host reopening the saved cursor.
+  const pressure = Array.from({ length: 65 }, (_, index) => `cache-${index}`);
+  for (const scope of pressure) {
+    await mkdir(join(root, scope));
+    for (let index = 0; index < 16; index++) await writeFile(join(root, scope, `${index}.test.mjs`), "");
+  }
+  const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
+  await writeFile(join(flat, "later.test.mjs"), text);
+  let foundFlat = false;
+  for (let index = 2; index <= 9; index++) {
+    await tool("cancel_operator", { reason: "Interrupt before continuing the same work" });
+    await hooks["chat.message"]!({ sessionID: "root", messageID: `resume-${index}`, agent: "dog-operator" }, {
+      message: { id: `resume-${index}`, agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+      parts: [{ type: "text", text: "Continue maintaining both test trees." }],
+    });
+    await tool("start_mission", { intent: "continue", requirements: ["Maintain both test trees"] });
+    // Other scoped inventories are fixture-only; they exercise the bounded stream cache.
+    for (const scope of pressure) await inspectTestDebtPage(root, { read: [], write: [`${scope}/**`], validation: [] }, [], { cacheKey: scope });
+    const result = await tool("plan_units", plan("flat", index));
+    foundFlat ||= (result.test_debt_audit?.signals ?? []).some((signal: { path: string }) => signal.path === "flat/later.test.mjs");
+  }
+  assert.ok(foundFlat, "a test beyond a 2048-entry page is eventually scheduled despite cancellation and stream-cache pressure");
+  for (const scope of pressure) await closeTestDebtInventory(scope);
+  await tool("plan_units", plan("nested", 10));
+  const cursors = Object.values((await mission.required("root")).testDebtInventory!.cursors);
+  assert.ok(cursors.some(cursor => cursor.frames.some(frame => frame.path.startsWith("nested"))),
+    "the directory cap also retains a continuation");
+  await writeFile(join(nested, "dir-139", "later.test.mjs"), text);
+  let foundNested = false;
+  for (let index = 11; index <= 15; index++) {
+    const result = await tool("plan_units", plan("nested", index));
+    foundNested ||= (result.test_debt_audit?.signals ?? []).some((signal: { path: string }) => signal.path === "nested/test/dir-139/later.test.mjs");
+  }
+  assert.ok(foundNested, "a test after the 128-directory page is eventually scheduled");
+  await tool("cancel_operator", { reason: "End this isolated fixture" });
+}));
+
+test("prepared Mission retains the original inventory page across registration and replan failures", async t => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const text = "assert.equal(1, 1);\nassert.equal(1, 1);\n";
+  for (let index = 0; index < 24; index++) await writeFile(join(root, "test", `${index}.test.mjs`), text);
+  await writeFile(join(root, "check.mjs"), "console.log('check');\n");
+  const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async () => ({ data: { id: "root", agent: "dog-operator" } }),
+    children: async () => ({ data: [] }), messages: async () => ({ data: [] }),
+  } } } as never);
+  let hooks = await create();
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Maintain the test suite." }],
+  });
+  await tool("start_mission", { requirements: ["Maintain the test suite"] });
+  const plan = { units: [{ title: "Maintain tests", objective: "Maintain tests", read: ["check.mjs"],
+    write: ["test/**"], validation: ["node check.mjs"] }] };
+  const missionPath = join(root, ".sortie-dogs-v010", "missions", `${createHash("sha256").update("root").digest("hex")}.json`);
+  const beforePrepare = await readFile(missionPath, "utf8");
+  t.mock.method(OperatorRuntime.prototype, "prepareMission", async () => { throw new Error("injected preparation failure"); });
+  await assert.rejects(tool("plan_units", plan), /injected preparation failure/);
+  t.mock.restoreAll();
+  assert.equal(await readFile(missionPath, "utf8"), beforePrepare, "failed preparation leaves no staged page");
+  const update = OperatorMissionRuntime.prototype.update;
+  let injected = false;
+  t.mock.method(OperatorMissionRuntime.prototype, "update", function (this: OperatorMissionRuntime, id: string, change: Parameters<typeof update>[1]) {
+    return update.call(this, id, state => {
+      const before = state.runID;
+      change(state);
+      if (!injected && before !== state.runID) { injected = true; throw new Error("injected inventory binding failure"); }
+    });
+  });
+  await assert.rejects(tool("plan_units", plan), /injected inventory binding failure/);
+  t.mock.restoreAll();
+  const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+  const prepared = await operators.required("root");
+  const handoff = JSON.parse(await readFile(prepared.units[0]!.handoffPath, "utf8"));
+  const expected = handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals;
+  assert.equal(expected.length, 16);
+  const beforeReplan = await readFile(missionPath, "utf8");
+  t.mock.method(OperatorRuntime.prototype, "replanMission", async () => { throw new Error("injected replan failure"); });
+  await assert.rejects(tool("plan_units", { ...plan, units: [{ ...plan.units[0], title: "Other proposal" }], reason: "Try a correction" }), /injected replan failure/);
+  t.mock.restoreAll();
+  assert.equal(await readFile(missionPath, "utf8"), beforeReplan, "rejection retains the prepared run's exact original page");
+  hooks = await create();
+  await tool("plan_units", plan);
+  const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  const registered = mission.testDebtSignals!.filter(signal => signal.run_id === prepared.runID);
+  assert.deepEqual(registered.map(({ run_id: _run, ...signal }) => signal), expected,
+    "the exact original handoff, not the failed proposal's page, is registered");
+  assert.equal((await operators.required("root")).runID, prepared.runID);
+  assert.equal(mission.testDebtInventory!.pending, undefined);
+
+  const replan = OperatorRuntime.prototype.replanMission;
+  const replacement = { ...plan, units: [{ ...plan.units[0], title: "Next milestone" }], reason: "Continue the inventory" };
+  t.mock.method(OperatorRuntime.prototype, "replanMission", async function (this: OperatorRuntime, ...args: Parameters<typeof replan>) {
+    await replan.apply(this, args);
+    throw new Error("injected post-preparation failure");
+  });
+  await assert.rejects(tool("plan_units", replacement), /injected post-preparation failure/);
+  t.mock.restoreAll();
+  const nextRun = await operators.required("root");
+  assert.notEqual(nextRun.runID, prepared.runID);
+  const waiting = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(waiting.runID, prepared.runID);
+  const nextHandoff = JSON.parse(await readFile(nextRun.units[0]!.handoffPath, "utf8"));
+  const nextSignals = nextHandoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals;
+  assert.deepEqual(waiting.testDebtInventory!.pending![0]!.signals, nextSignals,
+    "an uncertain post-preparation error must retain the new run's immutable page");
+  hooks = await create();
+  await tool("plan_units", replacement);
+  const recovered = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(recovered.runID, nextRun.runID);
+  assert.deepEqual(recovered.testDebtSignals!.filter(signal => signal.run_id === nextRun.runID)
+    .map(({ run_id: _run, ...signal }) => signal), nextSignals);
+  assert.equal(recovered.testDebtInventory!.pending, undefined);
+}));
+
+test("a newly edited test can schedule audit once without treating repeated assertions as proof", async () => fixture(async root => {
+  await mkdir(join(root, "test"));
+  const history: unknown[] = [], check = join(root, "test", "new.test.mjs");
+  const shellCheck = join(root, "test", "shell.test.mjs");
+  const text = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+  await writeFile(join(root, "seed.mjs"), text);
+  const identities: Record<string, { agent: string; parentID?: string }> = { root: { agent: "dog-operator" } };
+  const hooks = await SortieDogsV010Plugin({ directory: root, client: { session: {
+    get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+    children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+      .filter(([, identity]) => identity.parentID === path.id).map(([id, identity]) => ({ id, ...identity })) }),
+    messages: async () => ({ data: history }),
+  } } } as never);
+  const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+  await hooks["chat.message"]!({ sessionID: "root", messageID: "request", agent: "dog-operator" }, {
+    message: { id: "request", agent: "dog-operator", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Add a check" }],
+  });
+  await tool("start_mission", { requirements: ["Add a check"] });
+  const started = await tool("plan_units", { executor: "self", units: [{ title: "Add check", objective: "Add the check",
+    read: ["seed.mjs"], write: ["test/new.test.mjs", "test/shell.test.mjs", "test/failing-shell.test.mjs", "test/errored-shell.test.mjs", "test/no-output-shell.test.mjs"], validation: ["node test/new.test.mjs"] }] });
+  assert.equal(started.test_debt_audit, undefined);
+  const initialUnit = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+  const initialHandoff = await readFile(initialUnit.handoffPath, "utf8");
+  const args = { filePath: check, content: text }, request = { tool: "write", sessionID: "root", callID: "write-check" };
+  await hooks["tool.execute.before"]!(request, { args });
+  await writeFile(check, text);
+  const output = { output: "written" };
+  await hooks["tool.execute.after"]!({ ...request, args }, output);
+  assert.match(output.output, /SORTIE_TEST_DEBT_AUDIT/);
+  assert.match(output.output, /similar lines or size alone do not establish redundancy/);
+  assert.equal(await readFile(check, "utf8"), text, "inventory must not edit or delete the author's test");
+  const cold = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+  assert.equal((await cold.required("root")).testDebtSignals?.[0]?.trigger, "observed-change");
+  const again = { output: "written" };
+  await hooks["tool.execute.after"]!({ ...request, args }, again);
+  assert.doesNotMatch(again.output, /SORTIE_TEST_DEBT_AUDIT/);
+  const shellArgs = { command: "cp seed.mjs test/shell.test.mjs", workdir: root };
+  const shellRequest = { tool: "shell", sessionID: "root", callID: "shell-check" };
+  await hooks["tool.execute.before"]!(shellRequest, { args: shellArgs });
+  await promisify(execFile)("cp", ["seed.mjs", "test/shell.test.mjs"], { cwd: root });
+  const shellOutput = { output: "", metadata: { exit: 0, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...shellRequest, args: shellArgs }, shellOutput);
+  assert.match(shellOutput.output, /SORTIE_TEST_DEBT_AUDIT/);
+  assert.equal(await readFile(shellCheck, "utf8"), text, "inventory never changes a shell-written test");
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/shell.test.mjs"));
+  const failedArgs = { command: "cp seed.mjs test/failing-shell.test.mjs && false", workdir: root };
+  const failedRequest = { tool: "shell", sessionID: "root", callID: "failed-shell-check" };
+  await hooks["tool.execute.before"]!(failedRequest, { args: failedArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", failedArgs.command], { cwd: root }));
+  const failedOutput = { output: "", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...failedRequest, args: failedArgs }, failedOutput);
+  assert.match(failedOutput.output, /SORTIE_TEST_DEBT_AUDIT/, "a failed shell can still leave a changed test");
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/failing-shell.test.mjs"));
+  const erroredArgs = { command: "cp seed.mjs test/errored-shell.test.mjs && false", workdir: root };
+  const erroredRequest = { tool: "shell", sessionID: "root", callID: "errored-shell-check" };
+  await hooks["tool.execute.before"]!(erroredRequest, { args: erroredArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", erroredArgs.command], { cwd: root }));
+  const noExit = { status: "error", output: "execution interrupted", metadata: {} };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, noExit);
+  assert.doesNotMatch(noExit.output, /SORTIE_TEST_DEBT_AUDIT/, "an error without terminal exit is not a completed shell");
+  const pending = { status: "error", output: "execution pending", metadata: { exit: 1, status: "pending" } };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, pending);
+  assert.doesNotMatch(pending.output, /SORTIE_TEST_DEBT_AUDIT/, "a pending result is not a terminal shell");
+  const erroredOutput = { status: "error", output: "command failed", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...erroredRequest, args: erroredArgs }, erroredOutput);
+  assert.match(erroredOutput.output, /SORTIE_TEST_DEBT_AUDIT/, "native error status does not erase a terminal shell's changes");
+  assert.equal(erroredOutput.status, "error", "audit notification must not turn the failure into success");
+  assert.equal(erroredOutput.metadata.exit, 1);
+  assert.equal(await readFile(join(root, "test", "errored-shell.test.mjs"), "utf8"), text);
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/errored-shell.test.mjs"));
+  const noOutputArgs = { command: "cp seed.mjs test/no-output-shell.test.mjs && false", workdir: root };
+  const noOutputRequest = { tool: "shell", sessionID: "root", callID: "no-output-shell-check" };
+  await hooks["tool.execute.before"]!(noOutputRequest, { args: noOutputArgs });
+  await assert.rejects(promisify(execFile)("sh", ["-c", noOutputArgs.command], { cwd: root }));
+  const noOutput = { status: "error", metadata: { exit: 1, status: "completed" } };
+  await hooks["tool.execute.after"]!({ ...noOutputRequest, args: noOutputArgs }, noOutput);
+  assert.ok((await cold.required("root")).testDebtSignals?.some(signal => signal.path === "test/no-output-shell.test.mjs"),
+    "a terminal error without a text result still retains the scheduling signal");
+  assert.equal(noOutput.status, "error");
+  assert.equal(noOutput.metadata.exit, 1);
+  assert.equal("output" in noOutput, false, "recording must not fabricate a native result");
+  const yielded = await tool("plan_units", { executor: "worker", handoff_context: "Continue the same requested check." });
+  assert.ok(yielded.task, JSON.stringify(yielded));
+  const continued = (await new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+  assert.equal(await readFile(continued.handoffPath, "utf8"), initialHandoff, "the frozen controls are byte-for-byte unchanged");
+  const frozen = JSON.parse(initialHandoff);
+  assert.equal(frozen.ext["sortie-dogs/mission-context"].test_debt_audit, undefined, "the original controls stay immutable");
+  identities.worker = { agent: "dog-worker-v010", parentID: "root" };
+  const dispatched = { args: structuredClone(yielded.task) };
+  await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "worker-task" }, dispatched);
+  const workerChat = { message: { id: "worker-request", agent: "dog-worker-v010", model: { providerID: "openai", modelID: "fixture" } },
+    parts: [{ type: "text", text: dispatched.args.prompt }] };
+  await hooks["chat.message"]!({ sessionID: "worker", messageID: "worker-request", agent: "dog-worker-v010" }, workerChat);
+  const continuation = JSON.parse(/^direct_handoff: (.+)$/mu.exec(workerChat.parts[0]!.text)![1]!);
+  assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/errored-shell.test.mjs"),
+    "the admitted Worker's continuation receives a signal discovered after planning");
+  assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/no-output-shell.test.mjs"));
+  assert.ok(continuation.test_debt_audit.signals.every((signal: { unit_id: string }) => signal.unit_id === continued.unit.id));
+  assert.match(continuation.test_debt_audit.instruction, /not established as complete/);
+  assert.match(continuation.test_debt_audit.instruction, /already.*(?:assessed|handled)/i);
+  assert.equal(continuation.unit_id, continued.unit.id);
+  const large = join(root, "test", "large.test.mjs");
+  await writeFile(large, "x".repeat(512 * 1024 + 1));
+  const largeSignals = await inspectTestDebt(root, { read: [large], write: [], validation: [] });
+  assert.deepEqual(largeSignals[0]!.reasons, ["large-test-file"]);
+  assert.equal(largeSignals[0]!.lines, null, "large files are signaled without claiming a full inventory");
+  assert.equal(largeSignals[0]!.sha256, null);
+  const other = join(root, "other");
+  await mkdir(join(other, "test"), { recursive: true });
+  await writeFile(join(other, "test", "new.test.mjs"), text);
+  const unit = { read: [], write: [], validation: ["node   test/new.test.mjs"],
+    validation_cwd: { "node test/new.test.mjs": other } };
+  assert.equal((await inspectTestDebt(root, unit))[0]!.path, "other/test/new.test.mjs");
+  assert.equal((await inspectTestDebt(root, { ...unit, validation_cwd: { "node test/new.test.mjs": root } }))[0]!.path,
+    "test/new.test.mjs", "each inspection uses the current registered cwd, not an earlier setting");
+  await mkdir(join(root, "test", "nested"));
+  await writeFile(join(root, "test", "nested", "nested.test.mjs"), text);
+  await mkdir(join(root, "test", "node_modules"));
+  await writeFile(join(root, "test", "node_modules", "dependency.test.mjs"), text);
+  const hiddenDirectory = join(root, "test", ".opencode"), hiddenTest = join(hiddenDirectory, "private.test.mjs");
+  await mkdir(hiddenDirectory);
+  await writeFile(hiddenTest, text);
+  await writeFile(join(root, "test", ".state.test.mjs"), text);
+  await symlink(other, join(root, "test", "link"), process.platform === "win32" ? "junction" : "dir");
+  await symlink(join(root, ".."), join(root, "test", "linked-outside"), process.platform === "win32" ? "junction" : "dir");
+  const globbed = await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] });
+  assert.deepEqual(globbed.map(signal => signal.path).sort(), ["test/errored-shell.test.mjs", "test/failing-shell.test.mjs", "test/large.test.mjs", "test/nested/nested.test.mjs", "test/new.test.mjs", "test/no-output-shell.test.mjs", "test/shell.test.mjs"]);
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/link/**"], validation: [] }), [],
+    "a scope starting through a link must not traverse even an in-project target");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/.opencode/**"], validation: [] }), [],
+    "an automatic inventory must not start inside a hidden directory");
+  assert.deepEqual((await inspectTestDebt(root, { read: [hiddenTest], write: [], validation: [] })).map(signal => signal.path),
+    ["test/.opencode/private.test.mjs"], "an explicit file input retains the pre-existing opt-in behavior");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: ["test/*.test.mjs"], validation: [] }), [],
+    "unsupported shell patterns do not become wider host write scopes");
+  assert.deepEqual(await inspectTestDebt(root, { read: [], write: [], validation: ["npm test"] }), [],
+    "a script name alone does not implicitly expand the test directory");
+  const scoped = await inspectTestDebt(root, { read: [], write: [join(root, "other", "test", "**")], validation: [] });
+  assert.deepEqual(scoped.map(signal => signal.path), ["other/test/new.test.mjs"]);
+  const globCwd = { read: [], write: [], validation: ["node test/**"], validation_cwd: { "node test/**": other } };
+  assert.deepEqual((await inspectTestDebt(root, globCwd)).map(signal => signal.path), ["other/test/new.test.mjs"]);
+  assert.deepEqual((await inspectTestDebt(root, { ...globCwd, validation_cwd: { "node test/**": root } })).map(signal => signal.path).sort(),
+    globbed.map(signal => signal.path).sort(), "glob inventory uses the current validation cwd");
+  for (let index = 0; index < 20; index++) await writeFile(join(root, "test", `bounded-${index}.test.mjs`), text);
+  assert.ok((await inspectTestDebt(root, { read: [], write: ["test/**"], validation: [] })).length <= 16);
 }));
 
 test("Worker acceptance observations use each saved admission and cwd, including historical units", async () => fixture(async directory => {
@@ -476,7 +1240,10 @@ test("public reproduction and shared-branch checks remain in the same mission Wo
     title: "Repair formatter", objective, read: ["src/project/format.py"], write: ["src/project/format.py", "tests/test_format.py"],
     validation: ["python -m pytest tests/test_format.py"], requirement_ids: ["R1", "R2"],
   }]));
-  const task = (await operators.next("root", "root") as { task: { prompt: string } }).task;
+  const task = (await operators.next("root", "root") as { task: { prompt: string; subagent_type: string } }).task;
+  assert.equal(task.subagent_type, "dog-worker-v010");
+  assert.match(worker, /Compare existing tests: inputs, boundaries, assertions, failures; reuse if enough; retain coverage/u,
+    "the ordinary implementation Worker receives the test-value guidance");
   await operators.admitWorker("root", "root", "worker-call", task as never);
   const expanded = await operators.claimAdmittedWorkerPrompt("root", "root", "worker", task.prompt);
   assert.match(expanded.prompt, /^contract_reference: handoff$/m);

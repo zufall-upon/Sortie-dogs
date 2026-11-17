@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import Ajv from "ajv";
 import { legacyToolArgs } from "../dist/plugin/tool-schema.js";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
+import { availableParallelism } from "node:os";
 import test from "node:test";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { copyManagedRouterFixture } from "./helpers/managed-router-fixture.ts";
 
 import V2Plugin, {
   createSortieDogsV2Plugin,
@@ -197,6 +199,30 @@ function contextFixture() {
   return { context, history, synthetic, tools, toolHooks, sessionHooks, permissionHooks, agentSwitches, modelSwitches, emit,
     failNextSynthetic: () => { failSynthetic = true; }, failNextContext: () => { failContext = true; }, aborted: () => aborted };
 }
+
+test("V2 validation join checks the original native shell permission and forwards cancellation", async () => {
+  const fixture = contextFixture();
+  const assertions: unknown[] = [];
+  fixture.context.permission.assert = async input => { assertions.push(input); throw new Error("native permission denied"); };
+  let authorize: NonNullable<Parameters<OpenCodePlugin>[0]["authorizeValidationJoin"]> | undefined;
+  let observedSignal: AbortSignal | undefined;
+  const factory: OpenCodePlugin = async input => {
+    authorize = input.authorizeValidationJoin;
+    return { "tool.execute.before": async request => { observedSignal = request.signal; } };
+  };
+  const cleanup = await createSortieDogsV2Plugin(factory).setup(fixture.context);
+  try {
+    assert.ok(authorize);
+    await assert.rejects(authorize({ sessionID: "worker", agent: "dog-worker-v010", command: "node candidate.test.mjs",
+      directory: "/project" }), /native permission denied/u);
+    assert.deepEqual(assertions, [{ sessionID: "worker", agent: "dog-worker-v010", action: "shell",
+      resources: ["node candidate.test.mjs"], save: ["node candidate.test.mjs"] }]);
+    const controller = new AbortController();
+    await fixture.toolHooks.get("execute.before")!({ tool: "shell", sessionID: "worker", id: "call",
+      input: { command: "node candidate.test.mjs" }, signal: controller.signal });
+    assert.equal(observedSignal, controller.signal);
+  } finally { cleanup?.(); }
+});
 
 test("V2 native Grip hooks retain direction through context reload and preserve native question answer metadata", async () => {
   const directory = await mkdtemp(resolve("_testenv/v2-grip-"));
@@ -900,15 +926,31 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario } of [
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
-  { legacy: false, commit: false, cancel: false },
+  { legacy: false, commit: false, cancel: false }, { legacy: false, commit: false, cancel: false, join: true },
+  ...["passed", "failed", "source-changed", "environment-changed", "source-before", "environment-before", "permission-denied",
+    "owner-cancelled", "waiter-cancelled", "required-occurrence", "timeout-mismatch", "background-mismatch", "environment-mismatch"]
+    .map(reviewJoin => ({ legacy: false, commit: false, cancel: false, reviewJoin })),
+  { legacy: false, commit: false, cancel: false, managed: true },
+  { legacy: false, commit: false, cancel: false, managed: "required" },
+  { legacy: false, commit: false, cancel: false, managed: "focused" },
+  { legacy: false, commit: false, cancel: false, managed: "pytest-nodeid" },
+  { legacy: false, commit: false, cancel: false, managed: "router" },
+  { legacy: false, commit: false, cancel: false, managed: "router-required" },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`, async () => {
+test(managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
+  managedScenario === "router" ? "V2 project router defers covered full after real focused failure" :
+  managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
+  managedScenario === "pytest-nodeid" ? "V2 obsolete pytest node ID permits the native full run" :
+  managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
+  managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
+  `V2 ${reviewJoin ? `controller joins Worker validation ${reviewJoin}` : directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
+{ skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async (context) => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
@@ -920,10 +962,21 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
     unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  const originalPath = process.env.PATH;
+  const originalRouterEnvironment = { HOME: process.env.HOME, npm_config_userconfig: process.env.npm_config_userconfig,
+    npm_config_globalconfig: process.env.npm_config_globalconfig };
+  let joinedPermission!: () => void;
+  const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
+    if (joinScenario || reviewJoin) fixture.context.permission.assert = async request => {
+      assert.equal(request.action, "shell"); assert.match(request.resources[0]!, /^node check\.mjs /u);
+      if (reviewJoin) assert.equal(request.sessionID, "root");
+      joinedPermission();
+      if (reviewJoin === "permission-denied") throw new Error("native permission denied");
+    };
     cleanup = await createSortieDogsV2Plugin(async (input, options) => {
       const hooks = await SortieDogsV010Plugin(input, options);
       const after = hooks["tool.execute.after"];
@@ -999,6 +1052,11 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
     await exec("git", ["init", "--quiet", "--initial-branch=base"], { cwd: directory });
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict";\nimport {readFileSync} from "node:fs";\n' +
       'const value = readFileSync("result.txt", "utf8");\nassert.ok(value.length);\nif (process.argv[2] === "ready") assert.equal(value, "ready\\n");\nconsole.log("PASS");\n');
+    if (reviewJoin) await writeFile(join(directory, "check.mjs"), `import { appendFileSync, existsSync } from 'node:fs';
+appendFileSync('.git/sortie-dogs/join-count', 'run\\n'); process.stdout.write('started\\n');
+const deadline = Date.now() + 15000;
+while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
     if (fabric) {
       await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(`${process.argv[2]}.txt`, "utf8") !== "ready\\n") process.exit(1); console.log("PASS");\n');
@@ -1137,12 +1195,55 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
       await exec("git", ["add", ".gitignore", "check.mjs"], { cwd: directory });
       await exec("git", ["commit", "-m", "fixture base"], { cwd: directory });
     }
+    if (managedScenario === "router" || managedScenario === "router-required") {
+      const project = process.cwd(), pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
+      const tools = join(directory, ".git/sortie-dogs/tools");
+      process.env.PATH = `${tools}${delimiter}${resolve(project, "node_modules/.bin")}${delimiter}${originalPath ?? ""}`;
+      process.env.HOME = join(directory, ".git/sortie-dogs/home");
+      process.env.npm_config_userconfig = join(process.env.HOME, ".npmrc");
+      process.env.npm_config_globalconfig = join(process.env.HOME, "global.npmrc");
+      await mkdir(tools, { recursive: true });
+      await mkdir(process.env.HOME, { recursive: true });
+      await copyManagedRouterFixture(project, directory);
+      await mkdir(join(directory, "src/cli"), { recursive: true });
+      await writeFile(join(directory, ".gitignore"), "dist/\n_testenv/\nnode_modules/\n");
+      await mkdir(join(directory, "node_modules/@types/node"), { recursive: true });
+      await writeFile(join(directory, "node_modules/@types/node/index.d.ts"), "export {};\n");
+      await writeFile(join(directory, "src/cli/main.ts"), "export const fixture = true;\n");
+      await writeFile(join(directory, "package.json"), JSON.stringify({ type: "module", scripts: pkg.scripts }));
+      await mkdir(join(directory, "_testenv"), { recursive: true });
+      await writeFile(join(directory, "test/fixture.test.ts"),
+        `import { appendFileSync, readFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';\ntest('managed', () => { appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'); assert.notEqual(readFileSync('result.txt', 'utf8'), 'broken\\n'); });\n`);
+      for (const name of ["a", "b"]) await writeFile(join(directory, `test/concurrent-${name}.test.ts`),
+        `import { existsSync, rmSync, writeFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';
+test('requires exclusive execution', async () => {
+  const mine = '.git/sortie-dogs/active-${name}', peer = '.git/sortie-dogs/active-${name === "a" ? "b" : "a"}';
+  writeFileSync(mine, 'active');
+  try {
+    const deadline = Date.now() + 1000;
+    while (!existsSync(peer) && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+    assert.equal(existsSync(peer), false);
+  } finally { rmSync(mine, { force: true }); }
+});\n`);
+      await exec("npm", ["run", "build"], { cwd: directory });
+    } else if (managedScenario) {
+      await writeFile(join(directory, "package.json"), JSON.stringify({ scripts: {
+        all: "npm run suite", suite: "node --test", release: "echo release && node --test",
+      } }));
+      await writeFile(join(directory, "fixture.test.mjs"),
+        `import { appendFileSync, readFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';\ntest('managed', () => { appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'); assert.notEqual(readFileSync('result.txt', 'utf8'), 'broken\\n'); });\n`);
+      if (managedScenario === "pytest-nodeid") await writeFile(join(directory, "test_example.py"), "def test_before():\n    assert False\n");
+    }
     const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
     const mission = await tool("root", "start_mission", { requirements: [original] });
-    let dispatch = await before("root", "subagent", nativeTask(mission.task));
+    let dispatch = await before("root", "subagent", { ...nativeTask(mission.task), ...(reviewJoin ? { background: true } : {}) });
     await prompt("coordinator", String(dispatch.input.prompt));
+    if (reviewJoin) {
+      assert.equal(dispatch.input.background, true, "the root retains the normal native background Coordinator launch");
+      await after(dispatch, "Coordinator running", { sessionID: "coordinator", status: "running" });
+    }
     if (directRecovery) {
       const unit = { title: "Ready result", objective: "Create ready result", read: ["check.mjs"], write: ["result.txt"],
         validation: ["node check.mjs ready"] };
@@ -1197,9 +1298,15 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
     let retiredHandoff: string | undefined;
     for (const [index, child] of (commit ? ["first"] : ["first", "second"]).entries()) {
       const finalCandidate = commit || index === 1;
-      const command = `node check.mjs ${finalCandidate ? "ready" : "present"}`;
+      const command = managedScenario === "router-required" ? "npm run test:full" : managedScenario === "router"
+        ? "npm run test:targeted -- test/fixture.test.ts" : managedScenario === "required" ? "node --test" : managedScenario === "pytest-nodeid"
+        ? "pytest test_example.py::test_before -q" : managedScenario === "focused"
+        ? "node --test fixture.test.mjs" : `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
-        read: ["check.mjs"], write: ["result.txt"], validation: [command] }],
+        read: managedScenario ? [directory] : ["check.mjs"],
+        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] :
+          managedScenario === "pytest-nodeid" ? ["result.txt", "test_example.py"] : ["result.txt"],
+        validation: reviewJoin === "required-occurrence" ? [command, command] : [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
       let state = await runtime.required("root");
@@ -1332,6 +1439,399 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
       const patch = await before(child, "patch", { patchText });
       await writeFile(join(directory, "result.txt"), finalCandidate ? "ready\n" : "partial\n");
       await after(patch, "Updated result.txt");
+      if (managedScenario) {
+        if (managedScenario === "pytest-nodeid") {
+          const environment = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1", PYTEST_ADDOPTS: "-p no:cacheprovider" };
+          const available = await exec("pytest", ["--version"], { cwd: directory, env: environment }).then(() => true, error => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          });
+          if (!available) context.diagnostic("pytest unavailable: exercising hook routing with a simulated terminal only");
+          const native = async (args: string[]) => exec("pytest", args, { cwd: directory, env: environment })
+            .then(result => ({ output: result.stdout + result.stderr, code: 0 }), error => {
+              if (typeof error.code !== "number") throw error;
+              return { output: String(error.stdout) + String(error.stderr), code: error.code };
+            });
+          const failed = await before(child, "shell", { command, workdir: directory });
+          const initial = available ? await native(["test_example.py::test_before", "-q"]) : { output: "simulated native terminal", code: 1 };
+          assert.equal(initial.code, 1);
+          await after(failed, initial.output, { exit: initial.code });
+          const unknown = await before(child, "shell", { command: "pytest -q", workdir: directory });
+          assert.equal(unknown.input.command, "pytest -q", "an unverified node ID cannot force a focused retry even while its file exists");
+          await after(unknown, "not started", { status: "cancelled" });
+          const change = await before(child, "patch", { patchText: "*** Begin Patch\n*** Update File: test_example.py\n@@\n-def test_before():\n-    assert False\n+def test_after():\n+    assert True\n*** End Patch" });
+          await writeFile(join(directory, "test_example.py"), "def test_after():\n    assert True\n");
+          await after(change, "Updated test_example.py");
+          if (available) {
+            const stale = await before(child, "shell", { command, workdir: directory });
+            const missing = await native(["test_example.py::test_before", "-q"]);
+            assert.equal(missing.code, 4); assert.match(missing.output, /not found/u);
+            await after(stale, missing.output, { exit: missing.code });
+            const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.ok(checks.some(check => check.callID === stale.id && check.exitCode === 4), "the missing selector failure remains recorded");
+          }
+          const full = await before(child, "shell", { command: "pytest -q", workdir: directory });
+          assert.equal(full.input.command, "pytest -q");
+          if (available) {
+            const result = await native(["-q"]);
+            assert.equal(result.code, 0); assert.match(result.output, /1 passed/u);
+            await after(full, result.output, { exit: result.code });
+          } else await after(full, "not started: pytest unavailable", { status: "cancelled" });
+          const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+          assert.ok(checks.some(check => check.callID === failed.id && check.exitCode === 1), "the registered failure remains recorded");
+          assert.ok(!checks.some(check => check.callID === failed.id && check.exitCode === 0), "the old failure is not converted into a pass");
+          return;
+        }
+        if (managedScenario === "router" || managedScenario === "router-required") {
+          const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+          const edit = async (from: string, to: string) => {
+            const change = await before(child, "patch", { patchText: `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch` });
+            await writeFile(join(directory, "result.txt"), `${to}\n`); await after(change, "Updated result.txt");
+          };
+          const focusedCommand = "npm run test:targeted -- test/fixture.test.ts";
+          await edit("partial", "broken");
+          if (managedScenario === "router") {
+            const directCommand = "node --test test/fixture.test.ts";
+            const direct = await before(child, "shell", { command: directCommand, workdir: directory });
+            const result = await exec(process.execPath, ["--test", "test/fixture.test.ts"], { cwd: directory, env: environment })
+              .then(() => { throw new Error("direct fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(result.code, 1); await after(direct, result.stdout, { exit: result.code });
+            const different = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(different.input.command, "npm run test:full", "a different runner/setup is not the same selection");
+            await after(different, "not started", { status: "cancelled" });
+            await context.test("a concurrent targeted selection is not a serial full failure", { skip: availableParallelism() < 2 }, async () => {
+              const paths = ["test/concurrent-a.test.ts", "test/concurrent-b.test.ts"];
+              const multiple = `npm run test:targeted -- ${paths.join(" ")}`;
+              const multi = await before(child, "shell", { command: multiple, workdir: directory });
+              const failed = await exec("npm", ["run", "test:targeted", "--", ...paths], { cwd: directory, env: environment })
+                .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+              assert.equal(failed.code, 1); await after(multi, failed.stdout, { exit: failed.code });
+              // These are the full helper's actual per-file arguments, not a full launch.
+              for (const path of paths) await exec(process.execPath,
+                ["--experimental-strip-types", "--import", "./test/setup.ts", "--test", "--test-concurrency=1", path],
+                { cwd: directory, env: environment });
+              const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+              assert.equal(full.input.command, "npm run test:full");
+              await after(full, "not started", { status: "cancelled" });
+            });
+          }
+          const focused = await before(child, "shell", { command: focusedCommand, workdir: directory });
+          const failed = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment })
+            .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+          assert.equal(failed.code, 1); await after(focused, failed.stdout, { exit: failed.code });
+          if (managedScenario === "router-required") {
+            const full = await before(child, "shell", { command, workdir: directory });
+            assert.equal(full.input.command, command, "registered full keeps its execution obligation");
+            await after(full, "not started", { status: "cancelled" });
+          } else {
+            await assert.rejects(before(child, "shell", { command: "npm run test:full", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED.*test:targeted/u);
+            for (const kind of ["userconfig", "globalconfig"]) await context.test(`${kind} npm effects remain native with an existing focused failure`, async () => {
+              const config = process.env[`npm_config_${kind}`]!, shell = join(directory, ".git/sortie-dogs/tools/script-shell");
+              await writeFile(shell, "#!/bin/sh\nprintf 'called\\n' >> .git/sortie-dogs/shell-count\nexec /bin/sh \"$@\"\n", { mode: 0o755 });
+              await writeFile(config, `script-shell=${shell}\n`);
+              try {
+                assert.equal((await exec("npm", ["config", "get", "script-shell"], { cwd: directory })).stdout.trim(), shell);
+                const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+                assert.equal(full.input.command, "npm run test:full");
+                await after(full, "not started", { status: "cancelled" });
+                assert.equal(await readFile(config, "utf8"), `script-shell=${shell}\n`, "client-owned configuration is not rewritten");
+              } finally { await rm(config, { force: true }); }
+            });
+            await context.test("an external compiler fallback is not suppressed", async () => {
+              const compiler = join(directory, "node_modules/.bin/tsc"), wrapper = join(directory, ".git/sortie-dogs/tools/tsc");
+              await rm(compiler);
+              await writeFile(wrapper, "#!/bin/sh\nprintf 'called\\n' >> .git/sortie-dogs/compiler-count\nexit 0\n", { mode: 0o755 });
+              try {
+                const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+                assert.equal(full.input.command, "npm run test:full");
+                await after(full, "not started", { status: "cancelled" });
+              } finally { await symlink("../typescript/bin/tsc", compiler); }
+            });
+            const router = join(directory, "scripts/test-router.mjs"), originalRouter = await readFile(router, "utf8");
+            await writeFile(router, `${originalRouter}\n// changed\n`);
+            const changed = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(changed.input.command, "npm run test:full", "changed runner is not suppressed");
+            await after(changed, "not started", { status: "cancelled" });
+            await writeFile(router, originalRouter);
+            const packagePath = join(directory, "package.json"), originalPackage = await readFile(packagePath, "utf8");
+            const withLifecycle = JSON.parse(originalPackage); withLifecycle.scripts["pretest:full"] = "node prepare.mjs";
+            await writeFile(packagePath, JSON.stringify(withLifecycle));
+            const lifecycle = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(lifecycle.input.command, "npm run test:full", "unknown lifecycle effects are not suppressed");
+            await after(lifecycle, "not started", { status: "cancelled" });
+            await writeFile(packagePath, originalPackage);
+            const changedFocus = JSON.parse(originalPackage); changedFocus.scripts["test:targeted"] = "node --test";
+            await writeFile(packagePath, JSON.stringify(changedFocus));
+            const staleFocus = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(staleFocus.input.command, "npm run test:full", "the recorded focused command is no longer the same executable selection");
+            await after(staleFocus, "not started", { status: "cancelled" });
+            await writeFile(packagePath, originalPackage);
+            const oldOptions = process.env.NODE_OPTIONS;
+            try {
+              process.env.NODE_OPTIONS = "--trace-warnings";
+              const alteredEnvironment = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+              assert.equal(alteredEnvironment.input.command, "npm run test:full");
+              await after(alteredEnvironment, "not started", { status: "cancelled" });
+            } finally {
+              if (oldOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = oldOptions;
+            }
+            await edit("broken", "ready");
+            const retry = await before(child, "shell", { command: focusedCommand, workdir: directory });
+            const result = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment });
+            await after(retry, result.stdout, { exit: 0 });
+            const full = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(full.input.command, "npm run test:full", "fresh focused success removes the deferral, not a full-test PASS");
+            // Exercise the full runner's output format as a synthetic failed hook event.
+            // The actual full command is deliberately not launched in this test.
+            const fullOutput = `SORTIE_FULL_FILE_OUTPUT ${JSON.stringify({ phase: "nonintegration", path: "test/fixture.test.ts", line: "not ok 1 - managed" })}`;
+            await after(full, fullOutput, { exit: 1 });
+            await assert.rejects(before(child, "shell", { command: "npm run test:full", workdir: directory }),
+              /SORTIE_FULL_TEST_DEFERRED.*test:targeted/u, "a reported file failure produces a covered focused retry");
+            const retryAgain = await before(child, "shell", { command: focusedCommand, workdir: directory });
+            const retried = await exec("npm", ["run", "test:targeted", "--", "test/fixture.test.ts"], { cwd: directory, env: environment });
+            await after(retryAgain, retried.stdout, { exit: 0 });
+            const allowed = await before(child, "shell", { command: "npm run test:full", workdir: directory });
+            assert.equal(allowed.input.command, "npm run test:full");
+            await after(allowed, "not started", { status: "cancelled" });
+          }
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"),
+            managedScenario === "router" ? "run\nrun\nrun\nrun\n" : "run\n", "the full command was never started");
+          return;
+        }
+        if (managedScenario === "focused") {
+          const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+          const edit = async (from: string, to: string) => {
+            const change = await before(child, "patch", { patchText: `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch` });
+            await writeFile(join(directory, "result.txt"), `${to}\n`); await after(change, "Updated result.txt");
+          };
+          await edit("partial", "broken");
+          const focused = await before(child, "shell", { command, workdir: directory });
+          const failed = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment })
+            .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+          assert.equal(failed.code, 1); await after(focused, failed.stdout, { exit: failed.code });
+          await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+          const fixturePath = join(directory, "fixture.test.mjs"), source = await readFile(fixturePath);
+          await rename(join(directory, "fixture.test.mjs"), join(directory, "renamed.test.mjs"));
+          try {
+            if (process.platform !== "win32") {
+              await context.test("a dangling in-scope selection remains unavailable when omitted from the snapshot", async () => {
+                const control = join(directory, ".opencode"), link = join(control, "focused.test.mjs"), target = join(control, "target.test.mjs");
+                await mkdir(control, { recursive: true });
+                await writeFile(target, source);
+                await symlink("target.test.mjs", link);
+                try {
+                  const selected = "node --test .opencode/focused.test.mjs";
+                  const attempt = await before(child, "shell", { command: selected, workdir: directory });
+                  const failure = await exec(process.execPath, ["--test", ".opencode/focused.test.mjs"], { cwd: directory, env: environment })
+                    .then(() => { throw new Error("linked fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+                  assert.equal(failure.code, 1); await after(attempt, failure.stdout, { exit: failure.code });
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+                  await rm(target);
+                  const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+                  assert.equal(full.input.command, "npm run all", "the removed in-scope target cannot be retried");
+                  await after(full, "not started", { status: "cancelled" });
+                  const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+                  const recordedAttempt = history[child]!.flatMap(message => (message.content as any[]) ?? []).find(part => part.id === attempt.id);
+                  assert.equal(recordedAttempt?.state.metadata.exit, 1, "the native failed attempt remains in history");
+                  assert.ok(checks.some(check => check.callID === focused.id && check.exitCode === 1));
+                  assert.ok(!checks.some(check => check.exitCode === 0), "absence does not create a passing check");
+                  await rm(link);
+                  await symlink("../../outside.test.mjs", link);
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                    "an out-of-scope target is not proof of absence");
+                  await rm(link);
+                  await symlink("unresolved/../missing.test.mjs", link);
+                  await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                    "an embedded parent in a dangling link is ambiguous");
+                } finally { await rm(link, { force: true }); await rm(target, { force: true }); }
+              });
+              await symlink("renamed.test.mjs", fixturePath);
+              try {
+                await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                  "an existing symlink is not proof the focused selection is missing");
+              } finally { await rm(fixturePath); }
+              await symlink("missing.test.mjs", fixturePath);
+              try {
+                const missingTarget = await before(child, "shell", { command: "npm run all", workdir: directory });
+                assert.equal(missingTarget.input.command, "npm run all", "a missing in-scope symlink target is unavailable");
+                await after(missingTarget, "not started", { status: "cancelled" });
+              } finally { await rm(fixturePath); }
+            }
+            const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+            assert.equal(full.input.command, "npm run all", "the obsolete retry does not block the full command");
+            const result = await exec("npm", ["run", "all"], { cwd: directory, env: environment })
+              .then(() => { throw new Error("renamed fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(result.code, 1); assert.match(result.stdout, /not ok/u);
+            await after(full, result.stdout, { exit: result.code });
+          } finally {
+            await rename(join(directory, "renamed.test.mjs"), join(directory, "fixture.test.mjs"));
+          }
+          await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+            "restoring the failed selection restores its deferral");
+          await rm(fixturePath);
+          try {
+            const full = await before(child, "shell", { command: "npm run all", workdir: directory });
+            assert.equal(full.input.command, "npm run all", "a deleted selection does not block the full command");
+            await after(full, "not started", { status: "cancelled" });
+            const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.ok(checks.some(check => check.callID === focused.id && check.exitCode === 1));
+            assert.ok(!checks.some(check => check.exitCode === 0), "absence does not turn a previous failure into a pass");
+          } finally { await writeFile(fixturePath, source); }
+          await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+          const nested = join(directory, "nested");
+          await mkdir(nested);
+          for (const selection of ["../fixture.test.mjs", "../nested/../fixture.test.mjs"]) {
+            const relativeAttempt = await before(child, "shell", { command: `node --test ${selection}`, workdir: nested });
+            const relativeFailure = await exec(process.execPath, ["--test", selection], { cwd: nested, env: environment })
+              .then(() => { throw new Error("nested fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+            assert.equal(relativeFailure.code, 1); assert.match(relativeFailure.stdout, /ENOENT/u);
+            await after(relativeAttempt, relativeFailure.stdout, { exit: relativeFailure.code });
+          }
+          await assert.rejects(before(child, "shell", { command: "node --test", workdir: nested }), /SORTIE_FULL_TEST_DEFERRED/u);
+          await rename(fixturePath, join(directory, "renamed.test.mjs"));
+          try {
+            const full = await before(child, "shell", { command: "node --test", workdir: nested });
+            assert.equal(full.input.command, "node --test", "a parent-relative selection can also disappear");
+            await after(full, "not started", { status: "cancelled" });
+          } finally { await rename(join(directory, "renamed.test.mjs"), fixturePath); }
+          await edit("broken", "ready");
+          const retry = await before(child, "shell", { command, workdir: directory });
+          const result = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment });
+          await after(retry, result.stdout, { exit: 0 });
+          const full = await before(child, "shell", { command: "node --test", workdir: directory });
+          const fullResult = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+          await after(full, fullResult.stdout, { exit: 0 });
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"),
+            process.platform === "win32" ? "run\nrun\nrun\nrun\n" : "run\nrun\nrun\nrun\nrun\n");
+          const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+          assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === focused.id && check.exitCode === 1));
+          assert.ok(unitAfter.validationRegistration!.checks.some(check => check.callID === retry.id && check.exitCode === 0));
+          for (const selection of [
+            { runner: "pytest", path: "test_removed.py", focused: "python3 -m pytest test_removed.py -q", full: "python3 -m pytest -q", directory: false },
+            { runner: "go", path: "removed-package", focused: "go test ./removed-package", full: "go test ./...", directory: true },
+          ]) await context.test(`obsolete ${selection.runner} literal selection does not permanently defer full`, async () => {
+            const path = join(directory, selection.path), moved = `${path}.saved`;
+            if (selection.directory) await mkdir(path);
+            await writeFile(selection.directory ? join(path, "failure_test.go") : path, "retained failing input\n");
+            const failed = await before(child, "shell", { command: selection.focused, workdir: directory });
+            // Supply the native terminal through the public adapter; this checks routing,
+            // not pytest/Go installation or the runner's own failure detection.
+            await after(failed, "retained native failure", { exit: 1 });
+            await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u);
+            await rename(path, moved);
+            try {
+              const full = await before(child, "shell", { command: selection.full, workdir: directory });
+              assert.equal(full.input.command, selection.full, "the obsolete literal selection cannot require a successful retry");
+              await after(full, "not started", { status: "cancelled" });
+              const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+                `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+              const terminals = ledger.records.flatMap(({ event }) => event.kind === "validation.settled" && event.operation_id === failed.id ? [event] : []);
+              assert.deepEqual(terminals.map(event => [event.outcome, event.exit_code]), [["failed", 1]],
+                "allowing full neither settles the old failure again nor turns it into PASS");
+            } finally { await rename(moved, path); }
+            await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+              "restoring the original selection restores focused priority");
+            if (selection.runner === "go") {
+              const pattern = await before(child, "shell", { command: "go test ./.../subpackage", workdir: directory });
+              await after(pattern, "retained native pattern failure", { exit: 1 });
+              await rename(path, moved);
+              try {
+                await assert.rejects(before(child, "shell", { command: selection.full, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED/u,
+                  "a Go package pattern is not a missing literal directory");
+              } finally { await rename(moved, path); }
+            }
+          });
+          return;
+        }
+        if (managedScenario === "required") {
+          const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+          const operation = await before(child, "patch", { patchText: "*** Begin Patch\n*** Update File: result.txt\n@@\n-partial\n+broken\n*** End Patch" });
+          await writeFile(join(directory, "result.txt"), "broken\n"); await after(operation, "Updated result.txt");
+          const focused = await before(child, "shell", { command: "node --test fixture.test.mjs", workdir: directory });
+          const failed = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment })
+            .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+          assert.equal(failed.code, 1); await after(focused, failed.stdout, { exit: failed.code });
+          const required = await before(child, "shell", { command: "node --test", workdir: directory });
+          assert.equal(required.input.command, "node --test", "a registered occurrence must not be deferred or replaced");
+          const full = await exec(process.execPath, ["--test"], { cwd: directory, env: environment })
+            .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+          assert.equal(full.code, 1); await after(required, full.stdout, { exit: full.code });
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\n");
+          const retained = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+          assert.ok(retained.records.some(({ event }) => event.kind === "validation.settled" && event.operation_id === required.id &&
+            event.outcome === "failed" && event.exit_code === 1));
+          return;
+        }
+        const first = await before(child, "shell", { command: "node --test", workdir: directory });
+        assert.equal(first.input.command, "node --test");
+        const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+        const checked = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+        await after(first, checked.stdout, { exit: 0 });
+        const repeat = await before(child, "shell", { command: "node --test", workdir: directory });
+        assert.equal(repeat.input.command, "node --test", "the Mission has no equivalence contract for this undeclared test");
+        const repeated = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+        await after(repeat, repeated.stdout, { exit: 0 });
+        assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\n");
+        const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+        assert.equal(unitAfter.validationRegistration!.checks.length, 0, "informal observation is not formal validation");
+        const ledger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.deepEqual(ledger.records.filter(({ event }) => event.kind === "validation.admission").map(({ event }) =>
+          event.kind === "validation.admission" && event.decision), ["ALLOW", "ALLOW"]);
+        const terminals = ledger.records.filter(({ event }) => event.kind === "validation.settled").map(({ event }) =>
+          event.kind === "validation.settled" && { callID: event.operation_id, outcome: event.outcome, exit: event.exit_code });
+        assert.deepEqual(terminals, [{ callID: first.id, outcome: "passed", exit: 0 }, { callID: repeat.id, outcome: "passed", exit: 0 }]);
+
+        // A genuine failed full run identifies a focused retry; neither the failed run nor
+        // the deferral is turned into a PASS. The npm script is resolved from this project.
+        const edit = async (from: string, to: string) => {
+          const operation = await before(child, "patch", { patchText: `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch` });
+          await writeFile(join(directory, "result.txt"), `${to}\n`); await after(operation, "Updated result.txt");
+        };
+        await edit("partial", "broken");
+        const failure = await before(child, "shell", { command: "node --test", workdir: directory });
+        const failed = await exec(process.execPath, ["--test"], { cwd: directory, env: environment })
+          .then(() => { throw new Error("fixture was expected to fail"); }, error => ({ stdout: String(error.stdout), code: error.code }));
+        assert.equal(failed.code, 1);
+        await after(failure, failed.stdout, { exit: failed.code });
+        for (const command of ["node --test", "npm run all"]) await assert.rejects(
+          before(child, "shell", { command, workdir: directory }), /SORTIE_FULL_TEST_DEFERRED:.*node --test fixture\.test\.mjs/u);
+        await rename(join(directory, "fixture.test.mjs"), join(directory, "renamed.test.mjs"));
+        try {
+          const withoutOldSelection = await before(child, "shell", { command: "npm run all", workdir: directory });
+          assert.equal(withoutOldSelection.input.command, "npm run all", "a full-output-derived retry also becomes unavailable");
+          await after(withoutOldSelection, "not started", { status: "cancelled" });
+        } finally { await rename(join(directory, "renamed.test.mjs"), join(directory, "fixture.test.mjs")); }
+        await assert.rejects(before(child, "shell", { command: "npm run all", workdir: directory }),
+          /SORTIE_FULL_TEST_DEFERRED:.*node --test fixture\.test\.mjs/u);
+        const unrelated = await before(child, "shell", { command: "npm run release", workdir: directory });
+        assert.equal(unrelated.input.command, "npm run release", "opaque release operations are not silently suppressed");
+        await after(unrelated, "not started", { status: "cancelled" });
+        const otherRunner = await before(child, "shell", { command: "cargo test --workspace", workdir: directory });
+        assert.equal(otherRunner.input.command, "cargo test --workspace", "a Node failure is not evidence of a Cargo failure");
+        await after(otherRunner, "not started", { status: "cancelled" });
+        await edit("broken", "ready");
+        const focused = await before(child, "shell", { command: "node --test fixture.test.mjs", workdir: directory });
+        const repaired = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment });
+        await after(focused, repaired.stdout, { exit: 0 });
+        await edit("ready", "partial");
+        await assert.rejects(before(child, "shell", { command: "node --test", workdir: directory }),
+          /SORTIE_FULL_TEST_DEFERRED:.*node --test fixture\.test\.mjs/u, "an older focused pass does not clear a changed candidate");
+        const refreshed = await before(child, "shell", { command: "node --test fixture.test.mjs", workdir: directory });
+        const refreshedResult = await exec(process.execPath, ["--test", "fixture.test.mjs"], { cwd: directory, env: environment });
+        await after(refreshed, refreshedResult.stdout, { exit: 0 });
+        const admitted = await before(child, "shell", { command: "node --test", workdir: directory });
+        assert.equal(admitted.input.command, "node --test", "focused success is not substituted for the required full run");
+        const full = await exec(process.execPath, ["--test"], { cwd: directory, env: environment });
+        await after(admitted, full.stdout, { exit: 0 });
+        assert.equal(await readFile(join(directory, ".git/sortie-dogs/managed-count"), "utf8"), "run\nrun\nrun\nrun\nrun\nrun\n");
+        const afterFailure = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.ok(afterFailure.records.some(({ event }) => event.kind === "validation.settled" && event.operation_id === failure.id &&
+          event.outcome === "failed" && event.exit_code === 1));
+        return;
+      }
       if (commit) {
         for (const args of [["add", "--", "result.txt"], ["commit", "-m", "Implement result"]]) {
           const gitCommand = args[0] === "add" ? "git add -- result.txt" : 'git commit -m "Implement result"';
@@ -1340,9 +1840,141 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
           await after(operation, executed.stdout, { exit: 0 });
         }
       }
-      const validation = await before(child, "shell", { command });
+      const validation = await before(child, "shell", { command, ...(reviewJoin === "timeout-mismatch" ? { timeout: 10000 } : {}) });
+      if (reviewJoin && index === 0) {
+        const owner = spawn(process.execPath, ["check.mjs", "present"], { cwd: directory });
+        const ended = new Promise<number | null>((resolve, reject) => { owner.once("error", reject); owner.once("close", resolve); });
+        const previousEnvironment = process.env.SORTIE_JOIN_FIXTURE_SETTING;
+        try {
+          await new Promise<void>((resolve, reject) => { owner.stdout.once("data", () => resolve()); owner.once("error", reject); });
+          const ledgerPath = join(directory, ".git/sortie-dogs/run-flight-v010",
+            `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+          if (["timeout-mismatch", "background-mismatch", "environment-mismatch"].includes(reviewJoin)) {
+            if (reviewJoin === "environment-mismatch") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+            await assert.rejects(before(child, "shell", { command, ...(reviewJoin === "timeout-mismatch" ? { timeout: 20000 } : {}),
+              ...(reviewJoin === "background-mismatch" ? { background: true } : {}) }), /duplicate-evidence/u);
+            if (previousEnvironment === undefined) delete process.env.SORTIE_JOIN_FIXTURE_SETTING;
+            else process.env.SORTIE_JOIN_FIXTURE_SETTING = previousEnvironment;
+            await writeFile(join(directory, ".git/sortie-dogs/join-release"), "release");
+            assert.equal(await ended, 0);
+            await after(validation, "actual owner terminal", { exit: 0 });
+            assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\n");
+            const ledger = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+            assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.joined").length, 0);
+            assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+            return;
+          }
+          if (reviewJoin === "source-before") await writeFile(join(directory, "check.mjs"), "// changed before join\n");
+          if (reviewJoin === "environment-before") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+          if (reviewJoin === "passed") await assert.rejects(before("unrelated", "sortie_v010_review_mission", { risk_tags: [], traces: [] }),
+            /runtime-profile-session-inactive/u, "an unrelated session cannot join this Mission");
+          const controller = new AbortController();
+          const reviewEvent = await before("root", "sortie_v010_review_mission", { risk_tags: [], traces: [] });
+          const definition = fixture.tools.find(tool => tool.name === "sortie_v010_review_mission") as {
+            execute(input: unknown, context: unknown): Promise<{ content: string }> };
+          const waiting = definition.execute(reviewEvent.input, { sessionID: "root", agent: "dog-operator",
+            id: reviewEvent.id, signal: controller.signal }).then(result => ({ result }), error => ({ error }));
+          if (["required-occurrence", "source-before", "environment-before"].includes(reviewJoin)) {
+            const result = await waiting;
+            assert.ok("error" in result);
+            assert.match(String(result.error), /mission-review-terminal-unreconciled/u);
+          } else await Promise.race([joinPermitted, waiting.then(value => { if ("error" in value) throw value.error; })]);
+          assert.equal(owner.exitCode, null, "the real Worker process is running when the other Agent joins");
+          if (!["permission-denied", "required-occurrence", "source-before", "environment-before"].includes(reviewJoin)) {
+            const deadline = Date.now() + 5000;
+            while (!(await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.some(({ event }) =>
+              event.kind === "validation.joined") && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
+            assert.ok((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records.some(({ event }) =>
+              event.kind === "validation.joined"), "the waiter is admitted before changing or cancelling either side");
+          }
+          if (reviewJoin === "waiter-cancelled") controller.abort();
+          if (reviewJoin === "source-changed") await writeFile(join(directory, "check.mjs"), "// changed during native validation\n");
+          if (reviewJoin === "environment-changed") process.env.SORTIE_JOIN_FIXTURE_SETTING = "changed";
+          if (reviewJoin === "owner-cancelled") owner.kill("SIGTERM");
+          else await writeFile(join(directory, ".git/sortie-dogs/join-release"), "release");
+          const exit = await ended;
+          assert.equal(exit, reviewJoin === "owner-cancelled" ? null : reviewJoin === "failed" ? 7 : 0);
+          await after(validation, "actual owner terminal", reviewJoin === "owner-cancelled" ? { status: "cancelled" } : { exit });
+          const result = await waiting;
+          if (["source-changed", "environment-changed", "source-before", "environment-before", "permission-denied", "waiter-cancelled", "required-occurrence"].includes(reviewJoin)) {
+            assert.ok("error" in result, JSON.stringify(result));
+            assert.match(String(result.error), ["required-occurrence", "source-before", "environment-before"].includes(reviewJoin) ? /mission-review-terminal-unreconciled/u :
+              reviewJoin === "permission-denied" ? /native permission denied/u :
+              reviewJoin === "waiter-cancelled" ? /waiter cancelled/u : /JOINED_OWNER_STALE/u);
+          } else {
+            assert.ok("result" in result, JSON.stringify(result));
+            const packet = JSON.parse(result.result.content);
+            assert.equal(packet.status, reviewJoin === "passed" ? "validation-joined" : "validation-owner-not-passed");
+            assert.equal(packet.validation.owner_session_id, child);
+            assert.equal(packet.validation.owner_call_id, validation.id);
+            assert.equal(packet.validation.outcome, reviewJoin === "passed" ? "passed" : reviewJoin === "failed" ? "failed" : "cancelled");
+            assert.equal(packet.validation.evidence_ids.length > 0, reviewJoin === "passed");
+            assert.match(packet.next_action, /not a second execution or a Review/u);
+            const beforeReview = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review;
+            await after(reviewEvent, result.result.content);
+            assert.deepEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).review,
+              beforeReview, "the wait is not a Review or an acceptance decision");
+          }
+          assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\n");
+          const unitAfter = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+          assert.equal(unitAfter.validationRegistration!.checks.length, 1, "only the Worker's actual shell is registered");
+          assert.equal(unitAfter.validationRegistration!.checks[0]!.callID, validation.id);
+          if (["source-changed", "environment-changed", "source-before", "environment-before"].includes(reviewJoin)) {
+            assert.equal(unitAfter.validationRegistration!.checks[0]!.fresh, false, "changed owner inputs cannot become fresh proof");
+          }
+          const ledger = await (await RunFlightLedger.openGoal(ledgerPath)).readGoal();
+          assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.joined").length,
+            ["permission-denied", "required-occurrence", "source-before", "environment-before"].includes(reviewJoin) ? 0 : 1);
+          assert.equal(ledger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+          if (reviewJoin === "required-occurrence") {
+            const second = await before(child, "shell", { command });
+            assert.equal(second.input.command, command, "the other required occurrence is not substituted");
+            const actual = await exec(process.execPath, ["check.mjs", "present"], { cwd: directory });
+            await after(second, actual.stdout, { exit: 0 });
+            assert.equal(await readFile(join(directory, ".git/sortie-dogs/join-count"), "utf8"), "run\nrun\n");
+            const registered = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.deepEqual(registered.map(item => item.callID), [validation.id, second.id]);
+            assert.equal((await (await RunFlightLedger.openGoal(ledgerPath)).readGoal()).records
+              .filter(({ event }) => event.kind === "validation.settled").length, 2);
+          }
+          if (reviewJoin === "passed") {
+            agents[child]!.outcome = "succeeded";
+            const workerResult = await after(worker, "Validation passed", { sessionID: child });
+            assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status,
+              "succeeded", workerResult);
+            const review = await tool("coordinator", "review_mission", { risk_tags: [], traces: [] });
+            assert.notEqual(review.status, "validation-joined", "the normal post-Worker Review path remains reachable");
+          }
+          return;
+        } finally {
+          if (previousEnvironment === undefined) delete process.env.SORTIE_JOIN_FIXTURE_SETTING;
+          else process.env.SORTIE_JOIN_FIXTURE_SETTING = previousEnvironment;
+          if (owner.exitCode === null && owner.signalCode === null) { owner.kill("SIGTERM"); await ended; }
+        }
+      }
+      let waiter: { sessionID: string; agent: string; tool: string; id: string; input: { command: string } } | undefined;
+      let joined: Promise<void> | undefined;
+      if (joinScenario && index === 0) {
+        waiter = { sessionID: child, agent: agents[child]!.agent, tool: "shell", id: `call_${++counter}`, input: { command } };
+        joined = Promise.resolve(fixture.toolHooks.get("execute.before")!(waiter));
+        await Promise.race([joinPermitted, joined]);
+        const readWhileWaiting = await before(child, "read", { path: "check.mjs" });
+        await after(readWhileWaiting, await readFile(join(directory, "check.mjs"), "utf8"));
+      }
       const checked = await exec(process.execPath, ["check.mjs", finalCandidate ? "ready" : "present"], { cwd: directory });
       await after(validation, checked.stdout, { exit: 0 });
+      if (waiter && joined) {
+        await joined;
+        assert.match(waiter.input.command, /SORTIE_VALIDATION_JOINED/u);
+        await after(waiter, "SORTIE_VALIDATION_JOINED", { exit: 0 });
+        const recorded = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"))
+          .units[0]!.validationRegistration!.checks.find(check => check.callID === waiter!.id);
+        assert.ok(recorded?.reusedEvidenceIDs?.length, "the waiter retains the owner's proof identity, not a new native execution");
+        const joinedLedger = await (await RunFlightLedger.openGoal(join(directory, ".git/sortie-dogs/run-flight-v010",
+          `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`))).readGoal();
+        assert.equal(joinedLedger.records.filter(({ event }) => event.kind === "validation.joined").length, 1);
+        assert.equal(joinedLedger.records.filter(({ event }) => event.kind === "validation.settled").length, 1);
+      }
       agents[child]!.outcome = "succeeded";
       await after(worker, "Validation passed", { sessionID: child });
       const review = await tool("coordinator", "review_mission", { risk_tags: commit ? ["public-logic"] : [], traces: [`R1: result.txt checked using ${command}`] });
@@ -1382,7 +2014,14 @@ test(`V2 ${directRecovery ? `interrupted direct ${directRecovery}${interruptedLa
     assert.equal(final.requests.length, 1, "Operator correction does not need another user instruction");
     assert.equal(final.requests[0]!.text, original);
     assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
-  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    cleanup?.();
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    for (const [key, value] of Object.entries(originalRouterEnvironment)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("V2 interrupted Coordinator Task reconciles its native error despite a live dispatch owner", async () => {
@@ -3010,6 +3649,9 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
   let cleanup: (() => void) | void;
   try {
     await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "test"));
+    const testText = 'import assert from "node:assert/strict";\nassert.equal(1, 1);\nassert.equal(1, 1);\n';
+    await writeFile(join(directory, "seed.mjs"), testText);
     fixture.history.length = 0;
     fixture.context.location.directory = directory;
     fixture.context.session.get = async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator",
@@ -3026,8 +3668,19 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
     };
     await call("start_mission", { requirements: ["Validated result.txt"] });
     const direct = await call("plan_units", { executor: "self", units: [{ title: "Result", objective: "Create and validate result.txt",
-      read: [], write: ["result.txt"], validation: ["node check.mjs"] }] });
+      read: ["seed.mjs"], write: ["result.txt", "test/**"], validation: ["node check.mjs"] }] });
     assert.equal(direct.status, "direct-unit-running");
+    const shell = { tool: "shell", sessionID: "root", id: "audit-error-shell",
+      input: { command: "cp seed.mjs test/native.test.mjs && false", workdir: directory } };
+    await fixture.toolHooks.get("execute.before")!(shell);
+    await assert.rejects(promisify(execFile)("sh", ["-c", shell.input.command], { cwd: directory }));
+    const nativeError = { ...shell, status: "error", error: { exit: 1, status: "completed" } };
+    await fixture.toolHooks.get("execute.after")!(nativeError);
+    assert.deepEqual(nativeError.error, { exit: 1, status: "completed" }, "the V2 error stays an error");
+    assert.equal("result" in nativeError, false, "no successful native result is manufactured");
+    assert.equal(await readFile(join(directory, "test/native.test.mjs"), "utf8"), testText);
+    assert.ok((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).testDebtSignals
+      ?.some(signal => signal.path === "test/native.test.mjs"));
     const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE), before = await runtime.required("root");
     const plan = fixture.tools.find(tool => tool.name === "sortie_v010_plan_units") as any;
     assert.match(plan.input.properties.executor.description, /units=\"\" in V2/);
@@ -3039,6 +3692,8 @@ test("documented V2 worker handoff passes the actual schema and transfers the re
     assert.equal(after.units[0]!.callID, before.units[0]!.callID, "reservation anchor is retained");
     assert.equal(after.units[0]!.directHandoffs!.length, 1);
     assert.equal(after.dispatched, 0, "handoff returns a Task; it does not fabricate its admission");
+    const continuation = JSON.parse(/^direct_handoff: (.+)$/mu.exec(after.units[0]!.task.prompt)![1]!);
+    assert.ok(continuation.test_debt_audit.signals.some((signal: { path: string }) => signal.path === "test/native.test.mjs"));
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

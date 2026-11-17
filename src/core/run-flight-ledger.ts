@@ -269,11 +269,18 @@ function recordHash(sequence: number, previousHash: string | null, event: unknow
 // This is a storage version, not the version of the logical goal events. A 0.1
 // reader rejects it under the same lock rather than rewriting an unknown format.
 const GOAL_BLOB_STORAGE_VERSION = "0.2";
+// A page contains complete, ordered goal records, not a summary or a new event.
+// Older readers reject this version rather than silently truncating its history.
+const GOAL_PAGED_STORAGE_VERSION = "0.3";
 const GOAL_BLOB_CHUNK_BYTES = 1024 * 1024;
 const GOAL_BLOB_INLINE_BYTES = 64 * 1024;
+const GOAL_PAGE_RECORDS = 128;
+const MAX_GOAL_PAGES = 256;
 type GoalBlobChunk = { readonly sha256: string; readonly bytes: number };
 type GoalBlobRecord = { readonly sequence: number; readonly previous_hash: string | null; readonly event_hash: string;
   readonly event_blob: { readonly bytes: number; readonly chunks: readonly GoalBlobChunk[] } };
+type GoalPage = { readonly first_sequence: number; readonly count: number } &
+  ({ readonly records_blob: GoalBlobRecord["event_blob"] } | { readonly records: readonly (GoalFlightEventRecord | GoalBlobRecord)[] });
 
 function chunkHash(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
 
@@ -348,8 +355,11 @@ async function storeGoalBlob(filePath: string, data: Buffer): Promise<GoalBlobRe
 }
 
 async function goalStorageBody(filePath: string, records: readonly GoalFlightEventRecord[]): Promise<string> {
-  const legacy = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: records });
-  if (Buffer.byteLength(legacy) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return legacy;
+  if (records.length > GOAL_PAGE_RECORDS * MAX_GOAL_PAGES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  if (records.length <= MAX_RUN_FLIGHT_EVENTS) {
+    const legacy = canonical({ schema_version: GOAL_BOUND_SCHEMA_VERSION, goal_events: records });
+    if (Buffer.byteLength(legacy) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return legacy;
+  }
   const blobs = new Map<number, GoalBlobRecord>();
   const encode = () => canonical({ schema_version: GOAL_BLOB_STORAGE_VERSION,
     goal_events: records.map((record, index) => blobs.get(index) ?? record) });
@@ -363,10 +373,26 @@ async function goalStorageBody(filePath: string, records: readonly GoalFlightEve
       blobs.set(index, { sequence: record.sequence, previous_hash: record.previous_hash, event_hash: record.event_hash,
         event_blob: await storeGoalBlob(filePath, data) });
     }
-    const body = encode();
-    if (Buffer.byteLength(body) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return body;
+    if (records.length <= MAX_RUN_FLIGHT_EVENTS) {
+      const body = encode();
+      if (Buffer.byteLength(body) <= MAX_GOAL_FLIGHT_LEDGER_BYTES) return body;
+    } else break;
   }
-  throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  // Page references reuse the same immutable, verified chunks as event blobs.
+  // Full pages have stable contents across appends. Keep a normally sized tail
+  // inline so each append does not leave another unreachable immutable blob.
+  const pages: GoalPage[] = [];
+  for (let start = 0; start < records.length; start += GOAL_PAGE_RECORDS) {
+    const page = records.slice(start, start + GOAL_PAGE_RECORDS).map((record, offset) => blobs.get(start + offset) ?? record);
+    const data = Buffer.from(canonical(page));
+    if (data.length > MAX_GOAL_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger page capacity exceeded.");
+    if (page.length < GOAL_PAGE_RECORDS && data.length <= MAX_GOAL_FLIGHT_LEDGER_BYTES / 2) {
+      pages.push({ first_sequence: start + 1, count: page.length, records: page });
+    } else pages.push({ first_sequence: start + 1, count: page.length, records_blob: await storeGoalBlob(filePath, data) });
+  }
+  const body = canonical({ schema_version: GOAL_PAGED_STORAGE_VERSION, goal_events: pages });
+  if (Buffer.byteLength(body) > MAX_GOAL_FLIGHT_LEDGER_BYTES) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
+  return body;
 }
 
 export function diagnosisContractHash(value: unknown): string {
@@ -1020,21 +1046,35 @@ export class RunFlightLedger {
     const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey } = await import("./validation-budget.js");
     const evidenceKey = validationEvidenceKey(request);
     if (this.#goalMode) {
-      const snapshot = await this.readGoal();
-      const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
-      const guidance = passedValidationDurationGuidance(snapshot.records.map(({ event }) => event), evidenceKey);
-      const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-        evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
-      const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-      const admission = { kind: "validation.admission" as const, at: new Date().toISOString(), goal_id: snapshot.state.goal_id!,
-        reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`, operation_id: request.operation_id,
-        evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope, decision: decision.decision,
-        reason: decision.reason, consumed: decision.consumed, limit, saved_ms: decision.redundant_time_ms };
-      if (decision.decision === "SKIP" && skipReconciliation !== undefined) {
-        await this.#appendGoalWithSkipReconciliation(admission, skipReconciliation);
-      }
-      else await this.appendGoal(admission);
-      return { ...decision, reservation_id };
+      let result: (ValidationBudgetDecision & { readonly reservation_id: string | null }) | undefined;
+      let resolveTail!: () => void;
+      const previous = this.#tail;
+      this.#tail = new Promise<void>((done) => { resolveTail = done; });
+      await previous;
+      try {
+        // Decide from the records protected by the same cross-instance lock as the append.
+        // Otherwise concurrent callers can both decide ALLOW from an old snapshot and the
+        // loser receives a stale-transition error rather than the actual in-flight decision.
+        await this.#appendGoalLocked((state, records) => {
+          const events = records.map(({ event }) => event);
+          const evidence = validationEvidenceState(events);
+          const guidance = passedValidationDurationGuidance(events, evidenceKey);
+          const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+            evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
+          const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+          result = { ...decision, reservation_id };
+          return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+            reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+            operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+            scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+            limit, saved_ms: decision.redundant_time_ms };
+        }, (state, event) => {
+          if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+            this.#assertSkipReconciliation(state, event, skipReconciliation);
+          }
+        });
+      } finally { resolveTail(); }
+      return result!;
     }
     const snapshot = await this.read();
     const current = snapshot.state;
@@ -1051,46 +1091,178 @@ export class RunFlightLedger {
     return { ...decision, reservation_id };
   }
 
+  /**
+   * Opt-in admission for hosts able to wait for the actual owner and validate its native proof.
+   * The authority is a host-derived binding for permissions and the protected snapshot recipe;
+   * it is never accepted from a model. Legacy admissions cannot be joined retroactively.
+   */
+  async reserveJoinableValidation(request: ValidationBudgetRequest, limit: number, authority: string,
+    skipReconciliation?: ValidationSkipReconciliation): Promise<
+      (ValidationBudgetDecision & { readonly reservation_id: string | null }) |
+      { readonly decision: "JOIN"; readonly reason: "in-flight"; readonly evidence_key: string;
+        readonly owner_reservation_id: string; readonly consumed: number }> {
+    if (!this.#goalMode || typeof authority !== "string" || authority.length === 0 || authority.length > 4096) {
+      throw new RunFlightLedgerError("invalid", "Validation join requires a goal ledger and host authority.");
+    }
+    const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey, validationJoinFingerprint } =
+      await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request);
+    const joinFingerprint = request.required_execution === undefined ? validationJoinFingerprint(request, authority) : undefined;
+    let result: Awaited<ReturnType<RunFlightLedger["reserveJoinableValidation"]>> | undefined;
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((done) => { resolveTail = done; });
+    await previous;
+    try {
+      await this.#appendGoalLocked((state, records) => {
+        if (state.goal_id === null || request.run_id !== state.goal_id) {
+          throw new RunFlightLedgerError("transition", "Validation join admission does not belong to the active goal.");
+        }
+        const events = records.map(({ event }) => event);
+        const evidence = validationEvidenceState(events);
+        const guidance = passedValidationDurationGuidance(events, evidenceKey);
+        const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+          evidence_keys: evidence.reusable, blocked_evidence_keys: evidence.blocked, prior_duration_ms: guidance.median_ms ?? undefined });
+        const owner = decision.decision === "DENY" && decision.reason === "duplicate-evidence" && joinFingerprint !== undefined
+          ? state.validation_budget.reservations.find(item => item.evidence_key === evidenceKey) : undefined;
+        const admission = owner && records.find(({ event }) => event.kind === "validation.admission" &&
+          event.decision === "ALLOW" && event.reservation_id === owner.reservation_id)?.event;
+        if (owner && joinFingerprint !== undefined && admission?.kind === "validation.admission" && admission.join_fingerprint === joinFingerprint &&
+            owner.operation_id !== request.operation_id) {
+          result = { decision: "JOIN", reason: "in-flight", evidence_key: evidenceKey,
+            owner_reservation_id: owner.reservation_id, consumed: state.validation_budget.consumed };
+          return { kind: "validation.joined", at: new Date().toISOString(), goal_id: state.goal_id!,
+            operation_id: request.operation_id, owner_reservation_id: owner.reservation_id,
+            evidence_key: evidenceKey, join_fingerprint: joinFingerprint };
+        }
+        const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+        result = { ...decision, reservation_id };
+        return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+          reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+          operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+          scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+          limit, saved_ms: decision.redundant_time_ms,
+          ...(reservation_id && joinFingerprint ? { join_fingerprint: joinFingerprint } : {}) };
+      }, (state, event) => {
+        if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+          this.#assertSkipReconciliation(state, event, skipReconciliation);
+        }
+      });
+    } finally { resolveTail(); }
+    return result!;
+  }
+
+  /** Join one already-admitted owner, without ever admitting a new execution. */
+  async joinActiveValidation(request: ValidationBudgetRequest, ownerReservation: string, authority: string): Promise<boolean> {
+    if (!this.#goalMode || !ownerReservation || !authority || request.required_execution !== undefined) return false;
+    const { validationEvidenceKey, validationJoinFingerprint } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request), fingerprint = validationJoinFingerprint(request, authority);
+    const unavailable = Symbol("validation-owner-unavailable");
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>(done => { resolveTail = done; });
+    await previous;
+    try {
+      try {
+        await this.#appendGoalLocked((state, records) => {
+          const owner = state.validation_budget.reservations.find(item => item.reservation_id === ownerReservation &&
+            item.evidence_key === evidenceKey && item.operation_id !== request.operation_id);
+          const admission = owner && records.find(({ event }) => event.kind === "validation.admission" &&
+            event.decision === "ALLOW" && event.reservation_id === ownerReservation)?.event;
+          if (state.goal_id !== request.run_id || state.phase !== "active" || !owner ||
+              admission?.kind !== "validation.admission" || admission.join_fingerprint !== fingerprint) throw unavailable;
+          return { kind: "validation.joined", at: new Date().toISOString(), goal_id: request.run_id,
+            operation_id: request.operation_id, owner_reservation_id: ownerReservation,
+            evidence_key: evidenceKey, join_fingerprint: fingerprint };
+        });
+        return true;
+      } catch (error) { if (error === unavailable) return false; throw error; }
+    } finally { resolveTail(); }
+  }
+
+  /** Return only the owner's durable terminal observation, not proof for the waiter. */
+  async waitForJoinedValidation(ownerReservation: string, options: { readonly signal?: AbortSignal; readonly timeoutMs: number }):
+    Promise<Extract<GoalFlightEvent, { readonly kind: "validation.settled" }>> {
+    if (!this.#goalMode || !ownerReservation || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1) {
+      throw new RunFlightLedgerError("invalid", "Invalid validation join wait.");
+    }
+    const deadline = Date.now() + options.timeoutMs;
+    for (;;) {
+      if (options.signal?.aborted) throw new RunFlightLedgerError("transition", "Validation waiter cancelled.");
+      const { records, state } = await this.readGoal();
+      if (options.signal?.aborted) throw new RunFlightLedgerError("transition", "Validation waiter cancelled.");
+      const terminal = records.find(({ event }) => event.kind === "validation.settled" && event.goal_id === state.goal_id &&
+        event.reservation_id === ownerReservation)?.event;
+      if (terminal?.kind === "validation.settled") return terminal;
+      if (!state.validation_budget.reservations.some(item => item.reservation_id === ownerReservation)) {
+        throw new RunFlightLedgerError("transition", "Validation owner is no longer observable.");
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new RunFlightLedgerError("transition", "Validation owner wait timed out.");
+      await new Promise<void>((resolve, reject) => {
+        const signal = options.signal;
+        const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort);
+          reject(new RunFlightLedgerError("transition", "Validation waiter cancelled.")); };
+        const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, Math.min(remaining, 50));
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+    }
+  }
+
   /** Host-authorized one-time retry for interruptions; ordinary failed exits use reserveValidation. */
   async reserveInterruptedValidationRetry(request: ValidationBudgetRequest, limit: number,
     authorization: GoalValidationRetryAuthorization | GoalNativeValidationRetryAuthorization,
     skipReconciliation?: ValidationSkipReconciliation): Promise<ValidationBudgetDecision & { readonly reservation_id: string | null }> {
     if (!this.#goalMode) throw new RunFlightLedgerError("invalid", "Interrupted validation retry requires a goal ledger.");
-    const { decideValidationBudget, validationEvidenceKey } = await import("./validation-budget.js");
-    const snapshot = await this.readGoal(), evidenceKey = validationEvidenceKey(request);
-    const evidence = validationEvidenceState(snapshot.records.map(({ event }) => event));
-    const admissions = snapshot.records.filter(({ event }) => event.kind === "validation.admission" &&
-      event.decision === "ALLOW" && event.evidence_key === evidenceKey);
-    const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
-    const prior = admissions.at(-1)?.event;
-    const settlement = prior?.kind === "validation.admission" ? snapshot.records.find(({ event }) =>
-      event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
-    const native = authorization.authority === "mission-fabric-native-validation-retry";
-    const binding = native ? request.environment.toolchain === "native-shell-v1" && request.owner === "coordinator" &&
-      request.scope === "canonical" && authorization.evidence_key === evidenceKey &&
-      request.expected_evidence.includes(`fabric:${authorization.operator_run_id}`) &&
-      request.operation_id.startsWith(`fabric-native:${authorization.actor_session_id}:`) &&
-      prior?.kind === "validation.admission" && prior.operation_id.startsWith("fabric-native:")
-      : request.expected_evidence.includes(`unit:${authorization.unit_id}`);
-    const bound = snapshot.state.goal_id !== null && request.run_id === snapshot.state.goal_id &&
-      authorization.goal_fingerprint === snapshot.state.acceptance_fingerprint &&
-      binding;
-    if (!bound || alreadyReopened || prior?.kind !== "validation.admission" || settlement?.kind !== "validation.settled" ||
-        settlement.operation_id !== prior.operation_id || settlement.evidence_key !== evidenceKey || settlement.outcome !== "interrupted") {
-      return this.reserveValidation(request, limit, skipReconciliation);
-    }
-    const decision = decideValidationBudget(request, { limit, consumed: snapshot.state.validation_budget.consumed,
-      evidence_keys: evidence.reusable.filter(key => key !== evidenceKey),
-      blocked_evidence_keys: evidence.blocked.filter(key => key !== evidenceKey) });
-    const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
-    await this.appendGoal({ kind: "validation.admission", at: new Date().toISOString(), goal_id: snapshot.state.goal_id,
-      reservation_id: reservation_id ?? `deny-${randomUUID()}`, operation_id: request.operation_id,
-      evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`, scope: decision.scope,
-      decision: decision.decision, reason: decision.reason, consumed: decision.consumed, limit,
-      saved_ms: decision.redundant_time_ms,
-      ...(decision.decision === "ALLOW" ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id,
-        prior_operation_id: prior.operation_id } } : {}) });
-    return { ...decision, reservation_id };
+    const { decideValidationBudget, passedValidationDurationGuidance, validationEvidenceKey } = await import("./validation-budget.js");
+    const evidenceKey = validationEvidenceKey(request);
+    let result: (ValidationBudgetDecision & { readonly reservation_id: string | null }) | undefined;
+    let resolveTail!: () => void;
+    const previous = this.#tail;
+    this.#tail = new Promise<void>((done) => { resolveTail = done; });
+    await previous;
+    try {
+      await this.#appendGoalLocked((state, records) => {
+        const events = records.map(({ event }) => event), evidence = validationEvidenceState(events);
+        const admissions = records.filter(({ event }) => event.kind === "validation.admission" &&
+          event.decision === "ALLOW" && event.evidence_key === evidenceKey);
+        const alreadyReopened = admissions.some(({ event }) => event.kind === "validation.admission" && event.reopen !== undefined);
+        const prior = admissions.at(-1)?.event;
+        const settlement = prior?.kind === "validation.admission" ? records.find(({ event }) =>
+          event.kind === "validation.settled" && event.reservation_id === prior.reservation_id)?.event : undefined;
+        const native = authorization.authority === "mission-fabric-native-validation-retry";
+        const binding = native ? request.environment.toolchain === "native-shell-v1" && request.owner === "coordinator" &&
+          request.scope === "canonical" && authorization.evidence_key === evidenceKey &&
+          request.expected_evidence.includes(`fabric:${authorization.operator_run_id}`) &&
+          request.operation_id.startsWith(`fabric-native:${authorization.actor_session_id}:`) &&
+          prior?.kind === "validation.admission" && prior.operation_id.startsWith("fabric-native:")
+          : request.expected_evidence.includes(`unit:${authorization.unit_id}`);
+        const reopen = state.goal_id !== null && request.run_id === state.goal_id &&
+          authorization.goal_fingerprint === state.acceptance_fingerprint && binding && !alreadyReopened &&
+          prior?.kind === "validation.admission" && settlement?.kind === "validation.settled" &&
+          settlement.operation_id === prior.operation_id && settlement.evidence_key === evidenceKey && settlement.outcome === "interrupted";
+        const guidance = passedValidationDurationGuidance(events, evidenceKey);
+        const decision = decideValidationBudget(request, { limit, consumed: state.validation_budget.consumed,
+          evidence_keys: reopen ? evidence.reusable.filter(key => key !== evidenceKey) : evidence.reusable,
+          blocked_evidence_keys: reopen ? evidence.blocked.filter(key => key !== evidenceKey) : evidence.blocked,
+          prior_duration_ms: guidance.median_ms ?? undefined });
+        const reservation_id = decision.decision === "ALLOW" ? randomUUID() : null;
+        result = { ...decision, reservation_id };
+        return { kind: "validation.admission", at: new Date().toISOString(), goal_id: state.goal_id!,
+          reservation_id: reservation_id ?? `${decision.decision === "SKIP" ? "skip" : "deny"}-${randomUUID()}`,
+          operation_id: request.operation_id, evidence_key: decision.evidence_key ?? `sha256:${"0".repeat(64)}`,
+          scope: decision.scope, decision: decision.decision, reason: decision.reason, consumed: decision.consumed,
+          limit, saved_ms: decision.redundant_time_ms,
+          ...(reopen && decision.decision === "ALLOW" && prior?.kind === "validation.admission"
+            ? { reopen: { ...authorization, prior_reservation_id: prior.reservation_id, prior_operation_id: prior.operation_id } } : {}) };
+      }, (state, event) => {
+        if (event.kind === "validation.admission" && event.decision === "SKIP" && skipReconciliation !== undefined) {
+          this.#assertSkipReconciliation(state, event, skipReconciliation);
+        }
+      });
+    } finally { resolveTail(); }
+    return result!;
   }
 
   async settleValidation(reservation_id: string, request: ValidationBudgetRequest, outcome: ValidationOutcome,
@@ -1125,24 +1297,16 @@ export class RunFlightLedger {
     try { return await this.#appendGoalLocked(structuredClone(event)); } finally { resolveTail(); }
   }
 
-  async #appendGoalWithSkipReconciliation(event: Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>,
-    reconciliation: ValidationSkipReconciliation | undefined): Promise<GoalFlightState> {
-    let resolveTail!: () => void;
-    const previous = this.#tail;
-    this.#tail = new Promise<void>((resolve) => { resolveTail = resolve; });
-    await previous;
-    try {
-      return await this.#appendGoalLocked(event, (state) => {
-        if (reconciliation === undefined || reconciliation.evidence.length === 0 || state.goal_id !== event.goal_id ||
-          reconciliation.evidence.some(entry => !validGoalEvidence(entry, state) ||
-            !entry.execution.units.includes(reconciliation.unit_id) || entry.identity.source !== reconciliation.source ||
-            entry.identity.candidate !== reconciliation.candidate ||
-            entry.execution.command.length !== reconciliation.command.length ||
-            entry.execution.command.some((part, index) => part !== reconciliation.command[index]))) {
-          throw new RunFlightLedgerError("transition", "Settled-pass reconciliation is unavailable or stale.");
-        }
-      });
-    } finally { resolveTail(); }
+  #assertSkipReconciliation(state: GoalFlightState, event: Extract<GoalFlightEvent, { readonly kind: "validation.admission" }>,
+    reconciliation: ValidationSkipReconciliation | undefined): void {
+    if (reconciliation === undefined || reconciliation.evidence.length === 0 || state.goal_id !== event.goal_id ||
+      reconciliation.evidence.some(entry => !validGoalEvidence(entry, state) ||
+        !entry.execution.units.includes(reconciliation.unit_id) || entry.identity.source !== reconciliation.source ||
+        entry.identity.candidate !== reconciliation.candidate ||
+        entry.execution.command.length !== reconciliation.command.length ||
+        entry.execution.command.some((part, index) => part !== reconciliation.command[index]))) {
+      throw new RunFlightLedgerError("transition", "Settled-pass reconciliation is unavailable or stale.");
+    }
   }
 
   async #appendLocked(event: RunFlightEvent): Promise<RunFlightState> {
@@ -1192,7 +1356,8 @@ export class RunFlightLedger {
     } finally { await handle.close(); await unlink(lockPath).catch(() => undefined); }
   }
 
-  async #appendGoalLocked(event: GoalFlightEvent, guard?: (state: GoalFlightState) => void): Promise<GoalFlightState> {
+  async #appendGoalLocked(eventInput: GoalFlightEvent | ((state: GoalFlightState, records: readonly GoalFlightEventRecord[]) => GoalFlightEvent),
+    guard?: (state: GoalFlightState, event: GoalFlightEvent) => void): Promise<GoalFlightState> {
     await mkdir(path.dirname(this.#filePath), { recursive: true });
     const lockPath = `${this.#filePath}.lock`;
     let handle;
@@ -1206,7 +1371,34 @@ export class RunFlightLedger {
     if (!handle) throw new RunFlightLedgerError("conflict", "Ledger lock remained busy.");
     try {
       const records = await this.#readGoalRecords();
-      if (guard !== undefined) guard(reduceGoalFlight(records));
+      const current = typeof eventInput === "function" || guard !== undefined ? reduceGoalFlight(records) : undefined;
+      const event = typeof eventInput === "function" ? eventInput(current!, records) : eventInput;
+      if (guard !== undefined) guard(current!, event);
+      if (event.kind === "validation.joined") {
+        const prior = records.find(({ event: stored }) => stored.kind === "validation.joined" &&
+          stored.goal_id === event.goal_id && stored.operation_id === event.operation_id)?.event;
+        if (prior?.kind === "validation.joined") {
+          if (prior.owner_reservation_id !== event.owner_reservation_id || prior.evidence_key !== event.evidence_key ||
+              prior.join_fingerprint !== event.join_fingerprint) {
+            throw new RunFlightLedgerError("transition", "Validation join conflicts with its original owner.");
+          }
+          return current ?? reduceGoalFlight(records);
+        }
+      }
+      if (event.kind === "validation.settled") {
+        const prior = records.find(({ event: stored }) => stored.kind === "validation.settled" &&
+          stored.goal_id === event.goal_id && stored.reservation_id === event.reservation_id)?.event;
+        if (prior?.kind === "validation.settled") {
+          // Terminal events may be delivered again after a reconnect. Keep the first real
+          // observation and its duration; a conflicting result must never become a replay.
+          if (prior.operation_id !== event.operation_id || prior.evidence_key !== event.evidence_key ||
+            prior.outcome !== event.outcome || prior.exit_code !== event.exit_code ||
+            prior.evidence_fingerprint !== event.evidence_fingerprint) {
+            throw new RunFlightLedgerError("transition", "Validation settlement conflicts with its original observation.");
+          }
+          return current ?? reduceGoalFlight(records);
+        }
+      }
       if (event.kind === "unit.usage-reconciled" && records.some(({ event: stored }) =>
         stored.kind === "unit.usage-reconciled" && stored.goal_id === event.goal_id &&
         stored.reservation_id === event.reservation_id && stored.native_session_id === event.native_session_id &&
@@ -1252,7 +1444,6 @@ export class RunFlightLedger {
           error.code === "budget" ? "budget" : error.code === "invalid" ? "invalid" : "transition", error.message);
         throw error;
       }
-      if (next.length > MAX_RUN_FLIGHT_EVENTS) throw new RunFlightLedgerError("capacity", "Goal ledger capacity exceeded.");
       const body = await goalStorageBody(this.#filePath, next);
       const temporary = `${this.#filePath}.${process.pid}.${randomUUID()}.tmp`;
       await writeFile(temporary, body, { encoding: "utf8", flag: "wx" });
@@ -1281,14 +1472,42 @@ export class RunFlightLedger {
     let document: unknown;
     try { document = JSON.parse(raw); } catch { throw new RunFlightLedgerError("invalid", "Goal ledger is not valid JSON."); }
     if (!isObject(document) || !only(document, ["schema_version", "goal_events"]) ||
-      (document.schema_version !== GOAL_BOUND_SCHEMA_VERSION && document.schema_version !== GOAL_BLOB_STORAGE_VERSION) ||
-      !Array.isArray(document.goal_events) || document.goal_events.length > MAX_RUN_FLIGHT_EVENTS) {
+      (document.schema_version !== GOAL_BOUND_SCHEMA_VERSION && document.schema_version !== GOAL_BLOB_STORAGE_VERSION &&
+        document.schema_version !== GOAL_PAGED_STORAGE_VERSION) || !Array.isArray(document.goal_events) ||
+      document.goal_events.length > (document.schema_version === GOAL_PAGED_STORAGE_VERSION ? MAX_GOAL_PAGES : MAX_RUN_FLIGHT_EVENTS)) {
       throw new RunFlightLedgerError("invalid", "Goal ledger document does not match the closed schema.");
     }
+    const storedRecords: unknown[] = [];
+    if (document.schema_version === GOAL_PAGED_STORAGE_VERSION) {
+      if (document.goal_events.length === 0) throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+      for (const [index, page] of document.goal_events.entries()) {
+        if (!isObject(page) || !only(page, ["first_sequence", "count", "records_blob", "records"]) ||
+            page.first_sequence !== index * GOAL_PAGE_RECORDS + 1 || !Number.isSafeInteger(page.count) ||
+            Number(page.count) < 1 || Number(page.count) > GOAL_PAGE_RECORDS ||
+            (index < document.goal_events.length - 1 && page.count !== GOAL_PAGE_RECORDS)) {
+          throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+        }
+        let pageRecords: unknown;
+        if (Object.hasOwn(page, "records")) {
+          if (Object.hasOwn(page, "records_blob") || index !== document.goal_events.length - 1 || page.count === GOAL_PAGE_RECORDS) {
+            throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+          }
+          pageRecords = page.records;
+        } else {
+          if (!isObject(page.records_blob) || !Number.isSafeInteger(page.records_blob.bytes) ||
+              Number(page.records_blob.bytes) < 1 || Number(page.records_blob.bytes) > MAX_GOAL_FLIGHT_LEDGER_BYTES) {
+            throw new RunFlightLedgerError("invalid", "Goal ledger pages are malformed.");
+          }
+          pageRecords = await readGoalBlob(this.#filePath, page.records_blob);
+        }
+        if (!Array.isArray(pageRecords) || pageRecords.length !== page.count) throw new RunFlightLedgerError("invalid", "Goal ledger page contents are malformed.");
+        storedRecords.push(...pageRecords);
+      }
+    } else storedRecords.push(...document.goal_events);
     const records: GoalFlightEventRecord[] = [];
-    for (const stored of document.goal_events) {
+    for (const stored of storedRecords) {
       if (isObject(stored) && Object.hasOwn(stored, "event_blob")) {
-        if (document.schema_version !== GOAL_BLOB_STORAGE_VERSION || !only(stored, ["sequence", "previous_hash", "event_hash", "event_blob"])) {
+        if (document.schema_version === GOAL_BOUND_SCHEMA_VERSION || !only(stored, ["sequence", "previous_hash", "event_hash", "event_blob"])) {
           throw new RunFlightLedgerError("invalid", "Goal ledger blob record does not match the closed schema.");
         }
         records.push({ sequence: stored.sequence, previous_hash: stored.previous_hash, event_hash: stored.event_hash,

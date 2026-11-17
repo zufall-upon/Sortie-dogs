@@ -221,9 +221,9 @@ test("Worker Reviewer prompt observes the registered cwd and current admission",
   } finally { await rm(directory, { recursive: true, force: true }); await rm(external, { recursive: true, force: true }); }
 });
 
-const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
+const directModes = ["handoff-reload", "handoff-registration", "handoff-registration-latest-failure", "handoff-registration-chain-missing", "handoff-registration-chain-suffix", "handoff-registration-suffix", "handoff-registration-suffix-latest-failure", "handoff-cancel", "handoff-stale", "handoff-latest-failure", "handoff-storage-failure", "correction", "cancel", "non-git", "non-git-root", "junction", "replan", "cold-replan", "external-cwd", "registration", "scope-registration", "recipe-registration", "large-source", "ledger-capacity", "blocked", "needs-decision", "retry-direct", "retry-worker", "retry-registration-worker", "retry-direct-unknown", "retry-direct-failed", "retry-direct-rescue", "parent-interrupted", "parent-cancelled", "parent-failed", "parent-completed", "parent-unset", "finish-cancelled", "recovery", "recovery-capacity", "recovery-failed", "recovery-stale", "recovery-latest-failure", "recovery-missing-finish", "recovery-explicit-cancel", "recovery-crash", "recovery-projection-crash", "recovery-pending", "recovery-pending-projection-crash", "recovery-normal-succeeded", "recovery-boundary", "recovery-paginated"] as const;
 const cancelledWriterModes = ["cancel-stale-writer", "cancel-delayed-writer", "cancel-background-writer", "cancel-missing-writer", "cancel-duplicate-writer", "cancel-foreign-writer"];
-for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "replan-cwd-order", "scope-registration-legacy", "scope-registration-empty", "scope-registration-empty-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode =>
+for (const actor of ["root", "coordinator"]) for (const mode of [...directModes, ...cancelledWriterModes, "generated-read-output", "registration-with-cwd", "replan-cwd-order", "scope-registration-legacy", "scope-registration-empty", "scope-registration-empty-legacy", "scope-multi-registration", "compacted-success", "compacted-latest-failure", "compacted-stale"].filter(mode => (mode !== "recovery-capacity" || actor === "root") &&
   (actor === "coordinator" || !cancelledWriterModes.includes(mode) || mode === "cancel-stale-writer") && (
   actor === "coordinator" || !mode.includes("pending") && mode !== "recovery-normal-succeeded" && mode !== "scope-multi-registration" && mode !== "retry-direct-rescue" && mode !== "ledger-capacity"))) test(`${actor} direct execution: ${mode}`, async t => {
   const cancel = mode === "cancel", nonGit = mode.startsWith("non-git");
@@ -1145,6 +1145,23 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
       const broken = await readRun(), spent = (await ledger.readGoal()).state;
       assert.equal(broken.units[unitIndex]!.evidence.length, 0);
       assert.equal(broken.phase, "awaiting-decision");
+      let capacityPrior: Awaited<ReturnType<RunFlightLedger["readGoal"]>> | undefined;
+      if (mode === "recovery-capacity") {
+        const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`);
+        const document = JSON.parse(await readFile(file, "utf8"));
+        while (document.goal_events.length < 2048) {
+          const sequence = document.goal_events.length + 1, previous_hash = document.goal_events.at(-1).event_hash;
+          const event = { kind: "goal.user-continued", at, goal_id: spent.goal_id!, origin_user_message_id: `capacity-${sequence}`,
+            session_id: "root", selected_agent: spent.selected_agent! };
+          document.goal_events.push({ sequence, previous_hash, event_hash: goalFingerprint({ sequence, previous_hash, event }), event });
+        }
+        await writeFile(file, JSON.stringify(document));
+        capacityPrior = await ledger.readGoal();
+        const statusBefore = await readFile(file);
+        const status = JSON.parse(await hooks.tool!.sortie_v010_operator_status.execute({ view: "full" }, { sessionID: "root" }));
+        assert.equal(status.budget.consumed_units, spent.consumed_units);
+        assert.deepEqual(await readFile(file), statusBefore, "status at the limit does not spend or run another unit");
+      }
       if (mode === "recovery-stale") await writeFile(join(directory, resultPath), "changed after validation\n");
       agents[actor]!.outcome = failed ? "failed" : "interrupted";
       if (mode === "recovery-paginated") historyAvailable = false;
@@ -1195,6 +1212,14 @@ if (spawnSync(process.execPath, ['emit.mjs'], {stdio:'inherit'}).status !== 0) p
         assert.equal((await readRun()).generation, done.generation, "replay does not resume the run twice");
       }
       const after = (await ledger.readGoal()).state;
+      if (capacityPrior) {
+        const reopened = await ledger.readGoal();
+        assert.deepEqual(reopened.records.slice(0, capacityPrior.records.length), capacityPrior.records);
+        assert.equal(reopened.records[capacityPrior.records.length]!.event.kind, "unit.evidence-reconciled");
+        const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory, `${key}.json`);
+        assert.equal(JSON.parse(await readFile(file, "utf8")).schema_version, "0.3");
+        assert.ok(reopened.state.evidence_refs.length > 0, "the existing native proof is recovered after paging");
+      }
       for (const field of ["consumed_units", "consumed_time_ms", "consumed_cost_usd", "validation_budget", "outstanding_reservations"] as const) {
         assert.deepEqual(after[field], spent[field], `${field} is unchanged by recovery`);
       }

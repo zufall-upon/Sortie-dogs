@@ -172,7 +172,7 @@ export interface RuntimeBridge {
     currentReceipt(rootSessionID: string): Promise<GoalTerminalReceipt | undefined>;
     retireHistoricalGoal(rootSessionID: string): Promise<boolean>;
     isUncontractedGoal(rootSessionID: string, latestUserMessageID: string): Promise<boolean>;
-    currentBudget(rootSessionID: string, options?: { reconcileUsage?: boolean }): Promise<{
+    currentBudget(rootSessionID: string, options?: { reconcileUsage?: boolean; diagnosticOnly?: boolean }): Promise<{
       readonly max_units: number;
       readonly consumed_units: number;
       readonly reserved_units: number;
@@ -195,6 +195,11 @@ export interface RuntimeBridge {
     completionReadiness(rootSessionID: string): Promise<import("./goal-completion.js").CompletionReadiness>;
     validateMissionFabric(rootSessionID: string, request: import("../core/mission-fabric.js").MissionFabricValidation, signal?: AbortSignal): Promise<import("../core/types.js").ContainedValidationResult>;
     reserveMissionFabricValidation(root: string, request: import("../core/mission-fabric.js").MissionFabricValidation, actor: string, callID: string): Promise<void>;
+    joinMissionValidation(root: string, actor: string, agent: string | undefined, callID: string,
+      owner: { child: string; taskID: string; dispatchCallID: string }, signal?: AbortSignal): Promise<{
+        owner_session_id: string; owner_call_id: string; command: string; outcome: string; exit_code: number | null;
+        evidence_ids: readonly string[];
+      } | undefined>;
     settleMissionFabricValidation(root: string, request: import("../core/mission-fabric.js").MissionFabricValidation, actor: string, callID: string,
       outcome: import("../core/validation-budget.js").ValidationOutcome, exit: number | null, duration: number): Promise<void>;
     missionWorkerTerminal(rootSessionID: string, terminal: MissionWorkerTerminalRecord,
