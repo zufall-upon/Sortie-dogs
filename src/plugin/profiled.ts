@@ -123,6 +123,8 @@ export function previewModelCatalog(
   ];
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const goalLedgerCapacityError = (error: unknown): error is RunFlightLedgerError => error instanceof RunFlightLedgerError && error.code === "capacity" &&
+  ["Goal ledger capacity exceeded.", "Goal ledger page capacity exceeded."].includes(error.message);
 const payload = (value: unknown): unknown => record(value) && "data" in value ? value.data : value;
 
 function missionConsultationDetails(role: "advisor" | "scout", prompt: string) {
@@ -1796,6 +1798,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (mission && (args as Record<string, unknown>).confirmed_conditions !== undefined) {
           mission = await missions.recordLaunchConditions(root!, (args as Record<string, unknown>).confirmed_conditions);
         }
+        // V2 retains failed background settlements for retry; awaiting() then
+        // suppresses ordinary lifecycle recovery. Surface its real capacity error
+        // after preserving explicitly supplied Mission conditions, without a Task.
+        const backgroundError = root ? input.nativeBackground?.reconciliationError?.(root) : undefined;
+        if (goalLedgerCapacityError(backgroundError)) throw backgroundError;
         // Observation is available to every owned role. Only the root reconciles dispatch above.
         if (mission) {
           const budget = await control!.currentBudget(root!);
@@ -1858,8 +1865,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               next_action: proposalNextAction }
               : { status: "absent", profile: profile.id }) });
         } catch (error) {
-          if (!root || !(error instanceof RunFlightLedgerError) || error.code !== "capacity" ||
-              !["Goal ledger capacity exceeded.", "Goal ledger page capacity exceeded."].includes(error.message)) throw error;
+          if (!root || !goalLedgerCapacityError(error)) throw error;
           // A valid full goal ledger can still be read even when lifecycle/usage reconciliation
           // cannot append. Never use this unreconciled snapshot for planning or dispatch.
           const budget = await control!.currentBudget(root, { diagnosticOnly: true });

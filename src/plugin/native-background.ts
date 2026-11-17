@@ -48,7 +48,7 @@ function modelResult(dispatch: NativeBackgroundDispatch, result: string): string
 export class NativeBackgroundLifecycle {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly restored = new Set<string>();
-  private readonly reconciliationErrors = new Map<string, string>();
+  private readonly reconciliationErrors = new Map<string, { error: unknown; notice: string }>();
   constructor(private readonly context: OpenCodeV2Context,
     private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<string | void>,
     private readonly owner?: (callID: string, restore?: ObjectValue) => ObjectValue | undefined,
@@ -106,7 +106,8 @@ export class NativeBackgroundLifecycle {
     return object(info) && typeof info.parentID === "string" &&
       (await this.read(info.parentID)).some(item => !item.settled && item.child === sessionID);
   }
-  reconciliationNotice(parent: string): string | undefined { return this.reconciliationErrors.get(parent); }
+  reconciliationNotice(parent: string): string | undefined { return this.reconciliationErrors.get(parent)?.notice; }
+  reconciliationError(parent: string): unknown { return this.reconciliationErrors.get(parent)?.error; }
   async reconcile(parent: string): Promise<void> {
     try {
       await this.serial(parent, async () => this.reconcileInside(parent, await this.read(parent)));
@@ -118,9 +119,9 @@ export class NativeBackgroundLifecycle {
       // making the next user prompt, model request or compaction fail before it starts.
       const reason = error instanceof Error ? error.message : String(error);
       console.warn("[sortie-dogs-v010] Background reconciliation unavailable; saved work retained", reason);
-      this.reconciliationErrors.set(parent, `SORTIE_BACKGROUND_RECONCILIATION_UNAVAILABLE\n${JSON.stringify(reason.slice(0, 2_000))}\n` +
+      this.reconciliationErrors.set(parent, { error, notice: `SORTIE_BACKGROUND_RECONCILIATION_UNAVAILABLE\n${JSON.stringify(reason.slice(0, 2_000))}\n` +
         "Native work/results and cumulative spend are retained; formal validation and acceptance are not proven by this recovery failure. " +
-        "Diagnose the failed inspection and reconcile this same invocation after repair. Do not relaunch or repeat an already completed external operation just to repair accounting.");
+        "Diagnose the failed inspection and reconcile this same invocation after repair. Do not relaunch or repeat an already completed external operation just to repair accounting." });
     }
   }
   /** Add provenance beside its existing native notification, without editing history or waking the parent again. */

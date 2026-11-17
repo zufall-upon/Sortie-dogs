@@ -200,7 +200,8 @@ export interface OpenCodePluginInput {
   /** V2 has no assistant-part update API; return the canonical panel with explicit acceptance. */
   returnReportTransport?: "tool-result";
   /** Native background Job ownership, persisted by the V2 adapter. */
-  nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void> };
+  nativeBackground?: { awaiting(sessionID: string): Promise<boolean>; reconcile?(sessionID: string): Promise<void>;
+    reconciliationError?(sessionID: string): unknown };
   /** V2 adapter can project and restore native session-scoped correction permissions. */
   reviewerCorrectionPermissions?: boolean;
   /** Native host permission check for the original shell command before sharing an in-flight result. */

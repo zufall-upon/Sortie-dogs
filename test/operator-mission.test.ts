@@ -16,6 +16,7 @@ import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/
 import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
 import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
+import { NativeBackgroundLifecycle } from "../dist/plugin/native-background.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
 import { runCodexMission } from "../dist/codex/run-mission.js";
@@ -261,14 +262,15 @@ test("Operator status and continuation recover at the goal event capacity (paged
   await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
   const history: any[] = [];
   let priceAvailable = false;
-  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+  const session = {
     get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator", outcome: "running" } }),
     messages: async ({ path }: any) => ({ data: path.id === "root" ? history : path.id === "unpriced-child" && priceAvailable
       ? [{ info: { id: "priced-request", role: "assistant", providerID: "openai", modelID: "gpt-6-luna-fast",
         time: { created: 2000, completed: 3000 }, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } }]
       : [] }),
     children: async () => ({ data: [] }),
-  } } } as never);
+  };
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session } } as never);
   const chat = (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
     message: { id, agent: "dog-operator", model: { providerID: "fixture", modelID: "fixture" } },
     parts: [{ type: "text", text: "Continue the same goal" }],
@@ -311,6 +313,8 @@ test("Operator status and continuation recover at the goal event capacity (paged
   const beforeTerminal = await status("full");
   assert.equal(beforeTerminal.budget.reserved_units, pendingUnits.length);
   assert.equal(beforeTerminal.budget.settled_cost_usd, null);
+  const retainedConditions = { entrypoint: "existing-runner", source: "user:original", applies_to: "retained invocation" };
+  await hooks.tool!.sortie_v010_operator_status.execute({ confirmed_conditions: retainedConditions }, { sessionID: "root" });
   history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "terminal-call",
     state: { status: "completed", input: { subagent_type: "dog-worker-v010", prompt: "task_id: terminal" }, time: { start: 1, end: 2 } } }] });
   const originalOpen = fs.open;
@@ -349,6 +353,49 @@ test("Operator status and continuation recover at the goal event capacity (paged
     if (view === "full") assert.equal(diagnostic.coordinator_dispatch, "blocked-capacity");
   }
   await assert.rejects(chat("cannot-continue-at-capacity"), /Goal ledger capacity exceeded/);
+  // V2 retains a failed native background settlement instead of throwing it from
+  // reconcile(). Its pending dispatch must not hide the capacity diagnostic.
+  history.length = 0;
+  const backgroundStorage = new Map<string, unknown>(), childHistory: any[] = [];
+  let backgroundHooks: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+  const background = new NativeBackgroundLifecycle({
+    storage: { get: async (key: string) => structuredClone(backgroundStorage.get(key)),
+      set: async (key: string, value: unknown) => { backgroundStorage.set(key, structuredClone(value)); } },
+    session: { get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID }),
+      context: async () => childHistory },
+  } as never, async (dispatch, text) => {
+    await backgroundHooks["tool.execute.after"]!({ tool: "task", sessionID: dispatch.parent, callID: dispatch.callID,
+      args: { subagent_type: dispatch.agent, prompt: dispatch.input.prompt } },
+    { status: "completed", output: text, metadata: { sessionID: dispatch.child, status: dispatch.terminal } });
+  });
+  backgroundHooks = await SortieDogsV010Plugin({ directory, client: { session }, nativeBackground: background } as never);
+  backgroundHooks.backgroundOwner!("terminal-call", { core: { reservation: { root: "root", unitID: "terminal",
+    reservationID: goalFingerprint({ goal_id: goal, unit_id: "terminal", call_id: "terminal-call" }), started: 1 }, executions: [] } });
+  await background.admit("root", "terminal-call", { agent: "dog-worker-v010", prompt: "Preserve native result", sessionID: "native-terminal" });
+  await background.launched("root", "terminal-call", "native-terminal", true);
+  childHistory.push({ id: "native-result", type: "assistant", finish: "stop", content: [{ type: "text", text: "Retained result" }] });
+  await background.reconcile("root");
+  assert.match(background.reconciliationNotice("root")!, /Goal ledger capacity exceeded/);
+  assert.equal(await background.awaiting("root"), true);
+  for (const view of ["full", "progress", ""]) {
+    const diagnostic = JSON.parse(await backgroundHooks.tool!.sortie_v010_operator_status.execute({ view }, { sessionID: "root" }));
+    assert.equal(view === "progress" ? diagnostic.stage : diagnostic.status, "goal-ledger-capacity",
+      "a retained native background failure reaches the public status diagnostic");
+    assert.equal(diagnostic.ledger_diagnostic.reconciliation, "incomplete");
+    assert.equal(diagnostic.task, undefined);
+    assert.match(diagnostic.next_action, /Do not dispatch/);
+    assert.equal(diagnostic.budget.consumed_units, 1);
+    assert.equal(diagnostic.budget.reserved_units, pendingUnits.length);
+    assert.equal(diagnostic.budget.settled_cost_usd, null);
+  }
+  const nativeDispatch = (await backgroundStorage.get("v2-background-dispatches:root") as any[])[0];
+  assert.equal(nativeDispatch.terminal, "succeeded");
+  assert.notEqual(nativeDispatch.settled, true, "diagnosis never fabricates native accounting settlement");
+  const addedConditions = { inputs: ["existing-input"], source: "runner metadata", applies_to: retainedConditions.applies_to };
+  await backgroundHooks.tool!.sortie_v010_operator_status.execute({ confirmed_conditions: addedConditions }, { sessionID: "root" });
+  const launchConditions = (await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).launchConditions!;
+  assert.deepEqual(launchConditions.map(({ recordedAt: _at, ...conditions }) => conditions), [retainedConditions, addedConditions],
+    "capacity diagnostics preserve the explicit status opt-in and existing client-owned conditions");
   // Pricing can independently need an append even when no terminal reservation is recoverable.
   history.length = 0; priceAvailable = true;
   const pricingDiagnostic = await status("full");
