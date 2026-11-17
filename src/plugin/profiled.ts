@@ -2893,21 +2893,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (prior.acceptanceFingerprint !== run.acceptanceFingerprint || prior.operatorSessionID !== run.operatorSessionID) continue;
         for (const unit of prior.units) {
           const child = unit.childSessionID;
-          const failedPrelaunch = unit.status === "failed" && unit.resultClass === "process-defect";
+          const direct = unit.directExecution;
+          const failedPrelaunch = unit.status === "failed" && (unit.resultClass === "process-defect" || !!direct);
           if (unit.unit.id !== reference.unitID || child !== reference.sessionID ||
-              unit.status !== "succeeded" && !failedPrelaunch || unit.directExecution || !child || !unit.callID) continue;
+              unit.status !== "succeeded" && !failedPrelaunch || !child || !unit.callID) continue;
           const attempts = (mission.attempts ?? []).filter(item => item.runID === prior.runID && item.unitID === unit.unit.id &&
-            item.kind === "implementation" && item.status === unit.status && item.callID === unit.callID && item.childSessionID === child &&
-            (!failedPrelaunch || item.resultClass === "process-defect"));
+            item.kind === (direct ? "direct_execution" : "implementation") && item.status === unit.status && item.callID === unit.callID && item.childSessionID === child &&
+            (!failedPrelaunch || item.resultClass === unit.resultClass));
           const attempt = attempts.length === 1 ? attempts[0] : undefined;
           const terminal = attempt?.terminal;
-          if (!attempt || attempt.nativeOutcome !== "completed" || !terminal || terminal.outcome !== "completed" ||
+          if (!attempt) continue;
+          if (direct ? (await missionWorkerTerminalProof(root, mission, prior, attempt)).status !== "ready"
+            : attempt.nativeOutcome !== "completed" || !terminal || terminal.outcome !== "completed" ||
               terminal.runID !== prior.runID || terminal.unitID !== unit.unit.id || terminal.taskID !== attempt.taskID ||
               terminal.callID !== unit.callID || terminal.childSessionID !== child ||
               terminal.ownerSessionID !== (prior.operatorSessionID ?? root) || !Array.isArray(terminal.descendants)) continue;
           const settled = mission.progress.find(item => item.unit === `${prior.runID}/${unit.unit.id}` && item.status === unit.status)?.at;
           if (!settled || !Number.isFinite(Date.parse(settled)) || !Number.isFinite(Date.parse(prior.createdAt))) continue;
-          if (failedPrelaunch) {
+          if (failedPrelaunch || direct) {
             // A failed Worker is not a successful predecessor. Only a durable refusal
             // for this exact shell call can be inspected, never an arbitrary result.
             const receipts = execution.observations.filter(item => item.sessionID === child && item.callID === reference.callID);
@@ -2924,13 +2927,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const response = await session("get", { path: { id: child }, query: { directory: input.directory } });
             const info = payload(response);
             if (!record(info) || record(response) && response.error) throw new Error("native-operation-session-unavailable");
-            if (info.id !== child || info.parentID !== (prior.operatorSessionID ?? root)) continue;
+            if (info.id !== child) continue;
+            if (direct) {
+              // Direct settlement ends one admitted segment, not the reusable controller
+              // session. That same actor may legitimately be busy in the current run.
+              const owner = prior.operatorSessionID ?? root;
+              const start = Date.parse(direct.startedAt), end = Date.parse(direct.finishedAt!);
+              if (direct.actor !== child || child !== owner &&
+                  (unit.reviewerCorrection?.author !== child || info.parentID !== owner) ||
+                  !Number.isFinite(start) || !Number.isFinite(end) || start < Date.parse(prior.createdAt) ||
+                  end < start || end > Date.parse(settled)) continue;
+              addOwner(child, { notBefore: direct.startedAt, notAfter: direct.finishedAt,
+                sourceRunID: prior.runID, sourceUnitID: unit.unit.id, sourceCallID: reference.callID, prelaunchOnly: true });
+              predecessorBound = true;
+              continue;
+            }
+            if (info.parentID !== (prior.operatorSessionID ?? root)) continue;
             if (failedPrelaunch) {
               if (!["succeeded", "completed"].includes(String(info.outcome))) continue;
               const activeResponse = await session("active", { query: { directory: input.directory } });
               const active = payload(activeResponse);
               if (!record(active) || record(activeResponse) && activeResponse.error) throw new Error("native-operation-activity-unavailable");
-              if (Object.hasOwn(active, child) || terminal.descendants.some(id => typeof id !== "string" || Object.hasOwn(active, id))) continue;
+              if (Object.hasOwn(active, child) || terminal!.descendants.some(id => typeof id !== "string" || Object.hasOwn(active, id))) continue;
             }
             const created = record(info.time) ? info.time.created : undefined;
             const createdAt = typeof created === "number" && Number.isFinite(created) ? created
@@ -3021,8 +3039,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             // A boundary page may include tools from a later reusable-session turn.
             // Ignore them before comparing call input or terminal state as well.
-            const window = windows.find(item => Date.parse(startedAt) >= Date.parse(item.notBefore) &&
+            const matchingWindows = windows.filter(item => Date.parse(startedAt) >= Date.parse(item.notBefore) &&
                 (!item.notAfter || Date.parse(startedAt) <= Date.parse(item.notAfter)));
+            // Adjacent direct admissions can share a millisecond boundary. A same-call
+            // receipt identifies its original segment, not the next active admission.
+            const window = matchingWindows.find(item => saved?.prelaunchRejection &&
+              saved.prelaunchRejection.runID === (item.sourceRunID ?? run.runID)) ?? matchingWindows[0];
             if (!window) continue;
             let nativeDirectory: string;
             if (window.sourceRunID && typeof nativeInput.workdir !== "string") {

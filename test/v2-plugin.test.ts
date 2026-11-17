@@ -2786,6 +2786,7 @@ test("V2 reconciles the explicitly selected predecessor shell after a corrected 
 });
 
 for (const variant of ["verified", "legacy-receipt", "omitted-cwd", "omitted-cwd-changed-timeout",
+  "direct-replan", "direct-replan-omitted-cwd", "direct-replan-changed-timeout", "direct-replan-process", "direct-replan-running",
   "multiple-first", "multiple-last", "multiple-omitted-cwd", "multiple-missing-history", "multiple-missing-receipt", "multiple-changed-timeout",
   "multiple-process", "multiple-running", "multiple-completed-metadata", "multiple-duplicate-mismatch", "multiple-other-executed",
   "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner"] as const)
@@ -2822,7 +2823,7 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     await mkdir(join(directory, "output"));
     await writeFile(join(directory, "launch.mjs"), 'import { appendFileSync } from "node:fs"; appendFileSync("output/runs.txt", "started\\n");\n');
     const command = "node launch.mjs", args = { command,
-      ...(variant.startsWith("omitted-cwd") || variant === "multiple-omitted-cwd" ? {} : { workdir: directory }), timeout: 120_000 };
+      ...(variant.startsWith("omitted-cwd") || variant === "multiple-omitted-cwd" || variant === "direct-replan-omitted-cwd" ? {} : { workdir: directory }), timeout: 120_000 };
     const unit = { title: "Start once", objective: "Retain the prior result and start once after the host refusal",
       read: ["launch.mjs"], write: ["output/**"], validation: [command] };
     await chat("root", "Start the requested operation once; keep all prior work and accounting.");
@@ -2883,6 +2884,23 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     await rm(broken);
     const corrected = await tool("plan_units", "coordinator", { executor: "self", reason: "Correct the unavailable snapshot scope",
       units: [{ ...unit, title: "Continue retained operation" }], execution: { commands: [command], directory } });
+    const directReplan = variant.startsWith("direct-replan");
+    let directRunID: string | undefined, directState: any;
+    if (directReplan) {
+      directRunID = corrected.run_id;
+      const directRan = Date.now();
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "direct-refusal" }, { args }),
+        /mission-operation-already-admitted/u);
+      directState = { status: "error", input: { ...args }, error: { type: "unknown", message: "mission-operation-already-admitted" } };
+      history.coordinator = [{ id: "msg_direct_refusal", type: "assistant", agent: "dogs-coordinator", time: { created: directRan, completed: Date.now() },
+        content: [{ type: "tool", id: "direct-refusal", name: "shell", time: { created: directRan, ran: directRan, completed: Date.now() }, state: directState }] }];
+      const continued = await tool("plan_units", "coordinator", { executor: "self", reason: "Continue after the direct prelaunch refusal",
+        units: [{ ...unit, title: "Continue after direct refusal" }], execution: { commands: [command], directory } });
+      corrected.run_id = continued.run_id;
+      assert.notEqual(corrected.run_id, directRunID);
+      // The same Coordinator is executing its next admission, not a terminal session.
+      active = { coordinator: { type: "busy" } };
+    }
     const budget = (await tool("operator_status", "root")).budget;
     const originalAttempts = (await missionRuntime.required("root")).attempts!.filter(item => item.runID === original.runID);
     if (variant === "changed-input") nativeInput.command += " --different";
@@ -2904,8 +2922,18 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       state: { status: "completed", input: { ...args }, metadata: { exit: 0 },
         content: [{ type: "text", text: "A different native call already ran." }] } });
     const selectedCall = variant === "multiple-last" ? "other-refusal" : "rejected-call";
-    const recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
+    let recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
       recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: selectedCall } } });
+    if (directReplan) {
+      if (variant === "direct-replan-changed-timeout") directState.input.timeout = 60_000;
+      if (variant === "direct-replan-process") directState.metadata = { exit: 0 };
+      if (variant === "direct-replan-running") directState.status = "running";
+      const attempts = (await missionRuntime.required("root")).attempts;
+      recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
+        recover_call: { run_id: directRunID, unit_id: "unit-1", session_id: "coordinator", call_id: "direct-refusal" } } });
+      assert.deepEqual((await missionRuntime.required("root")).attempts, attempts, "recovery never re-settles a direct admission or changes its accounting");
+      assert.deepEqual(recovered.budget, budget);
+    }
     assert.equal(recovered.status, "operation-reconciled");
     assert.equal(recovered.run_id, corrected.run_id);
     assert.deepEqual(recovered.budget, budget);
@@ -2917,7 +2945,8 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     const observation = after.execution!.observations.find(item => item.callID === "rejected-call")!;
     assert.equal(observation.prelaunchRejection!.runID, original.runID, "the receipt is never reassigned to the current run");
     assert.equal(observation.exit, undefined);
-    const verified = ["verified", "legacy-receipt", "omitted-cwd", "multiple-first", "multiple-last", "multiple-omitted-cwd"].includes(variant);
+    const verified = ["verified", "legacy-receipt", "omitted-cwd", "multiple-first", "multiple-last", "multiple-omitted-cwd",
+      "direct-replan", "direct-replan-omitted-cwd"].includes(variant);
     if (!verified) {
       assert.ok(["recovery-unavailable", "recovery-blocked"].includes(recovered.operation.status), JSON.stringify(recovered.operation));
       await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "unsafe-retry" }, { args }),
@@ -2931,14 +2960,22 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       }
       return;
     }
-    assert.equal(recovered.operation.status, "not-started");
+    assert.equal(recovered.operation.status, "not-started", JSON.stringify(recovered.operation));
     assert.equal(observation.sourceRunID, original.runID);
     assert.equal(observation.sourceUnitID, "unit-1");
     assert.equal(observation.nativeTimeoutMs, 120_000);
     assert.ok(observation.nativeExecutionHash);
     assert.ok(observation.nativeCallHash);
     const observations = (await tool("operator_status", "root")).acceptance_summary.operation.observations;
-    assert.equal(observations.length, multiple ? 2 : 1);
+    assert.equal(observations.length, multiple || directReplan ? 2 : 1);
+    if (directReplan) {
+      const direct = observations.find((item: { callID: string }) => item.callID === "direct-refusal");
+      assert.equal(direct.sourceRunID, directRunID);
+      assert.equal(direct.sourceUnitID, "unit-1");
+      assert.equal(direct.prelaunchRejection.runID, directRunID);
+      assert.equal(direct.outcome, "not-started");
+      assert.ok(direct.nativeInputHash && direct.nativeCallHash && direct.nativeExecutionHash);
+    }
     if (multiple) for (const item of observations) {
       assert.equal(item.sourceRunID, original.runID);
       assert.equal(item.sourceUnitID, "unit-1");
