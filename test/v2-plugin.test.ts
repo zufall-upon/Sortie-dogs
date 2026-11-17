@@ -2789,7 +2789,10 @@ for (const variant of ["verified", "legacy-receipt", "omitted-cwd", "omitted-cwd
   "direct-replan", "direct-replan-omitted-cwd", "direct-replan-changed-timeout", "direct-replan-process", "direct-replan-running",
   "multiple-first", "multiple-last", "multiple-omitted-cwd", "multiple-missing-history", "multiple-missing-receipt", "multiple-changed-timeout",
   "multiple-process", "multiple-running", "multiple-completed-metadata", "multiple-duplicate-mismatch", "multiple-other-executed",
-  "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner"] as const)
+  "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner",
+  "failed-terminal", "task-failed-child-completed", "failed-terminal-active", "failed-terminal-active-descendant",
+  "failed-terminal-unknown", "failed-terminal-changed-input", "failed-terminal-process", "failed-terminal-missing-receipt",
+  "failed-terminal-conflicting-outcome", "failed-terminal-invalid-terminal", "failed-terminal-missing-terminal"] as const)
 test(`V2 recovers a failed predecessor's exact prelaunch rejection without replay: ${variant}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-failed-prelaunch-"));
@@ -2800,6 +2803,10 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
   };
   const history: Record<string, Record<string, unknown>[]> = {};
   let active: Record<string, unknown> = {};
+  const failedTerminal = variant.startsWith("failed-terminal");
+  if (variant === "failed-terminal-active-descendant") identities.descendant = {
+    agent: "dog-worker-v010", parentID: "worker", outcome: "failed", time: { created: Date.now() - 5_000 },
+  };
   let hooks!: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
   const cleanup = await createSortieDogsV2Plugin(async input => { hooks = await SortieDogsV010Plugin(input); return {}; }).setup({
     ...fixture.context, location: { directory }, session: { ...fixture.context.session,
@@ -2862,9 +2869,10 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       ...(multiple ? [{ type: "tool", id: "other-refusal", name: "shell", time: { created: peerRan, ran: peerRan, completed: Date.now() }, state: peerState }] : [])];
     history.worker = [{ id: "msg_refusal", type: "assistant", agent: "dog-worker-v010", time: { created: ran, completed: Date.now() },
       content: nativeParts }];
-    identities.worker!.outcome = "succeeded";
+    identities.worker!.outcome = failedTerminal ? "failed" : "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
-      { output: "PROCESS_DEFECT: local: registered snapshot unavailable before launch", metadata: { sessionId: "worker" } });
+      { ...(variant === "task-failed-child-completed" ? { status: "error" } : {}),
+        output: "PROCESS_DEFECT: local: registered snapshot unavailable before launch", metadata: { sessionId: "worker" } });
     const failed = await operators.required("root");
     assert.equal(failed.units[0]!.status, "failed");
     assert.equal(failed.units[0]!.resultClass, "process-defect");
@@ -2872,6 +2880,10 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     const before = await missionRuntime.required("root");
     assert.equal(before.execution!.observations[0]!.prelaunchRejection!.runID, original.runID);
     assert.equal(before.execution!.observations[0]!.exit, undefined);
+    const originalAttempt = before.attempts!.find(item => item.runID === original.runID)!;
+    assert.equal(originalAttempt.nativeOutcome, failedTerminal ? "failed" : "completed");
+    assert.equal(originalAttempt.terminal!.outcome, failedTerminal || variant === "task-failed-child-completed" ? "failed" : "completed");
+    if (variant === "failed-terminal-active-descendant") assert.deepEqual(originalAttempt.terminal!.descendants, ["descendant"]);
     if (multiple) {
       assert.equal(before.execution!.observations.length, 2);
       assert.ok(before.execution!.observations.every(item => item.prelaunchRejection?.runID === original.runID && item.outcome === "not-started"));
@@ -2902,12 +2914,24 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       active = { coordinator: { type: "busy" } };
     }
     const budget = (await tool("operator_status", "root")).budget;
+    if (variant === "failed-terminal-missing-receipt") await missionRuntime.update("root", current => {
+      delete current.execution!.observations[0]!.prelaunchRejection;
+    });
+    if (variant === "failed-terminal-invalid-terminal") await missionRuntime.update("root", current => {
+      // A failed child cannot have produced a successful aggregate Task terminal.
+      current.attempts!.find(item => item.runID === original.runID)!.terminal = { ...originalAttempt.terminal!, outcome: "completed" };
+    });
+    if (variant === "failed-terminal-missing-terminal") await missionRuntime.update("root", current => {
+      delete current.attempts!.find(item => item.runID === original.runID)!.terminal;
+    });
     const originalAttempts = (await missionRuntime.required("root")).attempts!.filter(item => item.runID === original.runID);
-    if (variant === "changed-input") nativeInput.command += " --different";
+    if (variant === "changed-input" || variant === "failed-terminal-changed-input") nativeInput.command += " --different";
     if (variant === "changed-timeout" || variant === "omitted-cwd-changed-timeout") nativeInput.timeout = 60_000;
-    if (variant === "process-evidence") nativeState.metadata = { exit: 1 };
-    if (variant === "active-owner") active = { worker: { type: "busy" } };
-    if (variant === "unknown-owner") delete identities.worker!.outcome;
+    if (variant === "process-evidence" || variant === "failed-terminal-process") nativeState.metadata = { exit: 1 };
+    if (variant === "active-owner" || variant === "failed-terminal-active") active = { worker: { type: "busy" } };
+    if (variant === "failed-terminal-active-descendant") active = { descendant: { type: "busy" } };
+    if (variant === "unknown-owner" || variant === "failed-terminal-unknown") delete identities.worker!.outcome;
+    if (variant === "failed-terminal-conflicting-outcome") identities.worker!.outcome = "succeeded";
     if (variant === "multiple-missing-history") nativeParts.pop();
     if (variant === "multiple-missing-receipt") await missionRuntime.update("root", current => {
       delete current.execution!.observations.find(item => item.callID === "other-refusal")!.prelaunchRejection;
@@ -2943,10 +2967,11 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     assert.deepEqual(after.requirements, before.requirements);
     assert.deepEqual(after.attempts!.filter(item => item.runID === original.runID), originalAttempts);
     const observation = after.execution!.observations.find(item => item.callID === "rejected-call")!;
-    assert.equal(observation.prelaunchRejection!.runID, original.runID, "the receipt is never reassigned to the current run");
+    if (variant !== "failed-terminal-missing-receipt")
+      assert.equal(observation.prelaunchRejection!.runID, original.runID, "the receipt is never reassigned to the current run");
     assert.equal(observation.exit, undefined);
     const verified = ["verified", "legacy-receipt", "omitted-cwd", "multiple-first", "multiple-last", "multiple-omitted-cwd",
-      "direct-replan", "direct-replan-omitted-cwd"].includes(variant);
+      "direct-replan", "direct-replan-omitted-cwd", "failed-terminal", "task-failed-child-completed"].includes(variant);
     if (!verified) {
       assert.ok(["recovery-unavailable", "recovery-blocked"].includes(recovered.operation.status), JSON.stringify(recovered.operation));
       await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "unsafe-retry" }, { args }),

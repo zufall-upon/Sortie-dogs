@@ -306,6 +306,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (requireAvailable && (record(response) && response.error || !Array.isArray(result))) throw new Error("native-operation-history-response-unavailable");
       return Array.isArray(result) ? result.filter(record) : [];
     }
+    function nativeSessionOutcome(info: Record<string, unknown>): "completed" | "failed" | "unknown" {
+      return ["succeeded", "completed"].includes(String(info.outcome)) ? "completed"
+        : ["failed", "interrupted", "cancelled"].includes(String(info.outcome)) ? "failed" : "unknown";
+    }
     async function observedSessionModel(id: string): Promise<{ model?: string; variant?: string; outcome: "completed" | "failed" | "unknown" }> {
       const info = payload(await session("get", { path: { id }, query: { directory: input.directory } }).catch(() => undefined));
       if (!record(info)) return { outcome: "unknown" };
@@ -313,8 +317,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const provider = typeof model.providerID === "string" ? model.providerID : info.providerID;
       const modelID = typeof model.modelID === "string" ? model.modelID : typeof model.id === "string" ? model.id : info.modelID;
       const variant = typeof model.variant === "string" ? model.variant : typeof info.variant === "string" ? info.variant : undefined;
-      const outcome = ["succeeded", "completed"].includes(String(info.outcome)) ? "completed"
-        : ["failed", "interrupted", "cancelled"].includes(String(info.outcome)) ? "failed" : "unknown";
+      const outcome = nativeSessionOutcome(info);
       return { ...(typeof provider === "string" && typeof modelID === "string" ? { model: `${provider}/${modelID}` } : {}),
         ...(variant === undefined ? {} : { variant }), outcome };
     }
@@ -2904,10 +2907,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const terminal = attempt?.terminal;
           if (!attempt) continue;
           if (direct ? (await missionWorkerTerminalProof(root, mission, prior, attempt)).status !== "ready"
-            : attempt.nativeOutcome !== "completed" || !terminal || terminal.outcome !== "completed" ||
+            : !terminal || (attempt.nativeOutcome !== "completed" && (!failedPrelaunch || attempt.nativeOutcome !== "failed")) ||
+              (terminal.outcome !== "completed" && (!failedPrelaunch || terminal.outcome !== "failed")) ||
+              (attempt.nativeOutcome === "failed" && terminal.outcome !== "failed") ||
               terminal.runID !== prior.runID || terminal.unitID !== unit.unit.id || terminal.taskID !== attempt.taskID ||
+              terminal.taskID !== /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1] ||
               terminal.callID !== unit.callID || terminal.childSessionID !== child ||
-              terminal.ownerSessionID !== (prior.operatorSessionID ?? root) || !Array.isArray(terminal.descendants)) continue;
+              terminal.ownerSessionID !== (prior.operatorSessionID ?? root) || !Array.isArray(terminal.descendants) ||
+              !terminal.descendants.every(id => typeof id === "string") || new Set(terminal.descendants).size !== terminal.descendants.length) continue;
           const settled = mission.progress.find(item => item.unit === `${prior.runID}/${unit.unit.id}` && item.status === unit.status)?.at;
           if (!settled || !Number.isFinite(Date.parse(settled)) || !Number.isFinite(Date.parse(prior.createdAt))) continue;
           if (failedPrelaunch || direct) {
@@ -2944,7 +2951,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             if (info.parentID !== (prior.operatorSessionID ?? root)) continue;
             if (failedPrelaunch) {
-              if (!["succeeded", "completed"].includes(String(info.outcome))) continue;
+              // nativeOutcome records the child session; terminal.outcome also includes
+              // the Task result, which may fail after a completed child. Compare like
+              // evidence, without turning either failure into a successful execution.
+              if (nativeSessionOutcome(info) !== attempt.nativeOutcome) continue;
               const activeResponse = await session("active", { query: { directory: input.directory } });
               const active = payload(activeResponse);
               if (!record(active) || record(activeResponse) && activeResponse.error) throw new Error("native-operation-activity-unavailable");
