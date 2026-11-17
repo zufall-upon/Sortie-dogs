@@ -801,6 +801,8 @@ export async function cleanupCandidateRuntime(runtime, remove = rm) {
 
 export async function prepareCandidateRuntime(candidate, packagePath, runRoot, dependencies = {}) {
   ensure(process.platform !== "win32", "live-mode-requires-wsl-login-shell");
+  const runtimeMode = dependencies.runtimeMode ?? "inference";
+  ensure(runtimeMode === "inference" || runtimeMode === "preflight", "invalid-candidate-runtime-mode");
   const execute = dependencies.execute ?? requiredCommand;
   const packageBytes = await readFile(packagePath);
   ensure(digest(packageBytes) === candidate.sha256, "candidate-package-sha256-mismatch");
@@ -830,9 +832,11 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   await mkdir(cacheRoot, { recursive: true });
   await mkdir(homeRoot, { recursive: true });
   const hostDataRoot = process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share");
-  const hostAuth = join(hostDataRoot, "opencode", "auth.json");
-  ensure(await exists(hostAuth), "candidate-opencode-auth-unavailable");
-  await symlink(hostAuth, join(dataRoot, "opencode", "auth.json"));
+  if (runtimeMode === "inference") {
+    const hostAuth = join(hostDataRoot, "opencode", "auth.json");
+    ensure(await exists(hostAuth), "candidate-opencode-auth-unavailable");
+    await symlink(hostAuth, join(dataRoot, "opencode", "auth.json"));
+  }
   const environment = {
     ...benchmarkEnvironment(),
     ...benchmarkPythonCacheEnvironment(cacheRoot),
@@ -891,11 +895,13 @@ export async function prepareCandidateRuntime(candidate, packagePath, runRoot, d
   const modelOverrides = dependencies.coordinatorModel ? { "dogs-coordinator": dependencies.coordinatorModel } : {};
   environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(benchmarkInlineConfig(plugin, agentNames, runRoot, modelOverrides));
   await (dependencies.probeAgents ?? probeCandidateV2Agents)(candidateRoot, environment, candidate.agent, agentNames, modelOverrides);
-  // V2 OAuth connections live in its SQLite credential store. The legacy auth.json
-  // alone cannot route the model in an isolated server. Copy only the selected
-  // provider's credential into the throwaway runtime, never the host session DB.
-  await seedIsolatedV2Credential(join(hostDataRoot, "opencode", "opencode.db"),
-    join(dataRoot, "opencode", "opencode.db"), join(dataRoot, "opencode"));
+  if (runtimeMode === "inference") {
+    // V2 OAuth connections live in its SQLite credential store. The legacy auth.json
+    // alone cannot route the model in an isolated server. Copy only the selected
+    // provider's credential into the throwaway runtime, never the host session DB.
+    await seedIsolatedV2Credential(join(hostDataRoot, "opencode", "opencode.db"),
+      join(dataRoot, "opencode", "opencode.db"), join(dataRoot, "opencode"));
+  }
   return {
     environment,
     runtimeRoot: candidateRoot,
@@ -944,7 +950,8 @@ export async function retainUsageDatabase(sourcePath, targetPath) {
 }
 
 export async function probeCandidateV2Agents(root, environment, primary, agentNames, modelOverrides = {}, dependencies = {}) {
-  const server = await (dependencies.startServer ?? startV2ReleaseServer)(root, environment);
+  const server = await (dependencies.startServer ?? startV2ReleaseServer)(root, environment,
+    { inheritEnvironment: false });
   let probeError;
   try {
     const headers = { "content-type": "application/json",

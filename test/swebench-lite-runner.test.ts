@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import fsPromises from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import test from "node:test";
-import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
+import { benchmarkEnvironment, benchmarkPythonCacheEnvironment, benchmarkInlineConfig, benchmarkPermissionPolicy, candidateFailureMessage, capturePatch, cleanupCandidateRuntime, cloneInstance, createDryRunPlan, createInferenceManifest, createInstancePrompt, createLiveRunPlan, prepareCandidateRuntime, probeCandidateV2Agents, runOpenCode, waitForBenchmarkModelRoute, readDirectoryUsage, readStalledRead, hasSourceChange, formatPrediction, officialEvaluationImage, parseArguments, relocateOfficialEnvironment, retainUsageDatabase, runDryRun, runLive, seedIsolatedV2Credential, verifyCandidateAgent } from "../scripts/swebench-lite-runner.mjs";
 import { runCandidatePreflight } from "../scripts/swebench-candidate-preflight.mjs";
 import { runSupervisor } from "../scripts/swebench-lite-supervisor.mjs";
 import { nativeRunPending as readNativePending } from "../scripts/native-run-settlement.mjs";
@@ -17,7 +17,7 @@ import { releaseManifest } from "../scripts/swebench-release-manifest.mjs";
 import { estimateModelUsageCost as benchmarkModelCost } from "../scripts/swebench-model-cost.mjs";
 import { estimateModelUsageCost as productModelCost } from "../src/plugin/model-cost.ts";
 import { runtimeAssets } from "../src/runtime-assets-v010.ts";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -44,7 +44,8 @@ for (const phase of ["probe-and-cleanup-failure", "probe-failure", "cleanup-fail
     const cleanup = Error("Could not inspect owned process group 719000001: pgrep failed (exit -1)");
     let starts = 0, stops = 0, requests = 0;
     const rejected = await probeCandidateV2Agents("/owned-candidate", {}, "dog-operator", [], {}, {
-      startServer: async () => {
+      startServer: async (_root: string, _environment: unknown, options: unknown) => {
+        assert.deepEqual(options, { inheritEnvironment: false });
         starts++;
         return { url: "http://owned-candidate.invalid", pid: 719000001, env: {}, stop: async () => {
           stops++;
@@ -1052,9 +1053,10 @@ test("candidate preflight owns and removes only its fresh isolated runtime root"
     await writeFile(manifestPath, "{}\n");
     const result = await runCandidatePreflight(manifestPath, runRoot, {
       createPlan: () => ({ candidate: { package_tgz: "candidate.tgz" } }),
-      prepareCandidate: async (_candidate: unknown, packagePath: string, preparedRoot: string) => {
+      prepareCandidate: async (_candidate: unknown, packagePath: string, preparedRoot: string, options: unknown) => {
         assert.equal(packagePath, join(root, "candidate.tgz"));
         assert.equal(preparedRoot, runRoot);
+        assert.deepEqual(options, { runtimeMode: "preflight" });
         assert.equal((await stat(preparedRoot)).isDirectory(), true);
         return { evidence: { package_sha256: "a".repeat(64) } };
       },
@@ -1068,6 +1070,168 @@ test("candidate preflight owns and removes only its fresh isolated runtime root"
     }), /candidate-preflight-run-root-already-exists/);
     assert.equal((await stat(runRoot)).isDirectory(), true);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("candidate preflight is credential-free while inference still requires and isolates both auth stores", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "swebench-auth-mode-"));
+  const previousDataHome = process.env.XDG_DATA_HOME, previousDatabase = process.env.OPENCODE_DB;
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  const schema = "CREATE TABLE credential (id TEXT, integration_id TEXT, label TEXT, value TEXT, connector_id TEXT, method_id TEXT, active INTEGER, time_created INTEGER, time_updated INTEGER)";
+  const hostData = join(root, "host-data"), hostDir = join(hostData, "opencode"), hostDb = join(hostDir, "opencode.db");
+  const manifestPath = join(root, "manifest.json"), archive = join(root, candidate.package_tgz);
+  const bytes = Buffer.from("candidate auth mode fixture");
+  const fixtureCandidate = { ...candidate, sha256: createHash("sha256").update(bytes).digest("hex") };
+  let temporaryRoot: string | undefined, commands = 0, probes = 0;
+  const requests: string[] = [];
+  const optionsFor = (runRoot: string, runtimeOptions: Record<string, unknown> = {}) => ({
+    ...runtimeOptions,
+    execute: async (command: string, _args: string[], options: { env: Record<string, string> }) => {
+      commands++;
+      temporaryRoot = options.env.TMPDIR;
+      const configRoot = join(runRoot, "candidate-runtime/opencode");
+      if (command === "opencode") return { stdout: "2.0.26\n" };
+      if (command === "npm") {
+        const installed = join(configRoot, "node_modules/sortie-dogs");
+        await mkdir(join(installed, "dist"), { recursive: true });
+        await writeFile(join(installed, "package.json"), JSON.stringify({ type: "module", version: candidate.version }));
+        await writeFile(join(installed, "dist/asset-version.js"), `export const V010_RUNTIME_ASSET_VERSION = ${JSON.stringify(candidate.runtime_marker)};`);
+        await writeFile(join(installed, "dist/runtime-assets-v010.js"), `export const runtimeAssets = ${JSON.stringify([
+          { version: candidate.runtime_marker, installPath: "agent/dog-operator.md", content: "auth mode fixture\n" },
+        ])};`);
+      } else {
+        await mkdir(join(configRoot, "agent"), { recursive: true });
+        await writeFile(join(configRoot, "agent/dog-operator.md"), "auth mode fixture\n");
+      }
+      return { stdout: "" };
+    },
+    probeAgents: (directory: string, environment: Record<string, string>, agent: string, names: string[], overrides: object) =>
+      probeCandidateV2Agents(directory, environment, agent, names, overrides, {
+        startServer: async (_directory: string, env: Record<string, string>, serverOptions: unknown) => {
+          probes++;
+          assert.deepEqual(serverOptions, { inheritEnvironment: false });
+          assert.equal(env.OPENAI_API_KEY, undefined);
+          assert.equal(env.OPENCODE_DB, undefined);
+          const isolated = join(env.XDG_DATA_HOME!, "opencode");
+          if (runtimeOptions.runtimeMode === "preflight") {
+            await assert.rejects(lstat(join(isolated, "auth.json")), { code: "ENOENT" });
+          } else assert.equal((await lstat(join(isolated, "auth.json"))).isSymbolicLink(), true);
+          await assert.rejects(stat(join(isolated, "opencode.db")), { code: "ENOENT" });
+          const database = new DatabaseSync(join(isolated, "opencode.db"));
+          try { database.exec(schema); } finally { database.close(); }
+          return { url: "http://isolated.invalid", env: { OPENCODE_SERVER_PASSWORD: "fixture" }, stop: async () => undefined };
+        },
+        fetch: async (url: string, options: { method: string; body?: string }) => {
+          const path = new URL(url).pathname;
+          requests.push(`${options.method} ${path}`);
+          if (path === "/api/session") return { ok: true, status: 200, json: async () => ({ data: { id: "no-inference" } }) };
+          if (path === "/api/session/no-inference/agent") {
+            assert.deepEqual(JSON.parse(options.body!), { agent: "dog-operator" });
+            return { ok: true, status: 200, json: async () => ({ data: {} }) };
+          }
+          if (path === "/api/plugin") return { ok: true, status: 200, json: async () => ({ data: [{ id: "sortie-dogs.v010" }] }) };
+          assert.equal(path, "/api/agent", "the probe must not send a prompt or model request");
+          return { ok: true, status: 200, json: async () => ({ data: [{ id: "dog-operator",
+            permissions: benchmarkPermissionPolicy(), model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" } }] }) };
+        },
+      }),
+  });
+  try {
+    await mkdir(hostDir, { recursive: true });
+    const db = new DatabaseSync(hostDb);
+    try {
+      db.exec(schema);
+      const insert = db.prepare("INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      insert.run("oauth", "openai", "fixture", JSON.stringify({ type: "oauth", access: "fixture-only-token" }), null, null, 1, 1, 1);
+      insert.run("other", "other", "fixture", JSON.stringify({ type: "oauth" }), null, null, 1, 1, 1);
+    } finally { db.close(); }
+    const originalDb = await readFile(hostDb);
+    await writeFile(manifestPath, "{}\n"); await writeFile(archive, bytes);
+    await writeFile(join(root, "keep.txt"), "unrelated\n");
+    process.env.XDG_DATA_HOME = hostData;
+    process.env.OPENCODE_DB = join(root, "must-not-use-host-db");
+    process.env.OPENAI_API_KEY = "must-not-inherit-fixture-key";
+
+    for (const legacyPresent of [false, true]) {
+      if (legacyPresent) await writeFile(join(hostDir, "auth.json"), "legacy fixture\n");
+      const runRoot = join(root, `preflight-${legacyPresent}`);
+      const result = await runCandidatePreflight(manifestPath, runRoot, {
+        createPlan: () => ({ candidate: fixtureCandidate }),
+        prepareCandidate: async (value: unknown, packagePath: string, target: string, runtimeOptions: Record<string, unknown>) => {
+          assert.deepEqual(runtimeOptions, { runtimeMode: "preflight" });
+          const prepared = await prepareCandidateRuntime(value, packagePath, target, optionsFor(target, runtimeOptions));
+          const isolatedDb = new DatabaseSync(prepared.databasePath, { readOnly: true });
+          try { assert.equal(isolatedDb.prepare("SELECT count(*) AS n FROM credential").get()!.n, 0); }
+          finally { isolatedDb.close(); }
+          return prepared;
+        },
+      });
+      assert.equal(result.provider_requests_started, false);
+      assert.equal(result.config_verified, true);
+      assert.equal(result.candidate.package_sha256, fixtureCandidate.sha256);
+      assert.equal(result.candidate.asset_count, 1);
+      await assert.rejects(stat(runRoot), { code: "ENOENT" });
+      await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
+      assert.deepEqual((await readFile(hostDb)), originalDb);
+      if (!legacyPresent) {
+        const previousCommands = commands;
+        const liveRoot = join(root, "missing-legacy"), output = join(root, "missing-legacy.jsonl");
+        await assert.rejects(runTestLive({ ...manifest(), candidate: fixtureCandidate },
+          { runRoot: liveRoot, output, manifest: manifestPath, costLimitUsd: 2 }, {
+            prepareCandidate: (value: unknown, packagePath: string, target: string, runtimeOptions: Record<string, unknown>) => {
+              assert.deepEqual(runtimeOptions, {}, "live inference must not request preflight mode");
+              return prepareCandidateRuntime(value, packagePath, target, optionsFor(target, runtimeOptions));
+            },
+            clone: async () => assert.fail("must not clone after missing authentication"),
+            execute: async () => assert.fail("must not start inference after missing authentication"),
+          }), /candidate-opencode-auth-unavailable/);
+        assert.equal(commands, previousCommands, "default inference rejects missing auth before launching commands");
+        await assert.rejects(stat(join(liveRoot, "candidate-runtime")), { code: "ENOENT" });
+        const metadata = JSON.parse(await readFile(`${output}.metadata.json`, "utf8"));
+        assert.equal(metadata.results[0].status, "candidate-preparation-failed");
+        assert.equal(metadata.execution.provider_requests_started, false);
+        assert.equal(metadata.execution.spent_usd, null);
+      }
+    }
+
+    const inferenceRoot = join(root, "inference");
+    const runtime = await prepareCandidateRuntime(fixtureCandidate, archive, inferenceRoot, optionsFor(inferenceRoot));
+    try {
+      assert.equal((await lstat(join(runtime.environment.XDG_DATA_HOME, "opencode/auth.json"))).isSymbolicLink(), true);
+      const copy = new DatabaseSync(runtime.databasePath, { readOnly: true });
+      try {
+        const credentials = copy.prepare("SELECT id, integration_id FROM credential").all();
+        assert.deepEqual(credentials.map(row => ({ ...row })), [{ id: "oauth", integration_id: "openai" }]);
+      } finally { copy.close(); }
+      assert.equal((await stat(runtime.databasePath)).mode & 0o777, 0o600);
+    } finally { await cleanupCandidateRuntime(runtime); }
+    await assert.rejects(stat(runtime.runtimeRoot), { code: "ENOENT" });
+    await assert.rejects(stat(runtime.temporaryRoot), { code: "ENOENT" });
+
+    const missingV2 = join(root, "missing-v2/opencode");
+    await mkdir(missingV2, { recursive: true });
+    await writeFile(join(missingV2, "auth.json"), "legacy fixture\n");
+    const empty = new DatabaseSync(join(missingV2, "opencode.db"));
+    try { empty.exec(schema); } finally { empty.close(); }
+    process.env.XDG_DATA_HOME = dirname(missingV2);
+    const missingV2Root = join(root, "inference-missing-v2");
+    await assert.rejects(prepareCandidateRuntime(fixtureCandidate, archive, missingV2Root, optionsFor(missingV2Root)),
+      /candidate-openai-credential-unavailable/);
+    await assert.rejects(stat(join(missingV2Root, "candidate-runtime")), { code: "ENOENT" });
+    await assert.rejects(stat(temporaryRoot!), { code: "ENOENT" });
+    assert.equal(probes, 4);
+    assert.deepEqual(requests, Array(4).fill(["POST /api/session", "POST /api/session/no-inference/agent", "GET /api/plugin", "GET /api/agent"]).flat());
+    assert.deepEqual(await readFile(hostDb), originalDb);
+    assert.equal(await readFile(join(hostDir, "auth.json"), "utf8"), "legacy fixture\n");
+    assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "unrelated\n");
+    await assert.rejects(prepareCandidateRuntime(fixtureCandidate, archive, join(root, "bad-mode"), { runtimeMode: "invalid" }),
+      /invalid-candidate-runtime-mode/);
+  } finally {
+    if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousDataHome;
+    if (previousDatabase === undefined) delete process.env.OPENCODE_DB; else process.env.OPENCODE_DB = previousDatabase;
+    if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousApiKey;
+    if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -1227,7 +1391,8 @@ test("candidate setup rejects an overlong explicitly selected TMPDIR before star
     await assert.rejects(runCandidatePreflight(manifestPath, preflightRoot, {
       createPlan: () => ({ candidate: { ...candidate, package_tgz: "candidate.tgz",
         sha256: createHash("sha256").update(bytes).digest("hex") } }),
-      prepareCandidate: (value: unknown, archive: string, target: string) => prepareCandidateRuntime(value, archive, target, {
+      prepareCandidate: (value: unknown, archive: string, target: string, runtimeOptions: Record<string, unknown>) => prepareCandidateRuntime(value, archive, target, {
+        ...runtimeOptions,
         execute: async () => { commands++; throw new Error("unexpected-preflight-command"); },
       }),
     }), /candidate-temporary-path-too-long.*TMPDIR/u);
@@ -1387,7 +1552,8 @@ for (const phase of ["probe-and-cleanup-failure", "cleanup-failure"] as const) {
       const registration = join(candidateRoot, ".opencode/v2-service-state/opencode/service.json");
       const error = await runCandidatePreflight(manifestPath, runRoot, {
         createPlan: () => ({ candidate: fixtureCandidate }),
-        prepareCandidate: (value: unknown, archive: string, target: string) => prepareCandidateRuntime(value, archive, target, {
+        prepareCandidate: (value: unknown, archive: string, target: string, runtimeOptions: Record<string, unknown>) => prepareCandidateRuntime(value, archive, target, {
+          ...runtimeOptions,
           execute: async (command: string, _args: string[], options: { env: Record<string, string> }) => {
             temporaryRoot = options.env.TMPDIR;
             if (command === "opencode") return { stdout: "2.0.26\n" };
