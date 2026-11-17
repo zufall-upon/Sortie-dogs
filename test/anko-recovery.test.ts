@@ -651,16 +651,19 @@ test("scope update persistence failure rolls back manifest, handoff and binding 
   const before = await f.tool("operator_status");
   const manifest = await readFile(unit.manifestPath, "utf8"), handoff = await readFile(unit.handoffPath, "utf8");
   const prototype = OperatorRuntime.prototype as any, save = prototype.save;
+  const assertUnchanged = async () => {
+    assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
+    assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
+    assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
+    assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
+  };
   prototype.save = async function(state: any) {
     if (state.units[0].unit.write.includes("extra.txt")) throw Error("injected-scope-state-save-failure");
     return save.call(this, state);
   };
   try { await assert.rejects(f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra.txt"], reason: "In-request output" }, "worker"), /injected-scope/); }
   finally { prototype.save = save; }
-  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
-  assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
-  assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
-  assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
+  await assertUnchanged();
   prototype.save = async function(state: any) {
     if (state.units[0].unit.write.includes("extra.txt")) throw Error("injected-shell-scope-state-save-failure");
     return save.call(this, state);
@@ -668,10 +671,7 @@ test("scope update persistence failure rolls back manifest, handoff and binding 
   try { await assert.rejects(f.hooks["tool.execute.before"]({ tool: "shell", sessionID: "worker", callID: "rollback-shell" },
     { args: { command: "printf x > extra.txt" } }), /injected-shell-scope/); }
   finally { prototype.save = save; }
-  assert.equal(await readFile(unit.manifestPath, "utf8"), manifest);
-  assert.equal(await readFile(unit.handoffPath, "utf8"), handoff);
-  assert.deepEqual((await f.tool("operator_status")).budget, before.budget);
-  assert.deepEqual((await f.runtime.required("root")).units[0].hashes, unit.hashes);
+  await assertUnchanged();
   await f.hooks["tool.execute.before"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { args: { filePath: "result.txt", content: "fixed" } });
   await f.hooks["tool.execute.after"]({ tool: "write", sessionID: "worker", callID: "original-write" }, { output: "written" });
   assert.equal((await f.tool("expand_unit", { unit_id: "unit-1", paths: ["extra.txt"], reason: "Storage restored" }, "worker")).status, "scope-updated");
