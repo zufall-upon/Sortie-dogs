@@ -721,7 +721,7 @@ test("prelaunch scope rejection recovers the SAME operation once across history,
   assert.deepEqual((await coldTool("operator_status")).budget, budget);
 }));
 
-for (const evidence of ["tool-envelope", "exit", "pid", "shellID", "output", "process-running", "changed-input", "late-process", "late-input"] as const)
+for (const evidence of ["tool-envelope", "exit", "pid", "shellID", "output", "process-running", "changed-input", "changed-timeout", "late-process", "late-input"] as const)
 test(`prelaunch scope refusal tolerates concurrent status but retains process contradictions: ${evidence}`, async () => fixture(async f => {
   const command = "$d='fixture-output'; New-Item -ItemType Directory -Path $d";
   f.agents.worker.time = { created: Date.now() };
@@ -753,6 +753,7 @@ test(`prelaunch scope refusal tolerates concurrent status but retains process co
     if (evidence === "output") state.output = "process output";
     if (evidence === "process-running") state.metadata.status = "running";
     if (evidence === "changed-input") state.input.command = "node other.mjs";
+    if (evidence === "changed-timeout") state.input.timeout = 30_000;
     if (evidence === "late-input") state.input.command += " ";
     let delayedPacket: any;
     if (evidence === "late-process" || evidence === "late-input") {

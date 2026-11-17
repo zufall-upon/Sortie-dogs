@@ -47,6 +47,26 @@ export interface TestDebtInventoryCursor {
 }
 export interface TestDebtInventoryPage { signals: TestDebtSignal[]; cursor: TestDebtInventoryCursor }
 
+// A literal Godot --script URI is relative to its explicit project --path, not
+// to the shell cwd. This discovers an audit candidate only; it does not classify
+// the script as a full/focused suite or grant permission to edit it.
+function godotScriptInput(command: string, cwd: string): { project: string; script: string } | undefined {
+  const words = command.trim().split(/\s+/u);
+  if (words.some(word => !/^[\w@%+=:,./\\-]+$/u.test(word))) return undefined;
+  let index = words[0] === "env" ? 1 : 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=.+$/u.test(words[index] ?? "")) index++;
+  const binary = words[index]?.split(/[\\/]/u).at(-1);
+  if (!binary || !/^godot(?:[_.-][\w.-]+)?$/iu.test(binary)) return undefined;
+  const separator = words.indexOf("--", index + 1);
+  const options = words.slice(index + 1, separator < 0 ? undefined : separator);
+  if (options.filter(word => word === "--path").length !== 1 || options.filter(word => word === "--script").length !== 1) return undefined;
+  const project = options[options.indexOf("--path") + 1], uri = options[options.indexOf("--script") + 1];
+  if (!project || project.startsWith("-") || !uri?.startsWith("res://")) return undefined;
+  const script = uri.slice("res://".length);
+  if (!/^[\w./-]+$/u.test(script) || script.split("/").some(part => !part || part === "." || part === "..")) return undefined;
+  return { project: resolve(cwd, project), script };
+}
+
 function inventoryInputs(root: string, unit: AuditUnit, changed: readonly string[]) {
   const candidates: string[] = [];
   const directories: string[] = [];
@@ -71,6 +91,8 @@ function inventoryInputs(root: string, unit: AuditUnit, changed: readonly string
   for (const path of [...unit.read, ...unit.write]) { add(path); addDirectory(path); }
   for (const command of unit.validation) {
     const cwd = unit.validation_cwd?.[normalizeCommand(command)] ?? root;
+    const godot = godotScriptInput(command, cwd);
+    if (godot) add(godot.script, godot.project);
     for (const word of command.match(/[^\s'"`|;&<>]+/gu) ?? []) {
       add(word, cwd);
       // Bare `test` is often a command or npm script name, not a directory argument.
