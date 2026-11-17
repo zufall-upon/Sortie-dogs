@@ -15,7 +15,7 @@ import { missionCoordinatorContent, missionOperatorContent, missionWorkerContent
 import { SortieDogsV010Plugin, terminalCancelledMissionChildren } from "../dist/plugin/profiled.js";
 import { createSortieDogsV2Plugin } from "../dist/plugin/v2.js";
 import { SortieDogsPlugin as CorePlugin } from "../dist/plugin/index.js";
-import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
+import { RunFlightLedger, RunFlightLedgerError } from "../dist/core/run-flight-ledger.js";
 import { goalFingerprint } from "../dist/core/goal-bound.js";
 import { evidenceFromObservedExecution } from "../dist/core/observed-goal-evidence.js";
 import { runCodexMission } from "../dist/codex/run-mission.js";
@@ -211,8 +211,6 @@ for (const storage of ["0.1", "0.2"] as const) test(`Operator status and continu
   assert.equal(paged.schema_version, "0.3");
   assert.ok(paged.goal_events.length > 1 && paged.goal_events.every((page: any) => page.count <= 128));
   assert.ok(Array.isArray(paged.goal_events.at(-1).records), "the incomplete tail stays inline");
-  // An old 0.1/0.2 reader must reject the new version instead of rewriting it.
-  assert.notEqual(paged.schema_version, "0.1"); assert.notEqual(paged.schema_version, "0.2");
   const chunk = join(`${file}.blobs`, paged.goal_events[0].records_blob.chunks[0].sha256);
   const chunkBytes = await readFile(chunk);
   const proofSequence = prior.records.find(record => record.event.kind === "unit.settled" && record.event.unit_id === "proved")!.sequence;
@@ -257,6 +255,109 @@ for (const storage of ["0.1", "0.2"] as const) test(`Operator status and continu
     await assert.rejects(runCodexMission({ projectRoot: directory, manifestPath: manifest, prompt: "Do not resend", executable: "must-not-start" }),
       /codex-mission-outcome-unknown:no-resend/, "paged goal remains visible to the existing Codex inventory caller");
   }
+}));
+
+test("Operator status and continuation recover at the goal event capacity (paged limit diagnostic)", async t => fixture(async directory => {
+  await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+  const history: any[] = [];
+  let priceAvailable = false;
+  const hooks = await SortieDogsV010Plugin({ directory, client: { session: {
+    get: async ({ path }: any) => ({ data: { id: path.id, agent: "dog-operator", outcome: "running" } }),
+    messages: async ({ path }: any) => ({ data: path.id === "root" ? history : path.id === "unpriced-child" && priceAvailable
+      ? [{ info: { id: "priced-request", role: "assistant", providerID: "openai", modelID: "gpt-6-luna-fast",
+        time: { created: 2000, completed: 3000 }, tokens: { input: 1000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } }]
+      : [] }),
+    children: async () => ({ data: [] }),
+  } } } as never);
+  const chat = (id: string) => hooks["chat.message"]!({ sessionID: "root", messageID: id, agent: "dog-operator" }, {
+    message: { id, agent: "dog-operator", model: { providerID: "fixture", modelID: "fixture" } },
+    parts: [{ type: "text", text: "Continue the same goal" }],
+  });
+  await chat("original");
+  await hooks.tool!.sortie_v010_start_mission.execute({ requirements: ["Preserve the result"] }, { sessionID: "root" });
+  const file = join(directory, ".git", "sortie-dogs", V010_RUNTIME_PROFILE.flightDirectory,
+    `${createHash("sha256").update("v010\u0000root").digest("hex")}.json`);
+  const ledger = await RunFlightLedger.openGoal(file), initial = (await ledger.readGoal()).state, goal = initial.goal_id!;
+  const at = "2026-09-08T00:00:00.000Z";
+  await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", session_id: "root", ticket_id: null });
+  await ledger.appendGoal({ kind: "unit.settled", at, goal_id: goal, unit_id: "failed", reservation_id: "failed", receipt_id: "failure",
+    disposition: "failed", result_class: "acceptance", progress_fingerprint: null, evidence: [], elapsed_ms: 5, cost_usd: null,
+    native_session_id: "unpriced-child" });
+  await ledger.appendGoal({ kind: "validation.admission", at, goal_id: goal, reservation_id: "unresolved-validation",
+    operation_id: "unresolved-request", evidence_key: goalFingerprint("unresolved"), scope: "canonical", decision: "ALLOW",
+    reason: "fixture", consumed: 1, limit: 4 });
+  const pendingUnits = ["live", "terminal", ...Array.from({ length: 9 }, (_, index) => `extra-${index}-${"x".repeat(460)}`)];
+  for (const unit_id of pendingUnits) await ledger.appendGoal({ kind: "dispatch.reserved", at, goal_id: goal, unit_id,
+    reservation_id: goalFingerprint({ goal_id: goal, unit_id, call_id: `${unit_id}-call` }), session_id: "root", ticket_id: null });
+  const records: any[] = [...(await ledger.readGoal()).records];
+  while (records.length < 32768) {
+    const sequence = records.length + 1, previous_hash = records.at(-1).event_hash;
+    const event = { kind: "goal.user-continued", at, goal_id: goal, origin_user_message_id: `past-${sequence}`,
+      session_id: "root", selected_agent: "dog-operator" };
+    records.push({ sequence, previous_hash, event_hash: goalFingerprint({ sequence, previous_hash, event }), event });
+  }
+  await mkdir(`${file}.blobs`, { recursive: true });
+  const pages = [];
+  for (let start = 0; start < records.length; start += 128) {
+    const bytes = Buffer.from(JSON.stringify(records.slice(start, start + 128)));
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(join(`${file}.blobs`, sha256), bytes);
+    pages.push({ first_sequence: start + 1, count: 128, records_blob: { bytes: bytes.length, chunks: [{ sha256, bytes: bytes.length }] } });
+  }
+  await writeFile(file, JSON.stringify({ schema_version: "0.3", goal_events: pages }));
+  const before = await ledger.readGoal(), original = await readFile(file), blobs = (await fs.readdir(`${file}.blobs`)).sort();
+  const rawStatus = (view: string) => hooks.tool!.sortie_v010_operator_status.execute({ view }, { sessionID: "root" });
+  const status = async (view: string) => JSON.parse(await rawStatus(view));
+  const beforeTerminal = await status("full");
+  assert.equal(beforeTerminal.budget.reserved_units, pendingUnits.length);
+  assert.equal(beforeTerminal.budget.settled_cost_usd, null);
+  history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "task", callID: "terminal-call",
+    state: { status: "completed", input: { subagent_type: "dog-worker-v010", prompt: "task_id: terminal" }, time: { start: 1, end: 2 } } }] });
+  const originalOpen = fs.open;
+  let lockFailure: Error = new Error("unrelated recovery I/O failure");
+  const open = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    if (String(args[0]) === `${file}.lock`) throw lockFailure;
+    return Reflect.apply(originalOpen, fs, args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(status("full"), /unrelated recovery I\/O failure/);
+    lockFailure = new RunFlightLedgerError("capacity", "Ledger byte capacity exceeded.");
+    await assert.rejects(status("full"), /Ledger byte capacity exceeded/, "ordinary Run ledger capacity is not a Goal diagnostic");
+  }
+  finally { open.mock.restore(); syncBuiltinESMExports(); }
+  for (const view of ["full", "progress"]) {
+    const raw = await rawStatus(view), diagnostic = JSON.parse(raw);
+    assert.equal(view === "progress" ? diagnostic.stage : diagnostic.status, "goal-ledger-capacity");
+    assert.equal(diagnostic.ledger_diagnostic.mode, "read-only");
+    assert.equal(diagnostic.ledger_diagnostic.reconciliation, "incomplete");
+    assert.match(diagnostic.next_action, /Do not dispatch/);
+    assert.ok(Buffer.byteLength(raw.slice(0, raw.indexOf('"next_action"'))) < 51200, "native output keeps the diagnostic action visible");
+    assert.equal(diagnostic.task, undefined);
+    assert.equal(diagnostic.budget.consumed_units, 1);
+    assert.equal(diagnostic.budget.reserved_units, pendingUnits.length);
+    assert.equal(diagnostic.budget.settled_cost_usd, null);
+    assert.equal(diagnostic.budget.cost_status, "unknown-usage");
+    const shown = diagnostic.budget.ledger_diagnostic.outstanding_reservations;
+    assert.deepEqual(shown.slice(0, 2).map((item: any) => item.unit_id), ["live", "terminal"]);
+    assert.equal(diagnostic.budget.ledger_diagnostic.outstanding_reservations_omitted, pendingUnits.length - shown.length);
+    assert.ok(diagnostic.budget.ledger_diagnostic.outstanding_reservations_omitted > 0, "bounded output points back to retained records");
+    assert.equal(diagnostic.budget.ledger_diagnostic.validation_reservations[0].reservation_id, "unresolved-validation");
+    assert.equal(diagnostic.budget.ledger_diagnostic.validation_reservations_omitted, 0);
+    assert.deepEqual(diagnostic.budget.ledger_diagnostic.recent_failed_settlements,
+      [{ goal_id: goal, unit_id: "failed", disposition: "failed", result_class: "acceptance", recorded_cost_usd: null }]);
+    if (view === "full") assert.equal(diagnostic.coordinator_dispatch, "blocked-capacity");
+  }
+  await assert.rejects(chat("cannot-continue-at-capacity"), /Goal ledger capacity exceeded/);
+  // Pricing can independently need an append even when no terminal reservation is recoverable.
+  history.length = 0; priceAvailable = true;
+  const pricingDiagnostic = await status("full");
+  assert.equal(pricingDiagnostic.status, "goal-ledger-capacity");
+  assert.equal(pricingDiagnostic.budget.settled_cost_usd, null);
+  assert.equal(pricingDiagnostic.budget.reserved_units, pendingUnits.length);
+  assert.deepEqual(await readFile(file), original);
+  assert.deepEqual((await fs.readdir(`${file}.blobs`)).sort(), blobs);
+  assert.deepEqual(await ledger.readGoal(), before, "no history, failed outcome, reservation or unknown cost is rewritten");
 }));
 
 test("Operator recovers a registered native check in a linked worktree within a broad Location", async () => fixture(async root => {

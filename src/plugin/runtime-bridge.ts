@@ -172,7 +172,7 @@ export interface RuntimeBridge {
     currentReceipt(rootSessionID: string): Promise<GoalTerminalReceipt | undefined>;
     retireHistoricalGoal(rootSessionID: string): Promise<boolean>;
     isUncontractedGoal(rootSessionID: string, latestUserMessageID: string): Promise<boolean>;
-    currentBudget(rootSessionID: string, options?: { reconcileUsage?: boolean }): Promise<{
+    currentBudget(rootSessionID: string, options?: { reconcileUsage?: boolean; diagnosticOnly?: boolean }): Promise<{
       readonly max_units: number;
       readonly consumed_units: number;
       readonly reserved_units: number;

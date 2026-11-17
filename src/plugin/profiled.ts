@@ -13,6 +13,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
+import { RunFlightLedgerError } from "../core/run-flight-ledger.js";
 import { decoratePreviewHeadings, returnReportPanel } from "./receipt-presentation.js";
 import { reportText, resolveReportLocale } from "./report-locale.js";
 import { sanitizeTerminalReport, terminalRunOutcome } from "./run-metrics.js";
@@ -1763,6 +1764,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         completed_units: units.filter(unit => unit.status === "succeeded").length, total_units: units.length,
         budget_remaining_units: budget?.remaining_units ?? null,
         budget: packet.budget, accounting_scope: packet.accounting_scope, attempts: packet.attempts,
+        ...(packet.ledger_diagnostic ? { ledger_diagnostic: packet.ledger_diagnostic } : {}),
         next_action: typeof packet.next_action === "string" ? packet.next_action : null,
         ...(record(packet.acceptance_summary) ? { observations: {
           operation: packet.acceptance_summary.operation,
@@ -1789,6 +1791,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       args: { view: optionalStringSchema, confirmed_conditions: conditionsSchema as never }, execute: async (args, context) => {
         const view = (args as { view?: unknown }).view;
         const root = await rootFor(context.sessionID);
+        try {
         let mission = root && context.sessionID === root ? await reconcileMissionDispatch(root) : root ? await missions.read(root) : undefined;
         if (mission && (args as Record<string, unknown>).confirmed_conditions !== undefined) {
           mission = await missions.recordLaunchConditions(root!, (args as Record<string, unknown>).confirmed_conditions);
@@ -1854,6 +1857,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 dispatch_instruction: "Pass this short Task reference verbatim; the host expands it only inside the directly claimed proposal child." } : {}),
               next_action: proposalNextAction }
               : { status: "absent", profile: profile.id }) });
+        } catch (error) {
+          if (!root || !(error instanceof RunFlightLedgerError) || error.code !== "capacity" ||
+              !["Goal ledger capacity exceeded.", "Goal ledger page capacity exceeded."].includes(error.message)) throw error;
+          // A valid full goal ledger can still be read even when lifecycle/usage reconciliation
+          // cannot append. Never use this unreconciled snapshot for planning or dispatch.
+          const budget = await control!.currentBudget(root, { diagnosticOnly: true });
+          const mission = await missions.read(root), run = await operators.read(root);
+          const runPacket = run ? operators.packet(run) : undefined;
+          const packet: Record<string, unknown> = { ...(mission ? missionDispatchPacket(mission, run) : record(runPacket) ? runPacket : { profile: profile.id }),
+            status: "goal-ledger-capacity", budget,
+            ...(mission ? { coordinator_dispatch: "blocked-capacity" } : {}),
+            ledger_diagnostic: { error: error.message, mode: "read-only", reconciliation: "incomplete" },
+            next_action: "Do not dispatch or assume pending reservations or costs are settled. Preserve the ledger and its .blobs together; recovery needs a compatible runtime able to append without discarding history or resetting budget." };
+          delete packet.task;
+          if (view === "progress" && mission) return serializeOperatorStatus(missionProgress(mission, run, budget, packet));
+          return serializeOperatorStatus(packet);
+        }
       } };
     tools[cancel] = { description: "Revoke this root's operator grant and stop only its owned children before releasing core state. Before approval it instead releases the bounded proposal grant, including one whose admitted child already terminated, so the root can begin a new investigation; it never reuses that child or restores spent proposal budget. reason is a required closed set: use reason=plain for a plain cancellation, including replanning, contract revision, and any pre-approval proposal release, and never send free text such as a written justification. Use reason=acceptance-remediation only for decision=operator-acceptance-remediation-required. At awaiting-acceptance, reason=review-blocking authorizes a same-goal review-remediation replacement only within the exact acceptance, committed head, approved write union, and retained remaining budget.",
       args: { reason: { type: "string", enum: ["plain", "review-blocking", "acceptance-remediation"] } as never }, execute: async (args, context) => {

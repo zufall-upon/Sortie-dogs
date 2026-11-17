@@ -9221,14 +9221,31 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
     },
     currentBudget: async (root, options) => {
       if (!isCoordinatorSession(root) && !await recoverCoordinatorRoot(root)) throw new Error("operator-coordinator-required");
-      // Planning must account for terminal native Tasks before reserving new units.
-      // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
-      await recoverCompletedGoalReservations(root);
-      // Terminal proof/Review only needs lifecycle recovery, not duplicate pricing history reads.
-      if (options?.reconcileUsage !== false) await reconcileUnitUsage(root);
-      const state = await currentGoal(root);
+      if (!options?.diagnosticOnly) {
+        // Planning must account for terminal native Tasks before reserving new units.
+        // Otherwise a cancelled predecessor keeps a stale unit reservation across missions.
+        await recoverCompletedGoalReservations(root);
+        // Terminal proof/Review only needs lifecycle recovery, not duplicate pricing history reads.
+        if (options?.reconcileUsage !== false) await reconcileUnitUsage(root);
+      }
+      const diagnostic = options?.diagnosticOnly ? await (await goalLedger(root)).readGoal() : undefined;
+      const state = diagnostic?.state ?? await currentGoal(root);
       if (state.goal_id === null || state.budget === null) return null;
       const reserved = state.outstanding_reservations.length;
+      // Keep the native whole-line status prefix usable; omitted entries remain in the ledger.
+      const boundedDiagnostic = <T>(items: readonly T[]) => {
+        const shown: T[] = [];
+        for (const item of items) {
+          if (shown.length >= 8 || Buffer.byteLength(JSON.stringify([...shown, item])) > 4096) break;
+          shown.push(item);
+        }
+        return { shown, omitted: items.length - shown.length };
+      };
+      const pending = diagnostic ? boundedDiagnostic(state.outstanding_reservations) : undefined;
+      const validations = diagnostic ? boundedDiagnostic(state.validation_budget.reservations) : undefined;
+      const failedRecords = diagnostic?.records.flatMap(({ event }) => event.kind === "unit.settled" && event.disposition !== "succeeded"
+        ? [{ goal_id: event.goal_id, unit_id: event.unit_id, disposition: event.disposition, result_class: event.result_class, recorded_cost_usd: event.cost_usd }] : []) ?? [];
+      const failures = diagnostic ? boundedDiagnostic(failedRecords.slice(-8)) : undefined;
       const snapshot = { max_units: state.budget.max_units, consumed_units: state.consumed_units,
         reserved_units: reserved, remaining_units: Math.max(0, state.budget.max_units - state.consumed_units - reserved),
         settled_time_ms: state.consumed_time_ms, time_limit_ms: state.budget.time_ms,
@@ -9236,7 +9253,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         cost_status: state.consumed_cost_usd === null ? "unknown-usage" : reserved > 0 ? "in-flight-not-final" : "settled",
         cost_source: "native-usage-price-table",
         cost_scope: "worker-only", campaign_remaining_usd: null,
-        cost_note: "Implementation token-price estimates from complete native usage; direct-author segments and scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution." };
+        cost_note: "Implementation token-price estimates from complete native usage; direct-author segments and scoped Reviewer corrections use this same Worker-unit ledger. Missing requests remain unknown and are reconciled on later status. Excludes orchestration/read-only review and external campaign spend. Zero settled cost does not mean free execution.",
+        ...(diagnostic ? { ledger_diagnostic: { reconciliation: "incomplete", outstanding_reservations: pending!.shown,
+          outstanding_reservations_omitted: pending!.omitted, validation_reservations: validations!.shown,
+          validation_reservations_omitted: validations!.omitted, recent_failed_settlements: failures!.shown,
+          recent_failed_settlements_omitted: failedRecords.length - failures!.shown.length } } : {}) };
       return snapshot;
     },
     extendMissionUnitBudget: (root, maxUnits) => serializeChatTransition(root, async () => {
