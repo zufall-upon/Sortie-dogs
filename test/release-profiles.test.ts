@@ -32,7 +32,7 @@ test("release profiles fix branch, channel, Latest behavior and isolated target"
   assert.equal(fastFirst.runtimeProfile, "v010", "the v0.13 release retains the actual Mission runtime");
   assert.equal(fastFirst.markerFile, V010_RUNTIME_PROFILE.markerFile);
   assert.equal(fastFirst.markerExport, "V010_RUNTIME_ASSET_VERSION");
-  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.17.0-test-optimization-v1");
+  assert.equal(V010_RUNTIME_ASSET_VERSION, "0.17.1-prelaunch-recovery-v1");
   assert.deepEqual(githubReleaseFlags(fastFirst), ["--target", "main"]);
   assert.equal(missionReleaseSmokeMode(fastFirst.id), "start", "candidate smoke observes Worker/model, not a claimed solution");
   assert.equal(missionReleaseSmokeMode(restored.id), "complete", "historical v012 contract remains intact");
@@ -112,6 +112,7 @@ test("v0.14.6 startup requires Terra max while historical releases still require
   assert.equal(v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.15.0-project-memory-v1" }).version, "0.15.0");
   assert.equal(v013StartupReceipt({ ...observed, package_version: "0.16.0", runtime_marker: "0.16.0-purpose-aligned-v2" }).version, "0.16.0");
   assert.equal(v013StartupReceipt({ ...observed, package_version: "0.17.0", runtime_marker: "0.17.0-test-optimization-v1" }).version, "0.17.0");
+  assert.equal(v013StartupReceipt({ ...observed, package_version: "0.17.1", runtime_marker: "0.17.1-prelaunch-recovery-v1" }).version, "0.17.1");
   assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.17.0", runtime_marker: "0.16.31-reviewer-transform-recovery-v1" }), /marker/u);
   assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.16.0", runtime_marker: "0.15.3-external-review-links-v1" }), /marker/u);
   assert.throws(() => v013StartupReceipt({ ...observed, package_version: "0.15.0", runtime_marker: "0.14.9-optional-kofi-v1" }), /marker/u);

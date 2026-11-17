@@ -21,7 +21,8 @@ export async function runCandidatePreflight(manifestArgument, runRootArgument, d
       if (error?.code === "EEXIST") throw new Error("candidate-preflight-run-root-already-exists");
       throw error;
     }
-    prepared = await (dependencies.prepareCandidate ?? prepareCandidateRuntime)(plan.candidate, packagePath, runRoot);
+    prepared = await (dependencies.prepareCandidate ?? prepareCandidateRuntime)(plan.candidate, packagePath, runRoot,
+      { runtimeMode: "preflight" });
     return { candidate: prepared.evidence, config_verified: true, provider_requests_started: false };
   } catch (error) {
     unresolvedRuntime = error?.candidateRuntimeContext?.cleanup_complete === false;
