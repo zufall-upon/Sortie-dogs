@@ -11,23 +11,28 @@ import { canonicalDeclaredValidationMembers } from "../dist/plugin/gate.js";
 import { reviewerCorrectionValidation } from "../dist/plugin/mission-review.js";
 import { exec, type ObjectValue, fixture, initial, inlineReport, selfRecheck } from "./helpers/reviewer-correction-fixture.ts";
 
-for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a prior direct validation registration: ${resumed ? "native Task" : "inline"}`, async () => {
+for (const resumed of [false, true]) for (const recipe of ["cwd", "replace", "append"] as const) test(`Reviewer recipes rebind a prior direct validation registration: ${resumed ? "native Task" : "inline"} ${recipe}`, async () => {
   const f = await fixture();
   try {
-    const A = "node required-test.mjs", B = "node check.mjs";
+    const A = "node required-test.mjs", originalB = "node check.mjs";
+    const B = recipe === "cwd" ? originalB : "SORTIE_REVIEW_REGISTRATION=1 node check.mjs";
+    const validation = recipe === "append" ? [A, originalB, B] : [A, B];
     await f.prompt("root", "Produce ready output, validate, commit and independently review without weakening proof.");
     await f.tool("root", "start_mission", { requirements: ["Output must be ready, validated, committed and independently reviewed"] });
     const unit = { title: "Ready output", objective: "Produce ready output", read: ["check.mjs", "required-test.mjs"],
-      write: ["result.txt"], validation: [A, B] };
+      write: ["result.txt"], validation: [A, originalB] };
     await f.tool("root", "plan_units", { executor: "self", units: [unit] });
-    await f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation_cwd: { [B]: f.directory } }],
+    await f.tool("root", "plan_units", { executor: "self", units: [{ ...unit, validation, validation_cwd: { [B]: f.directory } }],
       reason: "Bind the exact public check cwd before executing it." });
     await f.edit("root", "wrong");
     await f.shell("root", "git add -- result.txt && git commit -m candidate");
-    await f.shell("root", A); await f.shell("root", B);
+    for (const command of validation) await f.shell("root", command);
     await f.tool("root", "finish_direct_unit");
     const original = await f.run(), originalEvidence = original.units[0]!.evidence;
     assert.equal(original.units[0]!.status, "succeeded");
+    const goalPath = /^goal_declaration_path: (.+)$/mu.exec(original.units[0]!.task.prompt)![1]!;
+    const originalGoal = await readFile(goalPath, "utf8");
+    const originalAttempts = (await f.missions.required("root")).attempts;
     const oldRegistration = (await f.ledger()).state.validation_registrations!["unit-1"]!;
     const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
     let dispatch = await f.before("root", "subagent", f.task(review.task));
@@ -40,14 +45,24 @@ for (const resumed of [false, true]) test(`unchanged Reviewer recipes rebind a p
     } else await f.tool("author", "repair_review", { findings: "Medium: result must be ready." });
     await f.edit("author", "ready");
     const correction = await f.run(), currentTask = /^task_id: (.+)$/mu.exec(correction.units[0]!.task.prompt)![1]!;
+    assert.deepEqual(correction.acceptance, original.acceptance);
+    assert.deepEqual(correction.acceptanceProof, original.acceptanceProof);
+    assert.deepEqual(correction.sourceRefs, original.sourceRefs);
+    assert.deepEqual((await f.missions.required("root")).attempts!.filter(item => item.runID === original.runID), originalAttempts);
+    assert.equal(await readFile(goalPath, "utf8"), originalGoal, "the preceding declaration is immutable history, not a recipe repair target");
+    const nextGoalPath = /^goal_declaration_path: (.+)$/mu.exec(correction.units[0]!.task.prompt)![1]!;
+    const nextGoal = JSON.parse(await readFile(nextGoalPath, "utf8")), expectedGoal = JSON.parse(originalGoal);
+    if (recipe === "replace") expectedGoal.criteria[0].validation_command = B;
+    assert.deepEqual(nextGoal, expectedGoal, "retain existing proof mappings; only removed commands follow the authorized recipe repair");
     const bound = await f.ledger(), registration = bound.state.validation_registrations!["unit-1"]!;
     assert.notEqual(currentTask, oldRegistration.unit_id);
     assert.equal(registration.unit_id, currentTask, "an unchanged recipe must not remain bound to the preceding unit");
     assert.equal(registration.command, B);
+    assert.deepEqual(correction.units[0]!.unit.validation, validation);
     assert.ok(originalEvidence.every(evidence => !validGoalEvidence(evidence, bound.state)), "old-unit successes cannot prove this correction");
     const registrationCount = bound.records.filter(({ event }) => event.kind === "goal.validation-registered").length;
     await f.shell("author", "git add -- result.txt && git commit -m correction");
-    await f.shell("author", A); await f.shell("author", B);
+    for (const command of validation) await f.shell("author", command);
     assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
     const returned = JSON.parse(await f.finish(dispatch, "author", inlineReport()));
     const settled = await f.run();

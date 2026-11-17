@@ -101,6 +101,8 @@ export interface MissionExecution {
     nativeTimeoutMs?: number;
     /** Complete native input identity for an imported predecessor call. */
     nativeExecutionHash?: string;
+    /** Native input with its effective cwd, captured at admission when available. */
+    nativeCallHash?: string;
     /** Native tool clock, distinct from hook admission; alone it does not prove process start. */
     nativeStartedAt?: string;
     /** Positive native process evidence, unlike a tool's pre-hook running envelope/clock. */
@@ -359,12 +361,15 @@ export function missionExecutionStatus(mission: OperatorMission): "not-required"
     const matching = ordered.filter(item => item.command === command && item.directory === execution.directory);
     // A later host-refused launch cannot erase an earlier started/unknown/conflicting
     // operation. A command's own legacy NO_START result keeps its existing semantics.
-    return matching.find(item => item.conflicting || item.outcome !== "not-started" || !item.prelaunchRejection) ?? matching[0];
+    // Contradictory evidence from any matching call also takes precedence over a
+    // later apparent success; a terminal result must not mask that uncertainty.
+    return matching.find(item => item.conflicting) ??
+      matching.find(item => item.outcome !== "not-started" || !item.prelaunchRejection) ?? matching[0];
   });
   if (latest.some(item => item?.conflicting || item && ["completed", "error"].includes(item.status ?? "") &&
       !["executed", "execution-failed", "not-started"].includes(item.outcome ?? ""))) return "recovery-blocked";
   if (latest.some(item => item && !item.completedAt)) return "running";
-  if (latest.some(item => !item) && execution.recovery) return "recovery-unavailable";
+  if (execution.recovery && latest.some(item => !item || item.outcome === "not-started")) return "recovery-unavailable";
   if (latest.some(item => !item || !["executed", "execution-failed"].includes(item.outcome ?? ""))) return "not-started";
   if (latest.some(item => item?.outcome === "execution-failed" || (item && (item.status === "error" || item.exit !== 0)))) return "execution-failed";
   return "executed";

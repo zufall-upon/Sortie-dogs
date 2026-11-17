@@ -2785,6 +2785,216 @@ test("V2 reconciles the explicitly selected predecessor shell after a corrected 
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
+for (const variant of ["verified", "legacy-receipt", "omitted-cwd", "omitted-cwd-changed-timeout",
+  "direct-replan", "direct-replan-omitted-cwd", "direct-replan-changed-timeout", "direct-replan-process", "direct-replan-running",
+  "multiple-first", "multiple-last", "multiple-omitted-cwd", "multiple-missing-history", "multiple-missing-receipt", "multiple-changed-timeout",
+  "multiple-process", "multiple-running", "multiple-completed-metadata", "multiple-duplicate-mismatch", "multiple-other-executed",
+  "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner"] as const)
+test(`V2 recovers a failed predecessor's exact prelaunch rejection without replay: ${variant}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-failed-prelaunch-"));
+  const fixture = contextFixture();
+  const identities: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { created: number } }> = {
+    root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
+    worker: { agent: "dog-worker-v010", parentID: "coordinator", time: { created: Date.now() - 10_000 } },
+  };
+  const history: Record<string, Record<string, unknown>[]> = {};
+  let active: Record<string, unknown> = {};
+  let hooks!: Awaited<ReturnType<typeof SortieDogsV010Plugin>>;
+  const cleanup = await createSortieDogsV2Plugin(async input => { hooks = await SortieDogsV010Plugin(input); return {}; }).setup({
+    ...fixture.context, location: { directory }, session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, ...identities[sessionID] }),
+      active: async () => active,
+      list: async ({ parentID }) => ({ data: Object.entries(identities).filter(([, info]) => info.parentID === parentID)
+        .map(([id, info]) => ({ id, ...info })), cursor: {} }),
+      context: async ({ sessionID }) => history[sessionID] ?? [] },
+    message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
+      : history[sessionID] ?? [], cursor: {} }) },
+  });
+  let turn = 0;
+  const chat = async (sessionID: string, text: string) => hooks["chat.message"]!(
+    { sessionID, messageID: `${sessionID}-${++turn}`, agent: identities[sessionID]!.agent },
+    { message: { id: `${sessionID}-${turn}`, agent: identities[sessionID]!.agent,
+      model: { providerID: "openai", modelID: "fixture" } }, parts: [{ type: "text", text }] });
+  const tool = async (name: string, sessionID: string, input: object = {}) =>
+    JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(input, { sessionID }));
+  try {
+    await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
+    await mkdir(join(directory, "output"));
+    await writeFile(join(directory, "launch.mjs"), 'import { appendFileSync } from "node:fs"; appendFileSync("output/runs.txt", "started\\n");\n');
+    const command = "node launch.mjs", args = { command,
+      ...(variant.startsWith("omitted-cwd") || variant === "multiple-omitted-cwd" || variant === "direct-replan-omitted-cwd" ? {} : { workdir: directory }), timeout: 120_000 };
+    const unit = { title: "Start once", objective: "Retain the prior result and start once after the host refusal",
+      read: ["launch.mjs"], write: ["output/**"], validation: [command] };
+    await chat("root", "Start the requested operation once; keep all prior work and accounting.");
+    const started = await tool("start_mission", "root", { requirements: ["Start the requested operation once"], kind: "operation" });
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" }, { args: structuredClone(started.task) });
+    await chat("coordinator", started.task.prompt);
+    const planned = await tool("plan_units", "coordinator", { units: [unit], execution: { commands: [command], directory } });
+    const workerTask = { args: structuredClone(planned.task) };
+    await hooks["tool.execute.before"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" }, workerTask);
+    await chat("worker", workerTask.args.prompt);
+    const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const original = await operators.required("root"), worker = original.units[0]!;
+    await hooks["tool.execute.before"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { args: { filePath: worker.handoffPath } });
+    await hooks["tool.execute.after"]!({ tool: "read", sessionID: "worker", callID: "handoff" }, { output: "inspected" });
+    await tool("bind_write_gate", "worker", { project_root: directory, manifest_path: worker.manifestPath });
+    // As in the real receipt, the host admits the shell but its registered snapshot
+    // fails before the process starts. This fixture never starts the rejected call.
+    const broken = join(directory, "output", "broken");
+    await symlink(join(directory, "missing"), broken);
+    const ran = Date.now();
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "rejected-call" }, { args: { ...args } }),
+      /mission-validation-snapshot-unavailable/u);
+    const multiple = variant.startsWith("multiple-");
+    const peerRan = Date.now();
+    if (multiple) await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "shell", sessionID: "worker", callID: "other-refusal" }, { args: { ...args } }),
+    /mission-validation-snapshot-unavailable|repeated-command/u);
+    await assert.rejects(readFile(join(directory, "output", "runs.txt")), { code: "ENOENT" });
+    const nativeInput = { ...args };
+    const nativeState: any = { status: "error", input: nativeInput,
+      error: { type: "unknown", message: "mission-validation-snapshot-unavailable" } };
+    const peerInput = { ...args };
+    const peerState: any = { status: "error", input: peerInput,
+      error: { type: "unknown", message: "mission-validation-snapshot-unavailable" } };
+    const nativeParts = [{ type: "tool", id: "rejected-call", name: "shell", time: { created: ran, ran, completed: Date.now() }, state: nativeState },
+      ...(multiple ? [{ type: "tool", id: "other-refusal", name: "shell", time: { created: peerRan, ran: peerRan, completed: Date.now() }, state: peerState }] : [])];
+    history.worker = [{ id: "msg_refusal", type: "assistant", agent: "dog-worker-v010", time: { created: ran, completed: Date.now() },
+      content: nativeParts }];
+    identities.worker!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
+      { output: "PROCESS_DEFECT: local: registered snapshot unavailable before launch", metadata: { sessionId: "worker" } });
+    const failed = await operators.required("root");
+    assert.equal(failed.units[0]!.status, "failed");
+    assert.equal(failed.units[0]!.resultClass, "process-defect");
+    const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const before = await missionRuntime.required("root");
+    assert.equal(before.execution!.observations[0]!.prelaunchRejection!.runID, original.runID);
+    assert.equal(before.execution!.observations[0]!.exit, undefined);
+    if (multiple) {
+      assert.equal(before.execution!.observations.length, 2);
+      assert.ok(before.execution!.observations.every(item => item.prelaunchRejection?.runID === original.runID && item.outcome === "not-started"));
+    }
+    if (variant === "legacy-receipt") await missionRuntime.update("root", current => {
+      // The released host's receipt predates the optional full-input hash.
+      delete current.execution!.observations[0]!.nativeExecutionHash;
+      delete current.execution!.observations[0]!.nativeCallHash;
+    });
+    await rm(broken);
+    const corrected = await tool("plan_units", "coordinator", { executor: "self", reason: "Correct the unavailable snapshot scope",
+      units: [{ ...unit, title: "Continue retained operation" }], execution: { commands: [command], directory } });
+    const directReplan = variant.startsWith("direct-replan");
+    let directRunID: string | undefined, directState: any;
+    if (directReplan) {
+      directRunID = corrected.run_id;
+      const directRan = Date.now();
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "direct-refusal" }, { args }),
+        /mission-operation-already-admitted/u);
+      directState = { status: "error", input: { ...args }, error: { type: "unknown", message: "mission-operation-already-admitted" } };
+      history.coordinator = [{ id: "msg_direct_refusal", type: "assistant", agent: "dogs-coordinator", time: { created: directRan, completed: Date.now() },
+        content: [{ type: "tool", id: "direct-refusal", name: "shell", time: { created: directRan, ran: directRan, completed: Date.now() }, state: directState }] }];
+      const continued = await tool("plan_units", "coordinator", { executor: "self", reason: "Continue after the direct prelaunch refusal",
+        units: [{ ...unit, title: "Continue after direct refusal" }], execution: { commands: [command], directory } });
+      corrected.run_id = continued.run_id;
+      assert.notEqual(corrected.run_id, directRunID);
+      // The same Coordinator is executing its next admission, not a terminal session.
+      active = { coordinator: { type: "busy" } };
+    }
+    const budget = (await tool("operator_status", "root")).budget;
+    const originalAttempts = (await missionRuntime.required("root")).attempts!.filter(item => item.runID === original.runID);
+    if (variant === "changed-input") nativeInput.command += " --different";
+    if (variant === "changed-timeout" || variant === "omitted-cwd-changed-timeout") nativeInput.timeout = 60_000;
+    if (variant === "process-evidence") nativeState.metadata = { exit: 1 };
+    if (variant === "active-owner") active = { worker: { type: "busy" } };
+    if (variant === "unknown-owner") delete identities.worker!.outcome;
+    if (variant === "multiple-missing-history") nativeParts.pop();
+    if (variant === "multiple-missing-receipt") await missionRuntime.update("root", current => {
+      delete current.execution!.observations.find(item => item.callID === "other-refusal")!.prelaunchRejection;
+    });
+    if (variant === "multiple-changed-timeout") peerInput.timeout = 60_000;
+    if (variant === "multiple-process") peerState.metadata = { exit: 0 };
+    if (variant === "multiple-running") peerState.status = "running";
+    if (variant === "multiple-completed-metadata") peerState.metadata = { status: "completed" };
+    if (variant === "multiple-duplicate-mismatch") nativeParts.push({ ...nativeParts[1]!,
+      state: { ...peerState, input: { command: `${command} --different`, timeout: args.timeout } } });
+    if (variant === "multiple-other-executed") nativeParts.push({ ...nativeParts[1]!, id: "other-executed",
+      state: { status: "completed", input: { ...args }, metadata: { exit: 0 },
+        content: [{ type: "text", text: "A different native call already ran." }] } });
+    const selectedCall = variant === "multiple-last" ? "other-refusal" : "rejected-call";
+    let recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
+      recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: selectedCall } } });
+    if (directReplan) {
+      if (variant === "direct-replan-changed-timeout") directState.input.timeout = 60_000;
+      if (variant === "direct-replan-process") directState.metadata = { exit: 0 };
+      if (variant === "direct-replan-running") directState.status = "running";
+      const attempts = (await missionRuntime.required("root")).attempts;
+      recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
+        recover_call: { run_id: directRunID, unit_id: "unit-1", session_id: "coordinator", call_id: "direct-refusal" } } });
+      assert.deepEqual((await missionRuntime.required("root")).attempts, attempts, "recovery never re-settles a direct admission or changes its accounting");
+      assert.deepEqual(recovered.budget, budget);
+    }
+    assert.equal(recovered.status, "operation-reconciled");
+    assert.equal(recovered.run_id, corrected.run_id);
+    assert.deepEqual(recovered.budget, budget);
+    const after = await missionRuntime.required("root");
+    assert.equal(after.id, before.id);
+    assert.deepEqual(after.requests, before.requests);
+    assert.deepEqual(after.requirements, before.requirements);
+    assert.deepEqual(after.attempts!.filter(item => item.runID === original.runID), originalAttempts);
+    const observation = after.execution!.observations.find(item => item.callID === "rejected-call")!;
+    assert.equal(observation.prelaunchRejection!.runID, original.runID, "the receipt is never reassigned to the current run");
+    assert.equal(observation.exit, undefined);
+    const verified = ["verified", "legacy-receipt", "omitted-cwd", "multiple-first", "multiple-last", "multiple-omitted-cwd",
+      "direct-replan", "direct-replan-omitted-cwd"].includes(variant);
+    if (!verified) {
+      assert.ok(["recovery-unavailable", "recovery-blocked"].includes(recovered.operation.status), JSON.stringify(recovered.operation));
+      await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "unsafe-retry" }, { args }),
+        /mission-operation-(?:recovery-unavailable|already-admitted)/u);
+      await assert.rejects(readFile(join(directory, "output", "runs.txt")), { code: "ENOENT" });
+      if (variant === "multiple-running") {
+        peerState.status = "error";
+        const restored = (await tool("operator_status", "root")).acceptance_summary.operation;
+        assert.equal(restored.status, "not-started", "a later proven native refusal resolves an unknown envelope");
+        assert.deepEqual((await tool("operator_status", "root")).budget, budget);
+      }
+      return;
+    }
+    assert.equal(recovered.operation.status, "not-started", JSON.stringify(recovered.operation));
+    assert.equal(observation.sourceRunID, original.runID);
+    assert.equal(observation.sourceUnitID, "unit-1");
+    assert.equal(observation.nativeTimeoutMs, 120_000);
+    assert.ok(observation.nativeExecutionHash);
+    assert.ok(observation.nativeCallHash);
+    const observations = (await tool("operator_status", "root")).acceptance_summary.operation.observations;
+    assert.equal(observations.length, multiple || directReplan ? 2 : 1);
+    if (directReplan) {
+      const direct = observations.find((item: { callID: string }) => item.callID === "direct-refusal");
+      assert.equal(direct.sourceRunID, directRunID);
+      assert.equal(direct.sourceUnitID, "unit-1");
+      assert.equal(direct.prelaunchRejection.runID, directRunID);
+      assert.equal(direct.outcome, "not-started");
+      assert.ok(direct.nativeInputHash && direct.nativeCallHash && direct.nativeExecutionHash);
+    }
+    if (multiple) for (const item of observations) {
+      assert.equal(item.sourceRunID, original.runID);
+      assert.equal(item.sourceUnitID, "unit-1");
+      assert.equal(item.prelaunchRejection.runID, original.runID);
+      assert.equal(item.outcome, "not-started");
+      assert.ok(item.nativeInputHash && item.nativeCallHash && item.nativeExecutionHash);
+    }
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" }, { args });
+    await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" },
+      { output: "", metadata: { status: "completed", exit: 0 } });
+    assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
+    await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "duplicate" }, { args }),
+      /mission-operation-already-admitted/u);
+    assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
+    assert.notEqual((await missionRuntime.required("root")).phase, "completed");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const mode of ["success", "failure", "no-start", "structured-failure", "command-mismatch", "cwd-mismatch", "foreign-owner", "before-admission",
   "redeclared-run", "redeclared-failure", "redeclared-mismatch", "redeclared-cwd", "redeclared-ambiguous", "redeclared-node-pin", "unobserved-redeclared-run"] as const) {
   test(`V2 timed native operation recovery through Mission APIs: ${mode}`, async () => {

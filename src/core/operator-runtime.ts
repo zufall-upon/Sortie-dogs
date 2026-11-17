@@ -505,6 +505,30 @@ export const unitValidation = (unit: OperatorState["units"][number]): readonly s
   unit.validationRegistration?.validation ?? unit.unit.validation;
 export const unitValidationCwd = (unit: OperatorState["units"][number]): Readonly<Record<string, string>> | undefined =>
   unit.validationRegistration?.cwd ?? unit.directExecution?.validationCwd ?? unit.unit.validation_cwd;
+/** Project an authorized recipe repair into the NEXT correction, never its saved predecessor. */
+export function reviewerCorrectionGoalDeclaration(state: OperatorState, declaration: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(declaration.criteria)) return declaration;
+  const defaults = goalDeclarationDefaults(declaration);
+  return { ...declaration, criteria: declaration.criteria.map(criterion => {
+    if (!record(criterion)) return criterion;
+    const id = criterion.goal_criterion_id ?? criterion.criterion_id;
+    // Mission criteria originate from unit IDs. A preceding correction may have
+    // consolidated those units; its one registered recipe then owns all retained IDs.
+    const owner = state.units.find(unit => unit.unit.id === id) ?? (state.units.length === 1 &&
+      state.acceptanceProof.some(ids => ids.includes(String(id))) ? state.units[0] : undefined);
+    if (!owner || !owner.validationRegistration && !owner.reviewerCorrection) return criterion;
+    const validation = unitValidation(owner), command = validation.at(-1);
+    const previous = criterion.goal_validation_command ?? criterion.validation_command ??
+      defaults.goal_validation_command ?? defaults.validation_command;
+    // Still-required checks keep their distinct proof mapping, even when another
+    // check was appended or several original units now share this correction.
+    if (!command || validation.includes(String(previous))) return criterion;
+    return { ...criterion,
+      ...(Object.hasOwn(criterion, "goal_validation_command") ? { goal_validation_command: command } : {}),
+      ...(Object.hasOwn(criterion, "validation_command") || !Object.hasOwn(criterion, "goal_validation_command")
+        ? { validation_command: command } : {}) };
+  }) };
+}
 /** Strip only the owning unit's registration fields when comparing its frozen plan. */
 export function directValidationRegistrationPlanHash(state: OperatorState, plan: OperatorPlan, unitID: string,
   legacyWriteScopes?: ReadonlyMap<string, readonly string[]>): string {
@@ -1207,7 +1231,8 @@ export class OperatorRuntime {
       if (mission.reviewerCorrection) {
         await this.verifyContinuityControls(previous);
         const declarationPath = /^goal_declaration_path: (.+)$/mu.exec(previous.units[0]!.task.prompt)?.[1];
-        if (!declarationPath || JSON.stringify(plan.goal_declaration) !== JSON.stringify(JSON.parse(await readFile(declarationPath, "utf8"))) ||
+        if (!declarationPath || JSON.stringify(plan.goal_declaration) !== JSON.stringify(
+            reviewerCorrectionGoalDeclaration(previous, JSON.parse(await readFile(declarationPath, "utf8")))) ||
             (previous.gitLifecycle === null ? plan.git_lifecycle !== undefined :
               !plan.git_lifecycle || plan.git_lifecycle.branch_create.branch !== previous.gitLifecycle.branch ||
               plan.git_lifecycle.branch_create.start_ref !== previous.gitLifecycle.startRef ||

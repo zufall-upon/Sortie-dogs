@@ -26,6 +26,7 @@ import { purposeDecisionView, purposeRequirementsFingerprint } from "../dist/cor
 import { observedMissionValidationSummary } from "../dist/plugin/mission-review.js";
 import { closeTestDebtInventory, inspectTestDebt, inspectTestDebtPage } from "../dist/core/test-debt-audit.js";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
+import { managedTestCommand } from "../dist/plugin/managed-test-command.js";
 
 test("purpose decisions survive cold resume without becoming requirements, evidence or host actions", async () => fixture(async directory => {
   const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -556,6 +557,24 @@ test("ordinary direct Mission schedules test debt before validation and retains 
   const reviewPrompt = (await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root")).review!.task!.prompt;
   assert.match(reviewPrompt, /test_debt_scheduling_signals/);
   assert.match(reviewPrompt, /not proof of duplication, cleanup, detection equivalence or review/);
+}));
+
+test("test debt discovers a literal Godot res script in the current project without classifying its suite", async () => fixture(async root => {
+  for (const project of ["first", "second"]) {
+    await mkdir(join(root, project, "godot", "tests", "visual"), { recursive: true });
+    await writeFile(join(root, project, "godot", "tests", "visual", "test_actor.gd"), "assert(true)\nassert(true)\n");
+  }
+  const command = "env TMPDIR=/fixture/tmp /tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path godot --script res://tests/visual/test_actor.gd -- --face-outfit-only";
+  const unit = { read: [], write: [], validation: [command], validation_cwd: { [command]: join(root, "first") } };
+  assert.deepEqual((await inspectTestDebt(root, unit)).map(signal => signal.path), ["first/godot/tests/visual/test_actor.gd"]);
+  assert.deepEqual((await inspectTestDebt(root, { ...unit, validation_cwd: { [command]: join(root, "second") } })).map(signal => signal.path),
+    ["second/godot/tests/visual/test_actor.gd"], "each call uses its own registered cwd");
+  const changedPath = command.replace("--path godot", "--path missing");
+  assert.deepEqual(await inspectTestDebt(root, { ...unit, validation: [changedPath], validation_cwd: { [changedPath]: join(root, "first") } }), []);
+  const traversal = command.replace("res://tests/visual/test_actor.gd", "res://../tests/visual/test_actor.gd");
+  assert.deepEqual(await inspectTestDebt(root, { ...unit, validation: [traversal], validation_cwd: { [traversal]: join(root, "first") } }), []);
+  assert.equal((await managedTestCommand(command, join(root, "first"))).scope, "unknown",
+    "a script's arbitrary arguments and side effects do not establish full/focused equivalence");
 }));
 
 test("ordinary Mission inventory advances past unchanged large tests at later planning milestones", async () => fixture(async root => {
