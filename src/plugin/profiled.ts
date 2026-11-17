@@ -3341,6 +3341,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         planningSignals.push({ ...signal, unit_id: assigned });
       }
+      const inventoryStage: { active: boolean; prior?: OperatorMission["testDebtInventory"]; staged?: OperatorMission["testDebtInventory"] } = { active: false };
       if (!boundRetry && !staged && !legacyPrepared && mission.kind !== "operation") {
         const proposed = { planHash, baseRunID: mission.runID, cursors, nextUnit, signals: planningSignals };
         // Retain the exact page before preparing immutable handoffs. If registration
@@ -3351,20 +3352,44 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const prepared = previous && previous.runID !== item.runID && !["completed", "cancelled"].includes(previous.phase)
             ? item.testDebtInventory?.pending?.find(page => page.planHash === previous!.planHash && page.baseRunID === item.runID)
             : undefined;
+          inventoryStage.prior = structuredClone(item.testDebtInventory);
           item.testDebtInventory = { cursors: item.testDebtInventory?.cursors ?? {},
             nextUnit: item.testDebtInventory?.nextUnit ?? 0,
             pending: prepared && prepared.planHash !== proposed.planHash ? [prepared, proposed] : [proposed] };
+          inventoryStage.staged = structuredClone(item.testDebtInventory);
+          inventoryStage.active = true;
         });
       }
-      const context = { ...await missions.handoffContext(mission),
-        ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
-          measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
-        ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
-          ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
-          prior_run_id: previous.runID } : {}) };
-      const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
-      const state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context, { sameProcessDefect })
-        : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
+      let state: OperatorState;
+      try {
+        const context = { ...await missions.handoffContext(mission),
+          ...(planningSignals.length ? { test_debt_audit: { signals: planningSignals, instruction: TEST_DEBT_AUDIT_INSTRUCTION,
+            measurements: { duration: "unknown", failure_history: "unknown", coverage: "unknown" } } } : {}),
+          ...(previous ? { retained_validation: missionReviewValidation(previous, replanning || previous.phase === "completed"
+            ? operators.replanArchivePath(previous) : cancelledPredecessor ? `${operators.statePath(root)}.${previous.runID}.archive` : operators.statePath(root)),
+            prior_run_id: previous.runID } : {}) };
+        const terminalTaskCalls = cancelledPredecessor && previous ? await cancelledUnclaimedTaskCalls(root, previous) : undefined;
+        state = replanning && previous ? await operators.replanMission(root, previous.runID, plan, dispatcher, context, { sameProcessDefect })
+          : await operators.prepareMission(root, plan, dispatcher, mission.supersededRunID, terminalChildren, mission.requirementsReplaced, context, terminalTaskCalls);
+      } catch (error) {
+        if (inventoryStage.active) {
+          // If preparation did not switch the durable run, restore exactly the prior page.
+          // If it did switch, or its state cannot be read, retain the staged page for recovery.
+          const observed = await operators.read(root).then(value => ({ readable: true as const, value }), () => ({ readable: false as const }));
+          if (observed.readable && observed.value?.runID === previous?.runID) {
+            try {
+              await missions.update(root, item => {
+                if (item.runID !== mission.runID || !isDeepStrictEqual(item.testDebtInventory, inventoryStage.staged)) return;
+                if (inventoryStage.prior === undefined) delete item.testDebtInventory;
+                else item.testDebtInventory = inventoryStage.prior;
+              });
+            } catch (rollbackError) {
+              throw new AggregateError([error, rollbackError], "mission-test-debt-inventory-rollback-failed");
+            }
+          }
+        }
+        throw error;
+      }
       // prepareMission retains an identical prepared run after either registration stage
       // fails. Verify its pinned controls, then idempotently register the same declaration;
       // only the durable Mission binding below makes it eligible for admission.

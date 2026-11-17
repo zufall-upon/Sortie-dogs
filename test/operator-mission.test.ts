@@ -689,6 +689,12 @@ test("prepared Mission retains the original inventory page across registration a
   await tool("start_mission", { requirements: ["Maintain the test suite"] });
   const plan = { units: [{ title: "Maintain tests", objective: "Maintain tests", read: ["check.mjs"],
     write: ["test/**"], validation: ["node check.mjs"] }] };
+  const missionPath = join(root, ".sortie-dogs-v010", "missions", `${createHash("sha256").update("root").digest("hex")}.json`);
+  const beforePrepare = await readFile(missionPath, "utf8");
+  t.mock.method(OperatorRuntime.prototype, "prepareMission", async () => { throw new Error("injected preparation failure"); });
+  await assert.rejects(tool("plan_units", plan), /injected preparation failure/);
+  t.mock.restoreAll();
+  assert.equal(await readFile(missionPath, "utf8"), beforePrepare, "failed preparation leaves no staged page");
   const update = OperatorMissionRuntime.prototype.update;
   let injected = false;
   t.mock.method(OperatorMissionRuntime.prototype, "update", function (this: OperatorMissionRuntime, id: string, change: Parameters<typeof update>[1]) {
@@ -705,9 +711,11 @@ test("prepared Mission retains the original inventory page across registration a
   const handoff = JSON.parse(await readFile(prepared.units[0]!.handoffPath, "utf8"));
   const expected = handoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals;
   assert.equal(expected.length, 16);
+  const beforeReplan = await readFile(missionPath, "utf8");
   t.mock.method(OperatorRuntime.prototype, "replanMission", async () => { throw new Error("injected replan failure"); });
   await assert.rejects(tool("plan_units", { ...plan, units: [{ ...plan.units[0], title: "Other proposal" }], reason: "Try a correction" }), /injected replan failure/);
   t.mock.restoreAll();
+  assert.equal(await readFile(missionPath, "utf8"), beforeReplan, "rejection retains the prepared run's exact original page");
   hooks = await create();
   await tool("plan_units", plan);
   const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
@@ -716,6 +724,30 @@ test("prepared Mission retains the original inventory page across registration a
     "the exact original handoff, not the failed proposal's page, is registered");
   assert.equal((await operators.required("root")).runID, prepared.runID);
   assert.equal(mission.testDebtInventory!.pending, undefined);
+
+  const replan = OperatorRuntime.prototype.replanMission;
+  const replacement = { ...plan, units: [{ ...plan.units[0], title: "Next milestone" }], reason: "Continue the inventory" };
+  t.mock.method(OperatorRuntime.prototype, "replanMission", async function (this: OperatorRuntime, ...args: Parameters<typeof replan>) {
+    await replan.apply(this, args);
+    throw new Error("injected post-preparation failure");
+  });
+  await assert.rejects(tool("plan_units", replacement), /injected post-preparation failure/);
+  t.mock.restoreAll();
+  const nextRun = await operators.required("root");
+  assert.notEqual(nextRun.runID, prepared.runID);
+  const waiting = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(waiting.runID, prepared.runID);
+  const nextHandoff = JSON.parse(await readFile(nextRun.units[0]!.handoffPath, "utf8"));
+  const nextSignals = nextHandoff.ext["sortie-dogs/mission-context"].test_debt_audit.signals;
+  assert.deepEqual(waiting.testDebtInventory!.pending![0]!.signals, nextSignals,
+    "an uncertain post-preparation error must retain the new run's immutable page");
+  hooks = await create();
+  await tool("plan_units", replacement);
+  const recovered = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
+  assert.equal(recovered.runID, nextRun.runID);
+  assert.deepEqual(recovered.testDebtSignals!.filter(signal => signal.run_id === nextRun.runID)
+    .map(({ run_id: _run, ...signal }) => signal), nextSignals);
+  assert.equal(recovered.testDebtInventory!.pending, undefined);
 }));
 
 test("a newly edited test can schedule audit once without treating repeated assertions as proof", async () => fixture(async root => {
