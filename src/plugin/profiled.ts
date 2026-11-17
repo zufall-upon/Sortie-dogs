@@ -1,6 +1,6 @@
 import { V010_RUNTIME_ASSET_VERSION } from "../asset-version.js";
 import { MISSION_BEHAVIOR_REVIEW, MISSION_GIT_SCOPE, REVIEWER_VALIDATION_WORKFLOW } from "../runtime-mission-assets.js";
-import { cancelledMissionRetainsAcceptance, directValidationRegistrationPlanHash, unitValidation, unitValidationCwd, operatorGitPathAuthorized, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
+import { cancelledMissionRetainsAcceptance, directValidationRegistrationPlanHash, reviewerCorrectionGoalDeclaration, unitValidation, unitValidationCwd, operatorGitPathAuthorized, OperatorContractError, OperatorRuntime, type OperatorProgress, type OperatorState } from "../core/operator-runtime.js";
 import { DEFAULT_OPERATOR_PROPOSAL_BUDGET, OPERATOR_APPROVAL_CONTRACT, OPERATOR_PROPOSAL_BUDGET_CAPS, OPERATOR_PROPOSAL_REVISION_CONTRACT,
   OperatorProposalBudgetError, OperatorProposalRuntime } from "../core/operator-proposal.js";
 import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_RUNTIME_PROFILE,
@@ -3804,7 +3804,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           // Inherit fixed declaration budgets and Git authority, never infer fresh capacity.
           const goalPath = /^goal_declaration_path: (.+)$/mu.exec(run.units[0]!.task.prompt)?.[1];
           if (!goalPath) throw new Error("operator-declaration-path-invalid");
-          const declaration = JSON.parse(await readFile(goalPath, "utf8"));
+          const declaration = reviewerCorrectionGoalDeclaration(run, JSON.parse(await readFile(goalPath, "utf8")));
           const retainedPlan = { ...plan, acceptance: run.acceptance, acceptance_proof: run.acceptanceProof,
             source_refs: run.sourceRefs, goal_declaration: declaration,
             units: [{ ...plan.units[0]!, validation: run.units.flatMap(unitValidation) }] };
