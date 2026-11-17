@@ -938,6 +938,7 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, managed: true },
   { legacy: false, commit: false, cancel: false, managed: "required" },
   { legacy: false, commit: false, cancel: false, managed: "focused" },
+  { legacy: false, commit: false, cancel: false, managed: "pytest-nodeid" },
   { legacy: false, commit: false, cancel: false, managed: "router" },
   { legacy: false, commit: false, cancel: false, managed: "router-required" },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
@@ -945,6 +946,7 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
 test(managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
   managedScenario === "router" ? "V2 project router defers covered full after real focused failure" :
   managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
+  managedScenario === "pytest-nodeid" ? "V2 obsolete pytest node ID permits the native full run" :
   managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
   managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
   `V2 ${reviewJoin ? `controller joins Worker validation ${reviewJoin}` : directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
@@ -1230,6 +1232,7 @@ test('requires exclusive execution', async () => {
       } }));
       await writeFile(join(directory, "fixture.test.mjs"),
         `import { appendFileSync, readFileSync } from 'node:fs'; import { test } from 'node:test'; import assert from 'node:assert/strict';\ntest('managed', () => { appendFileSync('.git/sortie-dogs/managed-count', 'run\\n'); assert.notEqual(readFileSync('result.txt', 'utf8'), 'broken\\n'); });\n`);
+      if (managedScenario === "pytest-nodeid") await writeFile(join(directory, "test_example.py"), "def test_before():\n    assert False\n");
     }
     const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
@@ -1296,11 +1299,13 @@ test('requires exclusive execution', async () => {
     for (const [index, child] of (commit ? ["first"] : ["first", "second"]).entries()) {
       const finalCandidate = commit || index === 1;
       const command = managedScenario === "router-required" ? "npm run test:full" : managedScenario === "router"
-        ? "npm run test:targeted -- test/fixture.test.ts" : managedScenario === "required" ? "node --test" : managedScenario === "focused"
+        ? "npm run test:targeted -- test/fixture.test.ts" : managedScenario === "required" ? "node --test" : managedScenario === "pytest-nodeid"
+        ? "pytest test_example.py::test_before -q" : managedScenario === "focused"
         ? "node --test fixture.test.mjs" : `node check.mjs ${finalCandidate ? "ready" : "present"}`;
       const plan = await tool("coordinator", "plan_units", { units: [{ title: "Write result", objective,
         read: managedScenario ? [directory] : ["check.mjs"],
-        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] : ["result.txt"],
+        write: managedScenario === "router" || managedScenario === "router-required" ? ["result.txt", "dist/**", "_testenv/**"] :
+          managedScenario === "pytest-nodeid" ? ["result.txt", "test_example.py"] : ["result.txt"],
         validation: reviewJoin === "required-occurrence" ? [command, command] : [command] }],
         ...(index === 1 ? { reason: "Operator rejected the partial output; preserve the original requirement and correct it" } : {}) });
       let runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
@@ -1435,6 +1440,48 @@ test('requires exclusive execution', async () => {
       await writeFile(join(directory, "result.txt"), finalCandidate ? "ready\n" : "partial\n");
       await after(patch, "Updated result.txt");
       if (managedScenario) {
+        if (managedScenario === "pytest-nodeid") {
+          const environment = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1", PYTEST_ADDOPTS: "-p no:cacheprovider" };
+          const available = await exec("pytest", ["--version"], { cwd: directory, env: environment }).then(() => true, error => {
+            if (error.code === "ENOENT") return false;
+            throw error;
+          });
+          if (!available) context.diagnostic("pytest unavailable: exercising hook routing with a simulated terminal only");
+          const native = async (args: string[]) => exec("pytest", args, { cwd: directory, env: environment })
+            .then(result => ({ output: result.stdout + result.stderr, code: 0 }), error => {
+              if (typeof error.code !== "number") throw error;
+              return { output: String(error.stdout) + String(error.stderr), code: error.code };
+            });
+          const failed = await before(child, "shell", { command, workdir: directory });
+          const initial = available ? await native(["test_example.py::test_before", "-q"]) : { output: "simulated native terminal", code: 1 };
+          assert.equal(initial.code, 1);
+          await after(failed, initial.output, { exit: initial.code });
+          const unknown = await before(child, "shell", { command: "pytest -q", workdir: directory });
+          assert.equal(unknown.input.command, "pytest -q", "an unverified node ID cannot force a focused retry even while its file exists");
+          await after(unknown, "not started", { status: "cancelled" });
+          const change = await before(child, "patch", { patchText: "*** Begin Patch\n*** Update File: test_example.py\n@@\n-def test_before():\n-    assert False\n+def test_after():\n+    assert True\n*** End Patch" });
+          await writeFile(join(directory, "test_example.py"), "def test_after():\n    assert True\n");
+          await after(change, "Updated test_example.py");
+          if (available) {
+            const stale = await before(child, "shell", { command, workdir: directory });
+            const missing = await native(["test_example.py::test_before", "-q"]);
+            assert.equal(missing.code, 4); assert.match(missing.output, /not found/u);
+            await after(stale, missing.output, { exit: missing.code });
+            const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+            assert.ok(checks.some(check => check.callID === stale.id && check.exitCode === 4), "the missing selector failure remains recorded");
+          }
+          const full = await before(child, "shell", { command: "pytest -q", workdir: directory });
+          assert.equal(full.input.command, "pytest -q");
+          if (available) {
+            const result = await native(["-q"]);
+            assert.equal(result.code, 0); assert.match(result.output, /1 passed/u);
+            await after(full, result.output, { exit: result.code });
+          } else await after(full, "not started: pytest unavailable", { status: "cancelled" });
+          const checks = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.validationRegistration!.checks;
+          assert.ok(checks.some(check => check.callID === failed.id && check.exitCode === 1), "the registered failure remains recorded");
+          assert.ok(!checks.some(check => check.callID === failed.id && check.exitCode === 0), "the old failure is not converted into a pass");
+          return;
+        }
         if (managedScenario === "router" || managedScenario === "router-required") {
           const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
           const edit = async (from: string, to: string) => {

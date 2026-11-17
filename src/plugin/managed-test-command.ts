@@ -151,10 +151,12 @@ function runnerCommand(parts: readonly string[]): ManagedTestCommand {
   if (program === "pytest" || (program === "python" || program === "python3") && args[0] === "-m" && args[1] === "pytest") {
     const options = program === "pytest" ? args : args.slice(2);
     if (options.every(value => ["-q", "-v", "-x", "--quiet", "--verbose"].includes(value))) return { scope: "full", runner: "pytest" };
-    if (options.some(value => /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value)) &&
+    // A pytest node ID selects more than its file. Without interpreting collection,
+    // file existence cannot establish whether the requested function/class still exists.
+    if (options.some(value => /^[\w@./-]+\.py$/u.test(value)) &&
         options.every(value => ["-q", "-v", "-x", "--quiet", "--verbose"].includes(value) ||
-          /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value))) return { scope: "focused", runner: "pytest",
-      selection: options.filter(value => /^[\w@./-]+\.py(?:::[\w:]+)?$/u.test(value)).map(value => value.split("::")[0]!) };
+          /^[\w@./-]+\.py$/u.test(value))) return { scope: "focused", runner: "pytest",
+      selection: options.filter(value => /^[\w@./-]+\.py$/u.test(value)) };
     return unknown("pytest-selection-not-resolved");
   }
   if (program === "go" && args[0] === "test") {

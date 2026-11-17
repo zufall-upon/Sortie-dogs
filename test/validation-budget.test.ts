@@ -35,7 +35,6 @@ test("managed test reachability resolves literal project scripts without claimin
     assert.deepEqual(direct.selection, ["example.test.mjs"]);
     for (const [command, selection] of [
       ["pytest test_example.py -q", ["test_example.py"]],
-      ["python3 -m pytest test_example.py::TestExample::test_value -q", ["test_example.py"]],
       ["go test ./package", ["./package"]],
       ["go test ./.../subpackage", undefined],
       ["go test ./prefix.../subpackage", undefined],
@@ -66,7 +65,10 @@ test("managed test reachability resolves literal project scripts without claimin
       protected: "node --test", preprotected: "node prepare.mjs", "test:windows": "node --test",
     } }));
     for (const command of ["npm run cycle", "npm run release", "npm run opaque", "npm run protected",
-      "npm run missing", "npm run test:windows", "pytest test_example.py --collect-only", "node --test --unknown", "echo done && node --test"]) {
+      "npm run missing", "npm run test:windows", "pytest test_example.py --collect-only", "pytest test_example.py::test_before -q",
+      "python3 -m pytest test_example.py::TestExample::test_value -q", "pytest test_example.py::TestExample -q",
+      "pytest test_example.py::test_value[one] -q", "pytest test_example.py test_other.py::test_value -q",
+      "node --test --unknown", "echo done && node --test"]) {
       assert.equal((await managedTestCommand(command, root)).scope, "unknown", command);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
