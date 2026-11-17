@@ -2969,7 +2969,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         const calls = new Map<string, { command: string; directory: string; observation: NonNullable<OperatorMission["execution"]>["observations"][number] }>();
         const conflicts = new Set<string>();
-        const competitors: { command: string; startedAt: string }[] = [];
+        const competitors: { callID: string; command: string; startedAt: string }[] = [];
         const nativeStarts = new Map<string, string>();
         const nativeInputs = new Map<string, { command: string; directory: string; executionHash?: string }>();
         for (const message of history) {
@@ -2977,8 +2977,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (info.role !== "assistant" || info.sessionID !== sessionID || !Array.isArray(message.parts)) continue;
           for (const part of message.parts) {
             if (!record(part) || part.type !== "tool" || !isShellTool(String(part.tool)) ||
-                (part.sessionID !== undefined && part.sessionID !== sessionID) || typeof part.callID !== "string" ||
-                !record(part.state) || !record(part.state.input)) continue;
+                (part.sessionID !== undefined && part.sessionID !== sessionID) || typeof part.callID !== "string") continue;
+            const knownCall = execution.observations.find(item => item.sessionID === sessionID && item.callID === part.callID);
+            if (!record(part.state) || !record(part.state.input) || typeof part.state.input.command !== "string") {
+              if (windows.some(item => item.prelaunchOnly && (item.sourceCallID === part.callID || knownCall &&
+                  execution.commands.includes(knownCall.command) && knownCall.directory === execution.directory))) {
+                recoveryErrors.push({ sessionID, reason: "predecessor-native-input-unavailable" });
+              }
+              continue;
+            }
             const state = part.state as Record<string, unknown>;
             const nativeInput = state.input as Record<string, unknown>;
             if (typeof nativeInput.command !== "string") continue;
@@ -2997,16 +3004,51 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const date = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString()
               : typeof value === "string" && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
             const startedAt = date(time.start ?? time.ran);
-            if (!startedAt) continue;
+            const key = part.callID;
+            const savedMatches = execution.observations.filter(item => item.sessionID === sessionID && item.callID === key);
+            const saved = savedMatches.length === 1 ? savedMatches[0] : undefined;
+            if (!startedAt) {
+              // An untimed same-operation call in a predecessor cannot be placed outside
+              // its admission window and must not disappear from the run-once check.
+              if (windows.some(item => item.prelaunchOnly && (item.sourceCallID === key ||
+                  execution.commands.includes(nativeInput.command as string) || saved && execution.commands.includes(saved.command))) &&
+                  (typeof nativeInput.workdir !== "string" ||
+                    missionOperationDirectoryMatch(resolve(input.directory, nativeInput.workdir), execution.directory) ||
+                    saved?.directory === execution.directory)) {
+                recoveryErrors.push({ sessionID, reason: "predecessor-native-call-clock-unavailable" });
+              }
+              continue;
+            }
             // A boundary page may include tools from a later reusable-session turn.
             // Ignore them before comparing call input or terminal state as well.
             const window = windows.find(item => Date.parse(startedAt) >= Date.parse(item.notBefore) &&
                 (!item.notAfter || Date.parse(startedAt) <= Date.parse(item.notAfter)));
             if (!window) continue;
-            if (window.sourceRunID && typeof nativeInput.workdir !== "string") continue;
-            const nativeDirectory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
+            let nativeDirectory: string;
+            if (window.sourceRunID && typeof nativeInput.workdir !== "string") {
+              // Only a same-call host receipt records the predecessor's effective default
+              // cwd. The current plugin directory alone cannot establish an old cwd.
+              const receipt = saved?.prelaunchRejection;
+              if (nativeInput.workdir !== undefined || !window.prelaunchOnly || !saved ||
+                  receipt?.source !== "host-before-hook" || receipt.runID !== window.sourceRunID ||
+                  saved.command !== nativeInput.command || saved.directory !== execution.directory ||
+                  receipt.inputHash !== missionOperationInputHash(String(part.tool), nativeInput.command, saved.directory)) {
+                if (window.prelaunchOnly && (key === window.sourceCallID || saved &&
+                    execution.commands.includes(saved.command) && saved.directory === execution.directory)) {
+                  conflicts.add(key);
+                  nativeStarts.set(key, laterStart(nativeStarts.get(key), startedAt));
+                }
+                if (window.sourceCallID && key !== window.sourceCallID && window.prelaunchOnly &&
+                    (execution.commands.includes(nativeInput.command) || saved && execution.commands.includes(saved.command))) {
+                  competitors.push({ callID: key, command: saved?.command ?? nativeInput.command, startedAt });
+                }
+                continue;
+              }
+              nativeDirectory = saved.directory;
+            } else {
+              nativeDirectory = resolve(input.directory, typeof nativeInput.workdir === "string" ? nativeInput.workdir : ".");
+            }
             const directory = missionOperationDirectoryMatch(nativeDirectory, execution.directory) ? execution.directory : nativeDirectory;
-            const key = part.callID;
             nativeStarts.set(key, laterStart(nativeStarts.get(key), startedAt));
             const executionHash = window.sourceRunID ? goalFingerprint(nativeInput) : undefined;
             const callHash = missionOperationCallHash(nativeInput, directory);
@@ -3023,8 +3065,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ? execution.commands.find(item => item === nativeInput.command)
               : missionOperationCommandMatch(nativeInput.command, execution.commands, execution.directory);
             if (window.sourceCallID && key !== window.sourceCallID) {
-              if (command && directory === execution.directory) competitors.push({ command, startedAt });
-              continue;
+              const relevant = command && directory === execution.directory || saved &&
+                execution.commands.includes(saved.command) && saved.directory === execution.directory;
+              if (relevant) competitors.push({ callID: key, command: saved?.command ?? command!, startedAt });
+              // Only failed predecessors can contain multiple independently verified
+              // refusals. Other predecessor executions retain the original conflict rule.
+              if (!window.prelaunchOnly || !relevant) continue;
             }
             // Compare admitted inputs with persisted same-call observations even when this
             // record is no longer a matching command/cwd and will not yield a new result.
@@ -3054,7 +3100,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // persisted same-call before-hook receipt can, and actual process evidence wins.
             // V2 can still expose its pre-hook running envelope after the host has
             // refused the call. Only a process result, not that envelope, contradicts it.
-            if (receipt && (!rejected || nativeProcessObserved || !running && !failed)) conflicts.add(key);
+            if (receipt && (!rejected || nativeProcessObserved || !running && !failed ||
+                window.prelaunchOnly && (nativeStatus === "completed" || resultStatus === "completed"))) conflicts.add(key);
             const outcome = rejected && !conflicts.has(key) && failed && completedAt
               ? { outcome: "not-started" as const }
               : conflicts.has(key) || running || !completedAt || exit === undefined ? undefined : missionCommandOutcome(output, exit, status, nativeInput.command);
@@ -3090,13 +3137,48 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             recoveryErrors.push({ sessionID, reason: "selected-native-call-unavailable-or-mismatched" });
             continue;
           }
-          for (const other of competitors.filter(item => item.command === selected.command)) {
-            conflicts.add(window.sourceCallID!);
-            nativeStarts.set(window.sourceCallID!, laterStart(nativeStarts.get(window.sourceCallID!), other.startedAt));
+          const others = competitors.filter(item => item.command === selected.command);
+          if (!window.prelaunchOnly) {
+            for (const other of others) {
+              conflicts.add(window.sourceCallID!);
+              nativeStarts.set(window.sourceCallID!, laterStart(nativeStarts.get(window.sourceCallID!), other.startedAt));
+            }
+            continue;
           }
-          if (window.prelaunchOnly && (selected.observation.status !== "error" || selected.observation.outcome !== "not-started" ||
-              !selected.observation.completedAt || selected.observation.nativeProcessObserved || conflicts.has(window.sourceCallID!))) {
-            recoveryErrors.push({ sessionID, reason: "selected-prelaunch-receipt-unverified" });
+          // Every saved same-operation refusal in this admission needs its own native
+          // terminal and receipt, including receipts missing from the history response.
+          const savedPeers = execution.observations.filter(item => item.sessionID === sessionID &&
+            item.command === selected.command && item.directory === execution.directory &&
+            (item.prelaunchRejection?.runID === window.sourceRunID ||
+              Date.parse(item.startedAt) >= Date.parse(window.notBefore) &&
+              (!window.notAfter || Date.parse(item.startedAt) <= Date.parse(window.notAfter))));
+          const peerIDs = new Set([window.sourceCallID!, ...others.map(item => item.callID), ...savedPeers.map(item => item.callID)]);
+          for (const callID of peerIDs) {
+            const receipts = execution.observations.filter(item => item.sessionID === sessionID && item.callID === callID);
+            const saved = receipts.length === 1 ? receipts[0] : undefined;
+            const native = calls.get(callID)?.observation;
+            const receipt = saved?.prelaunchRejection;
+            const verified = !!saved && !!native && receipt?.source === "host-before-hook" && receipt.runID === window.sourceRunID &&
+              typeof receipt.tool === "string" && receipt.inputHash === missionOperationInputHash(receipt.tool, saved.command, saved.directory) &&
+              saved.command === selected.command && saved.directory === execution.directory && saved.status === "error" &&
+              saved.outcome === "not-started" && !!saved.completedAt && Number.isFinite(Date.parse(saved.completedAt)) &&
+              !saved.conflicting && !saved.nativeProcessObserved && saved.exit === undefined && !saved.shellID && !saved.result &&
+              native.status === "error" && native.outcome === "not-started" && !!native.completedAt &&
+              !native.nativeProcessObserved && !conflicts.has(callID) && native.nativeInputHash === receipt.inputHash &&
+              (!saved.nativeInputHash || saved.nativeInputHash === native.nativeInputHash) &&
+              (!saved.nativeCallHash || saved.nativeCallHash === native.nativeCallHash) &&
+              (!saved.nativeExecutionHash || saved.nativeExecutionHash === native.nativeExecutionHash) &&
+              (!saved.nativeStartedAt || saved.nativeStartedAt === native.nativeStartedAt);
+            if (!verified) {
+              if (callID !== window.sourceCallID && native?.nativeProcessObserved) {
+                // A separate actual process must not be hidden behind a selected
+                // refusal, even when that other call has a completed result.
+                conflicts.add(window.sourceCallID!);
+                nativeStarts.set(window.sourceCallID!, laterStart(nativeStarts.get(window.sourceCallID!), native.nativeStartedAt!));
+              }
+              recoveryErrors.push({ sessionID, reason: callID === window.sourceCallID
+                ? "selected-prelaunch-receipt-unverified" : "competing-prelaunch-receipt-unverified" });
+            }
           }
         }
         for (const [callID, item] of calls) recovered.push({ ...item.observation, ...(conflicts.has(callID)

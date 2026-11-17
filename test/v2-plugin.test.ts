@@ -2785,7 +2785,10 @@ test("V2 reconciles the explicitly selected predecessor shell after a corrected 
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
-for (const variant of ["verified", "legacy-receipt", "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner"] as const)
+for (const variant of ["verified", "legacy-receipt", "omitted-cwd", "omitted-cwd-changed-timeout",
+  "multiple-first", "multiple-last", "multiple-omitted-cwd", "multiple-missing-history", "multiple-missing-receipt", "multiple-changed-timeout",
+  "multiple-process", "multiple-running", "multiple-completed-metadata", "multiple-duplicate-mismatch", "multiple-other-executed",
+  "changed-input", "changed-timeout", "process-evidence", "active-owner", "unknown-owner"] as const)
 test(`V2 recovers a failed predecessor's exact prelaunch rejection without replay: ${variant}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-failed-prelaunch-"));
@@ -2818,7 +2821,8 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     await promisify(execFile)("git", ["init", "--quiet"], { cwd: directory });
     await mkdir(join(directory, "output"));
     await writeFile(join(directory, "launch.mjs"), 'import { appendFileSync } from "node:fs"; appendFileSync("output/runs.txt", "started\\n");\n');
-    const command = "node launch.mjs", args = { command, workdir: directory, timeout: 120_000 };
+    const command = "node launch.mjs", args = { command,
+      ...(variant.startsWith("omitted-cwd") || variant === "multiple-omitted-cwd" ? {} : { workdir: directory }), timeout: 120_000 };
     const unit = { title: "Start once", objective: "Retain the prior result and start once after the host refusal",
       read: ["launch.mjs"], write: ["output/**"], validation: [command] };
     await chat("root", "Start the requested operation once; keep all prior work and accounting.");
@@ -2841,12 +2845,22 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     const ran = Date.now();
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "worker", callID: "rejected-call" }, { args: { ...args } }),
       /mission-validation-snapshot-unavailable/u);
+    const multiple = variant.startsWith("multiple-");
+    const peerRan = Date.now();
+    if (multiple) await assert.rejects(hooks["tool.execute.before"]!(
+      { tool: "shell", sessionID: "worker", callID: "other-refusal" }, { args: { ...args } }),
+    /mission-validation-snapshot-unavailable|repeated-command/u);
     await assert.rejects(readFile(join(directory, "output", "runs.txt")), { code: "ENOENT" });
     const nativeInput = { ...args };
     const nativeState: any = { status: "error", input: nativeInput,
       error: { type: "unknown", message: "mission-validation-snapshot-unavailable" } };
+    const peerInput = { ...args };
+    const peerState: any = { status: "error", input: peerInput,
+      error: { type: "unknown", message: "mission-validation-snapshot-unavailable" } };
+    const nativeParts = [{ type: "tool", id: "rejected-call", name: "shell", time: { created: ran, ran, completed: Date.now() }, state: nativeState },
+      ...(multiple ? [{ type: "tool", id: "other-refusal", name: "shell", time: { created: peerRan, ran: peerRan, completed: Date.now() }, state: peerState }] : [])];
     history.worker = [{ id: "msg_refusal", type: "assistant", agent: "dog-worker-v010", time: { created: ran, completed: Date.now() },
-      content: [{ type: "tool", id: "rejected-call", name: "shell", time: { created: ran, ran, completed: Date.now() }, state: nativeState }] }];
+      content: nativeParts }];
     identities.worker!.outcome = "succeeded";
     await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID: "worker-call" },
       { output: "PROCESS_DEFECT: local: registered snapshot unavailable before launch", metadata: { sessionId: "worker" } });
@@ -2857,6 +2871,10 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     const before = await missionRuntime.required("root");
     assert.equal(before.execution!.observations[0]!.prelaunchRejection!.runID, original.runID);
     assert.equal(before.execution!.observations[0]!.exit, undefined);
+    if (multiple) {
+      assert.equal(before.execution!.observations.length, 2);
+      assert.ok(before.execution!.observations.every(item => item.prelaunchRejection?.runID === original.runID && item.outcome === "not-started"));
+    }
     if (variant === "legacy-receipt") await missionRuntime.update("root", current => {
       // The released host's receipt predates the optional full-input hash.
       delete current.execution!.observations[0]!.nativeExecutionHash;
@@ -2866,13 +2884,28 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     const corrected = await tool("plan_units", "coordinator", { executor: "self", reason: "Correct the unavailable snapshot scope",
       units: [{ ...unit, title: "Continue retained operation" }], execution: { commands: [command], directory } });
     const budget = (await tool("operator_status", "root")).budget;
+    const originalAttempts = (await missionRuntime.required("root")).attempts!.filter(item => item.runID === original.runID);
     if (variant === "changed-input") nativeInput.command += " --different";
-    if (variant === "changed-timeout") nativeInput.timeout = 60_000;
+    if (variant === "changed-timeout" || variant === "omitted-cwd-changed-timeout") nativeInput.timeout = 60_000;
     if (variant === "process-evidence") nativeState.metadata = { exit: 1 };
     if (variant === "active-owner") active = { worker: { type: "busy" } };
     if (variant === "unknown-owner") delete identities.worker!.outcome;
+    if (variant === "multiple-missing-history") nativeParts.pop();
+    if (variant === "multiple-missing-receipt") await missionRuntime.update("root", current => {
+      delete current.execution!.observations.find(item => item.callID === "other-refusal")!.prelaunchRejection;
+    });
+    if (variant === "multiple-changed-timeout") peerInput.timeout = 60_000;
+    if (variant === "multiple-process") peerState.metadata = { exit: 0 };
+    if (variant === "multiple-running") peerState.status = "running";
+    if (variant === "multiple-completed-metadata") peerState.metadata = { status: "completed" };
+    if (variant === "multiple-duplicate-mismatch") nativeParts.push({ ...nativeParts[1]!,
+      state: { ...peerState, input: { command: `${command} --different`, timeout: args.timeout } } });
+    if (variant === "multiple-other-executed") nativeParts.push({ ...nativeParts[1]!, id: "other-executed",
+      state: { status: "completed", input: { ...args }, metadata: { exit: 0 },
+        content: [{ type: "text", text: "A different native call already ran." }] } });
+    const selectedCall = variant === "multiple-last" ? "other-refusal" : "rejected-call";
     const recovered = await tool("plan_units", "root", { execution: { commands: [command], directory,
-      recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: "rejected-call" } } });
+      recover_call: { run_id: original.runID, unit_id: "unit-1", session_id: "worker", call_id: selectedCall } } });
     assert.equal(recovered.status, "operation-reconciled");
     assert.equal(recovered.run_id, corrected.run_id);
     assert.deepEqual(recovered.budget, budget);
@@ -2880,14 +2913,22 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     assert.equal(after.id, before.id);
     assert.deepEqual(after.requests, before.requests);
     assert.deepEqual(after.requirements, before.requirements);
+    assert.deepEqual(after.attempts!.filter(item => item.runID === original.runID), originalAttempts);
     const observation = after.execution!.observations.find(item => item.callID === "rejected-call")!;
     assert.equal(observation.prelaunchRejection!.runID, original.runID, "the receipt is never reassigned to the current run");
     assert.equal(observation.exit, undefined);
-    if (variant !== "verified" && variant !== "legacy-receipt") {
+    const verified = ["verified", "legacy-receipt", "omitted-cwd", "multiple-first", "multiple-last", "multiple-omitted-cwd"].includes(variant);
+    if (!verified) {
       assert.ok(["recovery-unavailable", "recovery-blocked"].includes(recovered.operation.status), JSON.stringify(recovered.operation));
       await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "unsafe-retry" }, { args }),
         /mission-operation-(?:recovery-unavailable|already-admitted)/u);
       await assert.rejects(readFile(join(directory, "output", "runs.txt")), { code: "ENOENT" });
+      if (variant === "multiple-running") {
+        peerState.status = "error";
+        const restored = (await tool("operator_status", "root")).acceptance_summary.operation;
+        assert.equal(restored.status, "not-started", "a later proven native refusal resolves an unknown envelope");
+        assert.deepEqual((await tool("operator_status", "root")).budget, budget);
+      }
       return;
     }
     assert.equal(recovered.operation.status, "not-started");
@@ -2896,7 +2937,15 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
     assert.equal(observation.nativeTimeoutMs, 120_000);
     assert.ok(observation.nativeExecutionHash);
     assert.ok(observation.nativeCallHash);
-    assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 1);
+    const observations = (await tool("operator_status", "root")).acceptance_summary.operation.observations;
+    assert.equal(observations.length, multiple ? 2 : 1);
+    if (multiple) for (const item of observations) {
+      assert.equal(item.sourceRunID, original.runID);
+      assert.equal(item.sourceUnitID, "unit-1");
+      assert.equal(item.prelaunchRejection.runID, original.runID);
+      assert.equal(item.outcome, "not-started");
+      assert.ok(item.nativeInputHash && item.nativeCallHash && item.nativeExecutionHash);
+    }
     await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" }, { args });
     await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
     await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" },
