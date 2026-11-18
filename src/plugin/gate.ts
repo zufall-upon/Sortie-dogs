@@ -464,10 +464,10 @@ function gitAddIndexAssignment(source: string): { path: string; command: string 
 
 function gitCommitArguments(tokens: readonly string[]): readonly string[] | undefined {
   let index = 1;
-  // Only invocation-local identity settings preserve the native repository/index context.
+  // Only invocation-local identity and signing-off settings preserve the native repository/index context.
   // Do not normalize arbitrary -c, --config-env or repository-selection options.
   while (tokens[index] === "-c") {
-    if (!/^user\.(?:name|email)=[^\0\r\n$`]+$/iu.test(tokens[index + 1] ?? "")) return undefined;
+    if (!/^(?:user\.(?:name|email)=[^\0\r\n$`]+|commit\.gpgsign=false)$/iu.test(tokens[index + 1] ?? "")) return undefined;
     index += 2;
   }
   return tokens[index]?.toLowerCase() === "commit" ? tokens.slice(index + 1) : undefined;
@@ -1289,10 +1289,9 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (powershell && expandedCommand[0] === "&") expandedCommand = expandedCommand.slice(1);
       if (/(?:^|[\\/])apply_?patch(?=$|<)/iu.test(expandedCommand[0] ?? "")) unresolvedPaths.push("<patch-content-unresolved>");
       // A substitution's internal separator can put the subcommand in another segment.
-      const identityConfig = expandedTokens.some((token, index) => token === "-c" &&
-        /^user\.(?:name|email)=/iu.test(expandedTokens[index + 1] ?? ""));
+      const gitConfig = expandedTokens.includes("-c");
       if (expandedTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token)) &&
-        (identityConfig || expandedTokens.some(token => token === "add" || token === "commit"))) gitAmbiguous = true;
+        (gitConfig || expandedTokens.some(token => token === "add" || token === "commit"))) gitAmbiguous = true;
       issue ??= commandIssue(source, "active-expansion", "remove substitution and run a direct literal command");
       continue;
     }

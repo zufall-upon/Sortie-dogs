@@ -942,8 +942,10 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, managed: "router" },
   { legacy: false, commit: false, cancel: false, managed: "router-required" },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
+  { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
+test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked worktree identity and unsigned commit" :
+  managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
   managedScenario === "router" ? "V2 project router defers covered full after real focused failure" :
   managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
   managedScenario === "pytest-nodeid" ? "V2 obsolete pytest node ID permits the native full run" :
@@ -1188,7 +1190,16 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
       assert.equal(ledger.state.validation_budget.reservations.length, 0);
       return;
     }
-    if (commit) {
+    if (commit === "linked-identity") {
+      await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
+      await exec("git", ["add", ".gitignore", "check.mjs"], { cwd: directory });
+      await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-m", "fixture base"], { cwd: directory });
+      await exec("git", ["worktree", "add", "--detach", join(directory, "linked"), "HEAD"], { cwd: directory });
+      await mkdir(join(directory, "linked", "src"));
+      await writeFile(join(directory, "linked", "src/allowed.txt"), "allowed\n");
+      await writeFile(join(directory, "linked", "src/outside.txt"), "outside\n");
+    } else if (commit) {
       await exec("git", ["config", "user.name", "Fixture User"], { cwd: directory });
       await exec("git", ["config", "user.email", "fixture@example.invalid"], { cwd: directory });
       await writeFile(join(directory, ".gitignore"), ".sortie-dogs-v010/\n");
@@ -1243,6 +1254,68 @@ test('requires exclusive execution', async () => {
     if (reviewJoin) {
       assert.equal(dispatch.input.background, true, "the root retains the normal native background Coordinator launch");
       await after(dispatch, "Coordinator running", { sessionID: "coordinator", status: "running" });
+    }
+    if (commit === "linked-identity") {
+      const workdir = join(directory, "linked");
+      const command = "git -c user.name='OpenCode AI assistant' -c user.email=opencode-ai@localhost -c commit.gpgsign=false commit -m 'Bind JointAUTO candidate inputs and artifact verification'";
+      assert.match(await readFile(join(workdir, ".git"), "utf8"), /^gitdir: /u, "Git created a linked worktree, not a clone");
+      const globalConfig = join(directory, "fixture-global.gitconfig");
+      await writeFile(globalConfig, "[commit]\n\tgpgsign = true\n");
+      const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" };
+      const planned = await tool("coordinator", "plan_units", { executor: "self", units: [{
+        title: "Commit scoped source", objective: "Commit the scoped source in the linked worktree",
+        read: ["check.mjs"], write: ["linked/src/allowed.txt"], validation: ["node check.mjs ready"],
+      }] });
+      assert.equal(planned.status, "direct-unit-running");
+      const originalHead = (await exec("git", ["rev-parse", "HEAD"], { cwd: workdir })).stdout.trim();
+      const baseHead = (await exec("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim();
+      const stage = await before("coordinator", "shell", { command: "git add -- src/allowed.txt", workdir });
+      const added = await exec("git", ["add", "--", "src/allowed.txt"], { cwd: workdir });
+      await after(stage, added.stdout, { exit: 0 });
+      const index = async () => (await exec("git", ["ls-files", "--stage", "-z"], { cwd: workdir })).stdout;
+      const originalIndex = await index();
+      for (const effect of ["deny", "ask", "allow"]) {
+        const permission = { sessionID: "coordinator", action: "shell", resources: [command], effect };
+        await fixture.permissionHooks.get("evaluate")!(permission);
+        assert.equal(permission.effect, effect, "the plugin cannot upgrade a native denial or ask");
+      }
+      for (const rejected of [
+        command.replace("-c commit.gpgsign=false", "-c core.hooksPath=elsewhere"),
+        command.replace("-c commit.gpgsign=false", "-c commit.gpgsign=true"),
+        command.replace("git -c", "git -C elsewhere -c"),
+        command.replace("commit -m", "commit --all -m"),
+      ]) {
+        await assert.rejects(before("coordinator", "shell", { command: rejected, workdir }), /Write denied/u, rejected);
+      }
+      await exec("git", ["add", "--", "src/outside.txt"], { cwd: workdir });
+      const outsideIndex = await index();
+      await assert.rejects(before("coordinator", "shell", { command, workdir }), /cached/u);
+      assert.equal(await index(), outsideIndex, "denial does not change the staged index");
+      assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd: workdir })).stdout.trim(), originalHead);
+      await exec("git", ["reset", "-q", "HEAD", "--", "src/outside.txt"], { cwd: workdir });
+      assert.equal(await index(), originalIndex);
+      assert.equal((await exec("git", ["config", "--get", "commit.gpgsign"], { cwd: workdir, env: gitEnv })).stdout.trim(), "true");
+      assert.equal((await exec("git", ["-c", "commit.gpgsign=false", "config", "--get", "commit.gpgsign"],
+        { cwd: workdir, env: gitEnv })).stdout.trim(), "false");
+      const operation = await before("coordinator", "shell", { command, workdir });
+      assert.equal(operation.input.command, command, "public hook retains the exact command and option order");
+      const committed = await exec(command, { cwd: workdir, env: gitEnv, shell: true });
+      await after(operation, committed.stdout, { exit: 0 });
+      assert.equal((await exec("git", ["config", "--get", "commit.gpgsign"], { cwd: workdir, env: gitEnv })).stdout.trim(), "true",
+        "the invocation-local override does not alter the configured setting");
+      for (const key of ["user.name", "user.email", "commit.gpgsign"]) await assert.rejects(
+        exec("git", ["config", "--local", "--get", key], { cwd: workdir, env: gitEnv }),
+        (error: any) => error.code === 1, `${key} is not persisted to the repository`);
+      assert.equal((await exec("git", ["show", "-s", "--format=%an <%ae>%n%cn <%ce>%n%s"], { cwd: workdir })).stdout.trim(),
+        "OpenCode AI assistant <opencode-ai@localhost>\nOpenCode AI assistant <opencode-ai@localhost>\nBind JointAUTO candidate inputs and artifact verification");
+      assert.equal((await exec("git", ["show", "--format=", "--name-only", "HEAD"], { cwd: workdir })).stdout.trim(), "src/allowed.txt");
+      assert.equal((await exec("git", ["rev-parse", "HEAD^"], { cwd: workdir })).stdout.trim(), originalHead);
+      assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: workdir })).stdout, "");
+      assert.equal((await exec("git", ["rev-parse", "HEAD"], { cwd: directory })).stdout.trim(), baseHead,
+        "the separate main worktree HEAD is untouched");
+      assert.equal((await exec("git", ["diff", "--cached", "--name-only"], { cwd: directory })).stdout, "",
+        "the separate main worktree index is untouched");
+      return;
     }
     if (directRecovery) {
       const unit = { title: "Ready result", objective: "Create ready result", read: ["check.mjs"], write: ["result.txt"],

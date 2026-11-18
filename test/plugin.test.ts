@@ -11445,6 +11445,14 @@ test("git identity commit follows public classification and native whole-index c
     assert.equal((await execFileAsync("git", ["-C", clone, "show", "-s", "--format=%an <%ae>"])).stdout.trim(),
       "Sortie Dogs <sortie-dogs@localhost>");
     assert.equal(await index(directory), unrelatedIndex);
+    await writeFile(allowed, "third candidate");
+    await execFileAsync("git", ["-C", clone, "add", "src/allowed.txt"]);
+    const unsigned = inline.replace(" commit -m", " -c commit.gpgsign=false commit -m");
+    for (const investigativeShell of [false, true]) await check(unsigned, investigativeShell);
+    await execFileAsync(unsigned, { cwd: clone, shell: true });
+    assert.equal((await execFileAsync("git", ["-C", clone, "show", "-s", "--format=%an <%ae>"])).stdout.trim(),
+      "Sortie Dogs <sortie-dogs@localhost>");
+    assert.equal(await index(directory), unrelatedIndex);
   }));
 });
 
@@ -11458,7 +11466,8 @@ test("git identity commit rejects arbitrary config, repository overrides and exp
     const originalIndex = await index();
     const identity = "git -c user.name=test -c user.email=test@example.invalid";
     for (const command of [
-      ...["core.hooksPath=elsewhere", "core.sshCommand=other", "core.editor=other", "alias.commit=!other", "include.path=other"].map(
+      ...["core.hooksPath=elsewhere", "core.sshCommand=other", "core.editor=other", "alias.commit=!other", "include.path=other",
+        "commit.gpgsign=true", "commit.gpgsign=other"].map(
         config => `${identity} -c ${config} commit -m other`),
       `${identity} -C elsewhere commit -m other`, `${identity} --git-dir=elsewhere commit -m other`,
       `${identity} --work-tree=elsewhere commit -m other`, `${identity} --config-env=user.name=NAME commit -m other`,
@@ -11517,6 +11526,17 @@ test("git identity commit rejects Bash process substitutions including internal 
         assert.equal(extractWritePaths("bash", { command }).ambiguous, false, "quoted substitution is literal data");
         for (const investigativeShell of [false, true]) await gate.check(
           { tool: "bash", sessionID: "identity-literal", callID: command }, { args: { command } }, { investigativeShell });
+      }
+    }
+    // A separator inside a substitution can conceal the later "commit" segment.
+    // This must fail closed even when no earlier identity option exposes it.
+    for (const key of ["commit.gpgsign", "core.hooksPath"]) {
+      const command = `git -c ${key}=>(./identity-process-probe;true) commit -m candidate`;
+      for (const tool of ["shell", "bash"]) {
+        assert.equal(extractWritePaths(tool, { command }).gitAmbiguous, true, command);
+        for (const investigativeShell of [false, true]) await assert.rejects(gate.check(
+          { tool, sessionID: "config-process", callID: command }, { args: { command } },
+          { investigativeShell }), /Write denied/, command);
       }
     }
     assert.equal(await index(), originalIndex, "preflights preserve all staged blobs");
