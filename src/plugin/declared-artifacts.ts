@@ -12,7 +12,7 @@ const within = (root: string, path: string) => {
  * previews are bounded independently. Follow package links only inside a declared physical root.
  */
 export async function declaredArtifacts(paths: readonly string[], previewLimit = 0,
-  options: { reportUnreadableDirectories?: boolean; reportOutsideLinks?: boolean } = {}) {
+  options: { reportUnreadableDirectories?: boolean; reportUnreadableFile?: (path: string) => boolean | Promise<boolean>; reportOutsideLinks?: boolean } = {}) {
   const roots = [...new Set(paths.map(path => resolve(path)))].sort();
   const physical = await Promise.all(roots.map(path => realpath(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return path;
@@ -21,6 +21,7 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
   const entries: Array<readonly [string, string, string?]> = [];
   const excerpts: string[] = [];
   const unreadable: string[] = [];
+  const unreadableFiles: string[] = [];
   let remaining = previewLimit, truncated = false;
   const visited = new Set<string>();
   const visit = async (path: string, ancestors: ReadonlySet<string>): Promise<void> => {
@@ -92,10 +93,25 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
     const hash = createHash("sha256");
     const room = remaining;
     let preview = Buffer.alloc(0);
-    for await (const part of createReadStream(path)) {
-      const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
-      hash.update(bytes);
-      if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
+    let received = false;
+    try {
+      for await (const part of createReadStream(path)) {
+        received = true;
+        const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
+        hash.update(bytes);
+        if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // A partial read is not an uninspected file. Validation never enables this option.
+      if (received || !["EACCES", "EPERM"].includes(code ?? "") || !(await options.reportUnreadableFile?.(path))) throw error;
+      entries.push([label, `unreadable-file:${metadata.mode}:${metadata.size}:${code}`, canonical]);
+      unreadableFiles.push(label);
+      const notice = Buffer.from(`\n--- external file: ${label} ---\n[not inspected: permission denied; file bytes not fingerprinted]\n`);
+      const bounded = notice.subarray(0, remaining);
+      if (bounded.length) { excerpts.push(bounded.toString("utf8")); remaining -= bounded.length; }
+      if (bounded.length < notice.length) truncated = true;
+      return;
     }
     entries.push([label, `file:${metadata.mode}`, hash.digest("hex")]);
     if (previewLimit > 0) {
@@ -109,5 +125,5 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
     }
   };
   for (const path of roots) await visit(path, new Set());
-  return { entries, excerpt: excerpts.join(""), truncated, unreadable };
+  return { entries, excerpt: excerpts.join(""), truncated, unreadable, unreadableFiles };
 }

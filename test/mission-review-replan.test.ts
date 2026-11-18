@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -46,7 +46,8 @@ test("failed implementation then read-only validation and test-only replan keep 
     await chat("coordinator", started.task.prompt);
     const currentRun = () => new OperatorRuntime(root, V010_RUNTIME_PROFILE).required("root");
     const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
-    for (const [index, write] of [["source.js"], [], ["test.js", "test/**"]].entries()) {
+    let lockDenied = false;
+    for (const [index, write] of [["source.js", "runtime/**"], [], ["test.js", "test/**"]].entries()) {
       const next = JSON.parse(await hooks.tool!.sortie_v010_plan_units.execute({ units: [{ title: `Unit ${index}`, objective: "Finish the source candidate",
         read: index === 0 ? ["check.mjs", "test/existing.test.mjs"] : ["check.mjs"], write, validation: [`node check.mjs ${index}`] }], ...(index ? { reason: "Correct the previous unit and validate" } : {}) }, { sessionID: "coordinator" }));
       const worker = `worker-${index}`, callID = `worker-call-${index}`;
@@ -72,7 +73,7 @@ test("failed implementation then read-only validation and test-only replan keep 
       await hooks.tool!.sortie_v010_bind_write_gate.execute({ project_root: root, manifest_path: unit.manifestPath }, { sessionID: worker });
       if (index === 0) await writeFile(join(root, "source.js"), "return nilValue;\n");
       if (index === 2) await writeFile(join(root, "test.js"), "assert.equal(value, null);\n");
-      await exec("git", ["add", "--", ...(write.length ? write : ["source.js"])], { cwd: root });
+      await exec("git", ["add", "--", ...(index === 0 ? ["source.js"] : write.length ? write : ["source.js"])], { cwd: root });
       if (write.length) await exec("git", ["commit", "--quiet", "-m", `candidate ${index}`], { cwd: root });
       await hooks["tool.execute.before"]!({ tool: "bash", sessionID: worker, callID: `validation-${index}` }, { args: { command: `node check.mjs ${index}` } });
       // Native exit 1 models the initial setup failure after implementation was committed.
@@ -80,16 +81,42 @@ test("failed implementation then read-only validation and test-only replan keep 
       identities[worker]!.outcome = "succeeded";
       const returned = { output: "returned", metadata: { sessionId: worker } };
       await hooks["tool.execute.after"]!({ tool: "task", sessionID: "coordinator", callID }, returned);
-      if (index === 0) assert.equal((await currentRun()).units[0]!.status, "failed", JSON.stringify(returned));
-      if (index === 1) assert.deepEqual((await missions.required("root")).reviewScope?.write, ["source.js"]);
+      if (index === 0) {
+        assert.equal((await currentRun()).units[0]!.status, "failed", JSON.stringify(returned));
+        // The old estimate includes an unrelated host file by the later review.
+        await mkdir(join(root, "runtime", "apt"), { recursive: true });
+        await writeFile(join(root, "runtime", "apt", "lock"), "");
+        await writeFile(join(root, "runtime", "result.json"), '{"resolved":7}\n');
+        if (process.platform !== "win32") {
+          const lock = join(root, "runtime", "apt", "lock");
+          await chmod(lock, 0);
+          try { await readFile(lock); } catch (error) {
+            assert.equal((error as NodeJS.ErrnoException).code, "EACCES");
+            lockDenied = true;
+          }
+        }
+      }
+      if (index === 1) assert.deepEqual((await missions.required("root")).reviewScope?.write, ["runtime/**", "source.js"]);
     }
     const cold = await create();
+    if (lockDenied) {
+      const skipped = JSON.parse(await cold.tool!.sortie_v010_review_mission.execute({ risk_tags: [] }, { sessionID: "coordinator" }));
+      assert.equal(skipped.status, "review-coverage-unavailable");
+      assert.ok(skipped.uninspected_historical_files.includes("runtime/apt/lock"));
+      assert.equal((await missions.required("root")).review, undefined, "an unknown coverage gap cannot silently become a low-risk skip");
+    }
     await cold.tool!.sortie_v010_review_mission.execute({ risk_tags: ["public-logic"], traces: ["Source corrected; checks passed"] }, { sessionID: "coordinator" });
     const mission = await new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE).required("root");
-    assert.deepEqual(mission.reviewScope?.write, ["source.js", "test.js", "test/**"]);
+    assert.deepEqual(mission.reviewScope?.write, ["runtime/**", "source.js", "test.js", "test/**"]);
     assert.match(mission.review!.task!.prompt, /changed: source\.js/);
     assert.match(mission.review!.task!.prompt, /return nilValue/);
     assert.match(mission.review!.task!.prompt, /changed: test\.js/);
+    assert.match(mission.review!.task!.prompt, /"resolved":7/);
+    if (lockDenied) {
+      assert.match(mission.review!.task!.prompt, /UNINSPECTED HISTORICAL FILES:.*runtime\/apt\/lock/);
+      assert.match(mission.review!.task!.prompt, /file bytes not inspected or fingerprinted/);
+      assert.equal((await stat(join(root, "runtime", "apt", "lock"))).mode & 0o777, 0);
+    }
     assert.ok(mission.review!.task!.prompt.includes(MISSION_BEHAVIOR_REVIEW));
     assert.match(mission.review!.task!.prompt, /compare relevant existing tests by inputs, boundaries, assertions and failure detection/);
     assert.match(mission.review!.task!.prompt, /duplication, weak or meaningless assertions, excessive mocks/);

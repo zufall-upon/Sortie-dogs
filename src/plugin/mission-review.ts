@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
-import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -781,7 +781,8 @@ export async function completedMissionReviewPrompts(mission: OperatorMission | u
 /** Pin all scoped tracked/untracked source bytes, including deletions; display a bounded excerpt only. */
 export async function missionReviewSource(directory: string, run: OperatorState,
   evidence: readonly MissionEvidenceExcerpt[] = [], baseline?: string, priorScope?: MissionReviewScope, displayBaseline = baseline): Promise<{
-    fingerprint: string; candidateFingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[] }> {
+    fingerprint: string; candidateFingerprint: string; excerpt: string; truncatedEvidence: string[]; truncatedSource: string[];
+    uninspectedHistoricalFiles: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
   const manifestScope = (path: string) => path === "." ? `${resolve(directory)}/**` : path;
@@ -803,6 +804,36 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     const rest = relative(root, path);
     return rest === "" || rest !== ".." && !rest.startsWith(`..${sep}`) && !isAbsolute(rest);
   };
+  // A retired estimate is not evidence that every file below it was changed. Do
+  // not turn an unreadable historical file into a missing current input or proof:
+  // active scopes and every retained validation binding still require its bytes.
+  const requiredFiles = [
+    ...run.units.flatMap(({ unit }) => [...(unit.read ?? []), ...unit.write])
+      .map(path => resolve(directory, normalizeManifestScope(manifestScope(path)).path)),
+    ...bindings.flatMap(binding => [...binding.source_paths, ...binding.candidate_paths, ...(binding.freshness?.protected_paths ?? [])])
+      .map(path => resolve(directory, path)),
+    ...(scope.legacyValidationPaths ?? []).map(path => resolve(directory, path)),
+  ];
+  // A current exact input can reach the same bytes through a link, including a
+  // link in an ancestor component or a hard link. An inaccessible resolution
+  // remains unknown rather than an unrelated historical file.
+  let physicalRequired: Promise<({ path: string; dev: number; ino: number } | null | undefined)[]> | undefined;
+  const reportHistoricalFile = async (path: string) => {
+    physicalRequired ??= Promise.all(requiredFiles.map(root => realpath(root).then(async path => {
+      const info = await stat(path);
+      return { path, dev: info.dev, ino: info.ino };
+    }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      if (error.code === "EACCES" || error.code === "EPERM") return null;
+      throw error;
+    })));
+    const physical = await physicalRequired;
+    const existing = physical.filter((root): root is { path: string; dev: number; ino: number } => !!root);
+    const file = await lstat(path);
+    return !physical.includes(null) && ![...requiredFiles, ...existing.map(root => root.path)]
+      .some(root => related(root, resolve(directory, path))) &&
+      !(file.ino && existing.some(root => root.ino === file.ino && root.dev === file.dev));
+  };
   const excluded = (path: string) => {
     const absolute = resolve(directory, path);
     const covers = (binding: typeof bindings[number]) => [...binding.source_paths, ...binding.candidate_paths].some(root => {
@@ -821,7 +852,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       !scratch.some(item => covers(item.binding) && !item.excludes(absolute));
   };
   const hash = createHash("sha256").update(JSON.stringify({ baseline,
-    scope: bindings.length ? { read: scope.read } : scope,
+    scope: bindings.length ? { read: scope.read, ...(scope.legacyValidationPaths ? { legacyValidationPaths: scope.legacyValidationPaths } : {}) } : scope,
     units: run.units.map(unit => bindings.length ? { id: unit.unit.id, read: unit.unit.read, validation: unit.unit.validation,
       acceptance: unit.unit.acceptance_indices } : { unit: unit.unit, hashes: unit.hashes }) }));
   const candidateHash = hash.copy(); // Optional excerpt selection is presentation, not candidate bytes.
@@ -850,6 +881,9 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       const stream = createReadStream(absolute);
       stream.on("data", chunk => hash.update(chunk));
       const lines = createInterface({ input: stream, crlfDelay: Infinity });
+      // The iterator still rejects on the forwarded error. Keep an error listener
+      // through cleanup too: readline can emit again as the failed stream closes.
+      lines.on("error", () => {});
       stream.on("error", error => lines.emit("error", error));
       const excerpt: string[] = [];
       let number = 0, bytes = 0;
@@ -901,7 +935,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const truncatedEvidence = focused.flatMap(({ entry }, index) => needsNotice[index] ? [`${entry.path}:${entry.offset}`] : []);
   if (writes.length === 0) return { fingerprint: `sha256:${hash.digest("hex")}`, candidateFingerprint: `sha256:${candidateHash.digest("hex")}`,
     excerpt: selected + "[Read-only units: no declared output files. Review the supplied observations, traces and validation evidence.]",
-    truncatedEvidence, truncatedSource: [] };
+    truncatedEvidence, truncatedSource: [], uninspectedHistoricalFiles: [] };
   // The shared dependency environment is local tooling, never reviewed or pinned source.
   const external: string[] = [], local: string[] = [];
   for (const path of writes) {
@@ -913,7 +947,9 @@ export async function missionReviewSource(directory: string, run: OperatorState,
   const untracked = new Set<string>(), currentFiles = new Set<string>();
   const collected = new Set<string>();
   const uninspectedGit = new Set<string>();
+  const internalGit = new Set<string>();
   const unreadableLocal = new Map<string, string>();
+  const unreadableLocalFiles = new Map<string, string>();
   // A Location may inherit an ancestor repository while its actual outputs live in a
   // nested repository/worktree. Resolve that boundary before asking the outer Git:
   // ls-files can return the whole ignored repository (or fail internally) for a narrow output.
@@ -966,6 +1002,28 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       return undefined;
     }
   };
+  // Apply the same metadata boundary to every enclosing worktree, including
+  // nested output repositories, before producing any automatic diff.
+  const checkedInternalGit = new Set<string>();
+  const detectInternalGit = async (names: readonly string[]) => {
+    for (const name of names.filter(Boolean)) {
+      const parts = name.split("/");
+      for (let count = 1; count < parts.length; count++) {
+        const path = parts.slice(0, count).join("/");
+        if (checkedInternalGit.has(path) || [...internalGit].some(root => path === root || path.startsWith(`${root}/`))) continue;
+        checkedInternalGit.add(path);
+        const absolute = resolve(directory, path);
+        const head = await lstat(join(absolute, "HEAD")).catch((error: NodeJS.ErrnoException) => {
+          if (["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(error.code ?? "")) return undefined;
+          throw error;
+        });
+        if (!head?.isFile()) continue;
+        const probe = await exec("git", ["-c", "core.fsmonitor=false", "rev-parse", "--is-inside-git-dir", "--is-inside-work-tree"],
+          { cwd: absolute, maxBuffer: 8 * 1024 * 1024 }).catch(() => undefined);
+        if (probe?.stdout.replaceAll("\r", "").trim() === "true\nfalse") internalGit.add(path);
+      }
+    }
+  };
   const collectRepository = async (absolute: string, path: string, pathspec: string[]): Promise<void> => {
     const marker = await lstat(join(absolute, ".git")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     let gitdir: string | undefined;
@@ -997,19 +1055,23 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     const prefix = (name: string) => join(path, name).replaceAll("\\", "/");
     for (const name of tracked.split("\0").filter(Boolean)) { collected.add(prefix(name)); currentFiles.add(prefix(name)); }
     for (const name of (await scopedGit(["ls-files", "-z", "--others", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) untracked.add(prefix(name));
-    for (const name of (await scopedGit(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...pathspec])).split("\0").filter(Boolean)) {
+    const ignored = await scopedGit(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...pathspec]);
+    for (const name of ignored.split("\0").filter(Boolean)) {
       collected.add(prefix(name)); untracked.add(prefix(name));
     }
+    await detectInternalGit([...tracked.split("\0"), ...ignored.split("\0")].filter(Boolean).map(prefix));
+    const diffPaths = [...pathspec, ...[...internalGit].filter(root => related(absolute, resolve(directory, root)))
+      .map(root => `:(exclude)${relative(absolute, resolve(directory, root)).replaceAll("\\", "/")}/**`)];
     // The Mission baseline belongs to its root, not these different repositories.
     // Without a baseline here, committed outputs still appear as current content.
     const delta = await withFilterlessGit(absolute, async git => {
       const gitlinks: string[] = [];
-      const dirty = await dirtyGitSubmodules(absolute, git, pathspec, "diff", false,
+      const dirty = await dirtyGitSubmodules(absolute, git, diffPaths, "diff", false,
         (child, head) => sourceUpdate(JSON.stringify(["gitlink", prefix(child), head])), gitlinks);
-      const patches = await gitlinkPatches(git, gitlinks, pathspec);
+      const patches = await gitlinkPatches(git, gitlinks, diffPaths);
       for (const item of dirty) currentFiles.add(prefix(item.path));
       for (const path of patches.keys()) currentFiles.add(prefix(path));
-      return (await currentGitDiff(git, pathspec)) + [...patches.values()].join("") + submoduleDiff(dirty);
+      return (await currentGitDiff(git, diffPaths)) + [...patches.values()].join("") + submoduleDiff(dirty);
     }, gitdir, directory);
     if (delta) scopedDiff += `\n--- repository output: ${path} ---\n${delta}`;
   };
@@ -1043,7 +1105,23 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       // Shared tooling is rooted at the Mission, not each output repository.
       try { await collectRepository(absolute, path, ["."]); }
       catch (error) {
-        if (!notRepository(error)) throw error;
+        let gitInternal = false;
+        if (/fatal: this operation must be run in a work tree/u.test(String((error as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""))) {
+          const marker = await lstat(join(absolute, ".git")).catch((failure: NodeJS.ErrnoException) => {
+            if (failure.code === "ENOENT") return undefined;
+            throw failure;
+          });
+          if (!marker) {
+            const probe = await exec("git", ["-c", "core.fsmonitor=false", "rev-parse", "--is-inside-git-dir", "--is-inside-work-tree"],
+              { cwd: absolute, maxBuffer: 8 * 1024 * 1024 }).catch(() => undefined);
+            gitInternal = probe?.stdout.replaceAll("\r", "").trim() === "true\nfalse";
+          }
+        }
+        // Git-internal directories have no worktree to enumerate. They are still
+        // declared filesystem outputs: descend and fingerprint their bytes, rather
+        // than treating an unrelated Git error as permission to skip them.
+        if (!notRepository(error) && !gitInternal) throw error;
+        if (gitInternal && ![...internalGit].some(root => path === root || path.startsWith(`${root}/`))) internalGit.add(path);
         for (const child of children.map(child => child.name).filter(name => name !== ".git").sort()) {
           await collect(join(path, child).replaceAll("\\", "/"));
         }
@@ -1053,12 +1131,20 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     for (const path of rootLocal) await collect(path);
   }
   names = [...new Set([...names.split("\0").filter(Boolean), ...collected])].sort().join("\0");
+  // A parent worktree can enumerate a separate Git directory as ordinary files.
+  // Detect its root before producing either automatic file previews or Git diffs:
+  // both can otherwise disclose config and other metadata to the Reviewer.
+  if (repository) {
+    await detectInternalGit([...names.split("\0"), ...ignored.split("\0")]);
+    for (const path of internalGit) gitScopes.push(`:(exclude)${path}/**`);
+  }
   // Go's ignored in-project caches may be writable during validation but are not candidate
   // output. Keep every other ignored declared output visible and fingerprinted, including
   // directories of generated artifacts; focused references can still pin a cache file.
   for (const path of ignored.split("\0").filter(Boolean)) untracked.add(path);
   const omitted: string[] = [];
   const unreadable: string[] = [];
+  const unreadableExternalFiles: string[] = [];
   const outsideLinks: string[] = [];
   let diff = scopedDiff;
   if (repository && rootLocal.length && displayBaseline) {
@@ -1113,7 +1199,10 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     try {
       const absolute = resolve(directory, path), stat = await lstat(absolute);
       sourceUpdate(String(stat.mode));
-      const include = includedByParent || untracked.has(path) || currentFiles.has(path) || unchanged;
+      // Git metadata may contain credentials; pin its bytes without placing its
+      // contents in the automatic Reviewer excerpt.
+      const internal = [...internalGit].some(root => path === root || path.startsWith(`${root}/`));
+      const include = !internal && (includedByParent || untracked.has(path) || currentFiles.has(path) || unchanged);
       const heading = `\n--- ${includedByParent || untracked.has(path) ? "new file" : "current file"}: ${path} ---\n`;
       const room = include ? Math.max(0, 24_000 - Buffer.byteLength(excerpt) - Buffer.byteLength(heading)) : 0;
       let preview = Buffer.alloc(0);
@@ -1150,10 +1239,24 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       } else {
         if (!stat.isFile()) throw new Error("mission-review-source: unsupported artifact type");
         sourceUpdate(String(stat.size));
-        for await (const part of createReadStream(absolute)) {
-          const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
-          sourceUpdate(bytes);
-          if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
+        let received = false;
+        try {
+          for await (const part of createReadStream(absolute)) {
+            received = true;
+            const bytes = Buffer.isBuffer(part) ? part : Buffer.from(part);
+            sourceUpdate(bytes);
+            if (preview.length < room) preview = Buffer.concat([preview, bytes.subarray(0, room - preview.length)]);
+          }
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (received || !["EACCES", "EPERM"].includes(code ?? "") || !(await reportHistoricalFile(absolute))) throw error;
+          sourceUpdate(`uninspected-file:${code}`);
+          unreadableLocalFiles.set(path, code!);
+          if (include) {
+            const notice = heading + "[not inspected: permission denied; file bytes not fingerprinted]\n";
+            if (Buffer.byteLength(excerpt) + Buffer.byteLength(notice) <= 24_000) excerpt += notice;
+          }
+          return;
         }
       }
       if (include && !stat.isDirectory()) {
@@ -1184,15 +1287,17 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     // Do not make review depend on listing it; record the missing coverage instead. Protected
     // validation still requires readable outputs and does not use this review-only option.
     const artifacts = await declaredArtifacts(external, Math.max(1, 24_000 - Buffer.byteLength(excerpt)),
-      { reportUnreadableDirectories: true, reportOutsideLinks: true });
+      { reportUnreadableDirectories: true, reportUnreadableFile: reportHistoricalFile, reportOutsideLinks: true });
     sourceUpdate(JSON.stringify(artifacts.entries));
     excerpt += artifacts.excerpt;
     if (artifacts.truncated) omitted.push("external artifacts");
     unreadable.push(...artifacts.unreadable);
+    unreadableExternalFiles.push(...artifacts.unreadableFiles);
     outsideLinks.push(...artifacts.entries.filter(([, kind]) => kind === "target-not-inspected:outside-scope").map(([path]) => path));
   }
   const bytes = Buffer.from(excerpt);
   const truncatedSource = [...new Set(omitted)];
+  const uninspectedHistoricalFiles = [...new Set([...unreadableLocalFiles.keys(), ...unreadableExternalFiles])].sort();
   if (bytes.length > 24_000 && truncatedSource.length === 0) truncatedSource.push("(source diff exceeds excerpt budget)");
   // Missing coverage is not a clipped source preview: disclose it even after that
   // budget is exhausted. Full link identities remain in the fingerprint above.
@@ -1203,6 +1308,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     (truncatedSource.length ? `\n[EXCERPT TRUNCATED: ${truncatedSource.slice(0, 20).join(", ")}; Reviewer can read/search the relevant source directly]` : "") +
     (unreadableLocal.size ? `\n[UNINSPECTED LOCAL DIRECTORIES: ${[...unreadableLocal.keys()].slice(0, 20).join(", ")}; permission denied; contents not inspected or fingerprinted; select specific result files as review evidence]` : "") +
     (unreadable.length ? `\n[UNINSPECTED EXTERNAL DIRECTORIES: ${unreadable.slice(0, 20).join(", ")}; select specific result files as review evidence]` : "") + outsideNotice +
+    (internalGit.size ? `\n[GIT INTERNAL FILES: ${[...internalGit].slice(0, 20).join(", ")}; bytes fingerprinted, contents omitted from automatic excerpts; Git history and diffs are not established.]` : "") +
+    (uninspectedHistoricalFiles.length ? `\n[UNINSPECTED HISTORICAL FILES: ${uninspectedHistoricalFiles.slice(0, 20).join(", ")}; permission denied; file bytes not inspected or fingerprinted. Historical scope alone does not establish whether they changed or are relevant; assess any material coverage gap explicitly.]` : "") +
     (uninspectedGit.size ? `\n[UNINSPECTED GIT HISTORY: ${[...uninspectedGit].slice(0, 20).join(", ")}; current declared files only. Git was not run against writable alternates; baseline diffs and tracked deletions are not established.]` : ""),
-    truncatedEvidence, truncatedSource };
+    truncatedEvidence, truncatedSource, uninspectedHistoricalFiles };
 }

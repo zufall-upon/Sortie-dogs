@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import fs, { appendFile, chmod, mkdir, mkdtemp, readdir, rm, utimes, writeFile, symlink } from "node:fs/promises";
+import nodeFs, { constants } from "node:fs";
+import fs, { appendFile, chmod, link, mkdir, mkdtemp, readdir, rm, utimes, writeFile, symlink } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { Readable } from "node:stream";
 import test from "node:test";
 import { completedMissionReviewPrompts, initialMissionReviewPrompt, missionDeliveryObservation, missionReviewBaseline, missionReviewSource,
   observedMissionValidation, reviewerCorrectionValidation, reviewerCorrectionValidationFresh } from "../dist/plugin/mission-review.js";
-import { MISSION_REVIEW_REFERENCE, OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
+import { MISSION_REVIEW_REFERENCE, missionReviewScope, OperatorMissionRuntime, type OperatorMission } from "../dist/core/operator-mission.js";
 import { OperatorRuntime } from "../dist/core/operator-runtime.js";
 import { V010_RUNTIME_PROFILE } from "../dist/core/runtime-profile.js";
 import { FastLaneController } from "../dist/plugin/fast-lane.js";
@@ -1543,6 +1544,128 @@ test("a non-Git mission reviews scoped nested repositories without a new root or
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
+test("non-Git mission reviews Git internal directories as filesystem outputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mission-review-bare-git-"));
+  const internal = join(root, "runtime", "internal.git");
+  try {
+    await mkdir(join(root, "runtime"));
+    await git("git", ["init", "--bare", "--quiet", internal], { cwd: root });
+    await writeFile(join(internal, "result.txt"), "retained result\n");
+    await writeFile(join(root, "runtime", "neighbor.txt"), "readable neighbor\n");
+    const run = { units: [{ unit: { read: [], write: ["runtime/**"] }, hashes: [] }] } as never;
+    const first = await missionReviewSource(root, run);
+    assert.match(first.excerpt, /readable neighbor/);
+    assert.match(first.excerpt, /GIT INTERNAL FILES:.*bytes fingerprinted/);
+    assert.doesNotMatch(first.excerpt, /retained result|repositoryformatversion/);
+    await writeFile(join(internal, "result.txt"), "changed result\n");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, first.fingerprint);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const topology of ["non-Git parent", "Git parent", "nested Git parent"]) test(`public Review prepares and resumes across an inherited non-bare Git directory without losing validation (${topology})`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-public-git-internal-"));
+  const parent = topology === "nested Git parent" ? join(root, "nested") : root;
+  const gitParent = topology !== "non-Git parent";
+  const output = topology === "nested Git parent" ? "nested/runtime/**" : "runtime/**";
+  const gitdir = join(parent, "runtime", "git-internal"), worktree = join(root, "other-worktree");
+  try {
+    await mkdir(parent, { recursive: true });
+    if (gitParent) await git("git", ["init", "--quiet"], { cwd: parent });
+    await mkdir(join(parent, "runtime"));
+    await git("git", ["init", "--quiet", `--separate-git-dir=${gitdir}`, worktree]);
+    const topology = await git("git", ["rev-parse", "--is-inside-git-dir", "--is-inside-work-tree", "--is-bare-repository"], { cwd: gitdir });
+    assert.equal(topology.stdout.replaceAll("\r", ""), "true\nfalse\nfalse\n");
+    await assert.rejects(git("git", ["-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+      { cwd: gitdir }), /this operation must be run in a work tree/u, "the inherited directory reproduces the native Git failure");
+    const sentinel = join(gitdir, "result.txt");
+    await writeFile(sentinel, "historical result\n");
+    if (gitParent) {
+      await git("git", ["add", "--", "runtime/git-internal"], { cwd: parent });
+      await git("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "--quiet", "-m", "Record internal metadata"], { cwd: parent });
+      await writeFile(sentinel, "changed private metadata\n");
+    }
+    const neighbor = join(parent, "runtime", "neighbor.txt");
+    await writeFile(neighbor, "readable neighboring output\n");
+    await writeFile(join(root, "proof.txt"), "retained\n");
+    await writeFile(join(root, "check.mjs"), 'import assert from "node:assert/strict";import fs from "node:fs";assert.equal(fs.readFileSync("proof.txt","utf8"),"retained\\n");\n');
+    const identities: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+      root: { agent: "dog-operator" }, reviewer: { agent: "dog-reviewer-v010", parentID: "root" },
+    };
+    const history: unknown[] = [];
+    const create = () => SortieDogsV010Plugin({ directory: root, client: { session: {
+      get: async ({ path }: { path: { id: string } }) => ({ data: { id: path.id, ...identities[path.id] } }),
+      children: async ({ path }: { path: { id: string } }) => ({ data: Object.entries(identities)
+        .filter(([, info]) => info.parentID === path.id).map(([id, info]) => ({ id, ...info })) }),
+      messages: async () => ({ data: history }),
+    } } } as never);
+    let hooks = await create();
+    const tool = async (name: string, args = {}) => JSON.parse(await hooks.tool![`sortie_v010_${name}`]!.execute(args, { sessionID: "root" }));
+    await hooks["chat.message"]!({ sessionID: "root", messageID: "original", agent: "dog-operator" }, {
+      message: { id: "original", agent: "dog-operator", model: { providerID: "openai", modelID: "gpt-6.1-sol" } },
+      parts: [{ type: "text", text: "Review the validated candidate and retain historical outputs" }],
+    });
+    await tool("start_mission", { requirements: ["Review the validated candidate and retain historical outputs"] });
+    const unit = { title: "Proof", objective: "Verify retained proof", read: ["check.mjs", "proof.txt"], write: [], validation: ["node check.mjs"] };
+    await tool("plan_units", { executor: "worker", units: [{ ...unit, write: [output] }] });
+    await tool("plan_units", { executor: "self", units: [unit], reason: "Retain historical scope while validating the current proof" });
+    await assert.rejects(tool("review_mission", { risk_tags: ["public-logic"], mode: "independent" }),
+      /mission-review-terminal-unreconciled:direct_unit_still_running/u);
+    const input = { tool: "shell", sessionID: "root", callID: "proof" }, args = { command: "node check.mjs", workdir: root };
+    const started = Date.now();
+    await hooks["tool.execute.before"]!(input, { args });
+    const checked = await git(process.execPath, ["check.mjs"], { cwd: root });
+    await hooks["tool.execute.after"]!({ ...input, args }, { output: checked.stdout, metadata: { exit: 0, status: "completed" } });
+    history.push({ info: { role: "assistant", sessionID: "root" }, parts: [{ type: "tool", tool: "shell", callID: "proof",
+      state: { status: "completed", input: args, metadata: { exit: 0 }, time: { start: started, end: Date.now() } } }] });
+    const finished = await tool("finish_direct_unit");
+    assert.notEqual(finished.status, "direct-unit-awaits-validation", JSON.stringify(finished));
+    const missions = new OperatorMissionRuntime(root, V010_RUNTIME_PROFILE);
+    const operators = new OperatorRuntime(root, V010_RUNTIME_PROFILE);
+    const before = await operators.required("root");
+    hooks = await create(); // cold plugin reload, without changing the saved Mission or its validation
+    const review = await tool("review_mission", { risk_tags: ["public-logic"], mode: "independent" });
+    assert.equal(review.status, "review-required");
+    const prepared = await missions.required("root");
+    const prompt = prepared.review!.task!.prompt;
+    assert.ok(prompt.includes("[GIT INTERNAL FILES:"), "the Reviewer must be told Git metadata bytes were pinned without automatic excerpts");
+    assert.ok(!prompt.includes("historical result"), "Git metadata is not automatically excerpted");
+    assert.ok(!prompt.includes("changed private metadata"), "tracked Git metadata must not appear in the automatic diff");
+    assert.ok(prompt.includes("readable neighboring output"), "ordinary adjacent outputs remain visible");
+    assert.match(prompt, /validation: /u);
+    assert.equal(prepared.review!.mode, "independent");
+    assert.equal(prepared.review!.verdict, "pending");
+    assert.ok(prompt.includes(`sourceFingerprint: ${prepared.review!.source}`));
+    const collected = await missionReviewSource(root, before, [], prepared.reviewBaseline, prepared.reviewScope);
+    assert.equal(prepared.review!.source, collected.fingerprint);
+    assert.equal(prepared.review!.candidateSource, collected.candidateFingerprint);
+    await writeFile(neighbor, "changed neighboring output\n");
+    assert.notEqual((await missionReviewSource(root, before, [], prepared.reviewBaseline, prepared.reviewScope)).candidateFingerprint,
+      collected.candidateFingerprint, "adjacent output bytes still invalidate Review");
+    await writeFile(neighbor, "readable neighboring output\n");
+    const dispatch = (task: unknown, callID: string) => hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "root", callID }, { args: structuredClone(task) as Record<string, unknown> });
+    await assert.rejects(dispatch({ ...review.task, prompt: review.task.prompt + "\nchanged" }, "forged-review"), /mission-review-task-required/u);
+    await writeFile(sentinel, "changed historical result\n");
+    await assert.rejects(dispatch(review.task, "stale-review"), /mission-review-snapshot-stale/u);
+    await writeFile(sentinel, gitParent ? "changed private metadata\n" : "historical result\n");
+    assert.deepEqual((await operators.required("root")).units, before.units, "Review preparation and refusals do not relabel or rerun validation");
+    await dispatch(review.task, "review-call");
+    identities.reviewer!.outcome = "interrupted";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "review-call" },
+      { status: "cancelled", output: "Review interrupted", metadata: { sessionId: "reviewer", status: "cancelled" } });
+    assert.equal((await missions.required("root")).review!.verdict, "pending", "cancellation is not Review PASS");
+    hooks = await create();
+    const resumed = await tool("review_mission", { risk_tags: ["public-logic"], mode: "independent" });
+    assert.equal(resumed.status, "review-required");
+    assert.equal((await missions.required("root")).review!.source, prepared.review!.source);
+    assert.equal((await missions.required("root")).review!.candidateSource, prepared.review!.candidateSource);
+    assert.deepEqual((await operators.required("root")).units, before.units);
+    await dispatch(resumed.task, "resumed-review-call");
+    assert.equal((await missions.required("root")).review!.verdict, "pending");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 for (const fileScope of [false, true]) test(`Review resolves an ignored nested worktree from an inherited repository without widening outputs: file=${fileScope}`, async () => {
   const area = await mkdtemp(join(tmpdir(), "mission-review-inherited-"));
   const directory = join(area, "_testenv", "mission"), repository = join(directory, "source");
@@ -2114,4 +2237,103 @@ test("review reports an unreadable external runtime directory without hiding rea
     await chmod(runtime, 0o700);
     await rm(area, { recursive: true, force: true });
   }
+});
+
+test("review discloses an unreadable historical external file but keeps active and validated inputs strict", async t => {
+  if (process.platform === "win32") return t.skip("POSIX file permissions required");
+  const area = await mkdtemp(resolve("_testenv/review-historical-file-"));
+  const project = join(area, "project"), runtime = join(area, "runtime"), lock = join(runtime, "lock"), output = join(project, "result.json");
+  try {
+    await mkdir(project); await mkdir(runtime);
+    await writeFile(lock, "");
+    await symlink("lock", join(runtime, "z-link"));
+    await link(lock, join(runtime, "z-hard-link"));
+    await writeFile(join(runtime, "a-large.txt"), "x".repeat(30_000));
+    await writeFile(join(runtime, "result.txt"), "previous output\n");
+    await writeFile(output, '{"resolved":7}\n');
+    const manifest = JSON.stringify({ task_id: "prior-proof", read: [lock], write: [], validation: ["node --version"] });
+    const manifestPath = join(project, "manifest.json");
+    await writeFile(manifestPath, manifest);
+    const pinned = await protectedSnapshot({ projectRoot: project, manifestPath,
+      manifestHash: createHash("sha256").update(manifest).digest("hex") }, { directory: project });
+    assert.ok(pinned?.binding.freshness, "use an actual captured validation binding");
+    const legacy = await protectedSnapshot({ projectRoot: project, manifestPath,
+      manifestHash: createHash("sha256").update(manifest).digest("hex") }, { captureFreshness: false });
+    assert.ok(legacy && !legacy.binding.freshness, "also preserve the older validation representation");
+    await chmod(lock, 0);
+    try { await fs.readFile(lock); return t.skip("file is readable by this process"); }
+    catch (error) { assert.equal((error as NodeJS.ErrnoException).code, "EACCES"); }
+
+    const run = { units: [{ unit: { id: "current", read: ["result.json"], write: [], validation: [] }, hashes: [] }] } as never;
+    const prior = { read: [], write: [runtime + "/**"] };
+    const evidence = [{ path: "result.json", offset: 1, limit: 1 }];
+    const first = await missionReviewSource(project, run, evidence, undefined, prior);
+    assert.match(first.excerpt, /"resolved":7/);
+    assert.match(first.excerpt, /UNINSPECTED HISTORICAL FILES:.*runtime\/lock/);
+    assert.match(first.excerpt, /file bytes not inspected or fingerprinted/);
+    assert.match(first.excerpt, /does not establish whether they changed or are relevant/);
+    assert.ok(first.excerpt.indexOf("[UNINSPECTED HISTORICAL FILES:") >= 24_000,
+      "the coverage gap survives a full preview");
+    assert.equal((await missionReviewSource(project, run, evidence, undefined, prior)).fingerprint, first.fingerprint);
+    await writeFile(join(runtime, "result.txt"), "changed output\n");
+    assert.notEqual((await missionReviewSource(project, run, evidence, undefined, prior)).fingerprint, first.fingerprint);
+    await assert.rejects(declaredArtifacts([runtime]), { code: "EACCES" }, "validation remains strict on every call");
+    await assert.rejects(missionReviewSource(project, run, [{ path: lock, offset: 1, limit: 1 }], undefined, prior), /EACCES/u,
+      "an explicit evidence request must still be readable");
+    const currentRead = { units: [{ unit: { id: "current", read: [runtime + "/**"], write: [], validation: [] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(project, currentRead, [], undefined, prior), { code: "EACCES" });
+    const currentWrite = { units: [{ unit: { id: "current", read: [], write: [runtime + "/**"], validation: [] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(project, currentWrite, [], undefined, prior), { code: "EACCES" });
+    const currentLink = { units: [{ unit: { id: "current", read: [join(runtime, "z-link")], write: [], validation: [] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(project, currentLink, [], undefined, prior), { code: "EACCES", path: lock },
+      "a current link input cannot lose its physical target to a historical scope");
+    const currentHardLink = { units: [{ unit: { id: "current", read: [join(runtime, "z-hard-link")], write: [], validation: [] }, hashes: [] }] } as never;
+    await assert.rejects(missionReviewSource(project, currentHardLink, [], undefined, prior), { code: "EACCES", path: lock },
+      "a current hard-linked input cannot be downgraded under another name");
+    await assert.rejects(missionReviewSource(project, run, [], undefined, { ...prior, validationBindings: [pinned!.binding] }), { code: "EACCES" },
+      "retained validation inputs are never downgraded to historical estimates");
+    const previousRun = { units: [{ unit: { read: [], write: [] }, evidence: [{ protected_binding: legacy!.binding }] }] } as never;
+    const legacyScope = missionReviewScope(prior, previousRun);
+    assert.ok(legacyScope.legacyValidationPaths?.includes(lock));
+    await assert.rejects(missionReviewSource(project, run, [], undefined, legacyScope), { code: "EACCES" },
+      "validation paths without a freshness recipe remain protected across replans");
+    await chmod(lock, 0o600);
+    const inspected = await missionReviewSource(project, run, evidence, undefined, prior);
+    assert.notEqual(inspected.fingerprint, first.fingerprint);
+    assert.doesNotMatch(inspected.excerpt, /UNINSPECTED HISTORICAL FILES:/);
+  } finally { await rm(area, { recursive: true, force: true }); }
+});
+
+test("review reports only wholly unreadable historical files; partial reads and other I/O failures remain errors", async t => {
+  const area = await mkdtemp(resolve("_testenv/review-historical-io-"));
+  try {
+    const project = join(area, "project"), local = join(project, "runtime"), external = join(area, "external");
+    await mkdir(local, { recursive: true }); await mkdir(external);
+    for (const directory of [local, external]) {
+      const file = join(directory, "lock"); await writeFile(file, "contents\n");
+      const run = { units: [{ unit: { read: [], write: [] }, hashes: [] }] } as never;
+      const prior = { read: [], write: [directory === local ? "runtime/**" : external + "/**"] };
+      const original = nodeFs.createReadStream;
+      for (const [code, partial] of [["EPERM", false], ["EIO", false], ["EACCES", true]] as const) {
+        const mock = t.mock.method(nodeFs, "createReadStream", ((path: Parameters<typeof nodeFs.createReadStream>[0], ...args: unknown[]) => {
+          if (path !== file) return original(path, ...(args as []));
+          return Readable.from((async function* () {
+            if (partial) yield Buffer.from("partial");
+            throw Object.assign(new Error(`injected ${code}`), { code });
+          })()) as ReturnType<typeof nodeFs.createReadStream>;
+        }) as typeof nodeFs.createReadStream);
+        syncBuiltinESMExports();
+        try {
+          if (code === "EPERM") {
+            const result = await missionReviewSource(project, run, [], undefined, prior);
+            assert.match(result.excerpt, /UNINSPECTED HISTORICAL FILES:/);
+            const current = { units: [{ unit: { read: prior.write, write: [] }, hashes: [] }] } as never;
+            await assert.rejects(missionReviewSource(project, current, [], undefined, prior), { code: "EPERM" });
+            if (directory === external) await assert.rejects(declaredArtifacts([external]), { code: "EPERM" },
+              "a prior Review call does not retain its relaxed setting for validation");
+          } else await assert.rejects(missionReviewSource(project, run, [], undefined, prior), { code });
+        } finally { mock.mock.restore(); syncBuiltinESMExports(); }
+      }
+    }
+  } finally { await rm(area, { recursive: true, force: true }); }
 });
