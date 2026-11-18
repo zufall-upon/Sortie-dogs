@@ -3965,8 +3965,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             const independentRequested = secondReview || args.mode === "independent" ||
               selectedReviewer !== undefined && missionReviewIndependent(mission, selectedReviewer);
-            const selfRecheck = !independentRequested && (args.mode === "self-recheck" || !!correction ||
-              (selectedReviewer ?? retainedReviewer) !== undefined && !missionReviewIndependent(mission, selectedReviewer ?? retainedReviewer));
+             const selfRecheck = !independentRequested && (args.mode === "self-recheck" || !!correction ||
+               (selectedReviewer ?? retainedReviewer) !== undefined && !missionReviewIndependent(mission, selectedReviewer ?? retainedReviewer));
+             if (source.uninspectedHistoricalFiles.length && risk.length === 0 && !correction && !selfRecheck && !independentRequested) {
+               return JSON.stringify({ status: "review-coverage-unavailable",
+                 uninspected_historical_files: source.uninspectedHistoricalFiles.slice(0, 20),
+                 uninspected_historical_file_count: source.uninspectedHistoricalFiles.length,
+                 next_action: "These historical files could not be inspected or fingerprinted; their relevance is unknown. No Review or low-risk skip was recorded. Assess the gap using available evidence and prepare an independent Review with the applicable risk tags, or resolve the actual access problem without changing permissions implicitly." });
+             }
             const reviewerID = selectedReviewer ?? (selfRecheck ? correction?.author ?? retainedReviewer : !secondReview && mission.review?.child &&
               missionReviewIndependent(mission, mission.review.child) && await ownedReviewer(root, mission, mission.review.child) ? mission.review.child : undefined);
             if (selfRecheck && !reviewerID) return JSON.stringify({ status: "mission-initial-self-recheck-unavailable",

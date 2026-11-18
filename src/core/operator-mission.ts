@@ -23,6 +23,8 @@ export interface MissionRequest { id: string; text: string }
 export interface MissionContext extends MissionRequest { role: "user" | "assistant" }
 export interface MissionEvidenceExcerpt { path: string; offset: number; limit: number }
 export interface MissionReviewScope { read: string[]; write: string[];
+  /** Paths from older evidence without a freshness recipe; never scratch exclusions. */
+  legacyValidationPaths?: string[];
   validationBindings?: NonNullable<import("./goal-bound.js").GoalEvidence["protected_binding"]>[] }
 export interface MissionConsultation {
   id: string;
@@ -305,9 +307,13 @@ export const MISSION_CONSULTATION_LIMIT = 32;
 export function missionReviewScope(previous: MissionReviewScope | undefined, ...runs: OperatorState[]): MissionReviewScope {
   const bindings = [...(previous?.validationBindings ?? []), ...runs.flatMap(run => run.units.flatMap(unit =>
     (unit.evidence ?? []).flatMap(proof => proof.protected_binding?.freshness ? [proof.protected_binding] : [])))];
+  const legacyValidationPaths = [...new Set([...(previous?.legacyValidationPaths ?? []), ...runs.flatMap(run => run.units.flatMap(unit =>
+    (unit.evidence ?? []).flatMap(proof => proof.protected_binding && !proof.protected_binding.freshness
+      ? [...proof.protected_binding.source_paths, ...proof.protected_binding.candidate_paths] : [])))])].sort();
   return {
     read: [...new Set([...(previous?.read ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.read ?? []))])].sort(),
     write: [...new Set([...(previous?.write ?? []), ...runs.flatMap(run => run.units.flatMap(({ unit }) => unit.write))])].sort(),
+    ...(legacyValidationPaths.length ? { legacyValidationPaths } : {}),
     ...(bindings.length ? { validationBindings: [...new Map(bindings.map(binding => [JSON.stringify(binding), binding])).values()] } : {}),
   };
 }
