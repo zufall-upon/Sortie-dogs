@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { availableParallelism } from "node:os";
 import test from "node:test";
+import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
 import { copyManagedRouterFixture } from "./helpers/managed-router-fixture.ts";
 
@@ -926,7 +927,7 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground } of [
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
@@ -941,10 +942,16 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, managed: "pytest-nodeid" },
   { legacy: false, commit: false, cancel: false, managed: "router" },
   { legacy: false, commit: false, cancel: false, managed: "router-required" },
+  { legacy: false, commit: false, cancel: false, objectRestore: true },
+  { legacy: false, commit: false, cancel: false, nestedBackground: "cold" },
+  { legacy: false, commit: false, cancel: false, nestedBackground: "storage-error" },
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked worktree identity and unsigned commit" :
+test(nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
+  nestedBackground ? "V2 Coordinator reconciles an implicitly background Worker with a failed check" :
+  objectRestore ? "V2 Worker restores a scoped Git commit object with quoted Python display data" :
+  commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked worktree identity and unsigned commit" :
   managedScenario === "router-required" ? "V2 formally required project router full is not deferred" :
   managedScenario === "router" ? "V2 project router defers covered full after real focused failure" :
   managedScenario === "required" ? "V2 formally required full execution survives an unresolved focused failure" :
@@ -952,11 +959,12 @@ test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked
   managedScenario === "focused" ? "V2 registered focused failure defers undeclared full until a fresh native retry" :
   managedScenario ? "V2 undeclared full runner preserves each native execution in a normal Mission" :
   `V2 ${reviewJoin ? `controller joins Worker validation ${reviewJoin}` : directRecovery ? `interrupted direct ${directRecovery}${interruptedLaunch ? " with shell progress only" : ""}` : fabric ? `parallel native validation ${permission}` : cancel ? "cancelled Worker cannot reactivate" : joinScenario ? "joined native check" : commit ? "auto-bound commit and independent review" : legacy ? "saved absolute" : "relative"} mission controls survive Operator correction and cold resume`,
-{ skip: process.platform === "win32" && (managedScenario === "router" || managedScenario === "router-required") }, async (context) => {
+{ skip: process.platform === "win32" && (objectRestore || managedScenario === "router" || managedScenario === "router-required") }, async (context) => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/swebench-night-long-project-root-"));
   const exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
+  const logs: Record<string, Record<string, unknown>[]> = {};
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     first: { agent: "dog-worker-v010", parentID: "coordinator" }, second: { agent: "dog-worker-v010", parentID: "coordinator" },
@@ -964,6 +972,15 @@ test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked
     unrelated: { agent: "build", parentID: "root" },
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
+  let failBackgroundWrite = false;
+  const storage = fixture.context.storage!;
+  const retainedStorage = { ...storage, set: async (key: string, value: unknown) => {
+    if (failBackgroundWrite && key === "v2-background-dispatches:coordinator") {
+      failBackgroundWrite = false;
+      throw new Error("fixture background storage unavailable");
+    }
+    await storage.set(key, value);
+  } };
   const originalPath = process.env.PATH;
   const originalRouterEnvironment = { HOME: process.env.HOME, npm_config_userconfig: process.env.npm_config_userconfig,
     npm_config_globalconfig: process.env.npm_config_globalconfig };
@@ -998,7 +1015,7 @@ test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked
         await after?.(request, output);
       };
       return hooks;
-    }).setup({ ...fixture.context, location: { directory },
+    }).setup({ ...fixture.context, location: { directory }, ...(nestedBackground ? { storage: retainedStorage } : {}),
       ...(directRecovery ? { message: { list: async ({ sessionID }: { sessionID: string }) =>
         ({ data: history[sessionID] ?? [], cursor: {} }) } } : {}),
       ...(fabric ? { agent: { ...fixture.context.agent, get: async () => ({ model: {
@@ -1012,6 +1029,9 @@ test(commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked
         get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
+        ...(nestedBackground ? { log: async function* ({ sessionID }: { sessionID: string }) {
+          for (const event of logs[sessionID] ?? []) yield event;
+        } } : {}),
       }, message: { list: async ({ sessionID, order }) => ({
         data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {},
       }) } });
@@ -1248,12 +1268,188 @@ test('requires exclusive execution', async () => {
     const original = `Create result.txt containing ready, and ${commit ? "commit the change" : "leave an uncommitted diff"}.`;
     const objective = `${original} Keep this example text verbatim: handoff_path: /external/example.json`;
     await prompt("root", original);
-    const mission = await tool("root", "start_mission", { requirements: [original] });
+    const mission = await tool("root", "start_mission", { requirements: [original],
+      ...(objectRestore ? { prohibited_write: ["outside.txt"] } : {}) });
     let dispatch = await before("root", "subagent", { ...nativeTask(mission.task), ...(reviewJoin ? { background: true } : {}) });
     await prompt("coordinator", String(dispatch.input.prompt));
     if (reviewJoin) {
       assert.equal(dispatch.input.background, true, "the root retains the normal native background Coordinator launch");
       await after(dispatch, "Coordinator running", { sessionID: "coordinator", status: "running" });
+    }
+    if (nestedBackground) {
+      const command = "node check.mjs ready";
+      const plan = await tool("coordinator", "plan_units", { units: [{
+        title: "Check fixture", objective: "Check the fixture without erasing failure",
+        read: ["check.mjs"], write: ["result.txt"], validation: [command],
+      }] });
+      const runtime = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+      const unit = (await runtime.required("root")).units[0]!;
+      if (nestedBackground === "storage-error") {
+        failBackgroundWrite = true;
+        await assert.rejects(before("coordinator", "subagent", nativeTask(plan.task)), /fixture background storage unavailable/u);
+        const settled = await runtime.required("root");
+        assert.equal(settled.units[0]!.status, "failed");
+        assert.equal(settled.receipt, null);
+        assert.equal(history.first, undefined, "native Worker launch never happened");
+        const packet = await tool("coordinator", "operator_next");
+        assert.equal(packet.budget.reserved_units, 0);
+        assert.equal(packet.budget.consumed_units, 1);
+        return;
+      }
+      const worker = await before("coordinator", "subagent", nativeTask(plan.task));
+      assert.equal(worker.input.background, undefined, "use the observed implicit native Job invocation");
+      await after(worker, "Native Job running", { sessionID: "first", status: "running" });
+      const expanded = await prompt("first", String(worker.input.prompt));
+      const promptID = String(history.first!.at(-1)!.id);
+      const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
+      const read = await before("first", "read", { path: handoff });
+      assert.match(await after(read, await readFile(unit.handoffPath, "utf8")), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/u);
+      const patch = await before("first", "patch", { patchText: "*** Begin Patch\n*** Add File: result.txt\n+broken\n*** End Patch" });
+      await writeFile(join(directory, "result.txt"), "broken\n"); await after(patch, "Updated result.txt");
+      const validation = await before("first", "shell", { command });
+      const failure = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory })
+        .then(() => { throw new Error("fixture check unexpectedly passed"); }, error => ({ code: error.code, output: String(error.stderr) }));
+      assert.equal(failure.code, 1);
+      await after(validation, failure.output, { exit: failure.code });
+      const beforeTerminal = await runtime.required("root");
+      assert.equal(beforeTerminal.units[0]!.status, "running");
+      assert.equal(beforeTerminal.units[0]!.validationRegistration!.checks[0]!.exitCode, 1);
+      cleanup?.(); await start();
+      const now = Date.now();
+      history.first!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-worker-v010", finish: "stop",
+        time: { created: now, completed: now }, content: [{ type: "text", text: "PROCESS_DEFECT: local: fixture stopped after a failed check" }] });
+      agents.first!.outcome = "succeeded";
+      // An unrelated earlier terminal cannot settle the admitted prompt.
+      logs.first = [{ type: "session.execution.succeeded", created: now - 1, data: { sessionID: "first" } }];
+      await fixture.emit({ type: "session.execution.succeeded", created: now, data: { sessionID: "first" } });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal((await runtime.required("root")).units[0]!.status, "running");
+      logs.first.push({ type: "session.inbox.delivered", created: now, data: { sessionID: "first", inboxID: promptID } },
+        { type: "session.execution.succeeded", created: now + 1, data: { sessionID: "first" } });
+      await fixture.emit({ type: "session.execution.succeeded", created: now + 1, data: { sessionID: "first" } });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const packet = await tool("coordinator", "operator_next");
+      const settled = await runtime.required("root");
+      assert.equal(settled.units[0]!.status, "failed", JSON.stringify(packet));
+      assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.exitCode, 1,
+        "native success means the Worker ended, not that the failed check passed");
+      assert.equal(settled.receipt, null);
+      assert.notEqual(packet.units?.[0]?.status, "running");
+      assert.equal(packet.budget.reserved_units, 0);
+      assert.equal(packet.budget.consumed_units, 1);
+      return;
+    }
+    if (objectRestore) {
+      // Mirror the incident: a shallow main repository with a linked worktree and
+      // a separate single-branch shared clone under the candidate directory.
+      const origin = join(directory, "origin"), controller = join(directory, "controller");
+      const linked = join(directory, "controller-linked"), candidate = join(directory, "oracle/candidate-fixed/service-checkout");
+      await mkdir(origin);
+      await exec("git", ["init", "--quiet", "--initial-branch=master"], { cwd: origin });
+      for (const text of ["base\n", "controller\n"]) {
+        await writeFile(join(origin, "source.txt"), text);
+        await exec("git", ["add", "--", "source.txt"], { cwd: origin });
+        await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+          "-c", "commit.gpgsign=false", "commit", "-qm", text.trim()], { cwd: origin });
+      }
+      await exec("git", ["clone", "--depth=1", "--branch", "master", "--quiet", "--", pathToFileURL(origin).href, controller]);
+      assert.equal((await exec("git", ["rev-parse", "--is-shallow-repository"], { cwd: controller })).stdout.trim(), "true");
+      const alternates = join(controller, ".git/objects/info/alternates");
+      await writeFile(alternates, `${join(origin, ".git/objects")}\n`);
+      await exec("git", ["worktree", "add", "--detach", linked, "HEAD"], { cwd: controller });
+      assert.match(await readFile(join(linked, ".git"), "utf8"), /^gitdir: /u);
+      await exec("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "linked controller"], { cwd: linked });
+      await mkdir(join(directory, "oracle/candidate-fixed"), { recursive: true });
+      await exec("git", ["-c", "maintenance.auto=false", "clone", "--shared", "--single-branch", "--branch", "master",
+        "--no-checkout", "--no-tags", "--quiet", "--", controller, candidate]);
+      const git = async (cwd: string, ...args: string[]) => (await exec("git", ["--no-optional-locks", ...args], { cwd })).stdout;
+      const linkedHead = (await git(linked, "rev-parse", "HEAD")).trim();
+      await exec("git", ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-C", candidate, "fetch",
+        "--no-tags", "--no-write-fetch-head", "--depth=1", "--update-shallow", "--quiet", linked, linkedHead]);
+      await exec("git", ["-c", "maintenance.auto=false", "-C", candidate, "checkout", "--quiet", "--detach", linkedHead]);
+      assert.equal((await git(candidate, "rev-parse", "--is-shallow-repository")).trim(), "true");
+      assert.equal((await git(candidate, "rev-parse", "HEAD")).trim(), linkedHead);
+      const parent = (await git(controller, "rev-parse", "HEAD")).trim();
+      const tree = (await git(controller, "rev-parse", "HEAD^{tree}")).trim();
+      const sourceState = () => Promise.all([
+        git(controller, "rev-parse", "HEAD"), git(controller, "ls-files", "--stage", "-z"),
+        git(controller, "for-each-ref"), git(linked, "rev-parse", "HEAD"), git(linked, "ls-files", "--stage", "-z"),
+        readFile(join(controller, ".git", "index")), readFile(join(controller, ".git", "shallow")), readFile(alternates),
+      ]);
+      const originalState = await sourceState();
+      const body = `tree ${tree}\nparent ${parent}\nauthor Fixture <fixture@example.invalid> 1700000000 +0000\n` +
+        `committer Fixture <fixture@example.invalid> 1700000000 +0000\n\nfixture product\n`;
+      const sha = createHash("sha1").update(`commit ${Buffer.byteLength(body)}\0`).update(body).digest("hex");
+      await assert.rejects(git(candidate, "cat-file", "-e", `${sha}^{commit}`));
+      const command = `/usr/bin/python3 -B - <<'PY'\n` +
+        `import base64, hashlib, os, subprocess\n` +
+        `sha=${JSON.stringify(sha)}\ncandidate=${JSON.stringify(candidate)}\n` +
+        `body=base64.b64decode(${JSON.stringify(Buffer.from(body).toString("base64"))})\n` +
+        `assert hashlib.sha1(b'commit '+str(len(body)).encode()+b'\\0'+body).hexdigest()==sha\n` +
+        `env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}\n` +
+        `env.update(GIT_NO_LAZY_FETCH='1',GIT_NO_REPLACE_OBJECTS='1',GIT_TERMINAL_PROMPT='0',GIT_OPTIONAL_LOCKS='0')\n` +
+        `w=subprocess.run(['git','--no-optional-locks','-C',candidate,'hash-object','-w','-t','commit','--stdin'],input=body,capture_output=True,env=env)\n` +
+        `assert w.returncode==0 and w.stdout.strip().decode()==sha\n` +
+        `print('exact metadata candidates=1; commit bytes=${Buffer.byteLength(body)}; SHA-1='+sha+'; private Git object written')\nPY`;
+      const plan = await tool("coordinator", "plan_units", { units: [{
+        title: "Restore fixture object", objective: "Restore only the candidate commit object",
+        read: ["check.mjs"], write: ["oracle/candidate-fixed/**", "result.txt"], validation: ["node check.mjs ready"],
+      }] });
+      const unit = (await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!;
+      const worker = await before("coordinator", "subagent", nativeTask(plan.task));
+      const expanded = await prompt("first", String(worker.input.prompt));
+      const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
+      const read = await before("first", "read", { path: handoff });
+      assert.match(await after(read, await readFile(unit.handoffPath, "utf8")), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/u);
+      const gate = await createWriteGate(await createProjectPaths(directory), JSON.parse(await readFile(unit.manifestPath, "utf8")), directory);
+      const request = { tool: "shell", sessionID: "first", callID: "fixture-mode" };
+      await assert.rejects(gate.check(request, { args: { command } }, { investigativeShell: false }), /unclassified command/u);
+      await gate.check(request, { args: { command } }, { investigativeShell: true });
+      for (const effect of ["deny", "ask", "allow"]) {
+        const permission = { sessionID: "first", action: "shell", resources: [command], effect };
+        await fixture.permissionHooks.get("evaluate")!(permission);
+        assert.equal(permission.effect, effect, "the plugin does not upgrade native permissions");
+      }
+      // A real commit, including one in the same Python-heredoc representation,
+      // remains ambiguous rather than becoming an unchecked index mutation.
+      const unsafe = command.replace(
+        "w=subprocess.run(['git','--no-optional-locks','-C',candidate,'hash-object','-w','-t','commit','--stdin'],input=body,capture_output=True,env=env)",
+        "w=subprocess.run([ 'git' , 'commit' , '--all' , '-m' , 'outside' ],capture_output=True,env=env)");
+      await assert.rejects(before("first", "shell", { command: unsafe, timeout: 30000 }), /Write denied/u);
+      const unsafeString = command.replace(
+        "w=subprocess.run(['git','--no-optional-locks','-C',candidate,'hash-object','-w','-t','commit','--stdin'],input=body,capture_output=True,env=env)",
+        "w=__import__('os').system(' git commit -m outside')");
+      await assert.rejects(before("first", "shell", { command: unsafeString, timeout: 30000 }), /Write denied/u);
+      const unsafePrint = command.replace(
+        "w=subprocess.run(['git','--no-optional-locks','-C',candidate,'hash-object','-w','-t','commit','--stdin'],input=body,capture_output=True,env=env)",
+        "print=__import__('os').system\nprint(' git commit -m outside')");
+      await assert.rejects(before("first", "shell", { command: unsafePrint, timeout: 30000 }), /Write denied/u);
+      await assert.rejects(before("first", "shell", { command: "git -C elsewhere commit -m outside" }), /Write denied/u);
+      await assert.rejects(before("first", "shell", { command: "printf forbidden > outside.txt" }), /mission-explicit-write-prohibition/u);
+      await assert.rejects(git(candidate, "cat-file", "-e", `${sha}^{commit}`));
+      const operation = await before("first", "shell", { command, timeout: 30000 });
+      assert.equal(operation.input.command, command, "the admitted V2 shell receives the original heredoc");
+      const executed = await exec(command, { cwd: directory, shell: "/bin/bash", timeout: 30000 });
+      assert.match(executed.stdout, new RegExp(sha, "u"));
+      await after(operation, executed.stdout, { exit: 0 });
+      assert.equal(await git(candidate, "cat-file", "commit", sha), body);
+      assert.equal((await git(candidate, "rev-parse", `${sha}^{tree}`)).trim(), tree);
+      assert.equal((await git(candidate, "show", "-s", "--format=%P", sha)).trim(), parent);
+      assert.deepEqual(await sourceState(), originalState, "candidate object restoration must not change the original Git state");
+      const patch = await before("first", "patch", { patchText: "*** Begin Patch\n*** Add File: result.txt\n+ready\n*** End Patch" });
+      await writeFile(join(directory, "result.txt"), "ready\n"); await after(patch, "Updated result.txt");
+      const validation = await before("first", "shell", { command: "node check.mjs ready" });
+      const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+      await after(validation, checked.stdout, { exit: 0 });
+      agents.first!.outcome = "succeeded";
+      await after(worker, "Fixture object restored and validation passed", { sessionID: "first" });
+      const settled = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(settled.units[0]!.status, "succeeded");
+      assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.callID, validation.id);
+      assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.exitCode, 0);
+      assert.equal(settled.receipt, null, "a Worker result does not accept the Mission");
+      return;
     }
     if (commit === "linked-identity") {
       const workdir = join(directory, "linked");
