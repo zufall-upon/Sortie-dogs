@@ -277,13 +277,16 @@ export class NativeBackgroundLifecycle {
         const prompt = history[promptIndex];
         const promptTime = object(prompt?.time) ? prompt.time.created : undefined;
         const laterPrompt = fresh.some(item => item.type === "user");
+        // Synthetic input can resume the same child without another user prompt.
+        // An intervening idle ends this prompt's turn; a later idle is not its terminal.
+        const laterTurn = fresh.slice(0, -1).some(item => item.type === "idle");
         if (object(info) && info.id === dispatch.child && info.parentID === parent && info.agent === dispatch.agent &&
             (dispatch.input.sessionID === undefined || dispatch.input.sessionID === dispatch.child) &&
             prompt?.type === "user" && typeof promptTime === "number" &&
             object(idle) && idle.type === "idle" && ["succeeded", "failed", "interrupted"].includes(String(idle.outcome)) &&
             info.outcome === idle.outcome && typeof idleTime === "number" && idleTime >= promptTime &&
             time && typeof time.busy === "number" && typeof time.idle === "number" &&
-            time.busy >= dispatch.admittedAt && time.idle === idleTime && time.busy <= time.idle && !laterPrompt) {
+            time.busy >= dispatch.admittedAt && time.idle === idleTime && time.busy <= time.idle && !laterPrompt && !laterTurn) {
           dispatch.terminal = idle.outcome as NativeBackgroundDispatch["terminal"];
         }
       }

@@ -832,6 +832,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // settlement; never mistake a prior parent response for this unit's completion.
         if (unit.directExecution && run.phase !== "cancelled") return undefined;
         if (run.phase !== "cancelled") {
+          // Root budget recovery must not bypass a nested Job's exact terminal
+          // reconciliation with a later outcome from the same reusable child.
+          if (unit.childSessionID && await input.nativeBackground?.awaiting(unit.childSessionID)) return undefined;
           const mission = await missions.read(root);
           const attempt = mission?.attempts?.find(item => item.runID === run!.runID && item.unitID === unit.unit.id &&
             item.callID === unit.callID && item.childSessionID === unit.childSessionID);
