@@ -945,10 +945,13 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, objectRestore: true },
   { legacy: false, commit: false, cancel: false, nestedBackground: "cold" },
   { legacy: false, commit: false, cancel: false, nestedBackground: "storage-error" },
+  ...["foreground-cold-pass", "foreground-cold-fail", "foreground-settlement-error"].map(nestedBackground =>
+    ({ legacy: false, commit: false, cancel: false, nestedBackground })),
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
+test(nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
+  nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
   nestedBackground ? "V2 Coordinator reconciles an implicitly background Worker with a failed check" :
   objectRestore ? "V2 Worker restores a scoped Git commit object with quoted Python display data" :
   commit === "linked-identity" ? "V2 direct Coordinator permits scoped linked worktree identity and unsigned commit" :
@@ -973,6 +976,7 @@ test(nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker who
   };
   let fixture = contextFixture(), cleanup: (() => void) | void, counter = 0;
   let failBackgroundWrite = false;
+  let failForegroundAfter = false;
   const storage = fixture.context.storage!;
   const retainedStorage = { ...storage, set: async (key: string, value: unknown) => {
     if (failBackgroundWrite && key === "v2-background-dispatches:coordinator") {
@@ -1000,6 +1004,10 @@ test(nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker who
       const hooks = await SortieDogsV010Plugin(input, options);
       const after = hooks["tool.execute.after"];
       hooks["tool.execute.after"] = async (request, output) => {
+        if (failForegroundAfter && request.tool === "task" && request.sessionID === "coordinator") {
+          failForegroundAfter = false;
+          throw new Error("fixture foreground accounting unavailable");
+        }
         if (permission?.startsWith("v1") && request.sessionID === "coordinator" && ["bash", "shell"].includes(request.tool)) {
           delete output.status;
           if (permission === "v1-no-exit") delete output.metadata?.exit;
@@ -1298,22 +1306,53 @@ test('requires exclusive execution', async () => {
       }
       const worker = await before("coordinator", "subagent", nativeTask(plan.task));
       assert.equal(worker.input.background, undefined, "use the observed implicit native Job invocation");
-      await after(worker, "Native Job running", { sessionID: "first", status: "running" });
+      const foreground = nestedBackground.startsWith("foreground-");
+      const succeeds = foreground && nestedBackground !== "foreground-cold-fail";
+      if (!foreground) await after(worker, "Native Job running", { sessionID: "first", status: "running" });
       const expanded = await prompt("first", String(worker.input.prompt));
       const promptID = String(history.first!.at(-1)!.id);
       const handoff = /^handoff_path: (.+)$/m.exec(expanded)![1]!;
       const read = await before("first", "read", { path: handoff });
       assert.match(await after(read, await readFile(unit.handoffPath, "utf8")), /SORTIE_WORKER_ACTIVATION: \{"status":"ready"\}/u);
-      const patch = await before("first", "patch", { patchText: "*** Begin Patch\n*** Add File: result.txt\n+broken\n*** End Patch" });
-      await writeFile(join(directory, "result.txt"), "broken\n"); await after(patch, "Updated result.txt");
+      const value = succeeds ? "ready" : "broken";
+      const patch = await before("first", "patch", { patchText: `*** Begin Patch\n*** Add File: result.txt\n+${value}\n*** End Patch` });
+      await writeFile(join(directory, "result.txt"), `${value}\n`); await after(patch, "Updated result.txt");
       const validation = await before("first", "shell", { command });
-      const failure = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory })
-        .then(() => { throw new Error("fixture check unexpectedly passed"); }, error => ({ code: error.code, output: String(error.stderr) }));
-      assert.equal(failure.code, 1);
-      await after(validation, failure.output, { exit: failure.code });
+      const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory })
+        .then(result => ({ code: 0, output: result.stdout }), error => ({ code: error.code, output: String(error.stderr) }));
+      assert.equal(checked.code, succeeds ? 0 : 1);
+      await after(validation, checked.output, { exit: checked.code });
       const beforeTerminal = await runtime.required("root");
       assert.equal(beforeTerminal.units[0]!.status, "running");
-      assert.equal(beforeTerminal.units[0]!.validationRegistration!.checks[0]!.exitCode, 1);
+      assert.equal(beforeTerminal.units[0]!.validationRegistration!.checks[0]!.exitCode, checked.code);
+      if (foreground) {
+        agents.first!.outcome = "succeeded";
+        if (nestedBackground === "foreground-settlement-error") {
+          failForegroundAfter = true;
+          await assert.rejects(after(worker, "Native foreground Worker ended", { sessionID: "first" }),
+            /fixture foreground accounting unavailable/u);
+          const saved = await retainedStorage.get("v2-background-dispatches:coordinator") as Array<Record<string, unknown>>;
+          assert.notEqual(saved.find(dispatch => dispatch.callID === worker.id)!.settled, true,
+            "a failed settlement must retain the exact owner and terminal for cold retry");
+          assert.equal((await runtime.required("root")).units[0]!.status, "running");
+        }
+        cleanup?.(); await start();
+        if (nestedBackground !== "foreground-settlement-error") {
+          await after(worker, "Native foreground Worker ended", { sessionID: "first" });
+        }
+        const packet = await tool("coordinator", "operator_next");
+        const settled = await runtime.required("root");
+        assert.equal(settled.units[0]!.status, succeeds ? "succeeded" : "failed", JSON.stringify(packet));
+        assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.callID, validation.id);
+        assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.exitCode, checked.code);
+        if (succeeds) assert.ok(settled.units[0]!.evidence.length > 0, "cold foreground settlement retains native formal evidence");
+        assert.equal(settled.receipt, null);
+        assert.equal(packet.budget.reserved_units, 0);
+        assert.equal(packet.budget.consumed_units, 1);
+        const repeated = await tool("coordinator", "operator_next");
+        assert.deepEqual(repeated.budget, packet.budget, "repeated reconciliation cannot consume the Worker twice");
+        return;
+      }
       cleanup?.(); await start();
       const now = Date.now();
       history.first!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-worker-v010", finish: "stop",

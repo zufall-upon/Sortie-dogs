@@ -868,16 +868,19 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       ? await nativeContractReadSnapshot(context.location.directory, event.input) : undefined;
     if (view !== undefined) mapped.output = view.output;
     if (heldDirection) mapped.output = `${mapped.output ?? ""}\n\nSORTIE_GRIP_HANDOFF\n${JSON.stringify(heldDirection)}`;
-    if (event.tool === "subagent") {
-      // A foreground Task can finish after an adapter reload. Restore its
-      // captured owner, then clear the provisional Job before ordinary
-      // foreground recovery inspects outstanding reservations.
-      await background.resume(String(event.sessionID));
-      if (!running) await background.launched(String(event.sessionID), String(event.id), undefined, false);
-    }
-    await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
-      callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
-      ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
+    const complete = async () => {
+      await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
+        callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
+        ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
+      return typeof mapped.output === "string" ? mapped.output : undefined;
+    };
+    if (event.tool === "subagent" && !running) {
+      const output = await background.foreground(String(event.sessionID), String(event.id),
+        record(mapped.metadata) ? string(mapped.metadata.sessionID) : undefined,
+        event.status === "error" ? "failed" : event.status === "cancelled" ? "interrupted" : "succeeded",
+        String(mapped.output ?? ""), complete);
+      if (typeof output === "string") mapped.output = output;
+    } else await complete();
     if (event.tool === "subagent") {
       const metadata = record(result.metadata) ? result.metadata : {};
       if (running) await background.launched(String(event.sessionID), String(event.id), string(metadata.sessionID), true);
