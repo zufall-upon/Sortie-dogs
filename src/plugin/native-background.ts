@@ -265,6 +265,31 @@ export class NativeBackgroundLifecycle {
           }
         }
       }
+      if (!dispatch.terminal && dispatch.child && dispatch.promptID && dispatch.owner && promptIndex >= 0) {
+        // The public V2 log can contain only log.synced after a completed Job.
+        // A persisted native idle is a terminal, unlike the parent notification or
+        // an assistant's final text. Bind it to this exact, latest child prompt and
+        // the current quiescent session; stale or ambiguous writers stay reserved.
+        const info = await this.context.session.get({ sessionID: dispatch.child });
+        const idle = history.at(-1);
+        const time = object(info) && object(info.time) ? info.time : undefined;
+        const idleTime = object(idle) && object(idle.time) ? idle.time.created : undefined;
+        const prompt = history[promptIndex];
+        const promptTime = object(prompt?.time) ? prompt.time.created : undefined;
+        const laterPrompt = fresh.some(item => item.type === "user");
+        // Synthetic input can resume the same child without another user prompt.
+        // An intervening idle ends this prompt's turn; a later idle is not its terminal.
+        const laterTurn = fresh.slice(0, -1).some(item => item.type === "idle");
+        if (object(info) && info.id === dispatch.child && info.parentID === parent && info.agent === dispatch.agent &&
+            (dispatch.input.sessionID === undefined || dispatch.input.sessionID === dispatch.child) &&
+            prompt?.type === "user" && typeof promptTime === "number" &&
+            object(idle) && idle.type === "idle" && ["succeeded", "failed", "interrupted"].includes(String(idle.outcome)) &&
+            info.outcome === idle.outcome && typeof idleTime === "number" && idleTime >= promptTime &&
+            time && typeof time.busy === "number" && typeof time.idle === "number" &&
+            time.busy >= dispatch.admittedAt && time.idle === idleTime && time.busy <= time.idle && !laterPrompt && !laterTurn) {
+          dispatch.terminal = idle.outcome as NativeBackgroundDispatch["terminal"];
+        }
+      }
       if (!dispatch.terminal && !this.context.session.log) {
         // Native completion inboxes survive reload even when the child context was compacted.
         const inboxes = this.context.session.inbox ? values(await this.context.session.inbox.list({ sessionID: parent })) : [];

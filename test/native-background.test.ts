@@ -158,6 +158,38 @@ test("cold native log reconciles interrupted launches and excludes late old-gene
   assert.deepEqual(settled, ["new-call:interrupted"]);
 });
 
+for (const condition of ["current", "busy", "missing-owner", "missing-prompt", "later-prompt", "later-idle",
+  "wrong-parent", "wrong-agent", "outcome-conflict", "idle-time-conflict"] as const) {
+  test(`native idle history preserves the exact Job and writer boundary: ${condition}`, async () => {
+    const f = fixture(), settled: string[] = [], now = Date.now();
+    const base = f.context as unknown as { session: Record<string, unknown> };
+    const info = { id: "child", parentID: condition === "wrong-parent" ? "other" : "root",
+      agent: condition === "wrong-agent" ? "other" : "dog-worker-v010",
+      outcome: condition === "outcome-conflict" ? "failed" : "succeeded",
+      time: { busy: condition === "busy" ? now + 1020 : condition === "later-idle" ? now + 1004 : now + 1001,
+        idle: condition === "idle-time-conflict" ? now + 1011 : now + 1010 } };
+    const context = { ...base, session: { ...base.session,
+      get: async ({ sessionID }: { sessionID: string }) => sessionID === "child" ? info : { id: sessionID },
+      log: async function* () { yield { type: "log.synced" }; },
+    } } as never;
+    const lifecycle = new NativeBackgroundLifecycle(context, async dispatch => { settled.push(dispatch.terminal!); });
+    await lifecycle.admit("root", "call", { agent: "dog-worker-v010", prompt: "exact" },
+      condition === "missing-owner" ? undefined : { reservation: "held" });
+    await lifecycle.bind("root", "child", "dog-worker-v010", "exact",
+      condition === "missing-prompt" ? undefined : "prompt");
+    f.history.child!.push({ id: "prompt", type: "user", time: { created: now + 1001 } });
+    if (condition === "later-prompt") f.history.child!.push({ id: "other", type: "user", time: { created: now + 1002 } });
+    if (condition === "later-idle") f.history.child!.push(
+      { id: "original-idle", type: "idle", outcome: "failed", time: { created: now + 1003 } },
+      { id: "resume", type: "synthetic", text: "Native follow-up", time: { created: now + 1004 } });
+    f.history.child!.push({ id: "idle", type: "idle", outcome: "succeeded", time: { created: now + 1010 } });
+    await lifecycle.launched("root", "call", "child", true);
+    await lifecycle.reconcile("root");
+    assert.deepEqual(settled, condition === "current" ? ["succeeded"] : []);
+    assert.equal(await lifecycle.awaiting("root"), condition !== "current");
+  });
+}
+
 test("reload restores ownership before continued child observations and checkpoints their formal evidence", async () => {
   const f = fixture();
   const first = new NativeBackgroundLifecycle(f.context, async () => {});

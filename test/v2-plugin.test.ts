@@ -945,12 +945,15 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: false, commit: false, cancel: false, objectRestore: true },
   { legacy: false, commit: false, cancel: false, nestedBackground: "cold" },
   { legacy: false, commit: false, cancel: false, nestedBackground: "storage-error" },
+  ...["idle-pass", "idle-failed-check", "idle-failed-native", "idle-later-turn"].map(nestedBackground =>
+    ({ legacy: false, commit: false, cancel: false, nestedBackground })),
   ...["foreground-cold-pass", "foreground-cold-fail", "foreground-settlement-error"].map(nestedBackground =>
     ({ legacy: false, commit: false, cancel: false, nestedBackground })),
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
+test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
+  nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
   nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
   nestedBackground ? "V2 Coordinator reconciles an implicitly background Worker with a failed check" :
   objectRestore ? "V2 Worker restores a scoped Git commit object with quoted Python display data" :
@@ -968,7 +971,7 @@ test(nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBac
   const exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
   const logs: Record<string, Record<string, unknown>[]> = {};
-  const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+  const agents: Record<string, { agent: string; parentID?: string; outcome?: string; time?: { busy: number; idle: number } }> = {
     root: { agent: "dog-operator" }, coordinator: { agent: "dogs-coordinator", parentID: "root" },
     first: { agent: "dog-worker-v010", parentID: "coordinator" }, second: { agent: "dog-worker-v010", parentID: "coordinator" },
     reviewer: { agent: "dog-reviewer-v010", parentID: "coordinator" },
@@ -1307,7 +1310,9 @@ test('requires exclusive execution', async () => {
       const worker = await before("coordinator", "subagent", nativeTask(plan.task));
       assert.equal(worker.input.background, undefined, "use the observed implicit native Job invocation");
       const foreground = nestedBackground.startsWith("foreground-");
-      const succeeds = foreground && nestedBackground !== "foreground-cold-fail";
+      const idleHistory = nestedBackground.startsWith("idle-");
+      const succeeds = (foreground && nestedBackground !== "foreground-cold-fail") ||
+        nestedBackground === "idle-pass" || nestedBackground === "idle-failed-native" || nestedBackground === "idle-later-turn";
       if (!foreground) await after(worker, "Native Job running", { sessionID: "first", status: "running" });
       const expanded = await prompt("first", String(worker.input.prompt));
       const promptID = String(history.first!.at(-1)!.id);
@@ -1325,6 +1330,52 @@ test('requires exclusive execution', async () => {
       const beforeTerminal = await runtime.required("root");
       assert.equal(beforeTerminal.units[0]!.status, "running");
       assert.equal(beforeTerminal.units[0]!.validationRegistration!.checks[0]!.exitCode, checked.code);
+      if (idleHistory) {
+        const pending = await tool("coordinator", "operator_next");
+        assert.equal((await runtime.required("root")).units[0]!.status, "running");
+        const status = await tool("coordinator", "operator_status");
+        assert.equal(status.attempts[0].status, "dispatched");
+        await assert.rejects(before("coordinator", "subagent", { ...nativeTask(plan.task), sessionID: "first" }),
+          /operator-unit-not-authorized/);
+        const now = Date.now();
+        const outcome = nestedBackground === "idle-failed-native" ? "failed" : "succeeded";
+        if (nestedBackground === "idle-later-turn") history.first!.push(
+          { id: `msg_${++counter}`, type: "idle", outcome: "failed", time: { created: now - 2 } },
+          { id: `msg_${++counter}`, type: "synthetic", text: "Native follow-up", time: { created: now - 1 } });
+        history.first!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-worker-v010", finish: "stop",
+          time: { created: now, completed: now }, content: [{ type: "text", text: "Worker finished" }] },
+        { id: `msg_${++counter}`, type: "idle", outcome, time: { created: now + 1 } });
+        agents.first!.outcome = outcome;
+        agents.first!.time = { busy: now, idle: now + 1 };
+        cleanup?.(); await start();
+        const packet = await tool("coordinator", "operator_next");
+        const settled = await runtime.required("root");
+        if (nestedBackground === "idle-later-turn") {
+          assert.equal(settled.units[0]!.status, "running", "a later successful turn cannot settle the original failed Job");
+          assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.callID, validation.id);
+          assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.exitCode, 0);
+          assert.equal(settled.receipt, null);
+          const saved = await retainedStorage.get("v2-background-dispatches:coordinator") as Array<Record<string, unknown>>;
+          const original = saved.find(dispatch => dispatch.callID === worker.id)!;
+          assert.equal(original.terminal, undefined);
+          assert.notEqual(original.settled, true, "ambiguous native turns retain the original owner");
+          assert.deepEqual(packet.budget, pending.budget);
+          const status = await tool("coordinator", "operator_status");
+          assert.equal(status.attempts[0].status, "dispatched");
+          await assert.rejects(before("coordinator", "subagent", { ...nativeTask(plan.task), sessionID: "first" }),
+            /operator-unit-not-authorized/);
+          assert.deepEqual((await tool("coordinator", "operator_next")).budget, packet.budget);
+          return;
+        }
+        assert.equal(settled.units[0]!.status, nestedBackground === "idle-pass" ? "succeeded" : "failed", JSON.stringify(packet));
+        assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.callID, validation.id);
+        assert.equal(settled.units[0]!.validationRegistration!.checks[0]!.exitCode, checked.code);
+        assert.equal(settled.receipt, null);
+        assert.equal(packet.budget.reserved_units, 0);
+        assert.equal(packet.budget.consumed_units, 1);
+        assert.deepEqual((await tool("coordinator", "operator_next")).budget, packet.budget);
+        return;
+      }
       if (foreground) {
         agents.first!.outcome = "succeeded";
         if (nestedBackground === "foreground-settlement-error") {
