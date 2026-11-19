@@ -206,6 +206,21 @@ function words(command: string): string[] {
   return command.match(/"(?:\\.|[^"])*"|'[^']*'|[^\s]+/gu)?.map(unquote) ?? [];
 }
 
+/**
+ * Recognize only a simple Python display expression, not executable arguments
+ * to an arbitrary opaque program. Keep the Git guard for command-looking text:
+ * Python can rebind `print`, and unknown program internals remain native policy.
+ */
+function pythonDisplayData(source: string): boolean {
+  const match = /^print\s*\((.*)\)\s*$/u.exec(source);
+  if (!match) return false;
+  const expression = match[1]!;
+  const atom = String.raw`(?:'[^'\\]*'|"[^"\\]*"|[A-Za-z_][A-Za-z0-9_]*)`;
+  if (!new RegExp(String.raw`^\s*${atom}(?:\s*\+\s*${atom})*\s*$`, "u").test(expression)) return false;
+  if (!/['"]/u.test(expression)) return false;
+  return !/(?:^|[\s/\\])git(?:\.exe)?\b[\s\S]*?\b(?:add|commit)\b/iu.test(expression);
+}
+
 /** Reuse the write-gate's quoted shell tokenization for non-authorizing command identity checks. */
 export function shellCommandWords(command: string): string[] {
   return words(command);
@@ -1651,7 +1666,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       pathValues.clear(); knownCwd = undefined;
       applies = true;
       ambiguous = true;
-      if ((executable === "git" || rawTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token))) &&
+      if ((powershell || !pythonDisplayData(source)) &&
+        (executable === "git" || rawTokens.some(token => /(?:^|[\\/])git(?:\.exe)?$/iu.test(token))) &&
         tokens.slice(1).some(token => token === "add" || token === "commit")) gitAmbiguous = true;
       issue ??= commandIssue(source, "executable-not-allowlisted", "use a direct allowlisted read-only command");
     }

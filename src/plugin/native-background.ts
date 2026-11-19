@@ -22,6 +22,8 @@ export interface NativeBackgroundDispatch {
   settled?: boolean;
   /** Host-reconciled output for this exact native invocation, not another completion prompt. */
   result?: string;
+  /** Exact native foreground output retained if its accounting needs a cold retry. */
+  foregroundOutput?: string;
 }
 
 /** Project the captured Coordinator result, not today's potentially different run or evidence. */
@@ -48,6 +50,7 @@ function modelResult(dispatch: NativeBackgroundDispatch, result: string): string
 export class NativeBackgroundLifecycle {
   private readonly operations = new Map<string, Promise<unknown>>();
   private readonly restored = new Set<string>();
+  private readonly completingForeground = new Set<string>();
   private readonly reconciliationErrors = new Map<string, { error: unknown; notice: string }>();
   constructor(private readonly context: OpenCodeV2Context,
     private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<string | void>,
@@ -100,11 +103,43 @@ export class NativeBackgroundLifecycle {
       return true;
     });
   }
+  /** Settle a native foreground return without dropping its durable owner on failure. */
+  async foreground(parent: string, callID: string, child: string | undefined,
+    terminal: NonNullable<NativeBackgroundDispatch["terminal"]>, text: string,
+    complete: () => Promise<string | void>): Promise<string | void> {
+    return this.serial(parent, async () => {
+      const dispatches = await this.read(parent), dispatch = dispatches.find(item => item.callID === callID);
+      if (!dispatch) return complete();
+      if (dispatch.settled) return dispatch.result;
+      const identity = `${parent}\0${callID}`;
+      if (dispatch.owner && !this.restored.has(identity)) {
+        this.owner?.(callID, dispatch.owner);
+        this.restored.add(identity);
+      }
+      if (child) dispatch.child = child;
+      dispatch.launched = true;
+      dispatch.terminal = terminal;
+      dispatch.foregroundOutput = text;
+      await this.write(parent, dispatches);
+      // Ordinary accounting may inspect outstanding reservations. Exclude only
+      // this call while it runs; other native Jobs retain their normal hold.
+      this.completingForeground.add(identity);
+      try {
+        const result = await complete();
+        if (typeof result === "string") dispatch.result = result;
+        dispatch.settled = true;
+        await this.write(parent, dispatches);
+        return result;
+      } finally { this.completingForeground.delete(identity); }
+    });
+  }
   async awaiting(sessionID: string): Promise<boolean> {
-    if ((await this.read(sessionID)).some(item => !item.settled)) return true;
+    const pending = (item: NativeBackgroundDispatch) => !item.settled &&
+      !this.completingForeground.has(`${item.parent}\0${item.callID}`);
+    if ((await this.read(sessionID)).some(pending)) return true;
     const info = await this.context.session.get({ sessionID });
     return object(info) && typeof info.parentID === "string" &&
-      (await this.read(info.parentID)).some(item => !item.settled && item.child === sessionID);
+      (await this.read(info.parentID)).some(item => pending(item) && item.child === sessionID);
   }
   reconciliationNotice(parent: string): string | undefined { return this.reconciliationErrors.get(parent)?.notice; }
   reconciliationError(parent: string): unknown { return this.reconciliationErrors.get(parent)?.error; }
@@ -244,7 +279,8 @@ export class NativeBackgroundLifecycle {
       if (!dispatch.terminal) continue;
       // Retain the terminal observation if accounting throws; a later context/status boundary retries it.
       await this.write(parent, dispatches);
-      const text = last ? values(last.content).filter(item => item.type === "text" && typeof item.text === "string").map(item => item.text).join("\n") : "";
+      const text = dispatch.foregroundOutput ??
+        (last ? values(last.content).filter(item => item.type === "text" && typeof item.text === "string").map(item => item.text).join("\n") : "");
       const result = await this.settle(dispatch, text);
       if (typeof result === "string") dispatch.result = result;
       dispatch.settled = true;

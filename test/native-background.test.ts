@@ -102,6 +102,36 @@ test("settlement errors remain pending and retry; independent parents are concur
   assert.deepEqual(settled, ["other-root", "root"]);
 });
 
+test("cold foreground accounting restores its owner and retries the same terminal without losing the host result", async () => {
+  const f = fixture(), owner = { reservation: "foreground", evidence: ["native-check"] };
+  const initial = new NativeBackgroundLifecycle(f.context, async () => {});
+  await initial.admit("root", "foreground", { agent: "dog-worker-v010", prompt: "exact" }, owner);
+  await initial.bind("root", "child", "dog-worker-v010", "exact", "prompt");
+  let restored: unknown, settlements = 0;
+  const cold = new NativeBackgroundLifecycle(f.context, async () => {}, (_call, value) => { restored = value; return value; });
+  await assert.rejects(cold.foreground("root", "foreground", "child", "succeeded", "exact native output", async () => {
+    assert.deepEqual(restored, owner);
+    assert.equal(await cold.awaiting("root"), false, "this foreground accounting does not block itself");
+    assert.equal(await cold.awaiting("child"), false);
+    throw Error("temporary accounting failure");
+  }), /temporary accounting failure/);
+  assert.equal(await cold.awaiting("root"), true, "the failed accounting remains pending");
+  const retry = new NativeBackgroundLifecycle(f.context, async (dispatch, text) => {
+    settlements++;
+    assert.deepEqual(dispatch.owner, owner);
+    assert.equal(dispatch.child, "child");
+    assert.equal(dispatch.terminal, "succeeded");
+    assert.equal(text, "exact native output", "retry needs no replacement child output");
+    return "recorded host result";
+  });
+  await retry.reconcile("root");
+  assert.equal(await retry.awaiting("root"), false);
+  const result = await retry.foreground("root", "foreground", "child", "succeeded", "duplicate native output",
+    async () => { throw Error("settled foreground call must not run accounting twice"); });
+  assert.equal(result, "recorded host result");
+  assert.equal(settlements, 1);
+});
+
 test("cold native log reconciles interrupted launches and excludes late old-generation events", async () => {
   const f = fixture(), log: Record<string, unknown>[] = [], settled: string[] = [];
   const base = f.context as unknown as { session: Record<string, unknown> };

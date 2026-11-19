@@ -822,10 +822,28 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
         throw error;
       }
     }
-    if (event.tool === "subagent" && record(event.input) && event.input.background === true) {
-      const info = await context.session.get({ sessionID: String(event.sessionID) });
-      if (record(info) && typeof info.parentID === "string") delete event.input.background;
-      else await background.admit(String(event.sessionID), String(event.id), event.input, hooks.backgroundOwner?.(String(event.id)));
+    if (event.tool === "subagent" && record(event.input)) {
+      const requestedBackground = event.input.background === true;
+      const owner = hooks.backgroundOwner?.(String(event.id));
+      try {
+        const nestedWorker = ["dog-worker-v010", "dog-luna-worker-v010"].includes(String(event.input.agent));
+        const info = requestedBackground || (owner && nestedWorker && context.storage)
+          ? await context.session.get({ sessionID: String(event.sessionID) }) : undefined;
+        const nested = record(info) && typeof info.parentID === "string";
+        if (requestedBackground && nested) delete event.input.background;
+        // Native V2 may return a running Job even when the caller did not request
+        // background execution. Capture a nested Worker's admitted owner before
+        // launch; an actual foreground result still settles normally.
+        if ((requestedBackground && !nested) || (nested && nestedWorker && owner && context.storage)) {
+          await background.admit(String(event.sessionID), String(event.id), event.input, owner);
+        }
+      } catch (error) {
+        if (owner) await hooks["tool.execute.after"]?.({
+          tool: "task", sessionID: String(event.sessionID), callID: String(event.id),
+          args: legacyToolInput("subagent", event.input),
+        }, { status: "error", output: "Native background admission failed before launch.", metadata: { status: "failed" } });
+        throw error;
+      }
     }
     if (event.tool === "subagent" && record(event.input) && typeof event.input.agent === "string" && typeof event.input.prompt === "string") {
       // Record only admitted explicit choices, scoped by role as well as parent and prompt.
@@ -850,12 +868,22 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       ? await nativeContractReadSnapshot(context.location.directory, event.input) : undefined;
     if (view !== undefined) mapped.output = view.output;
     if (heldDirection) mapped.output = `${mapped.output ?? ""}\n\nSORTIE_GRIP_HANDOFF\n${JSON.stringify(heldDirection)}`;
-    await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
-      callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
-      ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
+    const complete = async () => {
+      await hooks["tool.execute.after"]?.({ tool: legacyToolName(event.tool), sessionID: String(event.sessionID ?? ""),
+        callID: String(event.id ?? ""), args: legacyToolInput(event.tool, event.input),
+        ...(view ? { nativeReadHash: view.hash } : {}) }, mapped);
+      return typeof mapped.output === "string" ? mapped.output : undefined;
+    };
+    if (event.tool === "subagent" && !running) {
+      const output = await background.foreground(String(event.sessionID), String(event.id),
+        record(mapped.metadata) ? string(mapped.metadata.sessionID) : undefined,
+        event.status === "error" ? "failed" : event.status === "cancelled" ? "interrupted" : "succeeded",
+        String(mapped.output ?? ""), complete);
+      if (typeof output === "string") mapped.output = output;
+    } else await complete();
     if (event.tool === "subagent") {
       const metadata = record(result.metadata) ? result.metadata : {};
-      await background.launched(String(event.sessionID), String(event.id), string(metadata.sessionID), running);
+      if (running) await background.launched(String(event.sessionID), String(event.id), string(metadata.sessionID), true);
       if (typeof metadata.sessionID === "string") await correctionPermissions(metadata.sessionID);
       if (resumedReviewer && resumedReviewer !== metadata.sessionID) await correctionPermissions(resumedReviewer);
     }
