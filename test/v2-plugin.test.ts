@@ -2394,9 +2394,12 @@ for (const [request, quote] of [
   ["Use the same author and do not change the existing API.", "same author"],
   ["Do not change the existing API, use the same author.", "same author"],
   ["Use the same author and do not use a different author.", "same author"],
+  ["Use the same author and do not automatically select a different author.", "same author"],
   ["前回の実装担当で続けて", "前回の実装担当"],
   ["前回の実装担当に修正を依頼して。", "前回の実装担当"],
   ["同じ作者を使い、既存のAPIを変更する。", "同じ作者"],
+  ["同じ作者で続けて、別の担当のAPIを使って。", "同じ作者"],
+  ["同じ作者で続けて、別の担当に修正を依頼しないで。", "同じ作者"],
   ["同じ実装担当が担当する。", "同じ実装担当"],
   ["同じ実装担当が担当すること。", "同じ実装担当"],
 ]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
@@ -2470,6 +2473,8 @@ for (const request of [
   "同じ実装担当が担当するAPIを使って修正して。",
   "同じ実装担当が担当することになっているAPIを使って修正して。",
   "前回の実装担当に修正を依頼したAPIを使って修正して。",
+  "Do not automatically select the same author for new work.",
+  "前回の実装担当に修正を依頼しないで。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
@@ -2490,11 +2495,15 @@ for (const request of [
 
 for (const [request, quote] of [
   ["Do not use the same author for this new work.", "same author"],
+  ["Do not automatically select the same author for new work.", "same author"],
   ["Use the same author and do not use the same author.", "same author"],
   ["Use the same author, but the same author should not be used.", "same author"],
   ["Use the same author, but the same author is unnecessary.", "same author"],
   ["Use the same author and select a different author.", "same author"],
   ["同じ作者を使って、同じ作者を使わない。", "同じ作者"],
+  ["前回の実装担当に修正を依頼しないで。", "前回の実装担当"],
+  ["前回の実装担当に修正を任せないで。", "前回の実装担当"],
+  ["同じ作者で続けて、別の担当に修正を依頼して。", "同じ作者"],
 ]) test(`V2 author continuation cannot use a quote that negates the user's instruction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-intent-")), fixture = contextFixture();

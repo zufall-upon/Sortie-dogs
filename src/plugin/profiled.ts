@@ -2619,20 +2619,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // A separately qualified artifact does not erase selection of the first actor.
       const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}(?!${englishBoundary}))`;
       const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
-      const negatedTarget = new RegExp(String.raw`\b(?:do\s+not|don['’]t|never|not)\s+(?:${verb}\s+(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?(?:not\s+(?:be\s+)?(?:used|assigned|selected|required|needed)|unnecessary)\b|${target}\s*(?:を|は|が|で|に)?\s*(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の\s*${actor}`, "iu");
-      const otherSelection = new RegExp(String.raw`\b${verb}\s+(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
+      const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
+      const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}`;
+      const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
+      const negativeInflection = String.raw`(?:(?:し|[いわが])?(?:な[いく]|ません)|(?:する|る|う)な)`;
+      const requestedAction = String.raw`(?:任せ(?!${negativeInflection}|た|てい[たる]|る(?!${directiveEnd}))|依頼(?!${negativeInflection}|した|してい[たる]|する(?!${directiveEnd})))`;
+      const requestedWork = String.raw`(?:[^に、。,.!?！？;\r\n]*?を)?`;
+      // Use the same person-directed suffix for both the requested and alternative
+      // actor. "別の担当のAPI" names an artifact, not another person to select.
+      const japaneseSelection = String.raw`\s*(?:を(?:(?:継続|再開|引き継|引継|使|維持)(?!${negativeInflection})|変えない|替えない)|に${requestedWork}${requestedAction}|で(?:続け|続行|進め|再開|お願い)(?!${negativeInflection})|が(?:続け(?!${negativeInflection}|た)|担当(?!${negativeInflection}|した|してい[たる]|する(?!${directiveEnd})))|は(?:変えない|替えない))`;
+      const japaneseNegation = String.raw`\s*(?:(?:を|は|が|で|に)?\s*(?:(?:継続|再開|引き継|引継|使|維持|続け|続行|進め|お願い|担当)${negativeInflection}|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|に${requestedWork}(?:任せ|依頼)${negativeInflection})`;
+      const negatedTarget = new RegExp(String.raw`${negation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?(?:not\s+(?:be\s+)?(?:used|assigned|selected|required|needed)|unnecessary)\b|${target}${japaneseNegation}`, "iu");
+      const otherSelection = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
       // Negation and alternatives must govern the selected person, not an
       // unrelated object in another clause (such as an existing API).
-      const contrary = negatedTarget.test(text) || [...text.matchAll(otherSelection)].some(match =>
-        !/\b(?:do\s+not|don['’]t|never|not)\s+$/iu.test(text.slice(0, match.index)));
+      const contrary = negatedTarget.test(text) || new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
+        [...text.matchAll(otherSelection)].some(match =>
+          !new RegExp(String.raw`${negation}$`, "iu").test(text.slice(0, match.index)));
       if (!new RegExp(target, "iu").test(text) || contrary) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
-      const command = String.raw`\b${verb}\s+(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
-      const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
-      const requestedAction = String.raw`(?:任せ(?!た|てい[たる]|る(?!${directiveEnd}))|依頼(?!した|してい[たる]|する(?!${directiveEnd})))`;
-      const requestedWork = String.raw`(?:[^に、。,.!?！？;\r\n]*?を)?`;
-      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に${requestedWork}${requestedAction}|で(?:続け|続行|進め|再開|お願い)|が(?:続け(?!た)|担当(?!した|してい[たる]|する(?!${directiveEnd})))|は(?:変えない|替えない))`, "iu");
+      const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
+      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
       return selection.test(text);
     }
     async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {
