@@ -2385,10 +2385,12 @@ test('requires exclusive execution', async () => {
 
 for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
+  ["Use the same author again.", "same author"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
   ["Keep the same author and the same reviewer tools for new work.", "same author"],
   ["前回の実装担当で続けて", "前回の実装担当"],
+  ["前回の実装担当に修正を依頼して。", "前回の実装担当"],
   ["同じ実装担当が担当する。", "同じ実装担当"],
   ["同じ実装担当が担当すること。", "同じ実装担当"],
 ]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
@@ -2445,6 +2447,8 @@ for (const request of [
   "Keep the same authorization checks while fixing this bug.",
   "Keep the same developer experience while fixing the bug.",
   "Use the same developer tools to fix the bug.",
+  "Use the same developer documentation to fix the bug.",
+  "Keep the same developer workflow while fixing the bug.",
   "Use the same author and reviewer tools to fix the bug.",
   "Use the same reviewer and author tools to fix the bug.",
   "The previous developer left a bug; fix it.",
@@ -2459,6 +2463,7 @@ for (const request of [
   "同じ実装担当が担当しているAPIを使って修正して。",
   "同じ実装担当が担当するAPIを使って修正して。",
   "同じ実装担当が担当することになっているAPIを使って修正して。",
+  "前回の実装担当に修正を依頼したAPIを使って修正して。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
