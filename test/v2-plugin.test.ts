@@ -2544,6 +2544,9 @@ for (const request of [
   "You may retain the same reviewer and reuse the same author, but neither is required.",
   "You don't have to use the same author and retain the same reviewer, but neither is required.",
   "You do not need to retain the same reviewer and use the same author for this change.",
+  "Use the same author; actually, you don't have to use the same author for this change.",
+  "Use the same author; actually, you may use the same author but it is not required.",
+  "Use the same author, but you do not need to use the same author for this change.",
   "You can use the same author for this change.",
   "You may have the same author implement the change.",
   "You are allowed to use the same author for this change.",
@@ -2624,6 +2627,8 @@ for (const [request, reason] of [
   ["You may use the same author or select a different author, but use the same reviewer.", "explicit_author_continuation_input_required"],
   ["You may use the same author for implementation while the coordinator must fix the bug and retain the same reviewer.", "explicit_author_continuation_input_required"],
   ["You may use the same author while the coordinator must implement the fix and retain the same reviewer.", "explicit_author_continuation_input_required"],
+  ["Use the same author and the same reviewer; actually, you don't have to use the same author for this change.", "explicit_author_continuation_input_required"],
+  ["Use the same author and the same reviewer; actually, you may use the same author but it is not required.", "explicit_author_continuation_input_required"],
   ["Do not use the same author, but use the same reviewer.", "requested_author_reviewer_lineage_conflict"],
 ]) test(`V2 preserves a required reviewer when the author's choice is not mandatory: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -2739,12 +2744,14 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-declarative"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-permission"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-obligation-correction"],
   ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone"],
   ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone-permission"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-conflict"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-optional"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-permission"],
   ["Use the same author for the new result.", "same author", undefined, "git-permission-author-no-replace"],
+  ["Use the same author for the new result.", "same author", undefined, "git-permission-author-no-replace-correction"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
@@ -3038,10 +3045,12 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       assert.equal(retained.task.task_id, "author", "an explicit optional choice remains usable on a later call");
       assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).authorContinuation!.child, "author");
     }
-    if (workspace === "git-permission-author-no-replace" || workspace === "git-permission-reviewer-no-replace") {
+    if (workspace.startsWith("git-permission-author-no-replace") || workspace === "git-permission-reviewer-no-replace") {
       const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
       const beforeBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
-      await prompt("root", workspace === "git-permission-author-no-replace"
+      await prompt("root", workspace === "git-permission-author-no-replace-correction"
+        ? "Use the same author; actually, you may use the same author but it is not required."
+        : workspace === "git-permission-author-no-replace"
         ? "You may use the same author for this change, but it is not required."
         : "You may use the same reviewer for this change, but it is not required.");
       const updated = await tool("root", "start_mission", { requirements });
@@ -3051,7 +3060,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       assert.equal(current.runID, null);
       assert.equal(current.dispatchOpen, false);
       assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, beforeBudget);
-      if (workspace === "git-permission-author-no-replace") {
+      if (workspace.startsWith("git-permission-author-no-replace")) {
         assert.equal(current.authorContinuation, undefined);
         assert.equal(updated.task.task_id, undefined, "the newly optional author must not be fixed");
         return;
@@ -3095,6 +3104,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       }
       if (workspace.startsWith("git-replace-earlier-")) {
         await prompt("root", workspace === "git-replace-earlier-author-optional-declarative" ? "The same author is not required for this change."
+          : workspace === "git-replace-earlier-author-optional-obligation-correction"
+            ? "Use the same author; actually, you don't have to use the same author for this change."
           : workspace === "git-replace-earlier-author-optional-permission" || workspace === "git-replace-earlier-author-optional-alone-permission"
             ? "You may use the same author for this change, but it is not required."
           : workspace === "git-replace-earlier-reviewer-permission" ? "You may use the same reviewer for this change, but it is not required."

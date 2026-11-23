@@ -2704,11 +2704,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
         [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
           !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)) && !permitted(match.index));
-      // An optional selection cannot erase another mandatory command. A later
-      // explicit "the author is not required" predicate still releases it.
-      const optional = [...text.matchAll(optionalPredicate)].some(match =>
-        !requiredSelections.some(selection => selection.index > match.index)) ||
-        !requiredSelection && selections.some(match => permitted(match.index));
+      // Resolve changes for this role in order: a later release or permission
+      // can relax its earlier command, but cannot erase a later mandatory one.
+      // The modality above still belongs to its own selection/clause.
+      const optional = [...text.matchAll(optionalPredicate), ...selections.filter(match => permitted(match.index))].some(match =>
+        !requiredSelections.some(selection => selection.index > match.index));
       if (negated) return negated === "contrary" ? contrary : optional && !contrary && (negated !== "optional-quote" || !requiredSelection);
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
