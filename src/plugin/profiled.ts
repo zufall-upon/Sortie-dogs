@@ -2606,7 +2606,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return undefined;
     }
-    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false, negated?: "contrary" | "optional"): boolean {
+    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false, negated?: "contrary" | "optional" | "optional-quote"): boolean {
       // Select the person as the noun-phrase head, not a role-qualified artifact.
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
       const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
@@ -2682,7 +2682,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)) && !permitted(match.index));
       const optional = optionalTarget.test(text) || optionalCausative.test(text) ||
         !requiredSelection && selections.some(match => permitted(match.index));
-      if (negated) return negated === "contrary" ? contrary : optional && !contrary;
+      if (negated) return negated === "contrary" ? contrary : optional && !contrary && (negated !== "optional-quote" || !requiredSelection);
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
@@ -2782,7 +2782,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           !explicitContinuationQuote(selection.quote, false) ||
           !sentences.some(line => line.includes(selection.quote) &&
             (continuationIntent(line, false) === "selected" ||
-              authorIntent === "optional" && continuationIntent(line, false) === "optional")) ||
+              authorIntent === "optional" && explicitContinuationQuote(line, false, false, "optional-quote"))) ||
           selection.reviewerQuote && (reviewerIntent !== "selected" ||
             !explicitContinuationQuote(selection.reviewerQuote, true) ||
             !reviewerSentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
