@@ -33,6 +33,12 @@ export function owningServiceSessionActive(): () => Promise<unknown> {
   return async () => (await connect()).session.active({ signal: AbortSignal.timeout(10_000) });
 }
 
+/** Read queued work from the same service; a missing inbox is not evidence of idleness. */
+export function owningServiceSessionInbox(): (sessionID: string) => Promise<unknown> {
+  const connect = owningServiceClient();
+  return async sessionID => (await connect()).session.inbox.list({ sessionID }, { signal: AbortSignal.timeout(10_000) });
+}
+
 /** Read-only paginated history for reviews older than V2's bounded session.context window. */
 export function owningServiceMessageList(): (input: MessageListInput) => Promise<unknown> {
   const connect = owningServiceClient();

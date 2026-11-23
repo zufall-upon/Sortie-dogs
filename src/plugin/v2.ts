@@ -4,7 +4,7 @@ import { SortieDogsV010Plugin } from "./profiled.js";
 import { bindMissionProgress, missionProgressReader } from "./mission-progress.js";
 import { cachedWorkProgress, forgetWorkSession, retainWorkDirectory, workRootForActor } from "../core/work-quantity-observations.js";
 import { formatWorkQuantity } from "../core/work-quantity.js";
-import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive } from "./v2-session-history.js";
+import { owningServiceMessageList, owningServiceSessionList, owningServiceSessionActive, owningServiceSessionInbox } from "./v2-session-history.js";
 import { nativeContractReadSnapshot } from "./native-contract-read.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -281,9 +281,15 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
   const directory = context.location.directory;
   const list = owningServiceSessionList();
   const active = owningServiceSessionActive();
+  const inbox = owningServiceSessionInbox();
   const reviewList = owningServiceMessageList();
   const session = {
     active: async () => ({ data: await (context.session.active ? context.session.active() : active()) }),
+    inbox: async (request: unknown) => {
+      const id = sessionID(request);
+      if (!id) return undefined;
+      return { data: await (context.session.inbox ? context.session.inbox.list({ sessionID: id }) : inbox(id)) };
+    },
     get: async (request: unknown) => {
       const id = sessionID(request);
       const info = id === undefined ? undefined : await context.session.get({ sessionID: id });

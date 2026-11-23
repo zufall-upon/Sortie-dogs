@@ -7,8 +7,8 @@ import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
-import { availableParallelism } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { availableParallelism, tmpdir } from "node:os";
 import test from "node:test";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
@@ -2383,6 +2383,1082 @@ test('requires exclusive execution', async () => {
   }
 });
 
+for (const [request, quote] of [
+  ["Use the same author for new work", "same author"],
+  ["Have the same author implement the change.", "same author"],
+  ["Have the same author review code.", "same author"],
+  ["Have the same author review source code.", "same author"],
+  ["Have the same author review available source code.", "same author"],
+  ["Have the same author implement the change and do not have a different author implement the follow-up.", "same author"],
+  ["Have the same author implement the change and do not have the same reviewer review it.", "same author"],
+  ["Have the same author implement the change and have the same reviewer review notes available.", "same author"],
+  ["Use the same author again.", "same author"],
+  ["Use the same author now.", "same author"],
+  ["You have to use the same author for this change.", "same author"],
+  ["You need to use the same author for this change.", "same author"],
+  ["You may use the same author, but you must use the same author for this change.", "same author"],
+  ["You may use the same author, but retain the same author for this change.", "same author"],
+  ["Use the same author but you may use the same reviewer for this work.", "same author"],
+  ["You may use the same reviewer and you must retain the same author for this change.", "same author"],
+  ["You don't have to use the same reviewer and you must retain the same author for this change.", "same author"],
+  ["You don't have to use the same author, but you must retain the same author for this change.", "same author"],
+  ["The same author is not required, but you must use the same author for this change.", "same author"],
+  ["Continue with the previous developer immediately.", "previous developer"],
+  ["Continue with the previous developer for new work", "previous developer"],
+  ["Keep the same developer for new work", "same developer"],
+  ["Keep the same author and the same reviewer tools for new work.", "same author"],
+  ["Use the same author and do not change the existing API.", "same author"],
+  ["Do not change the existing API, use the same author.", "same author"],
+  ["Use the same author and do not use a different author.", "same author"],
+  ["Use the same author and do not automatically select a different author.", "same author"],
+  ["Use the same author and you don't have to use a different author.", "same author"],
+  ["Use the same author and you may use a different author.", "same author"],
+  ["Use the same author and you don't have to use the same author's API.", "same author"],
+  ["Use the same author and you do not need to use the same reviewer.", "same author"],
+  ["Use the same author, but you may use the same reviewer for this work.", "same author"],
+  ["Use the same author, but you can have the same reviewer review the change.", "same author"],
+  ["Use a different author. Actually, use the same author for this work.", "same author"],
+  ["Use the same author. Do not change the existing API.", "same author"],
+  ["Use the same author and the same reviewer. Actually, select a different reviewer.", "same author"],
+  ["前回の実装担当で続けて", "前回の実装担当"],
+  ["前回の実装担当に修正を依頼して。", "前回の実装担当"],
+  ["同じ作者を使い、既存のAPIを変更する。", "同じ作者"],
+  ["同じ作者で続けて、別の担当のAPIを使って。", "同じ作者"],
+  ["同じ作者で続けて、別の担当に修正を依頼しないで。", "同じ作者"],
+  ["同じ実装担当が担当する。", "同じ実装担当"],
+  ["同じ実装担当が担当すること。", "同じ実装担当"],
+]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-prior-coordinator-"));
+  const fixture = contextFixture();
+  const history: Record<string, unknown[]> = { root: [], previous: [] };
+  const context: OpenCodeV2Context = { ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "root" ? "dog-operator" : "dogs-coordinator",
+        ...(sessionID === "root" ? {} : { parentID: "root" }), model: { providerID: "openai", id: "gpt-6-sol" } }),
+      context: async ({ sessionID }) => history[sessionID] ?? [],
+    } };
+  const cleanup = await V2Plugin.setup(context);
+  try {
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "msg_previous", text: "Complete the prior work" });
+    const previous = await missions.start("root", ["Complete the prior work"]);
+    await missions.update("root", state => { state.coordinator = "previous"; state.phase = "completed"; state.dispatchOpen = false; });
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
+      prompt: { text: request } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    const packet = JSON.parse((await start.execute({ requirements: [request],
+      preferred_executor: "coordinator" }, { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.notEqual(packet.mission_id, previous.id);
+    assert.equal(packet.status, "mission-author-continuation-unavailable");
+    assert.equal(packet.reason, "explicit_author_continuation_input_required");
+    assert.equal(packet.task, undefined, "the explicit author restriction must not offer a substitute Task");
+    const task = missions.task(await missions.required("root"));
+    assert.equal(task.task_id, undefined);
+    const dispatch = { sessionID: "root", agent: "dog-operator", tool: "subagent", id: "call_old_author",
+      input: { agent: task.subagent_type, description: task.description,
+        prompt: task.prompt, sessionID: "previous" } };
+    await assert.rejects(fixture.toolHooks.get("execute.before")!(dispatch),
+      /mission-dispatch-not-authorized: this location owns Coordinator not yet claimed, not previous/u);
+    await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...dispatch, id: "call_substitute",
+      input: { agent: task.subagent_type, description: task.description, prompt: task.prompt } }),
+    /mission-author-continuation-not-authorized/u);
+    const current = await missions.required("root");
+    assert.equal(current.coordinator, null);
+    assert.equal(current.dispatchOpen, false);
+    const unproven = JSON.parse((await start.execute({ requirements: [request],
+      preferred_executor: "coordinator", author_continuation: { request_quote: quote, work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_start_continuation" })).content);
+    assert.equal(unproven.status, "mission-author-continuation-unavailable");
+    assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
+    assert.equal(unproven.task, undefined);
+    if (request === "Have the same author implement the change and do not have the same reviewer review it." ||
+        request === "Use the same author and you do not need to use the same reviewer." ||
+        request === "Use the same author, but you may use the same reviewer for this work." ||
+        request === "Use the same author, but you can have the same reviewer review the change." ||
+        request === "Have the same author implement the change and have the same reviewer review notes available." ||
+        request === "Use the same author and the same reviewer. Actually, select a different reviewer.") {
+      const rejectedReviewer = JSON.parse((await start.execute({ requirements: [request],
+        author_continuation: { request_quote: quote, reviewer_quote: "same reviewer", work_directory: directory } },
+      { sessionID: "root", agent: "dog-operator", callID: "call_negated_reviewer" })).content);
+      assert.equal(rejectedReviewer.reason, "user_intent_quote_unavailable");
+      assert.equal(rejectedReviewer.task, undefined);
+    }
+    const invalid = JSON.parse((await start.execute({ requirements: [request],
+      author_continuation: { request_quote: "not the user's choice", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_invalid_quote" })).content);
+    assert.equal(invalid.reason, "user_intent_quote_unavailable");
+    const retained = JSON.parse((await start.execute({ requirements: [request] },
+      { sessionID: "root", agent: "dog-operator", callID: "call_omit_invalid_quote" })).content);
+    assert.equal(retained.mission_id, packet.mission_id);
+    assert.equal(retained.task, undefined, "rejecting a caller quote cannot clear the user's genuine author restriction");
+    assert.equal((await missions.required("root")).authorContinuation!.quote, quote);
+    if (request === "Use the same author for new work") {
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_narrow",
+        prompt: { text: "Limit the files; keep the other requirements unchanged." } });
+      const replacement = JSON.parse((await start.execute({ intent: "replace", requirements: [request, "Limit the files"] },
+        { sessionID: "root", agent: "dog-operator", callID: "call_replace_unproven" })).content);
+      assert.equal(replacement.task, undefined, "a scope replacement cannot erase an unproven user selection");
+      assert.equal(replacement.reason, "completed_predecessor_run_unavailable");
+      assert.equal((await missions.required("root")).authorContinuation!.quote, quote);
+      const retried = JSON.parse((await start.execute({ requirements: [request, "Limit the files"],
+        author_continuation: { request_quote: quote, work_directory: directory } },
+      { sessionID: "root", agent: "dog-operator", callID: "call_retry_original_quote" })).content);
+      assert.equal(retried.reason, "completed_predecessor_run_unavailable", "the earlier real quote remains usable after narrowing");
+      assert.equal(retried.task, undefined);
+    }
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const request of [
+  "Keep the same authorization checks while fixing this bug.",
+  "Keep the same developer experience while fixing the bug.",
+  "Use the same developer tools to fix the bug.",
+  "Use the same developer documentation to fix the bug.",
+  "Keep the same developer workflow while fixing the bug.",
+  "Have the same author implementation notes available for the change.",
+  "Have the same author review notes available for the change.",
+  "Have the same author review notes ready for the change.",
+  "Use the same author and reviewer tools to fix the bug.",
+  "Use the same reviewer and author tools to fix the bug.",
+  "The previous developer left a bug; fix it.",
+  "Use the API written by the previous developer.",
+  "Use the previous developer's API to fix the bug.",
+  "Keep the original author’s tests passing.",
+  "Use the same author and reviewer’s API to fix the bug.",
+  "Use the same reviewer and author's API to fix the bug.",
+  "Fix the same bug reported by the developer.",
+  "前回の実装担当の引継ぎが止まった原因を調べて。",
+  "前回の実装担当が担当したAPIを使って修正して。",
+  "同じ実装担当が担当しているAPIを使って修正して。",
+  "同じ実装担当が担当するAPIを使って修正して。",
+  "同じ実装担当が担当することになっているAPIを使って修正して。",
+  "前回の実装担当に修正を依頼したAPIを使って修正して。",
+  "Do not automatically select the same author for new work.",
+  "You don't have to use the same author for this change.",
+  "You do not need to use the same author for this change.",
+  "You may use the same author for this change, but it is not required",
+  "You may reuse the same author and retain the same reviewer, but neither is required.",
+  "You may retain the same reviewer and reuse the same author, but neither is required.",
+  "You don't have to use the same author and retain the same reviewer, but neither is required.",
+  "You do not need to retain the same reviewer and use the same author for this change.",
+  "Use the same author; actually, you don't have to use the same author for this change.",
+  "Use the same author; actually, you may use the same author but it is not required.",
+  "Use the same author, but you do not need to use the same author for this change.",
+  "You can use the same author for this change.",
+  "You may have the same author implement the change.",
+  "You are allowed to use the same author for this change.",
+  "You may use the same developer documentation to fix the bug.",
+  "You may not use the same author for this change.",
+  "Do not have the same author implement the change.",
+  "Have the same author not implement the change.",
+  "Do not have the same author review source code.",
+  "Have the same author not review source code.",
+  "前回の実装担当に修正を依頼しないで。",
+  "Use the same author. Actually, select a different author for this work.",
+  "Use the same author. Do not use the same author for this work.",
+  "同じ作者で続けて。別の担当に修正を依頼して。",
+]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request", prompt: { text: request } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const packet = JSON.parse((await start.execute({ requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.ok(packet.task, "a description of earlier work or authorization is not a same-author instruction");
+    assert.equal(packet.task.task_id, undefined);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    assert.equal((await missions.required("root")).authorContinuation, undefined);
+    const rejected = JSON.parse((await start.execute({ requirements: [request],
+      author_continuation: { request_quote: "same author", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_invalid_choice" })).content);
+    const optionalAuthor = [
+      "You don't have to use the same author for this change.",
+      "You do not need to use the same author for this change.",
+      "You may use the same author for this change, but it is not required",
+      "You may reuse the same author and retain the same reviewer, but neither is required.",
+      "You may retain the same reviewer and reuse the same author, but neither is required.",
+      "You don't have to use the same author and retain the same reviewer, but neither is required.",
+      "You do not need to retain the same reviewer and use the same author for this change.",
+      "Use the same author; actually, you don't have to use the same author for this change.",
+      "Use the same author; actually, you may use the same author but it is not required.",
+      "Use the same author, but you do not need to use the same author for this change.",
+      "You can use the same author for this change.",
+      "You may have the same author implement the change.",
+      "You are allowed to use the same author for this change.",
+    ].includes(request);
+    assert.equal(rejected.reason, optionalAuthor ? "completed_predecessor_run_unavailable" : "user_intent_quote_unavailable");
+    assert.equal(rejected.task, undefined);
+    assert.equal((await missions.required("root")).authorContinuation, undefined,
+      "an unproven optional choice must not create a mandatory restriction");
+    const corrected = JSON.parse((await start.execute({ requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_corrected_choice" })).content);
+    assert.equal(corrected.mission_id, packet.mission_id, "correcting an invalid option does not replace the Mission");
+    assert.deepEqual(corrected.budget, packet.budget, "no admission or replacement changes accounting");
+    assert.ok(corrected.task, "a rejected caller option cannot create a restriction absent from the user request");
+    assert.equal(corrected.task.task_id, undefined);
+    const current = await missions.required("root");
+    assert.equal(current.authorContinuation, undefined);
+    assert.equal(current.coordinator, null);
+    assert.equal(current.runID, null);
+    assert.equal(current.dispatchOpen, false);
+    if (request === "Keep the same authorization checks while fixing this bug.") {
+      // Reproduce the old persisted rejection, not an authorization or an active owner.
+      await missions.update("root", state => {
+        state.authorContinuation = { requestID: "msg_request", quote: "same author", directory,
+          blocked: "user_intent_quote_unavailable" };
+      });
+      const recovered = JSON.parse((await start.execute({ requirements: [request] },
+        { sessionID: "root", agent: "dog-operator", callID: "call_recover_old_rejection" })).content);
+      assert.equal(recovered.mission_id, packet.mission_id);
+      assert.ok(recovered.task, "an older unadmitted invalid quote can be corrected without cancelling its Mission");
+      assert.deepEqual(recovered.budget, packet.budget);
+      assert.equal((await missions.required("root")).authorContinuation, undefined);
+    }
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const [request, reason] of [
+  ["You may use the same author, but you must use the same reviewer.", "explicit_author_continuation_input_required"],
+  ["You may use the same author or select a different author, but use the same reviewer.", "explicit_author_continuation_input_required"],
+  ["You may use the same author for implementation while the coordinator must fix the bug and retain the same reviewer.", "explicit_author_continuation_input_required"],
+  ["You may use the same author while the coordinator must implement the fix and retain the same reviewer.", "explicit_author_continuation_input_required"],
+  ["Use the same author and the same reviewer; actually, you don't have to use the same author for this change.", "explicit_author_continuation_input_required"],
+  ["Use the same author and the same reviewer; actually, you may use the same author but it is not required.", "explicit_author_continuation_input_required"],
+  ["Do not use the same author, but use the same reviewer.", "requested_author_reviewer_lineage_conflict"],
+]) test(`V2 preserves a required reviewer when the author's choice is not mandatory: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-optional-author-reviewer-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const prompt = (messageID: string, text: string) =>
+      fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID, prompt: { text } });
+    const call = async (callID: string) => JSON.parse((await start.execute(
+      { requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID })).content);
+    await prompt("msg_request", request);
+    const held = await call("call_start");
+    assert.equal(held.reason, reason);
+    assert.equal(held.task, undefined);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    assert.equal((await missions.required("root")).authorContinuation!.blocked, reason);
+    if (reason === "requested_author_reviewer_lineage_conflict") {
+      await prompt("msg_allow_author", "You may use the same author for this work.");
+      const corrected = await call("call_allow_author");
+      assert.equal(corrected.mission_id, held.mission_id);
+      assert.equal(corrected.reason, "explicit_author_continuation_input_required");
+      assert.equal(corrected.task, undefined);
+    }
+    await prompt("msg_allow_reviewer", "You may use the same reviewer for this work.");
+    const released = await call("call_allow_reviewer");
+    assert.equal(released.mission_id, held.mission_id);
+    assert.ok(released.task, "releasing both choices must restore an ordinary Task");
+    assert.equal(released.task.task_id, undefined);
+    const status = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const observed = JSON.parse((await status.execute({ view: "progress" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_status" })).content);
+    assert.deepEqual(observed.budget, held.budget);
+    const current = await missions.required("root");
+    assert.equal(current.authorContinuation, undefined);
+    assert.equal(current.coordinator, null);
+    assert.equal(current.runID, null);
+    assert.equal(current.dispatchOpen, false);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const [request, quote] of [
+  ["Do not use the same author for this new work.", "same author"],
+  ["You may not use the same author for this change.", "same author"],
+  ["Do not automatically select the same author for new work.", "same author"],
+  ["Do not have the same author implement the change.", "same author"],
+  ["Do not have the same author review source code.", "same author"],
+  ["Have the same author implement the change, but the same author should not implement it.", "same author"],
+  ["Have the same author implement the change, but have a different author implement the follow-up.", "same author"],
+  ["Use the same author and do not use the same author.", "same author"],
+  ["Use the same author, but the same author should not be used.", "same author"],
+  ["Use the same author, but the same author is unnecessary.", "same author"],
+  ["Use the same author and select a different author.", "same author"],
+  ["同じ作者を使って、同じ作者を使わない。", "同じ作者"],
+  ["前回の実装担当に修正を依頼しないで。", "前回の実装担当"],
+  ["前回の実装担当に修正を任せないで。", "前回の実装担当"],
+  ["同じ作者で続けて、別の担当に修正を依頼して。", "同じ作者"],
+  ["Use the same author. Actually, select a different author for this work.", "same author"],
+  ["Use the same author. Do not use the same author for this work.", "same author"],
+  ["同じ作者で続けて。別の担当に修正を依頼して。", "同じ作者"],
+]) test(`V2 author continuation cannot use a quote that negates the user's instruction: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-author-intent-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
+      prompt: { text: request } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const packet = JSON.parse((await start.execute({ requirements: ["Use a different author"],
+      author_continuation: { request_quote: quote, work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.equal(packet.status, "mission-author-continuation-unavailable");
+    assert.equal(packet.reason, "user_intent_quote_unavailable");
+    assert.equal(packet.task, undefined);
+    const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(state.coordinator, null);
+    assert.equal(state.dispatchOpen, false);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const [request, requestQuote, reviewerQuote, workspace] of [
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git"],
+  ["Use the same author and the same reviewer, but you may select a different reviewer.", "same author", "same reviewer", "git"],
+  ["You may use the same author, but you must use the same reviewer for the new result.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author or select a different author, but use the same reviewer for the new result.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author for implementation while the coordinator must fix the bug and retain the same reviewer.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author while the coordinator must implement the fix and retain the same reviewer.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["Use the same author and the same reviewer; actually, you may use the same author but it is not required.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["Use the same author and the same reviewer; actually, you don't have to use the same author for this change.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author for the new result, but it is not required.", "same author", undefined, "git-optional-author-selected"],
+  ["Use the same author; actually, you may use the same author but it is not required.", "same author", undefined, "git-optional-author-selected"],
+  ["Have the same author implement the change, and have the same reviewer review it.", "same author", "same reviewer", "git"],
+  ["Have the same author implement the change, and have the same reviewer review code.", "same author", "same reviewer", "git"],
+  ["Have the same author implement the change, and have the same reviewer review source code.", "same author", "same reviewer", "git"],
+  ["Have the same author and reviewer review the change.", "same author", "same author and reviewer", "git"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "git"],
+  ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer", "git"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-read"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-execution"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-glob-all"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-glob-ts"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-running"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-reviewer-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-declarative"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-permission"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-obligation-correction"],
+  ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone"],
+  ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone-permission"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-conflict"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-optional"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-permission"],
+  ["Use the same author for the new result.", "same author", undefined, "git-permission-author-no-replace"],
+  ["Use the same author for the new result.", "same author", undefined, "git-permission-author-no-replace-correction"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
+  ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
+  ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
+  ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
+  ["Use the same author and reviewer and you do not need to change the existing API.", "same author", "same author and reviewer", "non-git-default"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-partial-cwd"],
+]) test(`V2 explicitly continues the completed actual author and reviews the new candidate without old authority: ${request} (${workspace})`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(workspace === "git" ? resolve("_testenv/v2-author-continuation-")
+    : join(tmpdir(), "v2-author-continuation-"));
+  const otherCwd = join(directory, "checks");
+  const resultFile = workspace === "git-glob-ts" ? "result.ts" : "result.txt";
+  const fixture = contextFixture(), exec = promisify(execFile);
+  const history: Record<string, Record<string, unknown>[]> = {};
+  const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+    root: { agent: "dog-operator" }, author: { agent: "dogs-coordinator", parentID: "root" },
+    reviewer: { agent: "dog-reviewer-v010", parentID: "author" },
+  };
+  let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session, active: async () => active,
+      inbox: { list: async ({ sessionID }) => inbox[sessionID] ?? [] },
+      list: async ({ parentID }) => {
+        const children = Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        return { data: duplicateChildren && parentID === "author" ? [...children, ...children] : children, cursor: {} };
+      },
+      get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory },
+        model: { providerID: "openai", id: "fixture" } }),
+      context: async ({ sessionID }) => history[sessionID] ?? [] },
+    message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
+      : history[sessionID] ?? [], cursor: {} }) } });
+  const prompt = async (sessionID: string, text: string) => {
+    const messageID = `msg_${++counter}`;
+    const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
+    await fixture.sessionHooks.get("prompt")!(event);
+    (history[sessionID] ??= []).push({ id: messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    return event.prompt.text;
+  };
+  const before = async (sessionID: string, tool: string, input: Record<string, unknown>) => {
+    const event = { sessionID, agent: agents[sessionID]!.agent, tool, id: `call_${++counter}`, input };
+    await fixture.toolHooks.get("execute.before")!(event);
+    return event;
+  };
+  const after = async (event: Record<string, unknown>, content: string, metadata: Record<string, unknown> = {}) => {
+    const sessionID = String(event.sessionID), now = Date.now();
+    (history[sessionID] ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: agents[sessionID]!.agent,
+      finish: "tool-calls", time: { created: now, completed: now }, content: [{ type: "tool", name: event.tool, id: event.id,
+        state: { status: "completed", input: event.input, content: [{ type: "text", text: content }], metadata },
+        time: { created: now, ran: now, completed: now } }] });
+    await fixture.toolHooks.get("execute.after")!({ ...event, status: "completed", result: { content, metadata } });
+  };
+  const tool = async (sessionID: string, name: string, input: Record<string, unknown> = {}) => {
+    const event = await before(sessionID, `sortie_v010_${name}`, input);
+    const definition = fixture.tools.find(item => item.name === `sortie_v010_${name}`) as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const result = await definition.execute(event.input, { sessionID, agent: agents[sessionID]!.agent, callID: event.id });
+    await after(event, result.content);
+    return JSON.parse(result.content);
+  };
+  const nativeTask = (task: Record<string, unknown>) => ({ agent: task.subagent_type, prompt: task.prompt,
+    description: task.description, ...(task.task_id ? { sessionID: task.task_id } : {}) });
+  const edit = async (from: string | undefined, to: string) => {
+    const patchText = from === undefined ? `*** Begin Patch\n*** Add File: ${resultFile}\n+${to}\n*** End Patch`
+      : `*** Begin Patch\n*** Update File: ${resultFile}\n@@\n-${from}\n+${to}\n*** End Patch`;
+    const event = await before("author", "patch", { patchText });
+    await writeFile(join(directory, resultFile), `${to}\n`);
+    await after(event, "updated");
+  };
+  const validate = async (expected: string, readOnly = false) => {
+    const cwd = readOnly || workspace === "non-git-registered-other" && expected === "first" ? otherCwd : directory;
+    const checks = [{ cwd, suffix: "" }, ...(readOnly && workspace === "git-readonly-execution"
+      ? [{ cwd: directory, suffix: " --secondary" }]
+      : workspace === "non-git-partial-cwd" && expected === "first" ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
+    for (const check of checks) {
+      const event = await before("author", "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
+      const result = await exec(process.execPath, ["check.mjs", expected, ...(check.suffix ? ["--secondary"] : [])], { cwd: check.cwd });
+      await after(event, result.stdout, { exit: 0 });
+    }
+  };
+  try {
+    if (workspace.startsWith("git")) await exec("git", ["init", "--quiet"], { cwd: directory });
+    else await assert.rejects(exec("git", ["rev-parse", "--show-toplevel"], { cwd: directory }), "the workspace must actually be outside Git");
+    await writeFile(join(directory, "check.mjs"), `import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync(${JSON.stringify(resultFile)},"utf8").trim(),process.argv[2]);`);
+    if (workspace.startsWith("non-git-registered") || workspace === "non-git-partial-cwd") {
+      await mkdir(otherCwd);
+      await writeFile(join(otherCwd, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("../result.txt","utf8").trim(),process.argv[2]);');
+    }
+    await prompt("root", "Create the first result and review it.");
+    const old = await tool("root", "start_mission", { requirements: ["Create the first result"], preferred_executor: "coordinator" });
+    const firstDispatch = await before("root", "subagent", nativeTask(old.task));
+    await prompt("author", String(firstDispatch.input.prompt));
+    const unit = (expected: string) => ({ title: "Result", objective: `Write ${expected}`, read: ["check.mjs"],
+      write: workspace === "git-glob-all" ? expected === "first" ? ["**"] : [join(dirname(directory), "unrelated", "**"), "**"]
+        : [workspace === "git-glob-ts" ? "*.ts" : "result.txt"], validation: [`node check.mjs ${expected}`,
+        ...(workspace === "non-git-partial-cwd" && expected === "first" ? [`node check.mjs ${expected} --secondary`] : [])],
+      ...(workspace === "non-git-registered-default" && expected === "first"
+        ? { validation_cwd: { [`node check.mjs ${expected}`]: otherCwd } }
+        : workspace === "non-git-partial-cwd" && expected === "first"
+          ? { validation_cwd: { [`node check.mjs ${expected} --secondary`]: otherCwd } } : {}) });
+    const originalUnit = unit("first");
+    await tool("author", "plan_units", { executor: "self", units: [originalUnit] });
+    if (workspace.startsWith("non-git-registered")) {
+      const { validation_cwd: _initialCwd, ...withoutCwd } = originalUnit;
+      const corrected = workspace === "non-git-registered-default" ? withoutCwd
+        : { ...withoutCwd, validation_cwd: { "node check.mjs first": otherCwd } };
+      const registered = await tool("author", "plan_units", { executor: "self", units: [corrected], reason: "Correct the validation directory" });
+      assert.equal(registered.status, "direct-unit-registration-corrected");
+    }
+    await edit(undefined, "first");
+    await validate("first");
+    assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
+    const authorBackground = await before("author", "shell", { command: "node retained-writer.mjs", background: true });
+    await after(authorBackground, "Background process running", { status: "running" });
+    const authorTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    const oldReview = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+    const firstReview = await before("author", "subagent", nativeTask(oldReview.task));
+    await prompt("reviewer", String(firstReview.input.prompt));
+    const reviewerBackground = await before("reviewer", "shell", { command: "git status --short", background: true });
+    await after(reviewerBackground, "Background process running", { status: "running" });
+    const reviewerTool = (history.reviewer!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    agents.reviewer!.outcome = "succeeded";
+    const oldReport = "PASS\nThe first candidate is correct.", now = Date.now();
+    (history.reviewer ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010",
+      finish: "stop", time: { created: now, completed: now }, content: [{ type: "text", text: oldReport }] });
+    await after(firstReview, oldReport, { sessionID: "reviewer" });
+    // Native background launch metadata is historical; the exact child terminal
+    // must allow recovery without requiring edits to that launch record.
+    const completedReviewTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    (completedReviewTool.state as Record<string, unknown>).metadata = { sessionID: "reviewer", status: "running" };
+    await tool("author", "submit_mission", { status: "ready", summary: "First result ready" });
+    agents.author!.outcome = "succeeded";
+    await after(firstDispatch, "First result ready", { sessionID: "author" });
+    assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+    const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(oldRun.phase, "completed");
+    if (workspace === "git-glob-ts") assert.ok(oldRun.units[0]!.unit.write.includes("*.ts"));
+    if (workspace === "non-git-registered-default") {
+      assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first": otherCwd });
+      assert.deepEqual(oldRun.units[0]!.directExecution!.validationCwd, {});
+    } else if (workspace === "non-git-registered-other") {
+      assert.equal(oldRun.units[0]!.unit.validation_cwd, undefined);
+      assert.deepEqual(oldRun.units[0]!.directExecution!.validationCwd, { "node check.mjs first": otherCwd });
+    } else if (workspace === "non-git-partial-cwd") {
+      assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first --secondary": otherCwd });
+      assert.equal(oldRun.units[0]!.directExecution!.validationCwd, undefined);
+    }
+
+    await prompt("root", request);
+    const requirements = [reviewerQuote ? "Use the same author and reviewer to write the new result"
+      : "Use the same author to write the new result"];
+    const selection = { request_quote: requestQuote, reviewer_quote: reviewerQuote, work_directory: directory };
+    const start = (choice = selection) => tool("root", "start_mission", {
+      requirements, preferred_executor: "coordinator", author_continuation: choice });
+    const wrongQuote = await start({ ...selection, request_quote: "different author" });
+    assert.equal(wrongQuote.status, "mission-author-continuation-unavailable");
+    assert.equal(wrongQuote.reason, "user_intent_quote_unavailable");
+    assert.equal(wrongQuote.task, undefined);
+    if (workspace === "git-optional-author-selected") {
+      assert.ok((await tool("root", "operator_status")).task, "an invalid optional choice cannot block ordinary work");
+    } else {
+      assert.equal((await tool("root", "operator_status")).task, undefined);
+      await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
+        /mission-author-continuation-author-required/u);
+    }
+    if (reviewerQuote) assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
+      author_continuation: { request_quote: requestQuote, work_directory: directory } })).reason,
+    "explicit_reviewer_continuation_input_required", "an explicit same-Reviewer request cannot become a silent substitution");
+    if (workspace !== "git-optional-author-selected") {
+      await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
+        /mission-author-continuation-author-required/u);
+    }
+    assert.equal((await start({ ...selection, work_directory: join(directory, "missing") })).reason, "work_directory_unavailable_or_changed");
+    assert.equal((await start({ ...selection, work_directory: dirname(directory) })).reason, "predecessor_native_write_unproven",
+      "a common ancestor is not the actual repository where the prior author wrote");
+    if (workspace === "non-git-default" || workspace.startsWith("git-glob-")) {
+      const index = history.author!.findIndex(message => Array.isArray(message.content) &&
+        message.content.some((part: { name?: string }) => part.name === "patch"));
+      assert.notEqual(index, -1);
+      const [write] = history.author!.splice(index, 1);
+      const held = await start();
+      assert.equal(held.reason, "predecessor_native_write_unproven", "the default cwd alone cannot replace native write proof");
+      assert.equal(held.task, undefined);
+      history.author!.splice(index, 0, write!);
+    }
+    if (workspace === "non-git-registered-other") {
+      const held = await start();
+      assert.equal(held.reason, "predecessor_native_write_unproven", "an explicitly registered different validation directory is not the default");
+      assert.equal(held.task, undefined);
+      const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(state.coordinator, null);
+      assert.equal(state.dispatchOpen, false);
+      return;
+    }
+    agents.author!.parentID = "other-root";
+    assert.match((await start()).reason, /native_lineage/u);
+    agents.author!.parentID = "root";
+    delete agents.author!.outcome;
+    assert.equal((await start()).reason, "native_terminal_unknown");
+    agents.author!.outcome = "succeeded";
+    // A terminal session can still own an unfinished background process. Check the
+    // current native tool state for each owner independently: another pending
+    // process must not mask a missing check for the selected owner.
+    for (const part of [authorTool, reviewerTool]) (part.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+    for (const part of [authorTool, reviewerTool]) {
+      for (const status of ["running", "pending", "unknown"]) {
+        (part.state as Record<string, unknown>).metadata = { status };
+        assert.match((await start()).reason, /native_tools_active_or_unproven/u);
+      }
+      // The native completion updates this same call, rather than fabricating a
+      // new owner or treating its successful launch as process completion.
+      (part.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+    }
+    active = undefined;
+    assert.equal((await start()).reason, "native_activity_unavailable");
+    active = { author: { type: "running" } };
+    assert.equal((await start()).reason, "native_session_active");
+    active = {};
+    duplicateChildren = true;
+    assert.equal((await start()).reason, "native_lineage_duplicate_or_too_large");
+    duplicateChildren = false;
+    inbox.author = [{ id: "queued" }];
+    assert.equal((await start()).reason, "native_inbox_not_empty");
+    inbox = {};
+    let second = await start();
+    if (workspace.startsWith("git-add-reviewer")) {
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const selected = await missions.required("root");
+      assert.equal(second.task.task_id, "author");
+      assert.equal(selected.authorContinuation!.reviewerQuote, undefined);
+      const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", "Use the same reviewer for this work as well.");
+      const reviewerRequestID = history.root!.at(-1)!.id;
+      requirements.push("Use the same reviewer");
+      const adopted = await tool("root", "start_mission", { requirements });
+      assert.equal(adopted.reason, "explicit_reviewer_continuation_input_required");
+      assert.equal(adopted.task, undefined, "an unquoted newly adopted Reviewer choice must not offer an unusable Task");
+      assert.equal(adopted.mission_id, second.mission_id);
+      if (workspace === "git-add-reviewer-replace") {
+        await prompt("root", "Limit the implementation to result.txt; keep the other requirements unchanged.");
+        requirements.unshift("Only change result.txt");
+        const narrowed = await tool("root", "start_mission", { intent: "replace", requirements });
+        assert.equal(narrowed.reason, "explicit_reviewer_continuation_input_required");
+        assert.equal(narrowed.task, undefined);
+        assert.notEqual(narrowed.mission_id, second.mission_id);
+      }
+      const held = await missions.required("root");
+      assert.equal(held.authorContinuation!.child, "author");
+      assert.equal(held.runID, null);
+      const invalid = await start({ ...selection, reviewer_quote: "not the user's choice" });
+      assert.equal(invalid.reason, "user_intent_quote_unavailable");
+      assert.equal(invalid.task, undefined);
+      const rejected = await missions.required("root");
+      assert.deepEqual(rejected.authorContinuation, held.authorContinuation,
+        "an invalid additional quote cannot change the selected author or Reviewer");
+      assert.deepEqual([rejected.id, rejected.coordinator, rejected.runID, rejected.dispatchOpen],
+        [held.id, held.coordinator, held.runID, held.dispatchOpen]);
+      await assert.rejects(start({ ...selection, work_directory: dirname(directory), reviewer_quote: "same reviewer" }),
+        /mission-author-continuation-selection-frozen/u, "adding a Reviewer cannot change the selected work location");
+      Object.assign(selection, { reviewer_quote: "same reviewer" });
+      active = { reviewer: { type: "running" } };
+      const busy = await start();
+      assert.equal(busy.reason, "native_session_active");
+      assert.equal(busy.task, undefined, "a later Reviewer selection still requires its current native idle proof");
+      active = {};
+      second = await start();
+      const updated = await missions.required("root");
+      assert.equal(second.task.task_id, "author");
+      assert.equal(updated.id, held.id);
+      assert.equal(updated.authorContinuation!.requestID, selected.authorContinuation!.requestID);
+      assert.equal(updated.authorContinuation!.reviewerRequestID, reviewerRequestID);
+      assert.equal(updated.authorContinuation!.reviewer, "reviewer");
+      assert.equal(updated.coordinator, null);
+      assert.equal(updated.runID, null);
+      assert.equal(updated.review, undefined);
+      await assert.rejects(start({ ...selection, reviewer_quote: undefined }),
+        /mission-author-continuation-selection-frozen/u, "a successfully added Reviewer choice cannot be silently removed");
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget,
+        "adding a user restriction does not admit work or import earlier accounting");
+    }
+    assert.notEqual(second.mission_id, old.mission_id);
+    assert.equal(second.task.task_id, "author");
+    const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(state.coordinator, null, "the new Task has not been claimed or granted an old write scope");
+    assert.equal(state.runID, null);
+    assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
+    if (workspace === "git-optional-author-selected") {
+      const retained = await tool("root", "start_mission", { requirements });
+      assert.equal(retained.mission_id, second.mission_id);
+      assert.equal(retained.task.task_id, "author", "an explicit optional choice remains usable on a later call");
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).authorContinuation!.child, "author");
+    }
+    if (workspace.startsWith("git-permission-author-no-replace") || workspace === "git-permission-reviewer-no-replace") {
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const beforeBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", workspace === "git-permission-author-no-replace-correction"
+        ? "Use the same author; actually, you may use the same author but it is not required."
+        : workspace === "git-permission-author-no-replace"
+        ? "You may use the same author for this change, but it is not required."
+        : "You may use the same reviewer for this change, but it is not required.");
+      const updated = await tool("root", "start_mission", { requirements });
+      const current = await missions.required("root");
+      assert.equal(updated.mission_id, second.mission_id);
+      assert.equal(current.coordinator, null);
+      assert.equal(current.runID, null);
+      assert.equal(current.dispatchOpen, false);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, beforeBudget);
+      if (workspace.startsWith("git-permission-author-no-replace")) {
+        assert.equal(current.authorContinuation, undefined);
+        assert.equal(updated.task.task_id, undefined, "the newly optional author must not be fixed");
+        return;
+      }
+      assert.equal(current.authorContinuation!.child, "author");
+      assert.equal(current.authorContinuation!.reviewer, undefined);
+      assert.equal(current.authorContinuation!.reviewerQuote, undefined);
+      assert.equal(updated.task.task_id, "author");
+      second = updated;
+    }
+    if (workspace.startsWith("git-replace")) {
+      const optionalAuthor = workspace.startsWith("git-replace-earlier-author-optional");
+      const optionalReviewer = workspace === "git-replace-earlier-reviewer-optional" || workspace === "git-replace-earlier-reviewer-permission";
+      const authorReviewerConflict = workspace === "git-replace-earlier-author-conflict";
+      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change" ||
+        optionalAuthor && !reviewerQuote;
+      const changedReviewer = workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" || optionalReviewer;
+      if (workspace === "git-replace-running") {
+        const activeDispatch = await before("root", "subagent", nativeTask(second.task));
+        delete agents.author!.outcome;
+        await prompt("author", String(activeDispatch.input.prompt));
+        await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
+        await prompt("root", "Limit the implementation to result.txt; keep the other requirements unchanged.");
+        const beforeHold = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const beforeRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const beforeBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        const busy = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", ...requirements] });
+        assert.equal(busy.status, "mission-coordinator-active");
+        assert.equal(busy.task, undefined);
+        assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeHold);
+        assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeRun);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, beforeBudget);
+        await after(activeDispatch, "Interrupted before replacement", { sessionID: "author" });
+        const unknown = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", ...requirements] });
+        assert.equal(unknown.status, "mission-coordinator-active");
+        assert.equal(unknown.reason, "native_terminal_unknown");
+        assert.equal(unknown.task, undefined);
+        agents.author!.outcome = "interrupted";
+      }
+      if (workspace.startsWith("git-replace-earlier-")) {
+        await prompt("root", workspace === "git-replace-earlier-author-optional-declarative" ? "The same author is not required for this change."
+          : workspace === "git-replace-earlier-author-optional-obligation-correction"
+            ? "Use the same author; actually, you don't have to use the same author for this change."
+          : workspace === "git-replace-earlier-author-optional-permission" || workspace === "git-replace-earlier-author-optional-alone-permission"
+            ? "You may use the same author for this change, but it is not required."
+          : workspace === "git-replace-earlier-reviewer-permission" ? "You may use the same reviewer for this change, but it is not required."
+          : optionalAuthor ? "You don't have to use the same author for this change."
+          : optionalReviewer ? "You do not need to use the same reviewer for this change."
+          : authorReviewerConflict ? "Actually, select a different author for this work."
+          : changedAuthor ? "Actually, select a different author for this work. You do not need to use the same reviewer."
+          : "Actually, select a different reviewer for this work.");
+        await tool("root", "start_mission", { requirements });
+      }
+      const previousBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", workspace === "git-replace-change"
+        ? "Actually, select a different author for this work. You do not need to use the same reviewer."
+        : workspace === "git-replace-reviewer-change" ? "Actually, select a different reviewer for this work."
+        : "Limit the implementation to result.txt; keep the other requirements unchanged.");
+      const changedRequirements = ["Only change result.txt", ...(optionalAuthor ? [reviewerQuote
+        ? "The same author is optional; retain the same reviewer" : "The same author is not required"]
+        : optionalReviewer ? ["Use the same author; the same reviewer is not required"]
+        : authorReviewerConflict ? ["Use a different author and retain the same reviewer"]
+        : changedAuthor ? ["Use a different author"]
+        : changedReviewer ? ["Use the same author and a different reviewer"] : requirements)];
+      if (workspace === "git-replace") active = { author: { type: "running" } };
+      let replaced = await tool("root", "start_mission", { intent: "replace", requirements: changedRequirements });
+      assert.notEqual(replaced.mission_id, second.mission_id);
+      if (workspace === "git-replace") {
+        assert.equal(replaced.reason, "native_session_active");
+        assert.equal(replaced.task, undefined, "replacement must re-prove the selected author's current native state");
+        active = {};
+        const recovered = await tool("root", "start_mission", { requirements: changedRequirements });
+        assert.equal(recovered.mission_id, replaced.mission_id);
+        replaced = recovered;
+      }
+      const replacement = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(replacement.runID, null);
+      assert.equal(replacement.review, undefined);
+      const replacementBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      assert.equal(replacementBudget.consumed_units,
+        previousBudget.consumed_units + (workspace === "git-replace-running" ? 1 : 0),
+        "a stopped admitted unit is settled, not refunded or reused");
+      assert.equal(replacementBudget.max_units, previousBudget.max_units);
+      if (authorReviewerConflict) {
+        assert.equal(replaced.status, "mission-author-continuation-unavailable");
+        assert.equal(replaced.reason, "requested_author_reviewer_lineage_conflict");
+        assert.equal(replaced.task, undefined, "an excluded author and their required native Reviewer cannot be silently replaced");
+        assert.equal(replacement.authorContinuation!.reviewer, "reviewer");
+        assert.equal(replacement.coordinator, null);
+        assert.equal(replacement.dispatchOpen, false);
+        const held = await tool("root", "operator_status");
+        assert.equal(held.task, undefined);
+        assert.match(held.next_action, /do not reparent/u);
+        await assert.rejects(before("root", "subagent", nativeTask(second.task)),
+          /mission-author-continuation-not-authorized:requested_author_reviewer_lineage_conflict/u);
+        await prompt("root", "Use the same author and the same reviewer after all.");
+        replaced = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", "Use the same author and the same reviewer"] });
+        const recovered = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        assert.equal(replaced.task.task_id, "author");
+        assert.equal(recovered.authorContinuation!.reviewer, "reviewer");
+        assert.equal(recovered.coordinator, null);
+        assert.equal(recovered.runID, null);
+        assert.equal(recovered.review, undefined);
+      }
+      if (changedAuthor) {
+        assert.equal(replacement.authorContinuation, undefined);
+        assert.equal(replaced.task.task_id, undefined);
+        return;
+      }
+      assert.equal(replaced.task.task_id, "author", "narrowing the same work must retain the user's selected author");
+      if (optionalAuthor && reviewerQuote) {
+        assert.equal(replacement.authorContinuation!.reviewerQuote, reviewerQuote,
+          "releasing only the author obligation cannot release the still-required same Reviewer");
+        assert.equal(replacement.authorContinuation!.reviewer, "reviewer");
+        assert.ok(replacement.requests.some(item => item.text === request));
+      }
+      assert.equal(replacement.authorContinuation!.reviewer, changedReviewer ? undefined : "reviewer");
+      assert.equal(replacement.coordinator, null);
+      assert.equal(replacement.dispatchOpen, false);
+      second = replaced;
+    }
+    const interruptedDispatch = await before("root", "subagent", nativeTask(second.task));
+    const terminal = (callID: string, input: Record<string, unknown>) => ({
+      id: `msg_${++counter}`, type: "assistant", agent: "dog-operator", content: [{
+        type: "tool", id: callID, name: "subagent", state: { status: "error", input,
+          error: { type: "aborted", message: "Interrupted before claim; after-hook was lost" } },
+      }],
+    });
+    assert.equal((await tool("root", "operator_status")).coordinator_dispatch, "active");
+    history.root!.push(terminal("other-call", interruptedDispatch.input),
+      terminal(interruptedDispatch.id, { ...interruptedDispatch.input, sessionID: "wrong" }),
+      terminal(interruptedDispatch.id, { ...interruptedDispatch.input, prompt: "wrong reference" }));
+    assert.equal((await tool("root", "operator_status")).coordinator_dispatch, "active",
+      "unrelated terminals cannot release a newly authorized unclaimed Task");
+    history.root!.push(terminal(interruptedDispatch.id, interruptedDispatch.input));
+    const recovered = await tool("root", "operator_status");
+    assert.equal(recovered.coordinator_dispatch, "resumable", "the exact native terminal recovers a lost after-hook before claim");
+    assert.equal(recovered.task.task_id, "author");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, null);
+    const bad = nativeTask(second.task);
+    await assert.rejects(before("root", "subagent", { ...bad, sessionID: "wrong" }), /mission-author-continuation-not-authorized|mission-coordinator-location-mismatch/u);
+    history.author!.push({ id: `msg_${++counter}`, type: "assistant", content: [{
+      type: "tool", name: "shell", id: `call_${++counter}`, state: { status: "completed",
+        input: { command: "node retained-writer.mjs", background: true }, metadata: { status: "running" } },
+    }] });
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)),
+      /mission-author-continuation-not-authorized:native_tools_active_or_unproven/u,
+      "recheck tool ownership between preparation and actual admission");
+    const held = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(held.dispatchOpen, false);
+    assert.equal(held.coordinator, null, "a rejected dispatch cannot claim the old author");
+    const pendingPart = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    (pendingPart.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+    active = { author: { type: "running" } };
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)), /mission-author-continuation-not-authorized:native_session_active/u);
+    active = {};
+    const dispatch = await before("root", "subagent", nativeTask(second.task));
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)), /mission-dispatch-not-authorized/u);
+    delete agents.author!.outcome;
+    await prompt("author", String(dispatch.input.prompt));
+    const claimed = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(claimed.coordinator, "author");
+    await assert.rejects(before("author", "subagent", { agent: "dog-worker-v010", description: "other writer", prompt: "Implement" }),
+      /mission-author-continuation-author-required/u);
+    await assert.rejects(tool("author", "plan_units", { executor: "worker", units: [unit("second")] }),
+      /mission-author-continuation-author-required/u);
+    if (workspace.startsWith("git-readonly-")) {
+      // This directory is a different repository, not merely a subdirectory of
+      // the selected work location. Its command still reads the selected result.
+      await mkdir(otherCwd);
+      await exec("git", ["init", "--quiet"], { cwd: otherCwd });
+      await writeFile(join(otherCwd, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("../result.txt","utf8").trim(),process.argv[2]);');
+      const readOnly = { title: "Verify result", objective: "Verify the retained result without editing",
+        read: workspace === "git-readonly-read" ? ["result.txt"] : [], write: [],
+        validation: ["node check.mjs first", ...(workspace === "git-readonly-execution" ? ["node check.mjs first --secondary"] : [])],
+        validation_cwd: { "node check.mjs first": otherCwd } };
+      const priorMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const priorRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const priorBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      const outside = { ...readOnly, read: [join(dirname(directory), "unrelated.txt")],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, dirname(directory)])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [outside] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      const nested = { ...readOnly, read: [join(otherCwd, "check.mjs")],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, otherCwd])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [nested] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      const missingCwd = { ...readOnly, read: [],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, join(directory, "missing")])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [missingCwd] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [{ ...readOnly,
+        read: ["result.txt"], write: [join(otherCwd, "unrelated.txt")] }] }),
+      /mission-author-continuation-work-location-mismatch/u,
+      "a matching read or execution cwd must not relax the existing write destination check");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), priorMission);
+      assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), priorRun);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+      const direct = await tool("author", "plan_units", { executor: "self", units: [readOnly] });
+      assert.equal(direct.status, "direct-unit-running");
+      assert.notEqual(direct.run_id, oldRun.runID);
+      if (workspace === "git-readonly-execution") {
+        const running = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        await assert.rejects(tool("author", "plan_units", { executor: "self", units: [{ ...readOnly,
+          validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, otherCwd])) }],
+          reason: "Propose a different validation directory" }), /mission-author-continuation-work-location-mismatch/u);
+        assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), running,
+          "a correction uses its own effective cwd and cannot replace the admitted registration on rejection");
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget);
+      }
+      await validate("first", true);
+      await tool("author", "finish_direct_unit");
+      const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.deepEqual(newRun.units[0]!.unit.write, []);
+      assert.equal(newRun.units[0]!.directExecution!.actor, "author");
+      assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), readOnly.validation.map(command => [command]));
+      assert.ok(newRun.units[0]!.evidence.length > 0);
+      const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+      assert.equal(review.task.task_id, "reviewer", "the retained independent reviewer reviews this new read-only unit");
+      const reviewDispatch = await before("author", "subagent", nativeTask(review.task));
+      delete agents.reviewer!.outcome;
+      await prompt("reviewer", String(reviewDispatch.input.prompt));
+      agents.reviewer!.outcome = "succeeded";
+      const report = "PASS\nThe current read-only verification is correct.", end = Date.now();
+      history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+        time: { created: end, completed: end }, content: [{ type: "text", text: report }] });
+      await after(reviewDispatch, report, { sessionID: "reviewer" });
+      const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(current.review!.child, "reviewer");
+      assert.equal(current.review!.result, report);
+      assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "first\n");
+      await tool("author", "submit_mission", { status: "ready", summary: "Read-only verification ready" });
+      agents.author!.outcome = "succeeded";
+      await after(dispatch, "Read-only verification ready", { sessionID: "author" });
+      assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+      await prompt("root", "Use the same author and the same reviewer for another verification.");
+      const thirdStart = () => tool("root", "start_mission", {
+        requirements: ["Verify once more with the same author and reviewer"], author_continuation: selection });
+      const archive = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).replanArchivePath(oldRun);
+      await rename(archive, `${archive}.held`);
+      try {
+        const missing = await thirdStart();
+        assert.equal(missing.reason, "predecessor_work_location_unproven");
+        assert.equal(missing.task, undefined, "the continuation link cannot replace the original run's provenance");
+      } finally { await rename(`${archive}.held`, archive); }
+      if (workspace === "git-readonly-read") {
+        const sequence = oldRun.sequence + 1;
+        const conflicting = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).replanArchivePath({ ...oldRun, sequence });
+        try {
+          for (const invalid of [{ rootSessionID: "other-root" }, { runID: "other-run" },
+            { operatorSessionID: "other-author" }, { phase: "running" }]) {
+            await writeFile(conflicting, JSON.stringify({ ...oldRun, sequence, ...invalid }));
+            const held = await thirdStart();
+            assert.equal(held.reason, "predecessor_work_location_unproven");
+            assert.equal(held.task, undefined, "a newer mismatched archive cannot grant recovery or fall back to old proof");
+          }
+        } finally { await rm(conflicting, { force: true }); }
+      }
+      const writeIndex = history.author!.findIndex(message => Array.isArray(message.content) &&
+        message.content.some((part: { name?: string }) => part.name === "patch"));
+      assert.notEqual(writeIndex, -1);
+      const [nativeWrite] = history.author!.splice(writeIndex, 1);
+      try {
+        const missing = await thirdStart();
+        assert.equal(missing.reason, "predecessor_native_write_unproven");
+        assert.equal(missing.task, undefined, "read-only continuity still rechecks the actual writer's native history");
+      } finally { history.author!.splice(writeIndex, 0, nativeWrite!); }
+      active = { author: { type: "running" } };
+      const busy = await thirdStart();
+      assert.equal(busy.reason, "native_session_active");
+      assert.equal(busy.task, undefined);
+      active = {};
+      const third = await thirdStart();
+      assert.equal(third.task.task_id, "author", "a completed read-only continuation must not strand the proven actual author");
+      assert.notEqual(third.mission_id, second.mission_id);
+      const thirdMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(thirdMission.authorContinuation!.predecessorRunID, newRun.runID);
+      assert.equal(thirdMission.authorContinuation!.reviewer, "reviewer");
+      assert.equal(thirdMission.coordinator, null);
+      assert.equal(thirdMission.runID, null);
+      assert.equal(thirdMission.review, undefined, "only authorship, not an old Review or checks, survives the read-only link");
+      const thirdDispatch = await before("root", "subagent", nativeTask(third.task));
+      delete agents.author!.outcome;
+      await prompt("author", String(thirdDispatch.input.prompt));
+      await tool("author", "plan_units", { executor: "self", units: [readOnly] });
+      const thirdRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.notEqual(thirdRun.runID, newRun.runID);
+      assert.notEqual(thirdRun.runID, oldRun.runID);
+      assert.deepEqual(thirdRun.units[0]!.directExecution!.checks, []);
+      assert.deepEqual(thirdRun.units[0]!.evidence, [], "the new admission must earn its own evidence");
+      return;
+    }
+    const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
+    assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
+    assert.equal(direct.status, "direct-unit-running");
+    const proposed = { ...unit("second"), objective: "Use the current result to produce second without repeating setup" };
+    const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const missionsForProposal = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const assertProposal = async (status: string) => {
+      const priorRun = await operators.required("root"), priorMission = await missionsForProposal.required("root");
+      const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      const proposal = await tool("root", "plan_units", { executor: "self", units: [proposed],
+        reason: "Recover the retained same author's method", handoff_context: "Keep the existing check and cumulative budget." });
+      assert.equal(proposal.status, status);
+      assert.deepEqual(await operators.required("root"), priorRun, "root only forwards the proposal; it cannot admit a replacement contract");
+      assert.deepEqual(await missionsForProposal.required("root"), priorMission);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget);
+      return proposal;
+    };
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined);
+    await after(dispatch, "Interrupted with the direct unit retained", { sessionID: "author" });
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "an unknown native outcome is not idle proof");
+    agents.author!.outcome = "interrupted";
+    history.author!.push({ id: "pending-shell", type: "assistant", content: [{
+      type: "tool", id: "call_pending_shell", name: "shell", state: { status: "completed", metadata: { status: "running" } },
+    }] });
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "a background tool still prevents duplicate continuation");
+    history.author!.pop();
+    active = { reviewer: { type: "running" } };
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "a historical Task's live child remains protected");
+    active = {};
+    delete agents.reviewer!.outcome;
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "an unproven Task terminal is not recovery proof");
+    agents.reviewer!.outcome = "succeeded";
+    const proposal = await assertProposal("mission-coordinator-required");
+    assert.equal(proposal.task.task_id, "author");
+    const methodDispatch = await before("root", "subagent", nativeTask(proposal.task));
+    delete agents.author!.outcome;
+    assert.match(await prompt("author", String(methodDispatch.input.prompt)), /Use the current result to produce second/u);
+    await edit("first", "second");
+    await validate("second");
+    await tool("author", "finish_direct_unit");
+    const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), [["node check.mjs second"]]);
+    assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
+    assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
+    if (workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" ||
+        workspace === "git-replace-earlier-reviewer-optional" || workspace === "git-replace-earlier-reviewer-permission" ||
+        workspace === "git-permission-reviewer-no-replace" || workspace === "git-optional-author-selected") {
+      agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
+      const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [], reviewer_session_id: "otherReviewer" });
+      assert.equal(review.task.task_id, "otherReviewer", "a genuine reviewer change removes the old selection, not the author's");
+      await before("author", "subagent", nativeTask(review.task));
+      return;
+    }
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.update("root", current => { current.sourceAuthors = [...(current.sourceAuthors ?? []), "reviewer"]; });
+    await assert.rejects(tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] }),
+      /mission-review-requested-reviewer-not-independent/u);
+    await missions.update("root", current => { current.sourceAuthors = current.sourceAuthors!.filter(id => id !== "reviewer"); });
+    active = { reviewer: { type: "running" } };
+    await assert.rejects(tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] }),
+      /mission-review-requested-reviewer-unavailable:native_session_active/u);
+    active = {};
+    const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+    assert.equal(review.status, "review-required");
+    assert.equal(review.task.task_id, "reviewer");
+    if (workspace === "git" && request === "Use the same author and the same reviewer for the new result.") {
+      agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
+      const beforeSubstitution = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      await assert.rejects(before("author", "subagent", { ...nativeTask(review.task), sessionID: "otherReviewer" }),
+        /mission-review-requested-reviewer-unavailable/u, "a different owned independent Reviewer cannot replace the user's selection");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeSubstitution);
+    }
+    const reviewDispatch = await before("author", "subagent", nativeTask(review.task));
+    delete agents.reviewer!.outcome;
+    assert.match(await prompt("reviewer", String(reviewDispatch.input.prompt)), /second/u,
+      "the current candidate, not the prior verdict, is reviewed");
+    agents.reviewer!.outcome = "succeeded";
+    const report = "PASS\nThe second candidate and its current check are correct.", end = Date.now();
+    history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+      time: { created: end, completed: end }, content: [{ type: "text", text: report }] });
+    await after(reviewDispatch, report, { sessionID: "reviewer" });
+    const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(current.review!.child, "reviewer");
+    assert.equal(current.review!.result, report);
+    assert.notEqual(current.review!.runID, oldRun.runID);
+    assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
+    if (workspace === "git-glob-all" || workspace === "git-optional-author-required-reviewer" || workspace.startsWith("git-add-reviewer") ||
+        workspace.startsWith("git-replace-earlier-author-optional") || workspace === "git-replace-earlier-author-conflict") {
+      await tool("author", "submit_mission", { status: "ready", summary: "Current result reviewed and ready" });
+      agents.author!.outcome = "succeeded";
+      await after(methodDispatch, "Current result ready", { sessionID: "author" });
+      assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+    }
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 interrupted Coordinator Task reconciles its native error despite a live dispatch owner", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-interrupted-dispatch-"));
@@ -3522,6 +4598,7 @@ async function registeredHost(run: (host: { requests: URL[]; pid: number; repeat
     if (url.pathname === "/api/info") { response.end(JSON.stringify({ pid: host.pid, version: "2.0.18" })); return; }
     if (host.fail) { response.writeHead(503).end(JSON.stringify({ message: "unavailable" })); return; }
     if (url.pathname === "/api/session/active") { response.end(JSON.stringify({ data: { ses_live: { type: "running" } } })); return; }
+    if (url.pathname === "/api/session/ses_previous/inbox") { response.end(JSON.stringify({ data: [] })); return; }
     if (host.malformed) { response.end(JSON.stringify({ data: [] })); return; }
     const parent = url.searchParams.get("parentID"), cursor = url.searchParams.get("cursor");
     const ids = parent !== "ses_coordinator" ? [] : cursor === null ? ["ses_worker"] : cursor === "page-2" ? ["ses_reviewer"] : [];
@@ -3584,6 +4661,8 @@ test("V2 activity fallback reads only the exact registered owning service", asyn
   try {
     assert.deepEqual(await client.session.active(), { data: { ses_live: { type: "running" } } });
     assert.ok(host.requests.some(url => url.pathname === "/api/session/active"));
+    assert.deepEqual(await client.session.inbox({ path: { id: "ses_previous" } }), { data: [] });
+    assert.ok(host.requests.some(url => url.pathname === "/api/session/ses_previous/inbox"));
   } finally { cleanup?.(); }
   host.pid = process.pid + 1;
   await host.register(host.pid);
@@ -3591,7 +4670,9 @@ test("V2 activity fallback reads only the exact registered owning service", asyn
   try {
     const before = host.requests.length;
     await assert.rejects(client.session.active(), /v2-history-owning-service-unavailable/);
+    await assert.rejects(client.session.inbox({ path: { id: "ses_previous" } }), /v2-history-owning-service-unavailable/);
     assert.ok(!host.requests.slice(before).some(url => url.pathname === "/api/session/active"));
+    assert.ok(!host.requests.slice(before).some(url => url.pathname === "/api/session/ses_previous/inbox"));
   } finally { foreignCleanup?.(); }
 }));
 

@@ -785,7 +785,8 @@ export async function missionReviewSource(directory: string, run: OperatorState,
     uninspectedHistoricalFiles: string[] }> {
   const scope = missionReviewScope(priorScope, run);
   const bindings = scope.validationBindings ?? [];
-  const manifestScope = (path: string) => path === "." ? `${resolve(directory)}/**` : path;
+  const rootScope = (path: string) => path === "." || path === "**";
+  const manifestScope = (path: string) => rootScope(path) ? `${resolve(directory)}/**` : path;
   // Revisit every captured validation cwd, not only scope roots: a broad Location
   // grant can contain a nested checkout whose newly tracked scratch is real input.
   const manifest = { read: scope.read.map(manifestScope), write: scope.write.map(manifestScope) };
@@ -857,7 +858,7 @@ export async function missionReviewSource(directory: string, run: OperatorState,
       acceptance: unit.unit.acceptance_indices } : { unit: unit.unit, hashes: unit.hashes }) }));
   const candidateHash = hash.copy(); // Optional excerpt selection is presentation, not candidate bytes.
   const sourceUpdate = (value: string | Buffer) => { hash.update(value); candidateHash.update(value); };
-  const writes = [...new Set(scope.write.map(path => path === "." ? path : normalizeManifestScope(path).path))];
+  const writes = [...new Set(scope.write.map(path => rootScope(path) ? "." : normalizeManifestScope(path).path))];
   const focused: { entry: MissionEvidenceExcerpt; lines: string[]; bytes: number; lineCapped: boolean }[] = [];
   for (const entry of evidence) {
     const absolute = resolve(directory, entry.path);
