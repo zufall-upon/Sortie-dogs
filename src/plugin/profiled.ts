@@ -2604,15 +2604,20 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return undefined;
     }
     function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false): boolean {
-      // Possessives describe an artifact, not selection of the person who made it.
-      const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b(?!['’])|作業者|実装者|実装担当|作者|担当者?|書き手)`;
-      const reviewActor = String.raw`(?:\breviewer\b(?!['’])|レビュー担当|レビュアー|レビュー者)`;
+      // Possessives and role-qualified tooling/experience describe an artifact,
+      // not selection of the person. Apply the same boundary to shared modifiers.
+      const artifactNoun = String.raw`\s+(?:experience|tools?|tooling)\b`;
+      const artifactSuffix = String.raw`(?:['’]|${artifactNoun})`;
+      const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b(?!${artifactSuffix})|作業者|実装者|実装担当|作者|担当者?|書き手)`;
+      const reviewActor = String.raw`(?:\breviewer\b(?!${artifactSuffix})|レビュー担当|レビュアー|レビュー者)`;
       const actor = reviewer ? reviewActor : author, other = reviewer ? author : reviewActor;
-      const otherPossessive = reviewer ? String.raw`\b(?:author|writer|implementer|developer)\b['’]` : String.raw`\breviewer\b['’]`;
+      const otherEnglish = reviewer ? String.raw`\b(?:author|writer|implementer|developer)\b` : String.raw`\breviewer\b`;
       const qualifier = String.raw`(?:\b(?:same|previous|prior|original|existing)\s+(?:(?:implementation|code)\s+)?|(?:同じ|前回の|前の|既存の)\s*)`;
-      const connector = String.raw`\s*(?:,?\s+and\s+|&\s*|と\s*|・\s*|、\s*)(?:the\s+)?(?:${qualifier})?`;
+      const sharedConnector = String.raw`\s*(?:,?\s+and\s+|&\s*|と\s*|・\s*|、\s*)`;
+      const connector = String.raw`${sharedConnector}(?:the\s+)?(?:${qualifier})?`;
       // A modifier can be shared: "the same author and reviewer", "前回の実装担当・Reviewer".
-      const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherPossessive})`;
+      // A separately qualified tool phrase does not erase selection of the first actor.
+      const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}${artifactNoun})`;
       const contrary = /(?:do not|don't|never|not|different|another).{0,40}(?:same|previous|prior|original|existing)|(?:same|previous|prior|original|existing).{0,60}(?:not (?:be )?(?:used|assigned|selected|required|needed)|unnecessary)|(?:同じ|前回|前の|既存).{0,40}(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の(?:作者|担当|書き手|実装者|作業者|レビュアー)/iu;
       if (!new RegExp(target, "iu").test(text) || contrary.test(text)) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.

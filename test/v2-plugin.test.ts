@@ -2386,6 +2386,8 @@ test('requires exclusive execution', async () => {
 for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
   ["Continue with the previous developer for new work", "previous developer"],
+  ["Keep the same developer for new work", "same developer"],
+  ["Keep the same author and the same reviewer tools for new work.", "same author"],
   ["前回の実装担当で続けて", "前回の実装担当"],
   ["同じ実装担当が担当する。", "同じ実装担当"],
   ["同じ実装担当が担当すること。", "同じ実装担当"],
@@ -2441,6 +2443,10 @@ for (const [request, quote] of [
 
 for (const request of [
   "Keep the same authorization checks while fixing this bug.",
+  "Keep the same developer experience while fixing the bug.",
+  "Use the same developer tools to fix the bug.",
+  "Use the same author and reviewer tools to fix the bug.",
+  "Use the same reviewer and author tools to fix the bug.",
   "The previous developer left a bug; fix it.",
   "Use the API written by the previous developer.",
   "Use the previous developer's API to fix the bug.",
