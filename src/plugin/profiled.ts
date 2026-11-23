@@ -2748,7 +2748,32 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           !predecessor.sourceAuthors?.includes(predecessor.coordinator)) return { reason: "completed_predecessor_author_unproven" };
       const child = predecessor.coordinator;
       if (selection.child && selection.child !== child) return { reason: "predecessor_author_changed" };
-      const authorUnits = previous.units.filter(unit => unit.status === "succeeded" && unit.directExecution?.actor === child &&
+      // A completed read-only continuation does not erase the original writer.
+      // Follow only its exact host-selected lineage, rechecking the original run
+      // and native write below. No archived grants or validation are imported.
+      let writerRun = previous, writerMission = predecessor;
+      const seen = new Set<string>();
+      while (!writerRun.units.some(unit => unit.unit.write.length)) {
+        if (seen.has(writerRun.runID) || seen.size >= 256 || !writerRun.units.length ||
+            writerRun.units.some(unit => unit.status !== "succeeded" || unit.directExecution?.actor !== child ||
+              !unit.directExecution.finishedAt)) return { reason: "predecessor_work_location_unproven" };
+        seen.add(writerRun.runID);
+        const link = writerMission.authorContinuation;
+        if (!link || link.blocked || link.child !== child || link.directory !== directory ||
+            !link.predecessorRunID || !link.predecessorMissionID) return { reason: "predecessor_work_location_unproven" };
+        const [linkedMission, linkedRun] = await Promise.all([
+          missions.completedRun(root, link.predecessorRunID).catch(() => undefined),
+          operators.completedRun(root, link.predecessorRunID),
+        ]);
+        if (!linkedMission || !linkedRun || linkedMission.id !== link.predecessorMissionID ||
+            linkedMission.dispatchOpen || !linkedMission.callID || linkedMission.coordinator !== child ||
+            linkedRun.operatorSessionID !== child || !linkedMission.sourceAuthors?.includes(child)) {
+          return { reason: "predecessor_work_location_unproven" };
+        }
+        writerRun = linkedRun;
+        writerMission = linkedMission;
+      }
+      const authorUnits = writerRun.units.filter(unit => unit.status === "succeeded" && unit.directExecution?.actor === child &&
         unit.directExecution.finishedAt && continuationScopeIncludes(directory, unit.unit.write));
       if (!authorUnits.length) return { reason: "predecessor_work_location_unproven" };
       let history: readonly Record<string, unknown>[];

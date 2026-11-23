@@ -2935,6 +2935,61 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       agents.author!.outcome = "succeeded";
       await after(dispatch, "Read-only verification ready", { sessionID: "author" });
       assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+      await prompt("root", "Use the same author and the same reviewer for another verification.");
+      const thirdStart = () => tool("root", "start_mission", {
+        requirements: ["Verify once more with the same author and reviewer"], author_continuation: selection });
+      const archive = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).replanArchivePath(oldRun);
+      await rename(archive, `${archive}.held`);
+      try {
+        const missing = await thirdStart();
+        assert.equal(missing.reason, "predecessor_work_location_unproven");
+        assert.equal(missing.task, undefined, "the continuation link cannot replace the original run's provenance");
+      } finally { await rename(`${archive}.held`, archive); }
+      if (workspace === "git-readonly-read") {
+        const sequence = oldRun.sequence + 1;
+        const conflicting = new OperatorRuntime(directory, V010_RUNTIME_PROFILE).replanArchivePath({ ...oldRun, sequence });
+        try {
+          for (const invalid of [{ rootSessionID: "other-root" }, { runID: "other-run" },
+            { operatorSessionID: "other-author" }, { phase: "running" }]) {
+            await writeFile(conflicting, JSON.stringify({ ...oldRun, sequence, ...invalid }));
+            const held = await thirdStart();
+            assert.equal(held.reason, "predecessor_work_location_unproven");
+            assert.equal(held.task, undefined, "a newer mismatched archive cannot grant recovery or fall back to old proof");
+          }
+        } finally { await rm(conflicting, { force: true }); }
+      }
+      const writeIndex = history.author!.findIndex(message => Array.isArray(message.content) &&
+        message.content.some((part: { name?: string }) => part.name === "patch"));
+      assert.notEqual(writeIndex, -1);
+      const [nativeWrite] = history.author!.splice(writeIndex, 1);
+      try {
+        const missing = await thirdStart();
+        assert.equal(missing.reason, "predecessor_native_write_unproven");
+        assert.equal(missing.task, undefined, "read-only continuity still rechecks the actual writer's native history");
+      } finally { history.author!.splice(writeIndex, 0, nativeWrite!); }
+      active = { author: { type: "running" } };
+      const busy = await thirdStart();
+      assert.equal(busy.reason, "native_session_active");
+      assert.equal(busy.task, undefined);
+      active = {};
+      const third = await thirdStart();
+      assert.equal(third.task.task_id, "author", "a completed read-only continuation must not strand the proven actual author");
+      assert.notEqual(third.mission_id, second.mission_id);
+      const thirdMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(thirdMission.authorContinuation!.predecessorRunID, newRun.runID);
+      assert.equal(thirdMission.authorContinuation!.reviewer, "reviewer");
+      assert.equal(thirdMission.coordinator, null);
+      assert.equal(thirdMission.runID, null);
+      assert.equal(thirdMission.review, undefined, "only authorship, not an old Review or checks, survives the read-only link");
+      const thirdDispatch = await before("root", "subagent", nativeTask(third.task));
+      delete agents.author!.outcome;
+      await prompt("author", String(thirdDispatch.input.prompt));
+      await tool("author", "plan_units", { executor: "self", units: [readOnly] });
+      const thirdRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.notEqual(thirdRun.runID, newRun.runID);
+      assert.notEqual(thirdRun.runID, oldRun.runID);
+      assert.deepEqual(thirdRun.units[0]!.directExecution!.checks, []);
+      assert.deepEqual(thirdRun.units[0]!.evidence, [], "the new admission must earn its own evidence");
       return;
     }
     const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });

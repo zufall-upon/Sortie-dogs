@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { acceptanceContinuityFingerprint, inspectAcceptanceContinuity, normalizeAcceptanceCriteria,
   ACCEPTANCE_CONTINUITY_EXTENSION, MAX_ACCEPTANCE_CONTINUITY_BYTES, MAX_ACCEPTANCE_CRITERIA } from "./acceptance-continuity.js";
@@ -645,6 +645,22 @@ export class OperatorRuntime {
     } catch (error) {
       return { status: "unavailable", runs, reason: error instanceof Error ? error.message : String(error) };
     }
+  }
+  /** Read-only completed-run provenance. Never restores its grants, checks or acceptance. */
+  async completedRun(root: string, runID: string): Promise<OperatorState | undefined> {
+    if (!identifier(runID)) return undefined;
+    const file = this.file(root), directory = dirname(file);
+    try {
+      const prefix = `${file.slice(directory.length + 1)}.${runID}.`;
+      const candidates = (await readdir(directory)).filter(name =>
+        name.startsWith(prefix) && /^\d+\.archive$/u.test(name.slice(prefix.length)))
+        .sort((a, b) => Number(b.slice(prefix.length).split(".")[0]) - Number(a.slice(prefix.length).split(".")[0]));
+      if (!candidates[0]) return undefined;
+      const state = JSON.parse(await readFile(join(directory, candidates[0]), "utf8")) as OperatorState;
+      return state.schema_version === "0.1" && state.profile === this.profile.id && state.rootSessionID === root &&
+        state.runID === runID && state.phase === "completed" && Array.isArray(state.units) &&
+        state.sequence === Number(candidates[0].slice(prefix.length).split(".")[0]) ? state : undefined;
+    } catch { return undefined; }
   }
   async read(root: string): Promise<OperatorState | undefined> {
     await OperatorRuntime.writes.get(this.file(root));
