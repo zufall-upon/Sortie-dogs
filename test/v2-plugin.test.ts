@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { availableParallelism } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import test from "node:test";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
 import { RunFlightLedger } from "../dist/core/run-flight-ledger.js";
@@ -2391,8 +2391,12 @@ for (const [request, quote] of [
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
   ["Keep the same author and the same reviewer tools for new work.", "same author"],
+  ["Use the same author and do not change the existing API.", "same author"],
+  ["Do not change the existing API, use the same author.", "same author"],
+  ["Use the same author and do not use a different author.", "same author"],
   ["前回の実装担当で続けて", "前回の実装担当"],
   ["前回の実装担当に修正を依頼して。", "前回の実装担当"],
+  ["同じ作者を使い、既存のAPIを変更する。", "同じ作者"],
   ["同じ実装担当が担当する。", "同じ実装担当"],
   ["同じ実装担当が担当すること。", "同じ実装担当"],
 ]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
@@ -2484,7 +2488,14 @@ for (const request of [
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("V2 author continuation cannot use a quote that negates the user's instruction", async () => {
+for (const [request, quote] of [
+  ["Do not use the same author for this new work.", "same author"],
+  ["Use the same author and do not use the same author.", "same author"],
+  ["Use the same author, but the same author should not be used.", "same author"],
+  ["Use the same author, but the same author is unnecessary.", "same author"],
+  ["Use the same author and select a different author.", "same author"],
+  ["同じ作者を使って、同じ作者を使わない。", "同じ作者"],
+]) test(`V2 author continuation cannot use a quote that negates the user's instruction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-intent-")), fixture = contextFixture();
   const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
@@ -2492,25 +2503,34 @@ test("V2 author continuation cannot use a quote that negates the user's instruct
       get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
   try {
     await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
-      prompt: { text: "Do not use the same author for this new work." } });
+      prompt: { text: request } });
     const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
       execute(input: unknown, context: unknown): Promise<{ content: string }> };
     const packet = JSON.parse((await start.execute({ requirements: ["Use a different author"],
-      author_continuation: { request_quote: "same author", work_directory: directory } },
+      author_continuation: { request_quote: quote, work_directory: directory } },
     { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
     assert.equal(packet.status, "mission-author-continuation-unavailable");
     assert.equal(packet.reason, "user_intent_quote_unavailable");
     assert.equal(packet.task, undefined);
+    const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(state.coordinator, null);
+    assert.equal(state.dispatchOpen, false);
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
-for (const [request, requestQuote, reviewerQuote] of [
-  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer"],
-  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer"],
-  ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer"],
-]) test(`V2 explicitly continues the completed actual author and reviews the new candidate without old authority: ${request}`, async () => {
+for (const [request, requestQuote, reviewerQuote, workspace] of [
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "git"],
+  ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer", "git"],
+  ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-partial-cwd"],
+]) test(`V2 explicitly continues the completed actual author and reviews the new candidate without old authority: ${request} (${workspace})`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
-  const directory = await mkdtemp(resolve("_testenv/v2-author-continuation-"));
+  const directory = await mkdtemp(workspace === "git" ? resolve("_testenv/v2-author-continuation-")
+    : join(tmpdir(), "v2-author-continuation-"));
+  const otherCwd = join(directory, "checks");
   const fixture = contextFixture(), exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
@@ -2568,23 +2588,46 @@ for (const [request, requestQuote, reviewerQuote] of [
     await after(event, "updated");
   };
   const validate = async (expected: string) => {
-    const event = await before("author", "shell", { command: `node check.mjs ${expected}`, workdir: directory });
-    const result = await exec(process.execPath, ["check.mjs", expected], { cwd: directory });
-    await after(event, result.stdout, { exit: 0 });
+    const cwd = workspace === "non-git-registered-other" && expected === "first" ? otherCwd : directory;
+    const checks = [{ cwd, suffix: "" }, ...(workspace === "non-git-partial-cwd" && expected === "first"
+      ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
+    for (const check of checks) {
+      const event = await before("author", "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
+      const result = await exec(process.execPath, ["check.mjs", expected, ...(check.suffix ? ["--secondary"] : [])], { cwd: check.cwd });
+      await after(event, result.stdout, { exit: 0 });
+    }
   };
   try {
-    await exec("git", ["init", "--quiet"], { cwd: directory });
+    if (workspace === "git") await exec("git", ["init", "--quiet"], { cwd: directory });
+    else await assert.rejects(exec("git", ["rev-parse", "--show-toplevel"], { cwd: directory }), "the workspace must actually be outside Git");
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("result.txt","utf8").trim(),process.argv[2]);');
+    if (workspace.startsWith("non-git-registered") || workspace === "non-git-partial-cwd") {
+      await mkdir(otherCwd);
+      await writeFile(join(otherCwd, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("../result.txt","utf8").trim(),process.argv[2]);');
+    }
     await prompt("root", "Create the first result and review it.");
     const old = await tool("root", "start_mission", { requirements: ["Create the first result"], preferred_executor: "coordinator" });
     const firstDispatch = await before("root", "subagent", nativeTask(old.task));
     await prompt("author", String(firstDispatch.input.prompt));
     const unit = (expected: string) => ({ title: "Result", objective: `Write ${expected}`, read: ["check.mjs"],
-      write: ["result.txt"], validation: [`node check.mjs ${expected}`] });
-    await tool("author", "plan_units", { executor: "self", units: [unit("first")] });
+      write: ["result.txt"], validation: [`node check.mjs ${expected}`,
+        ...(workspace === "non-git-partial-cwd" && expected === "first" ? [`node check.mjs ${expected} --secondary`] : [])],
+      ...(workspace === "non-git-registered-default" && expected === "first"
+        ? { validation_cwd: { [`node check.mjs ${expected}`]: otherCwd } }
+        : workspace === "non-git-partial-cwd" && expected === "first"
+          ? { validation_cwd: { [`node check.mjs ${expected} --secondary`]: otherCwd } } : {}) });
+    const originalUnit = unit("first");
+    await tool("author", "plan_units", { executor: "self", units: [originalUnit] });
+    if (workspace.startsWith("non-git-registered")) {
+      const { validation_cwd: _initialCwd, ...withoutCwd } = originalUnit;
+      const corrected = workspace === "non-git-registered-default" ? withoutCwd
+        : { ...withoutCwd, validation_cwd: { "node check.mjs first": otherCwd } };
+      const registered = await tool("author", "plan_units", { executor: "self", units: [corrected], reason: "Correct the validation directory" });
+      assert.equal(registered.status, "direct-unit-registration-corrected");
+    }
     await edit(undefined, "first");
     await validate("first");
-    await tool("author", "finish_direct_unit");
+    assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
     const authorBackground = await before("author", "shell", { command: "node retained-writer.mjs", background: true });
     await after(authorBackground, "Background process running", { status: "running" });
     const authorTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
@@ -2609,6 +2652,16 @@ for (const [request, requestQuote, reviewerQuote] of [
     assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
+    if (workspace === "non-git-registered-default") {
+      assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first": otherCwd });
+      assert.deepEqual(oldRun.units[0]!.directExecution!.validationCwd, {});
+    } else if (workspace === "non-git-registered-other") {
+      assert.equal(oldRun.units[0]!.unit.validation_cwd, undefined);
+      assert.deepEqual(oldRun.units[0]!.directExecution!.validationCwd, { "node check.mjs first": otherCwd });
+    } else if (workspace === "non-git-partial-cwd") {
+      assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first --secondary": otherCwd });
+      assert.equal(oldRun.units[0]!.directExecution!.validationCwd, undefined);
+    }
 
     await prompt("root", request);
     const requirements = ["Use the same author and reviewer to write the new result"];
@@ -2630,6 +2683,25 @@ for (const [request, requestQuote, reviewerQuote] of [
     assert.equal((await start({ ...selection, work_directory: join(directory, "missing") })).reason, "work_directory_unavailable_or_changed");
     assert.equal((await start({ ...selection, work_directory: dirname(directory) })).reason, "predecessor_native_write_unproven",
       "a common ancestor is not the actual repository where the prior author wrote");
+    if (workspace === "non-git-default") {
+      const index = history.author!.findIndex(message => Array.isArray(message.content) &&
+        message.content.some((part: { name?: string }) => part.name === "patch"));
+      assert.notEqual(index, -1);
+      const [write] = history.author!.splice(index, 1);
+      const held = await start();
+      assert.equal(held.reason, "predecessor_native_write_unproven", "the default cwd alone cannot replace native write proof");
+      assert.equal(held.task, undefined);
+      history.author!.splice(index, 0, write!);
+    }
+    if (workspace === "non-git-registered-other") {
+      const held = await start();
+      assert.equal(held.reason, "predecessor_native_write_unproven", "an explicitly registered different validation directory is not the default");
+      assert.equal(held.task, undefined);
+      const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(state.coordinator, null);
+      assert.equal(state.dispatchOpen, false);
+      return;
+    }
     agents.author!.parentID = "other-root";
     assert.match((await start()).reason, /native_lineage/u);
     agents.author!.parentID = "root";

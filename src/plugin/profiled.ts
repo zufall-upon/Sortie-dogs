@@ -2618,11 +2618,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // A modifier can be shared: "the same author and reviewer", "前回の実装担当・Reviewer".
       // A separately qualified artifact does not erase selection of the first actor.
       const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}(?!${englishBoundary}))`;
-      const contrary = /(?:do not|don't|never|not|different|another).{0,40}(?:same|previous|prior|original|existing)|(?:same|previous|prior|original|existing).{0,60}(?:not (?:be )?(?:used|assigned|selected|required|needed)|unnecessary)|(?:同じ|前回|前の|既存).{0,40}(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の(?:作者|担当|書き手|実装者|作業者|レビュアー)/iu;
-      if (!new RegExp(target, "iu").test(text) || contrary.test(text)) return false;
+      const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
+      const negatedTarget = new RegExp(String.raw`\b(?:do\s+not|don['’]t|never|not)\s+(?:${verb}\s+(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?(?:not\s+(?:be\s+)?(?:used|assigned|selected|required|needed)|unnecessary)\b|${target}\s*(?:を|は|が|で|に)?\s*(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の\s*${actor}`, "iu");
+      const otherSelection = new RegExp(String.raw`\b${verb}\s+(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
+      // Negation and alternatives must govern the selected person, not an
+      // unrelated object in another clause (such as an existing API).
+      const contrary = negatedTarget.test(text) || [...text.matchAll(otherSelection)].some(match =>
+        !/\b(?:do\s+not|don['’]t|never|not)\s+$/iu.test(text.slice(0, match.index)));
+      if (!new RegExp(target, "iu").test(text) || contrary) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
-      const command = String.raw`\b(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)\s+(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
+      const command = String.raw`\b${verb}\s+(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
       const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
       const requestedAction = String.raw`(?:任せ(?!た|てい[たる]|る(?!${directiveEnd}))|依頼(?!した|してい[たる]|する(?!${directiveEnd})))`;
       const requestedWork = String.raw`(?:[^に、。,.!?！？;\r\n]*?を)?`;
@@ -2728,7 +2734,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         for (const path of writes.paths) {
           const location = await sameWorkLocation(directory, path);
           if (location === "repository" || location === "no-repository" && units.some(unit =>
-            Object.values(unitValidationCwd(unit) ?? {}).some(cwd => resolve(cwd) === directory))) observed = true;
+            unitValidation(unit).some(command => validationDirectoryMatches([command], directory,
+              unit.fabricRoot ?? input.directory, unitValidationCwd(unit))))) observed = true;
         }
       }
       if (!observed) return { reason: "predecessor_native_write_unproven" };
