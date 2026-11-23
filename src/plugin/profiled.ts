@@ -2610,8 +2610,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
       const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
       // Noun/verb homographs need a person-directed object boundary; otherwise
-      // "author review notes available" can name an artifact.
-      const actionObject = String.raw`(?=\s+(?:the|a|an|this|that|these|those|it|them|my|your|our|their)\b|\s+[a-z][\w'-]*\s*(?:$|[,;:.!?])|\s*(?:$|[,;:.!?]))`;
+      // "author review notes available" can name an artifact. A bare object can
+      // be a compound noun ("source code"); an availability predicate after it
+      // instead completes the possession clause. Preposed adjectives remain valid.
+      const clauseEnd = String.raw`(?:$|[,;:.!?])`;
+      const possessionPredicate = String.raw`\b(?:available|ready|accessible|present)\s*(?:${clauseEnd}|(?:for|to|in|on|at|with)\b)`;
+      const bareActionObject = String.raw`\s+(?![^,;:.!?\r\n]*${possessionPredicate})[a-z][\w'-]*(?:\s+[a-z][\w'-]*)*\s*${clauseEnd}`;
+      const actionObject = String.raw`(?=\s+(?:the|a|an|this|that|these|those|it|them|my|your|our|their)\b|${bareActionObject}|\s*${clauseEnd})`;
       const causativeAction = String.raw`(?:implement|write|develop|handle|continue|verify|inspect|fix|investigate|(?:resume|review|check|test)${actionObject}|work\s+(?:on|with|for))`;
       const causativeTail = String.raw`\s+${verbModifiers}${causativeAction}\b`;
       const causativeBoundary = String.raw`(?:${englishBoundary}|(?=${causativeTail}))`;
