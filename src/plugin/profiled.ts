@@ -2752,12 +2752,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!selection) return { reason: "explicit_user_intent_missing" };
       const request = mission.requests.find(item => item.id === selection.requestID);
       const sentences = request?.text.split(/[\r\n。.!?]+/u) ?? [];
+      // The user may add a Reviewer choice in a later adopted turn. Legacy
+      // selections without a separate binding quoted the author's same turn.
+      const reviewerRequest = mission.requests.find(item => item.id === (selection.reviewerRequestID ?? selection.requestID));
+      const reviewerSentences = reviewerRequest?.text.split(/[\r\n。.!?]+/u) ?? [];
       if (!request || effectiveContinuationIntent(mission.requests, false) !== "selected" ||
           !explicitContinuationQuote(selection.quote, false) ||
           !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
           selection.reviewerQuote && (effectiveContinuationIntent(mission.requests, true) !== "selected" ||
             !explicitContinuationQuote(selection.reviewerQuote, true) ||
-            !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
+            !reviewerSentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
         return { reason: "user_intent_quote_unavailable" };
       }
       if (effectiveContinuationIntent(mission.requests, true) === "selected" &&
@@ -2932,6 +2936,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const keepAuthor = effectiveContinuationIntent(requests, false) !== "contrary";
             if (effectiveContinuationIntent(requests, true) === "contrary") {
               delete selection.reviewerQuote;
+              delete selection.reviewerRequestID;
               delete selection.reviewer;
             }
             mission = await missions.update(context.sessionID, state => {
@@ -2971,12 +2976,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const directory = isAbsolute(String(authorRequest.work_directory))
               ? await realpath(String(authorRequest.work_directory)).catch(() => String(authorRequest.work_directory))
               : String(authorRequest.work_directory);
+            // Only an additional user-selected Reviewer is mutable before admission.
+            // Author, work location, predecessor and an already fixed Reviewer stay frozen.
+            const reviewerAddition = saved?.reviewerQuote === undefined && saved?.reviewer === undefined &&
+              typeof authorRequest.reviewer_quote === "string";
             if (saved?.child && (saved.requestID !== request.id || saved.quote !== authorRequest.request_quote ||
-                saved.directory !== directory || saved.reviewerQuote !== authorRequest.reviewer_quote)) {
+                saved.directory !== directory || saved.reviewerQuote !== authorRequest.reviewer_quote && !reviewerAddition)) {
               throw new Error("mission-author-continuation-selection-frozen");
             }
+            const reviewerRequest = typeof authorRequest.reviewer_quote === "string"
+              ? (saved?.reviewerQuote === authorRequest.reviewer_quote
+                ? mission.requests.find(item => item.id === (saved.reviewerRequestID ?? saved.requestID)) : undefined) ??
+                [...mission.requests].reverse().find(item => item.text.includes(String(authorRequest.reviewer_quote)) &&
+                  continuationIntent(item.text, true) === "selected") : undefined;
             const selection = { requestID: request.id, quote: String(authorRequest.request_quote), directory,
               ...(typeof authorRequest.reviewer_quote === "string" ? { reviewerQuote: authorRequest.reviewer_quote } : {}),
+              ...(reviewerRequest ? { reviewerRequestID: reviewerRequest.id } : {}),
               ...(saved?.predecessorRunID ? { predecessorRunID: saved.predecessorRunID } : {}),
               ...(saved?.predecessorMissionID ? { predecessorMissionID: saved.predecessorMissionID } : {}),
               ...(saved?.child ? { child: saved.child } : {}), ...(saved?.reviewer ? { reviewer: saved.reviewer } : {}),
@@ -3009,7 +3024,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               state.sourceAuthors = [...new Set([...(state.sourceAuthors ?? []), ...(proof.predecessor.sourceAuthors ?? []),
                 ...(proof.predecessor.corrections ?? []).filter(item => !(item.status === "failed" && item.noWriteReceipt)).map(item => item.author)])];
             });
-          } else if (mission.authorContinuation?.child && mission.authorContinuation.blocked &&
+          } else if (mission.authorContinuation?.child &&
               mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
             const saved = mission.authorContinuation;
             const proof = await proveAuthorContinuation(context.sessionID, mission,

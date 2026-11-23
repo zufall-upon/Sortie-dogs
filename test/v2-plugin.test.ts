@@ -2634,6 +2634,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-reviewer-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
+  ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
+  ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
@@ -2780,7 +2782,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     }
 
     await prompt("root", request);
-    const requirements = ["Use the same author and reviewer to write the new result"];
+    const requirements = [reviewerQuote ? "Use the same author and reviewer to write the new result"
+      : "Use the same author to write the new result"];
     const selection = { request_quote: requestQuote, reviewer_quote: reviewerQuote, work_directory: directory };
     const start = (choice = selection) => tool("root", "start_mission", {
       requirements, preferred_executor: "coordinator", author_continuation: choice });
@@ -2791,7 +2794,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await tool("root", "operator_status")).task, undefined);
     await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
       /mission-author-continuation-author-required/u);
-    assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
+    if (reviewerQuote) assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
       author_continuation: { request_quote: requestQuote, work_directory: directory } })).reason,
     "explicit_reviewer_continuation_input_required", "an explicit same-Reviewer request cannot become a silent substitution");
     await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
@@ -2849,6 +2852,61 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await start()).reason, "native_inbox_not_empty");
     inbox = {};
     let second = await start();
+    if (workspace.startsWith("git-add-reviewer")) {
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const selected = await missions.required("root");
+      assert.equal(second.task.task_id, "author");
+      assert.equal(selected.authorContinuation!.reviewerQuote, undefined);
+      const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", "Use the same reviewer for this work as well.");
+      const reviewerRequestID = history.root!.at(-1)!.id;
+      requirements.push("Use the same reviewer");
+      const adopted = await tool("root", "start_mission", { requirements });
+      assert.equal(adopted.reason, "explicit_reviewer_continuation_input_required");
+      assert.equal(adopted.task, undefined, "an unquoted newly adopted Reviewer choice must not offer an unusable Task");
+      assert.equal(adopted.mission_id, second.mission_id);
+      if (workspace === "git-add-reviewer-replace") {
+        await prompt("root", "Limit the implementation to result.txt; keep the other requirements unchanged.");
+        requirements.unshift("Only change result.txt");
+        const narrowed = await tool("root", "start_mission", { intent: "replace", requirements });
+        assert.equal(narrowed.reason, "explicit_reviewer_continuation_input_required");
+        assert.equal(narrowed.task, undefined);
+        assert.notEqual(narrowed.mission_id, second.mission_id);
+      }
+      const held = await missions.required("root");
+      assert.equal(held.authorContinuation!.child, "author");
+      assert.equal(held.runID, null);
+      const invalid = await start({ ...selection, reviewer_quote: "not the user's choice" });
+      assert.equal(invalid.reason, "user_intent_quote_unavailable");
+      assert.equal(invalid.task, undefined);
+      const rejected = await missions.required("root");
+      assert.deepEqual(rejected.authorContinuation, held.authorContinuation,
+        "an invalid additional quote cannot change the selected author or Reviewer");
+      assert.deepEqual([rejected.id, rejected.coordinator, rejected.runID, rejected.dispatchOpen],
+        [held.id, held.coordinator, held.runID, held.dispatchOpen]);
+      await assert.rejects(start({ ...selection, work_directory: dirname(directory), reviewer_quote: "same reviewer" }),
+        /mission-author-continuation-selection-frozen/u, "adding a Reviewer cannot change the selected work location");
+      Object.assign(selection, { reviewer_quote: "same reviewer" });
+      active = { reviewer: { type: "running" } };
+      const busy = await start();
+      assert.equal(busy.reason, "native_session_active");
+      assert.equal(busy.task, undefined, "a later Reviewer selection still requires its current native idle proof");
+      active = {};
+      second = await start();
+      const updated = await missions.required("root");
+      assert.equal(second.task.task_id, "author");
+      assert.equal(updated.id, held.id);
+      assert.equal(updated.authorContinuation!.requestID, selected.authorContinuation!.requestID);
+      assert.equal(updated.authorContinuation!.reviewerRequestID, reviewerRequestID);
+      assert.equal(updated.authorContinuation!.reviewer, "reviewer");
+      assert.equal(updated.coordinator, null);
+      assert.equal(updated.runID, null);
+      assert.equal(updated.review, undefined);
+      await assert.rejects(start({ ...selection, reviewer_quote: undefined }),
+        /mission-author-continuation-selection-frozen/u, "a successfully added Reviewer choice cannot be silently removed");
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget,
+        "adding a user restriction does not admit work or import earlier accounting");
+    }
     assert.notEqual(second.mission_id, old.mission_id);
     assert.equal(second.task.task_id, "author");
     const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
@@ -3180,10 +3238,10 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(current.review!.result, report);
     assert.notEqual(current.review!.runID, oldRun.runID);
     assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
-    if (workspace === "git-glob-all") {
-      await tool("author", "submit_mission", { status: "ready", summary: "Root-glob result reviewed and ready" });
+    if (workspace === "git-glob-all" || workspace.startsWith("git-add-reviewer")) {
+      await tool("author", "submit_mission", { status: "ready", summary: "Current result reviewed and ready" });
       agents.author!.outcome = "succeeded";
-      await after(methodDispatch, "Root-glob result ready", { sessionID: "author" });
+      await after(methodDispatch, "Current result ready", { sessionID: "author" });
       assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }

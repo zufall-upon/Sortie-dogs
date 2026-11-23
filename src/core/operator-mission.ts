@@ -247,7 +247,7 @@ export interface OperatorMission {
   coordinator: string | null;
   /** A new Mission's requested author is not an inherited grant, review, or validation. */
   authorContinuation?: {
-    requestID: string; quote: string; directory: string; reviewerQuote?: string;
+    requestID: string; quote: string; directory: string; reviewerQuote?: string; reviewerRequestID?: string;
     predecessorRunID?: string; predecessorMissionID?: string; child?: string; reviewer?: string;
     blocked?: string;
   };
