@@ -2707,9 +2707,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // Resolve changes for this role in order: a later release or permission
       // can relax its earlier command, but cannot erase a later mandatory one.
       // The modality above still belongs to its own selection/clause.
-      const optional = [...text.matchAll(optionalPredicate), ...selections.filter(match => permitted(match.index))].some(match =>
+      const optionalSelection = selections.some(match => permitted(match.index) &&
         !requiredSelections.some(selection => selection.index > match.index));
-      if (negated) return negated === "contrary" ? contrary : optional && !contrary && (negated !== "optional-quote" || !requiredSelection);
+      const optional = optionalSelection || [...text.matchAll(optionalPredicate)].some(match =>
+        !requiredSelections.some(selection => selection.index > match.index));
+      // A later explicit permission is a usable opt-in quote even if the same
+      // sentence started with an obligation. Preserve declarative contradictions.
+      if (negated) return negated === "contrary" ? contrary : optional && !contrary &&
+        (negated !== "optional-quote" || !requiredSelection || optionalSelection);
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
