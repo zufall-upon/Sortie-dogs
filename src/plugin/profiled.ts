@@ -2635,9 +2635,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const connector = String.raw`${sharedConnector}(?:the\s+)?(?:${qualifier})?`;
       // A modifier can be shared: "the same author and reviewer", "前回の実装担当・Reviewer".
       // A separately qualified artifact does not erase selection of the first actor.
-      const targetFor = (boundary: string) => {
-        const { actor, other } = actors(boundary);
-        return String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}(?!${boundary}))`;
+      const targetFor = (boundary: string, reverse = false) => {
+        const roles = actors(boundary);
+        const actor = reverse ? roles.other : roles.actor, other = reverse ? roles.actor : roles.other;
+        const artifactActor = reverse
+          ? reviewer ? String.raw`\breviewer\b` : String.raw`\b(?:author|writer|implementer|developer)\b`
+          : otherEnglish;
+        return String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${artifactActor}['’]|${sharedConnector}${artifactActor}(?!${boundary}))`;
       };
       const target = targetFor(englishBoundary), causativeTarget = targetFor(causativeBoundary);
       const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
@@ -2671,8 +2675,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "giu");
       const permissionPrefix = new RegExp(String.raw`\b(?:(?:may|can|could|might)\s+|(?:is|are)\s+(?:free|allowed|permitted)\s+to\s+)${verbModifiers}$`, "iu");
       const optionalPrefix = new RegExp(String.raw`${optionalObligation}$`, "iu");
+      // A shared modal governs coordinated person selections across both roles:
+      // "may reuse the author and retain the reviewer". A new subject, modal or
+      // contrasting clause breaks that link rather than weakening its command.
+      const allActors = String.raw`(?:${actors(englishBoundary).actor}|${actors(englishBoundary).other})`;
+      const allTargets = String.raw`(?:${target}|${targetFor(englishBoundary, true)}|(?:(?:a\s+)?different|another)\s+${allActors})`;
+      const allCausativeTargets = String.raw`(?:${causativeTarget}|${targetFor(causativeBoundary, true)}|(?:(?:a\s+)?different|another)\s+(?:${actors(causativeBoundary).actor}|${actors(causativeBoundary).other}))`;
+      const personSelections = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${allTargets}|\bhave\s+${verbModifiers}(?:the\s+)?${allCausativeTargets}${causativeTail}`, "giu");
+      const coordinated = new RegExp(String.raw`^(?:(?!\b(?:and|or|but|yet|however)\b)[^,;:.!?\r\n])*,?\s+(?:and|or)\s+${verbModifiers}$`, "iu");
+      const permissions = new Map<number, boolean>();
+      let previous: RegExpMatchArray | undefined;
+      for (const match of text.matchAll(personSelections)) {
+        const inherited = previous && permissions.get(previous.index!) &&
+          coordinated.test(text.slice(previous.index! + previous[0].length, match.index));
+        permissions.set(match.index, permissionPrefix.test(text.slice(0, match.index)) || !!inherited);
+        previous = match;
+      }
       const selections = [...text.matchAll(selection)];
-      const permitted = (index: number) => permissionPrefix.test(text.slice(0, index));
+      const permitted = (index: number) => permissions.get(index) ?? permissionPrefix.test(text.slice(0, index));
       const requiredSelection = selections.some(match => !permitted(match.index) && !optionalPrefix.test(text.slice(0, match.index)));
       // Negation and alternatives must govern the selected person, not an
       // unrelated object in another clause (such as an existing API).
