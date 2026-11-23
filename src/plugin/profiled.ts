@@ -2618,7 +2618,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
       const command = String.raw`\b(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)\s+(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
-      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に(?:任せ|依頼)|で(?:続け|続行|進め|再開|お願い)|が(?:続け(?!た)|担当(?!した|してい[たる]|する(?!\s*(?:[。.!！]|$|ように))))|は(?:変えない|替えない))`, "iu");
+      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に(?:任せ|依頼)|で(?:続け|続行|進め|再開|お願い)|が(?:続け(?!た)|担当(?!した|してい[たる]|する(?!\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように))))|は(?:変えない|替えない))`, "iu");
       return selection.test(text);
     }
     async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {

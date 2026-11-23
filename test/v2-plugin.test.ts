@@ -2387,6 +2387,8 @@ for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["前回の実装担当で続けて", "前回の実装担当"],
+  ["同じ実装担当が担当する。", "同じ実装担当"],
+  ["同じ実装担当が担当すること。", "同じ実装担当"],
 ]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-prior-coordinator-"));
@@ -2450,6 +2452,7 @@ for (const request of [
   "前回の実装担当が担当したAPIを使って修正して。",
   "同じ実装担当が担当しているAPIを使って修正して。",
   "同じ実装担当が担当するAPIを使って修正して。",
+  "同じ実装担当が担当することになっているAPIを使って修正して。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
