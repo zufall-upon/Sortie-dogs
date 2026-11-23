@@ -2402,6 +2402,9 @@ for (const [request, quote] of [
   ["Do not change the existing API, use the same author.", "same author"],
   ["Use the same author and do not use a different author.", "same author"],
   ["Use the same author and do not automatically select a different author.", "same author"],
+  ["Use a different author. Actually, use the same author for this work.", "same author"],
+  ["Use the same author. Do not change the existing API.", "same author"],
+  ["Use the same author and the same reviewer. Actually, select a different reviewer.", "same author"],
   ["前回の実装担当で続けて", "前回の実装担当"],
   ["前回の実装担当に修正を依頼して。", "前回の実装担当"],
   ["同じ作者を使い、既存のAPIを変更する。", "同じ作者"],
@@ -2457,7 +2460,8 @@ for (const [request, quote] of [
     assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
     assert.equal(unproven.task, undefined);
     if (request === "Have the same author implement the change and do not have the same reviewer review it." ||
-        request === "Have the same author implement the change and have the same reviewer review notes available.") {
+        request === "Have the same author implement the change and have the same reviewer review notes available." ||
+        request === "Use the same author and the same reviewer. Actually, select a different reviewer.") {
       const rejectedReviewer = JSON.parse((await start.execute({ requirements: [request],
         author_continuation: { request_quote: quote, reviewer_quote: "same reviewer", work_directory: directory } },
       { sessionID: "root", agent: "dog-operator", callID: "call_negated_reviewer" })).content);
@@ -2473,6 +2477,20 @@ for (const [request, quote] of [
     assert.equal(retained.mission_id, packet.mission_id);
     assert.equal(retained.task, undefined, "rejecting a caller quote cannot clear the user's genuine author restriction");
     assert.equal((await missions.required("root")).authorContinuation!.quote, quote);
+    if (request === "Use the same author for new work") {
+      await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_narrow",
+        prompt: { text: "Limit the files; keep the other requirements unchanged." } });
+      const replacement = JSON.parse((await start.execute({ intent: "replace", requirements: [request, "Limit the files"] },
+        { sessionID: "root", agent: "dog-operator", callID: "call_replace_unproven" })).content);
+      assert.equal(replacement.task, undefined, "a scope replacement cannot erase an unproven user selection");
+      assert.equal(replacement.reason, "completed_predecessor_run_unavailable");
+      assert.equal((await missions.required("root")).authorContinuation!.quote, quote);
+      const retried = JSON.parse((await start.execute({ requirements: [request, "Limit the files"],
+        author_continuation: { request_quote: quote, work_directory: directory } },
+      { sessionID: "root", agent: "dog-operator", callID: "call_retry_original_quote" })).content);
+      assert.equal(retried.reason, "completed_predecessor_run_unavailable", "the earlier real quote remains usable after narrowing");
+      assert.equal(retried.task, undefined);
+    }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -2506,6 +2524,9 @@ for (const request of [
   "Do not have the same author review source code.",
   "Have the same author not review source code.",
   "前回の実装担当に修正を依頼しないで。",
+  "Use the same author. Actually, select a different author for this work.",
+  "Use the same author. Do not use the same author for this work.",
+  "同じ作者で続けて。別の担当に修正を依頼して。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
@@ -2569,6 +2590,9 @@ for (const [request, quote] of [
   ["前回の実装担当に修正を依頼しないで。", "前回の実装担当"],
   ["前回の実装担当に修正を任せないで。", "前回の実装担当"],
   ["同じ作者で続けて、別の担当に修正を依頼して。", "同じ作者"],
+  ["Use the same author. Actually, select a different author for this work.", "same author"],
+  ["Use the same author. Do not use the same author for this work.", "same author"],
+  ["同じ作者で続けて。別の担当に修正を依頼して。", "同じ作者"],
 ]) test(`V2 author continuation cannot use a quote that negates the user's instruction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-intent-")), fixture = contextFixture();
@@ -2602,6 +2626,12 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer", "git"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-read"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-execution"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-glob-all"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-glob-ts"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-running"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-reviewer-change"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
@@ -2611,6 +2641,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   const directory = await mkdtemp(workspace === "git" ? resolve("_testenv/v2-author-continuation-")
     : join(tmpdir(), "v2-author-continuation-"));
   const otherCwd = join(directory, "checks");
+  const resultFile = workspace === "git-glob-ts" ? "result.ts" : "result.txt";
   const fixture = contextFixture(), exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
@@ -2661,10 +2692,10 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   const nativeTask = (task: Record<string, unknown>) => ({ agent: task.subagent_type, prompt: task.prompt,
     description: task.description, ...(task.task_id ? { sessionID: task.task_id } : {}) });
   const edit = async (from: string | undefined, to: string) => {
-    const patchText = from === undefined ? `*** Begin Patch\n*** Add File: result.txt\n+${to}\n*** End Patch`
-      : `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch`;
+    const patchText = from === undefined ? `*** Begin Patch\n*** Add File: ${resultFile}\n+${to}\n*** End Patch`
+      : `*** Begin Patch\n*** Update File: ${resultFile}\n@@\n-${from}\n+${to}\n*** End Patch`;
     const event = await before("author", "patch", { patchText });
-    await writeFile(join(directory, "result.txt"), `${to}\n`);
+    await writeFile(join(directory, resultFile), `${to}\n`);
     await after(event, "updated");
   };
   const validate = async (expected: string, readOnly = false) => {
@@ -2681,7 +2712,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   try {
     if (workspace.startsWith("git")) await exec("git", ["init", "--quiet"], { cwd: directory });
     else await assert.rejects(exec("git", ["rev-parse", "--show-toplevel"], { cwd: directory }), "the workspace must actually be outside Git");
-    await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("result.txt","utf8").trim(),process.argv[2]);');
+    await writeFile(join(directory, "check.mjs"), `import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync(${JSON.stringify(resultFile)},"utf8").trim(),process.argv[2]);`);
     if (workspace.startsWith("non-git-registered") || workspace === "non-git-partial-cwd") {
       await mkdir(otherCwd);
       await writeFile(join(otherCwd, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("../result.txt","utf8").trim(),process.argv[2]);');
@@ -2691,7 +2722,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     const firstDispatch = await before("root", "subagent", nativeTask(old.task));
     await prompt("author", String(firstDispatch.input.prompt));
     const unit = (expected: string) => ({ title: "Result", objective: `Write ${expected}`, read: ["check.mjs"],
-      write: ["result.txt"], validation: [`node check.mjs ${expected}`,
+      write: workspace === "git-glob-all" && expected === "second" ? [join(dirname(directory), "unrelated", "**"), "**"]
+        : [workspace === "git-glob-ts" ? "*.ts" : "result.txt"], validation: [`node check.mjs ${expected}`,
         ...(workspace === "non-git-partial-cwd" && expected === "first" ? [`node check.mjs ${expected} --secondary`] : [])],
       ...(workspace === "non-git-registered-default" && expected === "first"
         ? { validation_cwd: { [`node check.mjs ${expected}`]: otherCwd } }
@@ -2733,6 +2765,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
+    if (workspace === "git-glob-ts") assert.ok(oldRun.units[0]!.unit.write.includes("*.ts"));
     if (workspace === "non-git-registered-default") {
       assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first": otherCwd });
       assert.deepEqual(oldRun.units[0]!.directExecution!.validationCwd, {});
@@ -2764,7 +2797,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await start({ ...selection, work_directory: join(directory, "missing") })).reason, "work_directory_unavailable_or_changed");
     assert.equal((await start({ ...selection, work_directory: dirname(directory) })).reason, "predecessor_native_write_unproven",
       "a common ancestor is not the actual repository where the prior author wrote");
-    if (workspace === "non-git-default") {
+    if (workspace === "non-git-default" || workspace.startsWith("git-glob-")) {
       const index = history.author!.findIndex(message => Array.isArray(message.content) &&
         message.content.some((part: { name?: string }) => part.name === "patch"));
       assert.notEqual(index, -1);
@@ -2813,13 +2846,75 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     inbox.author = [{ id: "queued" }];
     assert.equal((await start()).reason, "native_inbox_not_empty");
     inbox = {};
-    const second = await start();
+    let second = await start();
     assert.notEqual(second.mission_id, old.mission_id);
     assert.equal(second.task.task_id, "author");
     const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(state.coordinator, null, "the new Task has not been claimed or granted an old write scope");
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
+    if (workspace.startsWith("git-replace")) {
+      if (workspace === "git-replace-running") {
+        const activeDispatch = await before("root", "subagent", nativeTask(second.task));
+        delete agents.author!.outcome;
+        await prompt("author", String(activeDispatch.input.prompt));
+        await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
+        await prompt("root", "Limit the implementation to result.txt; keep the other requirements unchanged.");
+        const beforeHold = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const beforeRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const beforeBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        const busy = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", ...requirements] });
+        assert.equal(busy.status, "mission-coordinator-active");
+        assert.equal(busy.task, undefined);
+        assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeHold);
+        assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeRun);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, beforeBudget);
+        await after(activeDispatch, "Interrupted before replacement", { sessionID: "author" });
+        const unknown = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", ...requirements] });
+        assert.equal(unknown.status, "mission-coordinator-active");
+        assert.equal(unknown.reason, "native_terminal_unknown");
+        assert.equal(unknown.task, undefined);
+        agents.author!.outcome = "interrupted";
+      }
+      const previousBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", workspace === "git-replace-change"
+        ? "Actually, select a different author for this work."
+        : workspace === "git-replace-reviewer-change" ? "Actually, select a different reviewer for this work."
+        : "Limit the implementation to result.txt; keep the other requirements unchanged.");
+      const changedRequirements = ["Only change result.txt", ...(workspace === "git-replace-change" ? ["Use a different author"]
+        : workspace === "git-replace-reviewer-change" ? ["Use the same author and a different reviewer"] : requirements)];
+      if (workspace === "git-replace") active = { author: { type: "running" } };
+      let replaced = await tool("root", "start_mission", { intent: "replace", requirements: changedRequirements });
+      assert.notEqual(replaced.mission_id, second.mission_id);
+      if (workspace === "git-replace") {
+        assert.equal(replaced.reason, "native_session_active");
+        assert.equal(replaced.task, undefined, "replacement must re-prove the selected author's current native state");
+        active = {};
+        const recovered = await tool("root", "start_mission", { requirements: changedRequirements });
+        assert.equal(recovered.mission_id, replaced.mission_id);
+        replaced = recovered;
+      }
+      const replacement = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(replacement.runID, null);
+      assert.equal(replacement.review, undefined);
+      const replacementBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      assert.equal(replacementBudget.consumed_units,
+        previousBudget.consumed_units + (workspace === "git-replace-running" ? 1 : 0),
+        "a stopped admitted unit is settled, not refunded or reused");
+      assert.equal(replacementBudget.max_units, previousBudget.max_units);
+      if (workspace === "git-replace-change") {
+        assert.equal(replacement.authorContinuation, undefined);
+        assert.equal(replaced.task.task_id, undefined);
+        return;
+      }
+      assert.equal(replaced.task.task_id, "author", "narrowing the same work must retain the user's selected author");
+      assert.equal(replacement.authorContinuation!.reviewer, workspace === "git-replace-reviewer-change" ? undefined : "reviewer");
+      assert.equal(replacement.coordinator, null);
+      assert.equal(replacement.dispatchOpen, false);
+      second = replaced;
+    }
     const interruptedDispatch = await before("root", "subagent", nativeTask(second.task));
     const terminal = (callID: string, input: Record<string, unknown>) => ({
       id: `msg_${++counter}`, type: "assistant", agent: "dog-operator", content: [{
@@ -2995,6 +3090,13 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
     assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
     assert.equal(direct.status, "direct-unit-running");
+    if (workspace === "git-glob-all") {
+      await edit("first", "second");
+      await validate("second");
+      assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
+      assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
+      return;
+    }
     const proposed = { ...unit("second"), objective: "Use the current result to produce second without repeating setup" };
     const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
     const missionsForProposal = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -3036,6 +3138,13 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), [["node check.mjs second"]]);
     assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
     assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
+    if (workspace === "git-replace-reviewer-change") {
+      agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
+      const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [], reviewer_session_id: "otherReviewer" });
+      assert.equal(review.task.task_id, "otherReviewer", "a genuine reviewer change removes the old selection, not the author's");
+      await before("author", "subagent", nativeTask(review.task));
+      return;
+    }
     const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
     await missions.update("root", current => { current.sourceAuthors = [...(current.sourceAuthors ?? []), "reviewer"]; });
     await assert.rejects(tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] }),
@@ -3048,6 +3157,13 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
     assert.equal(review.status, "review-required");
     assert.equal(review.task.task_id, "reviewer");
+    if (workspace === "git" && request === "Use the same author and the same reviewer for the new result.") {
+      agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
+      const beforeSubstitution = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      await assert.rejects(before("author", "subagent", { ...nativeTask(review.task), sessionID: "otherReviewer" }),
+        /mission-review-requested-reviewer-unavailable/u, "a different owned independent Reviewer cannot replace the user's selection");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), beforeSubstitution);
+    }
     const reviewDispatch = await before("author", "subagent", nativeTask(review.task));
     delete agents.reviewer!.outcome;
     assert.match(await prompt("reviewer", String(reviewDispatch.input.prompt)), /second/u,
@@ -3061,7 +3177,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(current.review!.child, "reviewer");
     assert.equal(current.review!.result, report);
     assert.notEqual(current.review!.runID, oldRun.runID);
-    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "second\n");
+    assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -2569,7 +2569,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return paths.some(path => {
         const wildcard = path.search(/[*?[\]{}]/u);
         const concrete = wildcard < 0 ? path : path.slice(0, wildcard);
-        return concrete.length > 0 && insideDirectory(directory, resolve(input.directory, concrete));
+        return (concrete.length > 0 || wildcard === 0) && insideDirectory(directory, resolve(input.directory, concrete));
       });
     }
     async function sameWorkLocation(directory: string, path: string): Promise<"repository" | "no-repository" | undefined> {
@@ -2603,7 +2603,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return undefined;
     }
-    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false): boolean {
+    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false, contraryOnly = false): boolean {
       // Select the person as the noun-phrase head, not a role-qualified artifact.
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
       const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
@@ -2661,12 +2661,35 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
         [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
           !new RegExp(String.raw`${negation}$`, "iu").test(text.slice(0, match.index)));
+      if (contraryOnly) return contrary;
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
       const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
       const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
       return selection.test(text);
+    }
+    function continuationIntent(text: string, reviewer: boolean): "selected" | "contrary" | undefined {
+      let result: "selected" | "contrary" | undefined;
+      for (const sentence of text.split(/[\r\n。.!?！？]+/u)) {
+        if (explicitContinuationQuote(sentence, reviewer, false, true)) result = "contrary";
+        else if (explicitContinuationQuote(sentence, reviewer, true)) result = "selected";
+      }
+      return result;
+    }
+    function effectiveContinuationIntent(requests: OperatorMission["requests"], reviewer: boolean) {
+      let result: "selected" | "contrary" | undefined;
+      for (const request of requests) result = continuationIntent(request.text, reviewer) ?? result;
+      return result;
+    }
+    async function continuationPredecessor(root: string, mission: OperatorMission, current: OperatorState | undefined) {
+      const runID = mission.authorContinuation?.predecessorRunID;
+      if (!runID || current?.runID === runID && current.phase === "completed") return current;
+      // Only a replacement of the current cancelled run may refer back to the
+      // completed author-selection provenance. An unrelated newer run must not
+      // resurrect an older selection merely because its archive still exists.
+      if (current?.phase !== "cancelled" || !mission.requirementsReplaced || mission.supersededRunID !== current.runID) return undefined;
+      return await operators.completedRun(root, runID);
     }
     async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {
       const ids = new Set<string>();
@@ -2729,13 +2752,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!selection) return { reason: "explicit_user_intent_missing" };
       const request = mission.requests.find(item => item.id === selection.requestID);
       const sentences = request?.text.split(/[\r\n。.!?]+/u) ?? [];
-      if (!request || !explicitContinuationQuote(selection.quote, false) ||
+      if (!request || effectiveContinuationIntent(mission.requests, false) !== "selected" ||
+          !explicitContinuationQuote(selection.quote, false) ||
           !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
-          selection.reviewerQuote && (!explicitContinuationQuote(selection.reviewerQuote, true) ||
+          selection.reviewerQuote && (effectiveContinuationIntent(mission.requests, true) !== "selected" ||
+            !explicitContinuationQuote(selection.reviewerQuote, true) ||
             !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
         return { reason: "user_intent_quote_unavailable" };
       }
-      if (sentences.some(line => explicitContinuationQuote(line, true, true)) &&
+      if (effectiveContinuationIntent(mission.requests, true) === "selected" &&
           !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
       const directory = isAbsolute(selection.directory) ? await realpath(selection.directory).catch(() => undefined) : undefined;
       if (!directory || directory !== selection.directory) return { reason: "work_directory_unavailable_or_changed" };
@@ -2872,6 +2897,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             return JSON.stringify({ ...locationObservation(context.sessionID), ...missionDispatchPacket(repaired, prior),
               budget: await control!.currentBudget(context.sessionID) });
           }
+          if (args.intent === "replace" && existing?.authorContinuation?.child &&
+              !["completed", "cancelled"].includes(existing.phase) && (existing.coordinator || existing.dispatchOpen)) {
+            const idle = existing.dispatchOpen ? "coordinator_dispatch_active_or_unproven"
+              : await continuationNativeIdle(existing.authorContinuation.child, "dog-operator", context.sessionID);
+            if (idle) return JSON.stringify({ ...missionDispatchPacket(existing, prior), status: "mission-coordinator-active",
+              reason: idle, task: undefined,
+              next_action: "The existing author's Task or native tools are still active or unproven. Preserve this Mission, its writer and budget; wait for its actual terminal state before replacing the contract." });
+          }
           if (args.intent === "replace" && existing && !["completed", "cancelled"].includes(existing.phase)) {
             await stop(context.sessionID, "explicit-cancellation", false);
           }
@@ -2888,6 +2921,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
+          // Replacement changes this work's contract, not an unchanged user selection.
+          // Keep the exact original request, but re-prove its predecessor and current
+          // native quiescence; neither the old grant nor its checks/Review is reused.
+          if (args.intent === "replace" && existing && !["completed", "cancelled"].includes(existing.phase) &&
+              existing.authorContinuation && continuationIntent(mission.requests.at(-1)!.text, false) !== "contrary") {
+            const selection = structuredClone(existing.authorContinuation);
+            if (continuationIntent(mission.requests.at(-1)!.text, true) === "contrary") {
+              delete selection.reviewerQuote;
+              delete selection.reviewer;
+            }
+            mission = await missions.update(context.sessionID, state => {
+              state.requests = [...existing.requests, ...state.requests.filter(request => !existing.requests.some(old => old.id === request.id))];
+              state.authorContinuation = { ...selection, blocked: selection.child ? "predecessor_not_proven" : selection.blocked };
+              state.preferredExecutor = "coordinator";
+            });
+          }
           if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
             const saved = mission.authorContinuation;
             const savedRequest = saved && mission.requests.find(item => item.id === saved.requestID);
@@ -2895,25 +2944,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // requested. Only recover an unadmitted, unselected invalid quote; a
             // genuine author instruction or any selected child remains binding.
             if (saved?.blocked === "user_intent_quote_unavailable" && !saved.child && savedRequest &&
-                !savedRequest.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false, true))) {
+                continuationIntent(savedRequest.text, false) !== "selected") {
               mission = await missions.update(context.sessionID, state => {
                 if (state.id === mission.id && state.coordinator === null && state.runID === null && !state.dispatchOpen &&
                     isDeepStrictEqual(state.authorContinuation, saved)) delete state.authorContinuation;
               });
             }
             const request = mission.requests.at(-1)!;
-            const explicit = request.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false, true));
+            const explicit = continuationIntent(request.text, false) === "selected";
             if (explicit && !mission.authorContinuation) mission = await missions.update(context.sessionID, state => {
               state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: "explicit_author_continuation_input_required" };
               state.preferredExecutor = "coordinator";
             });
           }
           if (record(authorRequest)) {
-            const request = mission.requests.at(-1)!;
+            const saved = mission.authorContinuation;
+            const request = (saved && saved.quote === authorRequest.request_quote
+              ? mission.requests.find(item => item.id === saved.requestID) : undefined) ??
+              [...mission.requests].reverse().find(item => item.text.includes(String(authorRequest.request_quote)) &&
+                continuationIntent(item.text, false) === "selected") ?? mission.requests.at(-1)!;
             const directory = isAbsolute(String(authorRequest.work_directory))
               ? await realpath(String(authorRequest.work_directory)).catch(() => String(authorRequest.work_directory))
               : String(authorRequest.work_directory);
-            const saved = mission.authorContinuation;
             if (saved?.child && (saved.requestID !== request.id || saved.quote !== authorRequest.request_quote ||
                 saved.directory !== directory || saved.reviewerQuote !== authorRequest.reviewer_quote)) {
               throw new Error("mission-author-continuation-selection-frozen");
@@ -2925,7 +2977,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ...(saved?.child ? { child: saved.child } : {}), ...(saved?.reviewer ? { reviewer: saved.reviewer } : {}),
               blocked: "predecessor_not_proven" };
             const proposed = { ...mission, authorContinuation: selection };
-            const proof = await proveAuthorContinuation(context.sessionID, proposed, prior);
+            const proof = await proveAuthorContinuation(context.sessionID, proposed,
+              await continuationPredecessor(context.sessionID, proposed, cancelled));
             if (proof.reason === "user_intent_quote_unavailable") {
               return JSON.stringify({ ...locationObservation(context.sessionID), ...continuationPacket(proposed),
                 reason: proof.reason,
@@ -2948,6 +3001,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 ...(proof.reviewer ? { reviewer: proof.reviewer } : {}) });
               delete state.authorContinuation!.blocked;
               // These are authorship facts for the inherited candidate, not old Review or check evidence.
+              state.sourceAuthors = [...new Set([...(state.sourceAuthors ?? []), ...(proof.predecessor.sourceAuthors ?? []),
+                ...(proof.predecessor.corrections ?? []).filter(item => !(item.status === "failed" && item.noWriteReceipt)).map(item => item.author)])];
+            });
+          } else if (mission.authorContinuation?.child && mission.authorContinuation.blocked &&
+              mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
+            const saved = mission.authorContinuation;
+            const proof = await proveAuthorContinuation(context.sessionID, mission,
+              await continuationPredecessor(context.sessionID, mission, cancelled));
+            mission = await missions.update(context.sessionID, state => {
+              if (state.id !== mission.id || state.runID !== null || state.coordinator !== null || state.dispatchOpen ||
+                  !isDeepStrictEqual(state.authorContinuation, saved)) throw new Error("mission-author-continuation-stale");
+              if (proof.reason || !proof.predecessor || !proof.child) {
+                state.authorContinuation!.blocked = proof.reason ?? "predecessor_not_proven";
+                return;
+              }
+              delete state.authorContinuation!.blocked;
               state.sourceAuthors = [...new Set([...(state.sourceAuthors ?? []), ...(proof.predecessor.sourceAuthors ?? []),
                 ...(proof.predecessor.corrections ?? []).filter(item => !(item.status === "failed" && item.noWriteReceipt)).map(item => item.author)])];
             });
@@ -5023,12 +5092,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const current = await reconcileMissionDispatch(root) ?? mission;
           if (current.coordinator === null && current.authorContinuation &&
               (!args.task_id || args.task_id === current.authorContinuation.child)) {
-            const proof = await proveAuthorContinuation(root, current, await operators.read(root));
+            const proof = await proveAuthorContinuation(root, current,
+              await continuationPredecessor(root, current, await operators.read(root)));
             if (proof.reason || proof.child !== current.authorContinuation.child) {
               throw new Error(`mission-author-continuation-not-authorized:${proof.reason ?? "predecessor_author_changed"}; ${continuationHint}`);
             }
           }
           await missions.admit(root, request.callID, args);
+          // A replacement may have retired the previous grant. Only the exact,
+          // freshly re-proven and admitted continuation can reactivate this child.
+          const selectedChild = current.authorContinuation?.child;
+          if (current.coordinator === null && selectedChild && selectedChild === args.task_id) {
+            retired.delete(selectedChild);
+          }
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, mission: true });
           return;
         }
@@ -5045,6 +5121,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const reviewerID = args.task_id ?? review?.task?.task_id ?? (review?.child &&
               (review.mode === "self-recheck" || missionReviewIndependent(reconciled.mission, review.child)) &&
               await ownedReviewer(root, reconciled.mission, review.child) ? review.child : undefined);
+            const fixedReviewer = reconciled.mission.authorContinuation?.reviewerQuote
+              ? reconciled.mission.authorContinuation.reviewer : undefined;
+            if (reconciled.mission.authorContinuation?.reviewerQuote && (!fixedReviewer || reviewerID !== fixedReviewer)) {
+              throw new Error("mission-review-requested-reviewer-unavailable: retain the user's choice; do not silently select another Reviewer");
+            }
             if (reconciled.active && review?.child && request.callID !== review.callID &&
                 (reviewerID === undefined || reviewerID === review.child)) {
               taskJoins.set(request.callID, { sessionID: review.child, callID: review.callID! });
