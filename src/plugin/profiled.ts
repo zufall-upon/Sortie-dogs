@@ -2608,18 +2608,31 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
       const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
       const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
-      const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b${englishBoundary}|作業者|実装者|実装担当|作者|担当者?|書き手)`;
-      const reviewActor = String.raw`(?:\breviewer\b${englishBoundary}|レビュー担当|レビュアー|レビュー者)`;
-      const actor = reviewer ? reviewActor : author, other = reviewer ? author : reviewActor;
+      const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
+      // Noun/verb homographs need a person-directed object boundary; otherwise
+      // "author review notes" or "reviewer test results" can name artifacts.
+      const actionObject = String.raw`(?=\s+(?:the|a|an|this|that|these|those|it|them|my|your|our|their)\b|\s*(?:$|[,;:.!?]))`;
+      const causativeAction = String.raw`(?:implement|write|develop|handle|continue|verify|inspect|fix|investigate|(?:resume|review|check|test)${actionObject}|work\s+(?:on|with|for))`;
+      const causativeTail = String.raw`\s+${verbModifiers}${causativeAction}\b`;
+      const causativeBoundary = String.raw`(?:${englishBoundary}|(?=${causativeTail}))`;
+      const actors = (boundary: string) => {
+        const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b${boundary}|作業者|実装者|実装担当|作者|担当者?|書き手)`;
+        const reviewActor = String.raw`(?:\breviewer\b${boundary}|レビュー担当|レビュアー|レビュー者)`;
+        return reviewer ? { actor: reviewActor, other: author } : { actor: author, other: reviewActor };
+      };
+      const { actor } = actors(englishBoundary);
       const otherEnglish = reviewer ? String.raw`\b(?:author|writer|implementer|developer)\b` : String.raw`\breviewer\b`;
       const qualifier = String.raw`(?:\b(?:same|previous|prior|original|existing)\s+(?:(?:implementation|code)\s+)?|(?:同じ|前回の|前の|既存の)\s*)`;
       const sharedConnector = String.raw`\s*(?:,?\s+and\s+|&\s*|と\s*|・\s*|、\s*)`;
       const connector = String.raw`${sharedConnector}(?:the\s+)?(?:${qualifier})?`;
       // A modifier can be shared: "the same author and reviewer", "前回の実装担当・Reviewer".
       // A separately qualified artifact does not erase selection of the first actor.
-      const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}(?!${englishBoundary}))`;
+      const targetFor = (boundary: string) => {
+        const { actor, other } = actors(boundary);
+        return String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)(?!${connector}${otherEnglish}['’]|${sharedConnector}${otherEnglish}(?!${boundary}))`;
+      };
+      const target = targetFor(englishBoundary), causativeTarget = targetFor(causativeBoundary);
       const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
-      const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
       const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}`;
       const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
       const negativeInflection = String.raw`(?:(?:し|[いわが])?(?:な[いく]|ません)|(?:する|る|う)な)`;
@@ -2631,16 +2644,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const japaneseNegation = String.raw`\s*(?:(?:を|は|が|で|に)?\s*(?:(?:継続|再開|引き継|引継|使|維持|続け|続行|進め|お願い|担当)${negativeInflection}|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|に${requestedWork}(?:任せ|依頼)${negativeInflection})`;
       const negatedTarget = new RegExp(String.raw`${negation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?(?:not\s+(?:be\s+)?(?:used|assigned|selected|required|needed)|unnecessary)\b|${target}${japaneseNegation}`, "iu");
       const otherSelection = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
+      const causative = String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`;
+      const negatedCausative = new RegExp(String.raw`${negation}have\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`, "iu");
+      const negatedActionTail = String.raw`\s+${verbModifiers}not\s+${verbModifiers}${causativeAction}\b`;
+      const negatedActionTarget = targetFor(String.raw`(?:${englishBoundary}|(?=${negatedActionTail}))`);
+      const negatedAction = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${negatedActionTarget}${negatedActionTail}|${target}\s+(?:must|should|shall|will|would|can|could)\s+not\s+${verbModifiers}${causativeAction}\b`, "iu");
+      const otherCausative = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:(?:a\s+)?different|another)\s+${actors(causativeBoundary).actor}${causativeTail}`, "giu");
       // Negation and alternatives must govern the selected person, not an
       // unrelated object in another clause (such as an existing API).
-      const contrary = negatedTarget.test(text) || new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
-        [...text.matchAll(otherSelection)].some(match =>
+      const contrary = negatedTarget.test(text) || negatedCausative.test(text) || negatedAction.test(text) ||
+        new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
+        [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
           !new RegExp(String.raw`${negation}$`, "iu").test(text.slice(0, match.index)));
-      if (!new RegExp(target, "iu").test(text) || contrary) return false;
+      if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
       const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
-      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
+      const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
       return selection.test(text);
     }
     async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {
@@ -3610,7 +3630,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const plan = missionPlan(mission, raw, input.directory);
       if (mission.authorContinuation) {
         const directory = mission.authorContinuation.directory;
-        const paths = plan.units.flatMap(unit => unit.write).filter(path => continuationScopeIncludes(directory, [path]));
+        const writes = plan.units.flatMap(unit => unit.write);
+        // Writing plans retain their existing destination check. For a read-only
+        // plan, use declared reads or actual current execution directories instead.
+        const executionDirectories = writes.length ? [] : [
+          ...plan.units.flatMap(unit => unit.validation.map(command => unit.validation_cwd?.[normalizeCommand(command)] ?? input.directory)),
+          ...(operation ? [operation.directory] : []),
+        ];
+        const existingDirectories = (await Promise.all(executionDirectories.map(async path =>
+          (await stat(path).catch(() => undefined))?.isDirectory() ? path : undefined)))
+          .filter((path): path is string => path !== undefined);
+        const paths = (writes.length ? writes : [...plan.units.flatMap(unit => unit.read), ...existingDirectories])
+          .filter(path => continuationScopeIncludes(directory, [path]));
         const locations = await Promise.all(paths.map(path => sameWorkLocation(directory, path)));
         if (!locations.some(Boolean)) {
           throw new Error("mission-author-continuation-work-location-mismatch: declare the requested same work location; do not dispatch a substitute");

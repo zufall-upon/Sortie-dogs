@@ -2385,6 +2385,10 @@ test('requires exclusive execution', async () => {
 
 for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
+  ["Have the same author implement the change.", "same author"],
+  ["Have the same author implement the change and do not have a different author implement the follow-up.", "same author"],
+  ["Have the same author implement the change and do not have the same reviewer review it.", "same author"],
+  ["Have the same author implement the change and have the same reviewer review notes available.", "same author"],
   ["Use the same author again.", "same author"],
   ["Use the same author now.", "same author"],
   ["Continue with the previous developer immediately.", "previous developer"],
@@ -2449,6 +2453,14 @@ for (const [request, quote] of [
     assert.equal(unproven.status, "mission-author-continuation-unavailable");
     assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
     assert.equal(unproven.task, undefined);
+    if (request === "Have the same author implement the change and do not have the same reviewer review it." ||
+        request === "Have the same author implement the change and have the same reviewer review notes available.") {
+      const rejectedReviewer = JSON.parse((await start.execute({ requirements: [request],
+        author_continuation: { request_quote: quote, reviewer_quote: "same reviewer", work_directory: directory } },
+      { sessionID: "root", agent: "dog-operator", callID: "call_negated_reviewer" })).content);
+      assert.equal(rejectedReviewer.reason, "user_intent_quote_unavailable");
+      assert.equal(rejectedReviewer.task, undefined);
+    }
     const invalid = JSON.parse((await start.execute({ requirements: [request],
       author_continuation: { request_quote: "not the user's choice", work_directory: directory } },
     { sessionID: "root", agent: "dog-operator", callID: "call_invalid_quote" })).content);
@@ -2467,6 +2479,8 @@ for (const request of [
   "Use the same developer tools to fix the bug.",
   "Use the same developer documentation to fix the bug.",
   "Keep the same developer workflow while fixing the bug.",
+  "Have the same author implementation notes available for the change.",
+  "Have the same author review notes available for the change.",
   "Use the same author and reviewer tools to fix the bug.",
   "Use the same reviewer and author tools to fix the bug.",
   "The previous developer left a bug; fix it.",
@@ -2483,6 +2497,8 @@ for (const request of [
   "同じ実装担当が担当することになっているAPIを使って修正して。",
   "前回の実装担当に修正を依頼したAPIを使って修正して。",
   "Do not automatically select the same author for new work.",
+  "Do not have the same author implement the change.",
+  "Have the same author not implement the change.",
   "前回の実装担当に修正を依頼しないで。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -2535,6 +2551,9 @@ for (const request of [
 for (const [request, quote] of [
   ["Do not use the same author for this new work.", "same author"],
   ["Do not automatically select the same author for new work.", "same author"],
+  ["Do not have the same author implement the change.", "same author"],
+  ["Have the same author implement the change, but the same author should not implement it.", "same author"],
+  ["Have the same author implement the change, but have a different author implement the follow-up.", "same author"],
   ["Use the same author and do not use the same author.", "same author"],
   ["Use the same author, but the same author should not be used.", "same author"],
   ["Use the same author, but the same author is unnecessary.", "same author"],
@@ -2568,8 +2587,12 @@ for (const [request, quote] of [
 
 for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git"],
+  ["Have the same author implement the change, and have the same reviewer review it.", "same author", "same reviewer", "git"],
+  ["Have the same author and reviewer review the change.", "same author", "same author and reviewer", "git"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "git"],
   ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer", "git"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-read"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-readonly-execution"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
@@ -2635,10 +2658,11 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     await writeFile(join(directory, "result.txt"), `${to}\n`);
     await after(event, "updated");
   };
-  const validate = async (expected: string) => {
-    const cwd = workspace === "non-git-registered-other" && expected === "first" ? otherCwd : directory;
-    const checks = [{ cwd, suffix: "" }, ...(workspace === "non-git-partial-cwd" && expected === "first"
-      ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
+  const validate = async (expected: string, readOnly = false) => {
+    const cwd = readOnly || workspace === "non-git-registered-other" && expected === "first" ? otherCwd : directory;
+    const checks = [{ cwd, suffix: "" }, ...(readOnly && workspace === "git-readonly-execution"
+      ? [{ cwd: directory, suffix: " --secondary" }]
+      : workspace === "non-git-partial-cwd" && expected === "first" ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
     for (const check of checks) {
       const event = await before("author", "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
       const result = await exec(process.execPath, ["check.mjs", expected, ...(check.suffix ? ["--secondary"] : [])], { cwd: check.cwd });
@@ -2646,7 +2670,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     }
   };
   try {
-    if (workspace === "git") await exec("git", ["init", "--quiet"], { cwd: directory });
+    if (workspace.startsWith("git")) await exec("git", ["init", "--quiet"], { cwd: directory });
     else await assert.rejects(exec("git", ["rev-parse", "--show-toplevel"], { cwd: directory }), "the workspace must actually be outside Git");
     await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("result.txt","utf8").trim(),process.argv[2]);');
     if (workspace.startsWith("non-git-registered") || workspace === "non-git-partial-cwd") {
@@ -2832,6 +2856,78 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       /mission-author-continuation-author-required/u);
     await assert.rejects(tool("author", "plan_units", { executor: "worker", units: [unit("second")] }),
       /mission-author-continuation-author-required/u);
+    if (workspace.startsWith("git-readonly-")) {
+      // This directory is a different repository, not merely a subdirectory of
+      // the selected work location. Its command still reads the selected result.
+      await mkdir(otherCwd);
+      await exec("git", ["init", "--quiet"], { cwd: otherCwd });
+      await writeFile(join(otherCwd, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("../result.txt","utf8").trim(),process.argv[2]);');
+      const readOnly = { title: "Verify result", objective: "Verify the retained result without editing",
+        read: workspace === "git-readonly-read" ? ["result.txt"] : [], write: [],
+        validation: ["node check.mjs first", ...(workspace === "git-readonly-execution" ? ["node check.mjs first --secondary"] : [])],
+        validation_cwd: { "node check.mjs first": otherCwd } };
+      const priorMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const priorRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const priorBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      const outside = { ...readOnly, read: [join(dirname(directory), "unrelated.txt")],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, dirname(directory)])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [outside] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      const nested = { ...readOnly, read: [join(otherCwd, "check.mjs")],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, otherCwd])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [nested] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      const missingCwd = { ...readOnly, read: [],
+        validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, join(directory, "missing")])) };
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [missingCwd] }),
+        /mission-author-continuation-work-location-mismatch/u);
+      await assert.rejects(tool("author", "plan_units", { executor: "self", units: [{ ...readOnly,
+        read: ["result.txt"], write: [join(otherCwd, "unrelated.txt")] }] }),
+      /mission-author-continuation-work-location-mismatch/u,
+      "a matching read or execution cwd must not relax the existing write destination check");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), priorMission);
+      assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), priorRun);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+      const direct = await tool("author", "plan_units", { executor: "self", units: [readOnly] });
+      assert.equal(direct.status, "direct-unit-running");
+      assert.notEqual(direct.run_id, oldRun.runID);
+      if (workspace === "git-readonly-execution") {
+        const running = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        await assert.rejects(tool("author", "plan_units", { executor: "self", units: [{ ...readOnly,
+          validation_cwd: Object.fromEntries(readOnly.validation.map(command => [command, otherCwd])) }],
+          reason: "Propose a different validation directory" }), /mission-author-continuation-work-location-mismatch/u);
+        assert.deepEqual(await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), running,
+          "a correction uses its own effective cwd and cannot replace the admitted registration on rejection");
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget);
+      }
+      await validate("first", true);
+      await tool("author", "finish_direct_unit");
+      const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.deepEqual(newRun.units[0]!.unit.write, []);
+      assert.equal(newRun.units[0]!.directExecution!.actor, "author");
+      assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), readOnly.validation.map(command => [command]));
+      assert.ok(newRun.units[0]!.evidence.length > 0);
+      const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+      assert.equal(review.task.task_id, "reviewer", "the retained independent reviewer reviews this new read-only unit");
+      const reviewDispatch = await before("author", "subagent", nativeTask(review.task));
+      delete agents.reviewer!.outcome;
+      await prompt("reviewer", String(reviewDispatch.input.prompt));
+      agents.reviewer!.outcome = "succeeded";
+      const report = "PASS\nThe current read-only verification is correct.", end = Date.now();
+      history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+        time: { created: end, completed: end }, content: [{ type: "text", text: report }] });
+      await after(reviewDispatch, report, { sessionID: "reviewer" });
+      const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(current.review!.child, "reviewer");
+      assert.equal(current.review!.result, report);
+      assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "first\n");
+      await tool("author", "submit_mission", { status: "ready", summary: "Read-only verification ready" });
+      agents.author!.outcome = "succeeded";
+      await after(dispatch, "Read-only verification ready", { sessionID: "author" });
+      assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+      return;
+    }
     const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
     assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
     assert.equal(direct.status, "direct-unit-running");
