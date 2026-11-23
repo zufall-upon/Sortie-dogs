@@ -2394,6 +2394,8 @@ for (const [request, quote] of [
   ["Have the same author implement the change and have the same reviewer review notes available.", "same author"],
   ["Use the same author again.", "same author"],
   ["Use the same author now.", "same author"],
+  ["You have to use the same author for this change.", "same author"],
+  ["You need to use the same author for this change.", "same author"],
   ["Continue with the previous developer immediately.", "previous developer"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
@@ -2402,6 +2404,9 @@ for (const [request, quote] of [
   ["Do not change the existing API, use the same author.", "same author"],
   ["Use the same author and do not use a different author.", "same author"],
   ["Use the same author and do not automatically select a different author.", "same author"],
+  ["Use the same author and you don't have to use a different author.", "same author"],
+  ["Use the same author and you don't have to use the same author's API.", "same author"],
+  ["Use the same author and you do not need to use the same reviewer.", "same author"],
   ["Use a different author. Actually, use the same author for this work.", "same author"],
   ["Use the same author. Do not change the existing API.", "same author"],
   ["Use the same author and the same reviewer. Actually, select a different reviewer.", "same author"],
@@ -2460,6 +2465,7 @@ for (const [request, quote] of [
     assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
     assert.equal(unproven.task, undefined);
     if (request === "Have the same author implement the change and do not have the same reviewer review it." ||
+        request === "Use the same author and you do not need to use the same reviewer." ||
         request === "Have the same author implement the change and have the same reviewer review notes available." ||
         request === "Use the same author and the same reviewer. Actually, select a different reviewer.") {
       const rejectedReviewer = JSON.parse((await start.execute({ requirements: [request],
@@ -2519,6 +2525,8 @@ for (const request of [
   "同じ実装担当が担当することになっているAPIを使って修正して。",
   "前回の実装担当に修正を依頼したAPIを使って修正して。",
   "Do not automatically select the same author for new work.",
+  "You don't have to use the same author for this change.",
+  "You do not need to use the same author for this change.",
   "Do not have the same author implement the change.",
   "Have the same author not implement the change.",
   "Do not have the same author review source code.",
@@ -2634,9 +2642,12 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-reviewer-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-optional"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
+  ["Use the same author and reviewer and you do not need to change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-partial-cwd"],
@@ -2914,8 +2925,10 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
     if (workspace.startsWith("git-replace")) {
-      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change";
-      const changedReviewer = workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change";
+      const optionalAuthor = workspace === "git-replace-earlier-author-optional";
+      const optionalReviewer = workspace === "git-replace-earlier-reviewer-optional";
+      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change" || optionalAuthor;
+      const changedReviewer = workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" || optionalReviewer;
       if (workspace === "git-replace-running") {
         const activeDispatch = await before("root", "subagent", nativeTask(second.task));
         delete agents.author!.outcome;
@@ -2941,7 +2954,9 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         agents.author!.outcome = "interrupted";
       }
       if (workspace.startsWith("git-replace-earlier-")) {
-        await prompt("root", changedAuthor ? "Actually, select a different author for this work."
+        await prompt("root", optionalAuthor ? "You don't have to use the same author for this change."
+          : optionalReviewer ? "You do not need to use the same reviewer for this change."
+          : changedAuthor ? "Actually, select a different author for this work."
           : "Actually, select a different reviewer for this work.");
         await tool("root", "start_mission", { requirements });
       }
@@ -2950,7 +2965,9 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         ? "Actually, select a different author for this work."
         : workspace === "git-replace-reviewer-change" ? "Actually, select a different reviewer for this work."
         : "Limit the implementation to result.txt; keep the other requirements unchanged.");
-      const changedRequirements = ["Only change result.txt", ...(changedAuthor ? ["Use a different author"]
+      const changedRequirements = ["Only change result.txt", ...(optionalAuthor ? ["The same author is not required"]
+        : optionalReviewer ? ["Use the same author; the same reviewer is not required"]
+        : changedAuthor ? ["Use a different author"]
         : changedReviewer ? ["Use the same author and a different reviewer"] : requirements)];
       if (workspace === "git-replace") active = { author: { type: "running" } };
       let replaced = await tool("root", "start_mission", { intent: "replace", requirements: changedRequirements });
@@ -3198,7 +3215,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), [["node check.mjs second"]]);
     assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
     assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
-    if (workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change") {
+    if (workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" ||
+        workspace === "git-replace-earlier-reviewer-optional") {
       agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
       const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [], reviewer_session_id: "otherReviewer" });
       assert.equal(review.task.task_id, "otherReviewer", "a genuine reviewer change removes the old selection, not the author's");

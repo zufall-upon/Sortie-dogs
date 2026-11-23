@@ -2638,7 +2638,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       };
       const target = targetFor(englishBoundary), causativeTarget = targetFor(causativeBoundary);
       const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
-      const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}`;
+      // A negated obligation also negates the embedded selection, without
+      // treating negation of an unrelated object as a change of author.
+      const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}(?:(?:have|need)\s+to\s+${verbModifiers})?`;
       const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
       const negativeInflection = String.raw`(?:(?:し|[いわが])?(?:な[いく]|ません)|(?:する|る|う)な)`;
       const requestedAction = String.raw`(?:任せ(?!${negativeInflection}|た|てい[たる]|る(?!${directiveEnd}))|依頼(?!${negativeInflection}|した|してい[たる]|する(?!${directiveEnd})))`;
