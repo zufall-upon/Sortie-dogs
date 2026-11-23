@@ -2423,8 +2423,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       }
       for (const part of calls.values()) {
-        if (!record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
-            record(part.state.metadata) && ["running", "pending", "unknown"].includes(String(part.state.metadata.status))) {
+        if (!record(part.state) || !["completed", "error"].includes(String(part.state.status))) {
+          throw new Error("mission-replan-terminal-unreconciled:tool_dispatch_active_or_unproven");
+        }
+        if (!record(part.state.metadata) || !["running", "pending", "unknown"].includes(String(part.state.metadata.status))) continue;
+        const child = part.tool === "task" && part.state.status === "completed"
+          ? taskChildSessionID({ metadata: part.state.metadata, output: part.state.output }) : undefined;
+        const role = record(part.state.input) && typeof part.state.input.subagent_type === "string"
+          ? canonicalAgent(profile, part.state.input.subagent_type) : undefined;
+        if (!child || !role || await continuationNativeIdle(child, role, actor)) {
           throw new Error("mission-replan-terminal-unreconciled:tool_dispatch_active_or_unproven");
         }
       }
@@ -2597,19 +2604,23 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       return undefined;
     }
     function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false): boolean {
-      const actor = reviewer ? String.raw`(?:\breviewer\b|レビュー担当|レビュアー|レビュー者)`
-        : String.raw`(?:\b(?:author|writer|implementer|developer)\b|作業者|実装者|実装担当|作者|担当者?|書き手)`;
-      const target = String.raw`(?:\b(?:same|previous|prior|original|existing)\s+(?:(?:implementation|code)\s+)?${actor}|(?:同じ|前回の|前の|既存の)\s*${actor})`;
+      // Possessives describe an artifact, not selection of the person who made it.
+      const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b(?!['’])|作業者|実装者|実装担当|作者|担当者?|書き手)`;
+      const reviewActor = String.raw`(?:\breviewer\b(?!['’])|レビュー担当|レビュアー|レビュー者)`;
+      const actor = reviewer ? reviewActor : author, other = reviewer ? author : reviewActor;
+      const qualifier = String.raw`(?:\b(?:same|previous|prior|original|existing)\s+(?:(?:implementation|code)\s+)?|(?:同じ|前回の|前の|既存の)\s*)`;
+      const connector = String.raw`\s*(?:,?\s+and\s+|&\s*|と\s*|・\s*|、\s*)(?:the\s+)?(?:${qualifier})?`;
+      // A modifier can be shared: "the same author and reviewer", "前回の実装担当・Reviewer".
+      const target = String.raw`(?:${qualifier}${other}${connector}${actor}|${qualifier}${actor}(?:${connector}${other})?)`;
       const contrary = /(?:do not|don't|never|not|different|another).{0,40}(?:same|previous|prior|original|existing)|(?:same|previous|prior|original|existing).{0,60}(?:not (?:be )?(?:used|assigned|selected|required|needed)|unnecessary)|(?:同じ|前回|前の|既存).{0,40}(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の(?:作者|担当|書き手|実装者|作業者|レビュアー)/iu;
       if (!new RegExp(target, "iu").test(text) || contrary.test(text)) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
-      const otherActor = String.raw`\b(?:same|previous|prior|original|existing)\s+(?:author|writer|implementer|developer|reviewer)\b`;
-      const command = String.raw`\b(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)\s+(?:(?:with|using|to)\s+)?(?:the\s+)?(?:${otherActor}\s*(?:,|and|&)\s*(?:the\s+)?)?${target}`;
-      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}(?:\s*(?:と|・|、)\s*(?:同じ|前回の|前の|既存の)?\s*(?:Reviewer|レビュー担当|レビュアー|実装担当|担当者?))?\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に(?:任せ|依頼)|で(?:続け|続行|進め|再開|お願い)|が(?:続け|担当)|は(?:変えない|替えない))`, "iu");
+      const command = String.raw`\b(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)\s+(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
+      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に(?:任せ|依頼)|で(?:続け|続行|進め|再開|お願い)|が(?:続け(?!た)|担当(?!した|してい[たる]))|は(?:変えない|替えない))`, "iu");
       return selection.test(text);
     }
-    async function continuationNativeIdle(root: string, id: string, role: "dog-operator" | "dog-reviewer", parent: string): Promise<string | undefined> {
+    async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {
       const ids = new Set<string>();
       const visit = async (child: string, owner: string, expected?: CanonicalAgentRole): Promise<string | undefined> => {
         if (ids.has(child) || ids.size >= 256) return "native_lineage_duplicate_or_too_large";
@@ -2626,10 +2637,32 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (inbox.length) return "native_inbox_not_empty";
         const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
         if (!Array.isArray(children)) return "native_children_unavailable";
+        const terminalChildren = new Set<string>();
         for (const entry of children) {
           if (!record(entry) || typeof entry.id !== "string" || entry.parentID !== child) return "native_lineage_unavailable_or_mismatch";
           const reason = await visit(entry.id, child);
           if (reason) return reason;
+          terminalChildren.add(entry.id);
+        }
+        let history: readonly Record<string, unknown>[];
+        try { history = await reviewMessages(child, undefined, true); }
+        catch { return "native_tool_history_unavailable"; }
+        const calls = new Map<string, Record<string, unknown>>();
+        for (const message of history) for (const part of Array.isArray(message.parts) ? message.parts : []) {
+          if (!record(part) || part.type !== "tool") continue;
+          if (typeof part.callID !== "string" || typeof part.tool !== "string" ||
+              calls.has(part.callID) && calls.get(part.callID)!.tool !== part.tool) return "native_tool_identity_unavailable_or_conflicting";
+          calls.set(part.callID, part);
+        }
+        for (const part of calls.values()) {
+          if (!record(part.state) || !["completed", "error"].includes(String(part.state.status))) return "native_tools_active_or_unproven";
+          if (!record(part.state.metadata) || !["running", "pending", "unknown"].includes(String(part.state.metadata.status))) continue;
+          // A background Task's launch marker can remain "running" after its exact
+          // child ends. Use that child's current terminal/lineage/tool proof above,
+          // not the launch marker or an old verdict, to preserve lawful recovery.
+          const taskChild = part.tool === "task" && part.state.status === "completed"
+            ? taskChildSessionID({ metadata: part.state.metadata, output: part.state.output }) : undefined;
+          if (!taskChild || !terminalChildren.has(taskChild)) return "native_tools_active_or_unproven";
         }
         return undefined;
       };
@@ -2690,14 +2723,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       }
       if (!observed) return { reason: "predecessor_native_write_unproven" };
-      const idle = await continuationNativeIdle(root, child, "dog-operator", root);
+      const idle = await continuationNativeIdle(child, "dog-operator", root);
       if (idle) return { reason: idle };
       let reviewer: string | undefined;
       if (selection.reviewerQuote) {
         reviewer = predecessor.review?.child;
         if (!reviewer || !missionReviewIndependent(predecessor, reviewer) ||
             selection.reviewer && selection.reviewer !== reviewer) return { reason: "previous_independent_reviewer_unproven" };
-        const reviewerIdle = await continuationNativeIdle(root, reviewer, "dog-reviewer", child);
+        const reviewerIdle = await continuationNativeIdle(reviewer, "dog-reviewer", child);
         if (reviewerIdle) return { reason: `reviewer_${reviewerIdle}` };
       }
       return { predecessor, child, reviewer };
@@ -4220,7 +4253,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                mission = await restoreReviewAuthorship(root, mission, selectedReviewer);
                if (fixedReviewer) {
                  if (!missionReviewIndependent(mission, fixedReviewer)) throw new Error("mission-review-requested-reviewer-not-independent: retain the user's choice and report the conflict");
-                 const idle = await continuationNativeIdle(root, fixedReviewer, "dog-reviewer", mission.coordinator ?? root);
+                 const idle = await continuationNativeIdle(fixedReviewer, "dog-reviewer", mission.coordinator ?? root);
                  if (idle) throw new Error(`mission-review-requested-reviewer-unavailable:${idle}`);
                }
              }
@@ -4927,7 +4960,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
             }
             if (reconciled.mission.authorContinuation?.reviewerQuote && reviewerID === reconciled.mission.authorContinuation.reviewer) {
-              const idle = await continuationNativeIdle(root, String(reviewerID), "dog-reviewer", reconciled.mission.coordinator ?? root);
+              const idle = await continuationNativeIdle(String(reviewerID), "dog-reviewer", reconciled.mission.coordinator ?? root);
               if (idle) throw new Error(`mission-review-requested-reviewer-unavailable:${idle}`);
             }
             // Continuing an owned independent Reviewer does not make it the candidate's author.

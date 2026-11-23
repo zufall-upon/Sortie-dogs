@@ -2441,8 +2441,12 @@ for (const request of [
   "Keep the same authorization checks while fixing this bug.",
   "The previous developer left a bug; fix it.",
   "Use the API written by the previous developer.",
+  "Use the previous developer's API to fix the bug.",
+  "Keep the original author’s tests passing.",
   "Fix the same bug reported by the developer.",
   "前回の実装担当の引継ぎが止まった原因を調べて。",
+  "前回の実装担当が担当したAPIを使って修正して。",
+  "同じ実装担当が担当しているAPIを使って修正して。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
@@ -2481,7 +2485,11 @@ test("V2 author continuation cannot use a quote that negates the user's instruct
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test("V2 explicitly continues the completed actual author and reviews the new candidate without old authority", async () => {
+for (const [request, requestQuote, reviewerQuote] of [
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer"],
+  ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer"],
+  ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer"],
+]) test(`V2 explicitly continues the completed actual author and reviews the new candidate without old authority: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-continuation-"));
   const fixture = contextFixture(), exec = promisify(execFile);
@@ -2558,14 +2566,24 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     await edit(undefined, "first");
     await validate("first");
     await tool("author", "finish_direct_unit");
+    const authorBackground = await before("author", "shell", { command: "node retained-writer.mjs", background: true });
+    await after(authorBackground, "Background process running", { status: "running" });
+    const authorTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
     const oldReview = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
     const firstReview = await before("author", "subagent", nativeTask(oldReview.task));
     await prompt("reviewer", String(firstReview.input.prompt));
+    const reviewerBackground = await before("reviewer", "shell", { command: "git status --short", background: true });
+    await after(reviewerBackground, "Background process running", { status: "running" });
+    const reviewerTool = (history.reviewer!.at(-1)!.content as Record<string, unknown>[])[0]!;
     agents.reviewer!.outcome = "succeeded";
     const oldReport = "PASS\nThe first candidate is correct.", now = Date.now();
     (history.reviewer ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010",
       finish: "stop", time: { created: now, completed: now }, content: [{ type: "text", text: oldReport }] });
     await after(firstReview, oldReport, { sessionID: "reviewer" });
+    // Native background launch metadata is historical; the exact child terminal
+    // must allow recovery without requiring edits to that launch record.
+    const completedReviewTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    (completedReviewTool.state as Record<string, unknown>).metadata = { sessionID: "reviewer", status: "running" };
     await tool("author", "submit_mission", { status: "ready", summary: "First result ready" });
     agents.author!.outcome = "succeeded";
     await after(firstDispatch, "First result ready", { sessionID: "author" });
@@ -2573,10 +2591,9 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
 
-    const request = "Use the same author and the same reviewer for the new result.";
     await prompt("root", request);
     const requirements = ["Use the same author and reviewer to write the new result"];
-    const selection = { request_quote: "same author", reviewer_quote: "same reviewer", work_directory: directory };
+    const selection = { request_quote: requestQuote, reviewer_quote: reviewerQuote, work_directory: directory };
     const start = (choice = selection) => tool("root", "start_mission", {
       requirements, preferred_executor: "coordinator", author_continuation: choice });
     const wrongQuote = await start({ ...selection, request_quote: "different author" });
@@ -2587,7 +2604,7 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
       /mission-author-continuation-author-required/u);
     assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
-      author_continuation: { request_quote: "same author", work_directory: directory } })).reason,
+      author_continuation: { request_quote: requestQuote, work_directory: directory } })).reason,
     "explicit_reviewer_continuation_input_required", "an explicit same-Reviewer request cannot become a silent substitution");
     await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
       /mission-author-continuation-author-required/u);
@@ -2600,6 +2617,19 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     delete agents.author!.outcome;
     assert.equal((await start()).reason, "native_terminal_unknown");
     agents.author!.outcome = "succeeded";
+    // A terminal session can still own an unfinished background process. Check the
+    // current native tool state for each owner independently: another pending
+    // process must not mask a missing check for the selected owner.
+    for (const part of [authorTool, reviewerTool]) (part.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+    for (const part of [authorTool, reviewerTool]) {
+      for (const status of ["running", "pending", "unknown"]) {
+        (part.state as Record<string, unknown>).metadata = { status };
+        assert.match((await start()).reason, /native_tools_active_or_unproven/u);
+      }
+      // The native completion updates this same call, rather than fabricating a
+      // new owner or treating its successful launch as process completion.
+      (part.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+    }
     active = undefined;
     assert.equal((await start()).reason, "native_activity_unavailable");
     active = { author: { type: "running" } };
@@ -2638,6 +2668,18 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, null);
     const bad = nativeTask(second.task);
     await assert.rejects(before("root", "subagent", { ...bad, sessionID: "wrong" }), /mission-author-continuation-not-authorized|mission-coordinator-location-mismatch/u);
+    history.author!.push({ id: `msg_${++counter}`, type: "assistant", content: [{
+      type: "tool", name: "shell", id: `call_${++counter}`, state: { status: "completed",
+        input: { command: "node retained-writer.mjs", background: true }, metadata: { status: "running" } },
+    }] });
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)),
+      /mission-author-continuation-not-authorized:native_tools_active_or_unproven/u,
+      "recheck tool ownership between preparation and actual admission");
+    const held = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(held.dispatchOpen, false);
+    assert.equal(held.coordinator, null, "a rejected dispatch cannot claim the old author");
+    const pendingPart = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
+    (pendingPart.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
     active = { author: { type: "running" } };
     await assert.rejects(before("root", "subagent", nativeTask(second.task)), /mission-author-continuation-not-authorized:native_session_active/u);
     active = {};
@@ -2677,6 +2719,12 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     }] });
     assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "a background tool still prevents duplicate continuation");
     history.author!.pop();
+    active = { reviewer: { type: "running" } };
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "a historical Task's live child remains protected");
+    active = {};
+    delete agents.reviewer!.outcome;
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "an unproven Task terminal is not recovery proof");
+    agents.reviewer!.outcome = "succeeded";
     const proposal = await assertProposal("mission-coordinator-required");
     assert.equal(proposal.task.task_id, "author");
     const methodDispatch = await before("root", "subagent", nativeTask(proposal.task));
