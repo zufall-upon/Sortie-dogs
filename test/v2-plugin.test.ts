@@ -2449,6 +2449,15 @@ for (const [request, quote] of [
     assert.equal(unproven.status, "mission-author-continuation-unavailable");
     assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
     assert.equal(unproven.task, undefined);
+    const invalid = JSON.parse((await start.execute({ requirements: [request],
+      author_continuation: { request_quote: "not the user's choice", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_invalid_quote" })).content);
+    assert.equal(invalid.reason, "user_intent_quote_unavailable");
+    const retained = JSON.parse((await start.execute({ requirements: [request] },
+      { sessionID: "root", agent: "dog-operator", callID: "call_omit_invalid_quote" })).content);
+    assert.equal(retained.mission_id, packet.mission_id);
+    assert.equal(retained.task, undefined, "rejecting a caller quote cannot clear the user's genuine author restriction");
+    assert.equal((await missions.required("root")).authorContinuation!.quote, quote);
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -2489,7 +2498,37 @@ for (const request of [
       { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
     assert.ok(packet.task, "a description of earlier work or authorization is not a same-author instruction");
     assert.equal(packet.task.task_id, undefined);
-    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).authorContinuation, undefined);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    assert.equal((await missions.required("root")).authorContinuation, undefined);
+    const rejected = JSON.parse((await start.execute({ requirements: [request],
+      author_continuation: { request_quote: "same author", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_invalid_choice" })).content);
+    assert.equal(rejected.reason, "user_intent_quote_unavailable");
+    assert.equal(rejected.task, undefined);
+    const corrected = JSON.parse((await start.execute({ requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_corrected_choice" })).content);
+    assert.equal(corrected.mission_id, packet.mission_id, "correcting an invalid option does not replace the Mission");
+    assert.deepEqual(corrected.budget, packet.budget, "no admission or replacement changes accounting");
+    assert.ok(corrected.task, "a rejected caller option cannot create a restriction absent from the user request");
+    assert.equal(corrected.task.task_id, undefined);
+    const current = await missions.required("root");
+    assert.equal(current.authorContinuation, undefined);
+    assert.equal(current.coordinator, null);
+    assert.equal(current.runID, null);
+    assert.equal(current.dispatchOpen, false);
+    if (request === "Keep the same authorization checks while fixing this bug.") {
+      // Reproduce the old persisted rejection, not an authorization or an active owner.
+      await missions.update("root", state => {
+        state.authorContinuation = { requestID: "msg_request", quote: "same author", directory,
+          blocked: "user_intent_quote_unavailable" };
+      });
+      const recovered = JSON.parse((await start.execute({ requirements: [request] },
+        { sessionID: "root", agent: "dog-operator", callID: "call_recover_old_rejection" })).content);
+      assert.equal(recovered.mission_id, packet.mission_id);
+      assert.ok(recovered.task, "an older unadmitted invalid quote can be corrected without cancelling its Mission");
+      assert.deepEqual(recovered.budget, packet.budget);
+      assert.equal((await missions.required("root")).authorContinuation, undefined);
+    }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

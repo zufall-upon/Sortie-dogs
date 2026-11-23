@@ -2704,14 +2704,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!selection) return { reason: "explicit_user_intent_missing" };
       const request = mission.requests.find(item => item.id === selection.requestID);
       const sentences = request?.text.split(/[\r\n。.!?]+/u) ?? [];
-      if (sentences.some(line => explicitContinuationQuote(line, true, true)) &&
-          !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
       if (!request || !explicitContinuationQuote(selection.quote, false) ||
           !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
           selection.reviewerQuote && (!explicitContinuationQuote(selection.reviewerQuote, true) ||
             !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
         return { reason: "user_intent_quote_unavailable" };
       }
+      if (sentences.some(line => explicitContinuationQuote(line, true, true)) &&
+          !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
       const directory = isAbsolute(selection.directory) ? await realpath(selection.directory).catch(() => undefined) : undefined;
       if (!directory || directory !== selection.directory) return { reason: "work_directory_unavailable_or_changed" };
       if (!previous || previous.phase !== "completed" || previous.rootSessionID !== root ||
@@ -2838,10 +2838,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
-          if (!authorRequest && !mission.authorContinuation && mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
+          if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
+            const saved = mission.authorContinuation;
+            const savedRequest = saved && mission.requests.find(item => item.id === saved.requestID);
+            // Older rejected caller input could leave a restriction the user never
+            // requested. Only recover an unadmitted, unselected invalid quote; a
+            // genuine author instruction or any selected child remains binding.
+            if (saved?.blocked === "user_intent_quote_unavailable" && !saved.child && savedRequest &&
+                !savedRequest.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false, true))) {
+              mission = await missions.update(context.sessionID, state => {
+                if (state.id === mission.id && state.coordinator === null && state.runID === null && !state.dispatchOpen &&
+                    isDeepStrictEqual(state.authorContinuation, saved)) delete state.authorContinuation;
+              });
+            }
             const request = mission.requests.at(-1)!;
             const explicit = request.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false, true));
-            if (explicit) mission = await missions.update(context.sessionID, state => {
+            if (explicit && !mission.authorContinuation) mission = await missions.update(context.sessionID, state => {
               state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: "explicit_author_continuation_input_required" };
               state.preferredExecutor = "coordinator";
             });
@@ -2856,20 +2868,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 saved.directory !== directory || saved.reviewerQuote !== authorRequest.reviewer_quote)) {
               throw new Error("mission-author-continuation-selection-frozen");
             }
-            mission = await missions.update(context.sessionID, state => {
-              state.preferredExecutor = "coordinator";
-              state.authorContinuation = { requestID: request.id, quote: String(authorRequest.request_quote), directory,
-                ...(typeof authorRequest.reviewer_quote === "string" ? { reviewerQuote: authorRequest.reviewer_quote } : {}),
-                ...(saved?.predecessorRunID ? { predecessorRunID: saved.predecessorRunID } : {}),
-                ...(saved?.predecessorMissionID ? { predecessorMissionID: saved.predecessorMissionID } : {}),
-                ...(saved?.child ? { child: saved.child } : {}), ...(saved?.reviewer ? { reviewer: saved.reviewer } : {}),
-                blocked: "predecessor_not_proven" };
-            });
-            const proof = await proveAuthorContinuation(context.sessionID, mission, prior);
+            const selection = { requestID: request.id, quote: String(authorRequest.request_quote), directory,
+              ...(typeof authorRequest.reviewer_quote === "string" ? { reviewerQuote: authorRequest.reviewer_quote } : {}),
+              ...(saved?.predecessorRunID ? { predecessorRunID: saved.predecessorRunID } : {}),
+              ...(saved?.predecessorMissionID ? { predecessorMissionID: saved.predecessorMissionID } : {}),
+              ...(saved?.child ? { child: saved.child } : {}), ...(saved?.reviewer ? { reviewer: saved.reviewer } : {}),
+              blocked: "predecessor_not_proven" };
+            const proposed = { ...mission, authorContinuation: selection };
+            const proof = await proveAuthorContinuation(context.sessionID, proposed, prior);
+            if (proof.reason === "user_intent_quote_unavailable") {
+              return JSON.stringify({ ...locationObservation(context.sessionID), ...continuationPacket(proposed),
+                reason: proof.reason,
+                next_action: mission.authorContinuation ? continuationHint
+                  : `The supplied author_continuation is not supported by the current user instruction. Retry ${startMission} with the same requirements and correct or omit that option; this rejected selection did not create a user restriction or authorize any Task.`,
+                budget: await control!.currentBudget(context.sessionID) });
+            }
             mission = await missions.update(context.sessionID, state => {
               if (state.id !== mission.id || state.runID !== null || state.coordinator !== null || state.dispatchOpen) {
                 throw new Error("mission-author-continuation-stale");
               }
+              state.preferredExecutor = "coordinator";
+              state.authorContinuation = selection;
               if (proof.reason || !proof.predecessor || !proof.child) {
                 state.authorContinuation!.blocked = proof.reason ?? "predecessor_not_proven";
                 return;
