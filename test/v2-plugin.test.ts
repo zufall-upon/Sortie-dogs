@@ -2398,7 +2398,11 @@ for (const [request, quote] of [
   ["You need to use the same author for this change.", "same author"],
   ["You may use the same author, but you must use the same author for this change.", "same author"],
   ["You may use the same author, but retain the same author for this change.", "same author"],
+  ["Use the same author but you may use the same reviewer for this work.", "same author"],
   ["You may use the same reviewer and you must retain the same author for this change.", "same author"],
+  ["You don't have to use the same reviewer and you must retain the same author for this change.", "same author"],
+  ["You don't have to use the same author, but you must retain the same author for this change.", "same author"],
+  ["The same author is not required, but you must use the same author for this change.", "same author"],
   ["Continue with the previous developer immediately.", "previous developer"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
@@ -2538,6 +2542,8 @@ for (const request of [
   "You may use the same author for this change, but it is not required",
   "You may reuse the same author and retain the same reviewer, but neither is required.",
   "You may retain the same reviewer and reuse the same author, but neither is required.",
+  "You don't have to use the same author and retain the same reviewer, but neither is required.",
+  "You do not need to retain the same reviewer and use the same author for this change.",
   "You can use the same author for this change.",
   "You may have the same author implement the change.",
   "You are allowed to use the same author for this change.",
@@ -2576,6 +2582,8 @@ for (const request of [
       "You may use the same author for this change, but it is not required",
       "You may reuse the same author and retain the same reviewer, but neither is required.",
       "You may retain the same reviewer and reuse the same author, but neither is required.",
+      "You don't have to use the same author and retain the same reviewer, but neither is required.",
+      "You do not need to retain the same reviewer and use the same author for this change.",
       "You can use the same author for this change.",
       "You may have the same author implement the change.",
       "You are allowed to use the same author for this change.",
@@ -2614,6 +2622,8 @@ for (const request of [
 for (const [request, reason] of [
   ["You may use the same author, but you must use the same reviewer.", "explicit_author_continuation_input_required"],
   ["You may use the same author or select a different author, but use the same reviewer.", "explicit_author_continuation_input_required"],
+  ["You may use the same author for implementation while the coordinator must fix the bug and retain the same reviewer.", "explicit_author_continuation_input_required"],
+  ["You may use the same author while the coordinator must implement the fix and retain the same reviewer.", "explicit_author_continuation_input_required"],
   ["Do not use the same author, but use the same reviewer.", "requested_author_reviewer_lineage_conflict"],
 ]) test(`V2 preserves a required reviewer when the author's choice is not mandatory: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
@@ -2707,6 +2717,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer, but you may select a different reviewer.", "same author", "same reviewer", "git"],
   ["You may use the same author, but you must use the same reviewer for the new result.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
   ["You may use the same author or select a different author, but use the same reviewer for the new result.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author for implementation while the coordinator must fix the bug and retain the same reviewer.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author while the coordinator must implement the fix and retain the same reviewer.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
   ["You may use the same author for the new result, but it is not required.", "same author", undefined, "git-optional-author-selected"],
   ["Have the same author implement the change, and have the same reviewer review it.", "same author", "same reviewer", "git"],
   ["Have the same author implement the change, and have the same reviewer review code.", "same author", "same reviewer", "git"],
@@ -3420,7 +3432,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(current.review!.result, report);
     assert.notEqual(current.review!.runID, oldRun.runID);
     assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
-    if (workspace === "git-glob-all" || workspace.startsWith("git-add-reviewer") ||
+    if (workspace === "git-glob-all" || workspace === "git-optional-author-required-reviewer" || workspace.startsWith("git-add-reviewer") ||
         workspace.startsWith("git-replace-earlier-author-optional") || workspace === "git-replace-earlier-author-conflict") {
       await tool("author", "submit_mission", { status: "ready", summary: "Current result reviewed and ready" });
       agents.author!.outcome = "succeeded";

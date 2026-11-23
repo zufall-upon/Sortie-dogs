@@ -2610,7 +2610,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // Select the person as the noun-phrase head, not a role-qualified artifact.
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
       const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
-      const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
+      const clauseConnective = String.raw`(?:and|or|but|yet|however|while|whereas|although|though|because|if|unless)`;
+      const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:${clauseConnective}|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
       const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
       // Noun/verb homographs need a person-directed object boundary; otherwise
       // "author review notes available" can name an artifact. A bare object can
@@ -2660,11 +2661,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const japaneseNegation = String.raw`\s*(?:(?:を|は|が|で|に)?\s*(?:(?:継続|再開|引き継|引継|使|維持|続け|続行|進め|お願い|担当)${negativeInflection}|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|に${requestedWork}(?:任せ|依頼)${negativeInflection})`;
       const actorPredicate = String.raw`${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?`;
       const negatedTarget = new RegExp(String.raw`${negation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${actorPredicate}not\s+(?:be\s+)?(?:used|assigned|selected)\b|${target}${japaneseNegation}`, "iu");
-      const optionalTarget = new RegExp(String.raw`${optionalObligation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${actorPredicate}(?:not\s+(?:be\s+)?(?:required|needed)|unnecessary)\b`, "iu");
+      const optionalPredicate = new RegExp(String.raw`${actorPredicate}(?:not\s+(?:be\s+)?(?:required|needed)|unnecessary)\b`, "giu");
       const otherSelection = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
       const causative = String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`;
       const negatedCausative = new RegExp(String.raw`${negation}have\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`, "iu");
-      const optionalCausative = new RegExp(String.raw`${optionalObligation}have\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`, "iu");
       const negatedActionTail = String.raw`\s+${verbModifiers}not\s+${verbModifiers}${causativeAction}\b`;
       const negatedActionTarget = targetFor(String.raw`(?:${englishBoundary}|(?=${negatedActionTail}))`);
       const negatedAction = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${negatedActionTarget}${negatedActionTail}|${target}\s+(?:must|should|shall|will|would|can|could)\s+not\s+${verbModifiers}${causativeAction}\b`, "iu");
@@ -2675,32 +2675,39 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "giu");
       const permissionPrefix = new RegExp(String.raw`\b(?:(?:may|can|could|might)\s+|(?:is|are)\s+(?:free|allowed|permitted)\s+to\s+)${verbModifiers}$`, "iu");
       const optionalPrefix = new RegExp(String.raw`${optionalObligation}$`, "iu");
-      // A shared modal governs coordinated person selections across both roles:
-      // "may reuse the author and retain the reviewer". A new subject, modal or
-      // contrasting clause breaks that link rather than weakening its command.
+      // Permission and release of an obligation can govern coordinated person
+      // selections across both roles. Do not carry either past another clause's
+      // finite modal ("while the coordinator must ... and retain the reviewer").
       const allActors = String.raw`(?:${actors(englishBoundary).actor}|${actors(englishBoundary).other})`;
       const allTargets = String.raw`(?:${target}|${targetFor(englishBoundary, true)}|(?:(?:a\s+)?different|another)\s+${allActors})`;
       const allCausativeTargets = String.raw`(?:${causativeTarget}|${targetFor(causativeBoundary, true)}|(?:(?:a\s+)?different|another)\s+(?:${actors(causativeBoundary).actor}|${actors(causativeBoundary).other}))`;
       const personSelections = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${allTargets}|\bhave\s+${verbModifiers}(?:the\s+)?${allCausativeTargets}${causativeTail}`, "giu");
-      const coordinated = new RegExp(String.raw`^(?:(?!\b(?:and|or|but|yet|however)\b)[^,;:.!?\r\n])*,?\s+(?:and|or)\s+${verbModifiers}$`, "iu");
-      const permissions = new Map<number, boolean>();
+      const clauseBoundary = String.raw`\b(?:${clauseConnective}|must|should|shall|may|can|could|might|will|would|needs?|is|are|was|were)\b`;
+      const coordinated = new RegExp(String.raw`^(?:(?!${clauseBoundary})[^,;:.!?\r\n])*,?\s+(?:and|or)\s+${verbModifiers}$`, "iu");
+      const nonRequired = new Map<number, boolean>();
       let previous: RegExpMatchArray | undefined;
       for (const match of text.matchAll(personSelections)) {
-        const inherited = previous && permissions.get(previous.index!) &&
+        const inherited = previous && nonRequired.get(previous.index!) &&
           coordinated.test(text.slice(previous.index! + previous[0].length, match.index));
-        permissions.set(match.index, permissionPrefix.test(text.slice(0, match.index)) || !!inherited);
+        const prefix = text.slice(0, match.index);
+        nonRequired.set(match.index, permissionPrefix.test(prefix) || optionalPrefix.test(prefix) || !!inherited);
         previous = match;
       }
       const selections = [...text.matchAll(selection)];
-      const permitted = (index: number) => permissions.get(index) ?? permissionPrefix.test(text.slice(0, index));
-      const requiredSelection = selections.some(match => !permitted(match.index) && !optionalPrefix.test(text.slice(0, match.index)));
+      const permitted = (index: number) => nonRequired.get(index) ??
+        (permissionPrefix.test(text.slice(0, index)) || optionalPrefix.test(text.slice(0, index)));
+      const requiredSelections = selections.filter(match => !permitted(match.index));
+      const requiredSelection = requiredSelections.length > 0;
       // Negation and alternatives must govern the selected person, not an
       // unrelated object in another clause (such as an existing API).
       const contrary = negatedTarget.test(text) || negatedCausative.test(text) || negatedAction.test(text) ||
         new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
         [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
           !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)) && !permitted(match.index));
-      const optional = optionalTarget.test(text) || optionalCausative.test(text) ||
+      // An optional selection cannot erase another mandatory command. A later
+      // explicit "the author is not required" predicate still releases it.
+      const optional = [...text.matchAll(optionalPredicate)].some(match =>
+        !requiredSelections.some(selection => selection.index > match.index)) ||
         !requiredSelection && selections.some(match => permitted(match.index));
       if (negated) return negated === "contrary" ? contrary : optional && !contrary && (negated !== "optional-quote" || !requiredSelection);
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
