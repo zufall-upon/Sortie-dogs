@@ -2386,6 +2386,7 @@ test('requires exclusive execution', async () => {
 for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
   ["Have the same author implement the change.", "same author"],
+  ["Have the same author review code.", "same author"],
   ["Have the same author implement the change and do not have a different author implement the follow-up.", "same author"],
   ["Have the same author implement the change and do not have the same reviewer review it.", "same author"],
   ["Have the same author implement the change and have the same reviewer review notes available.", "same author"],
@@ -2588,6 +2589,7 @@ for (const [request, quote] of [
 for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git"],
   ["Have the same author implement the change, and have the same reviewer review it.", "same author", "same reviewer", "git"],
+  ["Have the same author implement the change, and have the same reviewer review code.", "same author", "same reviewer", "git"],
   ["Have the same author and reviewer review the change.", "same author", "same author and reviewer", "git"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "git"],
   ["前回の実装担当・Reviewerで続けて。", "前回の実装担当", "前回の実装担当・Reviewer", "git"],

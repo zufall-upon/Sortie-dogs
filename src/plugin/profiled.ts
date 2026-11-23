@@ -2610,8 +2610,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
       const verbModifiers = String.raw`(?:(?:[a-z]+ly|again|now|then|here|there|once|twice|unchanged|please|ever)\s+)*`;
       // Noun/verb homographs need a person-directed object boundary; otherwise
-      // "author review notes" or "reviewer test results" can name artifacts.
-      const actionObject = String.raw`(?=\s+(?:the|a|an|this|that|these|those|it|them|my|your|our|their)\b|\s*(?:$|[,;:.!?]))`;
+      // "author review notes available" can name an artifact.
+      const actionObject = String.raw`(?=\s+(?:the|a|an|this|that|these|those|it|them|my|your|our|their)\b|\s+[a-z][\w'-]*\s*(?:$|[,;:.!?])|\s*(?:$|[,;:.!?]))`;
       const causativeAction = String.raw`(?:implement|write|develop|handle|continue|verify|inspect|fix|investigate|(?:resume|review|check|test)${actionObject}|work\s+(?:on|with|for))`;
       const causativeTail = String.raw`\s+${verbModifiers}${causativeAction}\b`;
       const causativeBoundary = String.raw`(?:${englishBoundary}|(?=${causativeTail}))`;
