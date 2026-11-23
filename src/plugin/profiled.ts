@@ -2606,7 +2606,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false): boolean {
       // Select the person as the noun-phrase head, not a role-qualified artifact.
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
-      const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|again|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were)\b|[をにでがはと]))`;
+      const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
+      const englishBoundary = String.raw`(?=\s*(?:$|[,;:.!?&、・]|(?:and|or|for|to|with|on|in|at|from|of|as|who|that|must|should|shall|needs?|will|would|can|could|is|are|was|were|${actorAdverb})\b|[をにでがはと]))`;
       const author = String.raw`(?:\b(?:author|writer|implementer|developer)\b${englishBoundary}|作業者|実装者|実装担当|作者|担当者?|書き手)`;
       const reviewActor = String.raw`(?:\breviewer\b${englishBoundary}|レビュー担当|レビュアー|レビュー者)`;
       const actor = reviewer ? reviewActor : author, other = reviewer ? author : reviewActor;

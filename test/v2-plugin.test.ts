@@ -2386,6 +2386,8 @@ test('requires exclusive execution', async () => {
 for (const [request, quote] of [
   ["Use the same author for new work", "same author"],
   ["Use the same author again.", "same author"],
+  ["Use the same author now.", "same author"],
+  ["Continue with the previous developer immediately.", "previous developer"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
   ["Keep the same author and the same reviewer tools for new work.", "same author"],
