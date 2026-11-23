@@ -20,23 +20,25 @@ test("legacy multiple expanded units recover only their frozen plan identity", (
   assert.equal(recoverLegacyRegistrationScopes(state, { ...proposal, units: [expanded1, { ...proposal.units[1], write: [...expanded2.write, "unapproved"] }] }, "unit-2"), undefined);
 });
 
-test("scope registration restores only the generated entrypoint of an initially read-only unit", () => {
+test("scope registration restores only the generated entrypoint of an initially read-only or root-glob unit", () => {
   const mission = { id: "scope-entrypoint", requirements: [{ id: "R1", text: "Validate and retain the result" }], requests: [{ id: "request" }] } as any;
   const declaration = { title: "Check", objective: "Validate and retain the result", read: ["check.mjs"], write: [], validation: ["node check.mjs"] };
-  const original = missionPlan(mission, [declaration]);
-  const planHash = createHash("sha256").update(JSON.stringify(original)).digest("hex");
-  const expanded = { ...declaration, write: ["result.txt"], validation: ["node check.mjs --corrected"] };
-  const proposal = missionPlan(mission, [expanded]);
-  for (const legacy of [false, true]) {
-    const state = { planHash, units: [{ unit: { ...original.units[0], write: expanded.write }, ...(legacy ? {} : { initialWriteScope: [] }) }] } as any;
-    const scopes = recoverLegacyRegistrationScopes(state, proposal, "unit-1");
-    if (legacy) assert.deepEqual([...scopes!], [["unit-1", []]]);
-    assert.equal(directValidationRegistrationPlanHash(state, proposal, "unit-1", scopes), planHash);
-    const changed = structuredClone(proposal);
-    changed.goal_declaration.criteria[0]!.entrypoint = "unrelated.txt";
-    assert.notEqual(directValidationRegistrationPlanHash(state, changed, "unit-1", scopes), planHash,
-      "only the scope-derived generated entrypoint is normalized");
-    assert.equal(recoverLegacyRegistrationScopes(state, changed, "unit-1"), undefined);
+  for (const initialWrite of [[], ["**"]]) {
+    const original = missionPlan(mission, [{ ...declaration, write: initialWrite }]);
+    const planHash = createHash("sha256").update(JSON.stringify(original)).digest("hex");
+    const expanded = { ...declaration, write: [...initialWrite, "result.txt"], validation: ["node check.mjs --corrected"] };
+    const proposal = missionPlan(mission, [expanded]);
+    for (const legacy of [false, true]) {
+      const state = { planHash, units: [{ unit: { ...original.units[0], write: expanded.write }, ...(legacy ? {} : { initialWriteScope: initialWrite }) }] } as any;
+      const scopes = recoverLegacyRegistrationScopes(state, proposal, "unit-1");
+      if (legacy) assert.deepEqual([...scopes!], [["unit-1", initialWrite]]);
+      assert.equal(directValidationRegistrationPlanHash(state, proposal, "unit-1", scopes), planHash);
+      const changed = structuredClone(proposal);
+      changed.goal_declaration.criteria[0]!.entrypoint = "unrelated.txt";
+      assert.notEqual(directValidationRegistrationPlanHash(state, changed, "unit-1", scopes), planHash,
+        "only the scope-derived generated entrypoint is normalized");
+      assert.equal(recoverLegacyRegistrationScopes(state, changed, "unit-1"), undefined);
+    }
   }
 });
 

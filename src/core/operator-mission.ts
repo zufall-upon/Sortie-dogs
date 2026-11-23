@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve, win32 } from "node:path";
 import { normalizeExecutionScope } from "./path.js";
-import { parseOperatorPlan, unitValidation, unitValidationCwd, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
+import { parseOperatorPlan, operatorUnitEntrypoint, unitValidation, unitValidationCwd, type OperatorPlan, type OperatorState, type OperatorTask, type OperatorRuntime } from "./operator-runtime.js";
 import { profileAgent, type RuntimeProfile } from "./runtime-profile.js";
 import { normalizeCommand, shellCommandPrefixes, shellCommandWords } from "../plugin/gate.js";
 import { missionValidationCommand } from "./mission-validation-command.js";
@@ -1073,7 +1073,7 @@ export function missionPlan(mission: OperatorMission, raw: unknown, projectRoot?
       // The evidence ledger's labels are bounded independently of the complete Worker objective.
       // Keep all detailed instructions in the handoff, not in a 512-character wire label.
       criteria: units.map(unit => ({ criterion_id: unit.id, target: unit.title.slice(0, 512),
-        entrypoint: (unit.write[0] ?? unit.read[0] ?? unit.id).slice(0, 512), validation_command: unit.validation.at(-1) })) },
+        entrypoint: operatorUnitEntrypoint(unit), validation_command: unit.validation.at(-1) })) },
     units }, "execution");
 }
 

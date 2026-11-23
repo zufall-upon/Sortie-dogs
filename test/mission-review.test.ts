@@ -1728,24 +1728,32 @@ test("non-Git outputs and worktrees remain reviewable with scoped byte freshness
   } finally { await rm(area, { recursive: true, force: true }); }
 });
 
-test("whole non-Git output ignores host bookkeeping but pins explicitly declared control-like files", async () => {
+for (const scope of [".", "**"]) test(`whole non-Git output ignores host bookkeeping but pins explicitly declared control-like files: ${scope}`, async () => {
   const root = await mkdtemp(join(tmpdir(), "mission-review-control-"));
   try {
     await mkdir(join(root, ".sortie-dogs-v010", "missions"), { recursive: true });
     const state = join(root, ".sortie-dogs-v010", "missions", "root.json");
     await writeFile(state, "host review pending\n");
     await writeFile(join(root, "result.txt"), "actual product result\n");
-    const run = { units: [{ unit: { write: ["."] }, hashes: [] }] } as never;
+    const run = { units: [{ unit: { write: [scope] }, hashes: [] }] } as never;
     const before = await missionReviewSource(root, run);
     assert.match(before.excerpt, /actual product result/);
     assert.doesNotMatch(before.excerpt, /host review pending/);
     await writeFile(state, "host review saved\n");
     assert.equal((await missionReviewSource(root, run)).fingerprint, before.fingerprint);
-    const explicit = { units: [{ unit: { write: [".", ".sortie-dogs-v010/missions/root.json"] }, hashes: [] }] } as never;
-    const pinned = await missionReviewSource(root, explicit);
-    assert.match(pinned.excerpt, /host review saved/);
-    await writeFile(state, "explicit output changed\n");
-    assert.notEqual((await missionReviewSource(root, explicit)).fingerprint, pinned.fingerprint);
+    await writeFile(join(root, "result.txt"), "changed product result\n");
+    assert.notEqual((await missionReviewSource(root, run)).fingerprint, before.fingerprint,
+      "the implicit control exclusion cannot conceal a real candidate change");
+    for (const access of ["read", "write"]) {
+      await writeFile(state, "host review saved\n");
+      const path = ".sortie-dogs-v010/missions/root.json";
+      const explicit = { units: [{ unit: { write: [scope, ...(access === "write" ? [path] : [])],
+        read: access === "read" ? [path] : [] }, hashes: [] }] } as never;
+      const pinned = await missionReviewSource(root, explicit);
+      assert.match(pinned.excerpt, /host review saved/);
+      await writeFile(state, "explicit output changed\n");
+      assert.notEqual((await missionReviewSource(root, explicit)).fingerprint, pinned.fingerprint);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

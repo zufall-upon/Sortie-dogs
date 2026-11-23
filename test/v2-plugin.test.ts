@@ -2632,6 +2632,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-running"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-reviewer-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-change"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-other"],
@@ -2722,7 +2724,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     const firstDispatch = await before("root", "subagent", nativeTask(old.task));
     await prompt("author", String(firstDispatch.input.prompt));
     const unit = (expected: string) => ({ title: "Result", objective: `Write ${expected}`, read: ["check.mjs"],
-      write: workspace === "git-glob-all" && expected === "second" ? [join(dirname(directory), "unrelated", "**"), "**"]
+      write: workspace === "git-glob-all" ? expected === "first" ? ["**"] : [join(dirname(directory), "unrelated", "**"), "**"]
         : [workspace === "git-glob-ts" ? "*.ts" : "result.txt"], validation: [`node check.mjs ${expected}`,
         ...(workspace === "non-git-partial-cwd" && expected === "first" ? [`node check.mjs ${expected} --secondary`] : [])],
       ...(workspace === "non-git-registered-default" && expected === "first"
@@ -2854,6 +2856,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
     if (workspace.startsWith("git-replace")) {
+      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change";
+      const changedReviewer = workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change";
       if (workspace === "git-replace-running") {
         const activeDispatch = await before("root", "subagent", nativeTask(second.task));
         delete agents.author!.outcome;
@@ -2878,13 +2882,18 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         assert.equal(unknown.task, undefined);
         agents.author!.outcome = "interrupted";
       }
+      if (workspace.startsWith("git-replace-earlier-")) {
+        await prompt("root", changedAuthor ? "Actually, select a different author for this work."
+          : "Actually, select a different reviewer for this work.");
+        await tool("root", "start_mission", { requirements });
+      }
       const previousBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
       await prompt("root", workspace === "git-replace-change"
         ? "Actually, select a different author for this work."
         : workspace === "git-replace-reviewer-change" ? "Actually, select a different reviewer for this work."
         : "Limit the implementation to result.txt; keep the other requirements unchanged.");
-      const changedRequirements = ["Only change result.txt", ...(workspace === "git-replace-change" ? ["Use a different author"]
-        : workspace === "git-replace-reviewer-change" ? ["Use the same author and a different reviewer"] : requirements)];
+      const changedRequirements = ["Only change result.txt", ...(changedAuthor ? ["Use a different author"]
+        : changedReviewer ? ["Use the same author and a different reviewer"] : requirements)];
       if (workspace === "git-replace") active = { author: { type: "running" } };
       let replaced = await tool("root", "start_mission", { intent: "replace", requirements: changedRequirements });
       assert.notEqual(replaced.mission_id, second.mission_id);
@@ -2904,13 +2913,13 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         previousBudget.consumed_units + (workspace === "git-replace-running" ? 1 : 0),
         "a stopped admitted unit is settled, not refunded or reused");
       assert.equal(replacementBudget.max_units, previousBudget.max_units);
-      if (workspace === "git-replace-change") {
+      if (changedAuthor) {
         assert.equal(replacement.authorContinuation, undefined);
         assert.equal(replaced.task.task_id, undefined);
         return;
       }
       assert.equal(replaced.task.task_id, "author", "narrowing the same work must retain the user's selected author");
-      assert.equal(replacement.authorContinuation!.reviewer, workspace === "git-replace-reviewer-change" ? undefined : "reviewer");
+      assert.equal(replacement.authorContinuation!.reviewer, changedReviewer ? undefined : "reviewer");
       assert.equal(replacement.coordinator, null);
       assert.equal(replacement.dispatchOpen, false);
       second = replaced;
@@ -3090,13 +3099,6 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
     assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
     assert.equal(direct.status, "direct-unit-running");
-    if (workspace === "git-glob-all") {
-      await edit("first", "second");
-      await validate("second");
-      assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
-      assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
-      return;
-    }
     const proposed = { ...unit("second"), objective: "Use the current result to produce second without repeating setup" };
     const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
     const missionsForProposal = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
@@ -3138,7 +3140,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), [["node check.mjs second"]]);
     assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
     assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
-    if (workspace === "git-replace-reviewer-change") {
+    if (workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change") {
       agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
       const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [], reviewer_session_id: "otherReviewer" });
       assert.equal(review.task.task_id, "otherReviewer", "a genuine reviewer change removes the old selection, not the author's");
@@ -3178,6 +3180,12 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(current.review!.result, report);
     assert.notEqual(current.review!.runID, oldRun.runID);
     assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
+    if (workspace === "git-glob-all") {
+      await tool("author", "submit_mission", { status: "ready", summary: "Root-glob result reviewed and ready" });
+      agents.author!.outcome = "succeeded";
+      await after(methodDispatch, "Root-glob result ready", { sessionID: "author" });
+      assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+    }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -1299,6 +1299,11 @@ test("Mission root scope shorthand equals the explicit project directory for rea
     "no ambient cwd guess when no actual project root is supplied");
   const exact = missionPlan(mission, [{ ...unit, write: ["src/**"] }], directory);
   assert.deepEqual(exact.units[0]!.write, ["src/**"], "ordinary scope is not broadened");
+  for (const [read, expectedEntrypoint] of [[["check.mjs"], "check.mjs"], [[], "."]] as const) {
+    const broad = missionPlan(mission, [{ ...unit, read, write: ["**"] }], directory);
+    assert.deepEqual(broad.units[0]!.write, ["**"], "a measurement label cannot change the declared scope");
+    assert.equal((broad.goal_declaration.criteria as { entrypoint: string }[])[0]!.entrypoint, expectedEntrypoint);
+  }
 }));
 
 test("mission review notes are optional and cannot turn prose formatting into a coverage gate", async () => fixture(async directory => {

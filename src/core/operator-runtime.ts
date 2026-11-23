@@ -60,6 +60,11 @@ export interface OperatorUnit {
   readonly validation_cwd?: Readonly<Record<string, string>>;
   readonly acceptance_indices: readonly number[];
 }
+/** A root glob is a scope, not a concrete entrypoint (or Markdown emphasis). */
+export function operatorUnitEntrypoint(unit: OperatorUnit): string {
+  const paths = [...unit.write, ...unit.read];
+  return (paths[0] === "**" ? paths.find(path => path !== "**") ?? "." : paths[0] ?? unit.id).slice(0, 512);
+}
 export interface OperatorGitLifecycle {
   readonly branch_create: { readonly branch: string; readonly start_ref: string };
   readonly commit: { readonly message: string };
@@ -547,12 +552,11 @@ export function directValidationRegistrationPlanHash(state: OperatorState, plan:
     if (!record(criterion)) return criterion;
     const index = plan.units.findIndex(unit => unit.id === criterion.criterion_id);
     const next = plan.units[index], normalized = scopedUnits[index];
-    // missionPlan derives this label from the first write (or read). An initially
+    // missionPlan derives this label from the declared output/input. An initially
     // read-only unit gains a new label on its first authorized output; that is not
     // a goal change. A separately changed entrypoint must still fail the hash.
-    const entrypoint = (unit: OperatorUnit) => (unit.write[0] ?? unit.read[0] ?? unit.id).slice(0, 512);
-    const restored = next && normalized && normalized !== next && criterion.entrypoint === entrypoint(next)
-      ? { ...criterion, entrypoint: entrypoint(normalized) } : criterion;
+    const restored = next && normalized && normalized !== next && criterion.entrypoint === operatorUnitEntrypoint(next)
+      ? { ...criterion, entrypoint: operatorUnitEntrypoint(normalized) } : criterion;
     return criterion.criterion_id === unitID && criterion.validation_command === proposed?.validation.at(-1)
       ? { ...restored, validation_command: original?.validation.at(-1) } : restored;
   }) } : plan.goal_declaration;

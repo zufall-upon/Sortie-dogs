@@ -2925,16 +2925,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           // Keep the exact original request, but re-prove its predecessor and current
           // native quiescence; neither the old grant nor its checks/Review is reused.
           if (args.intent === "replace" && existing && !["completed", "cancelled"].includes(existing.phase) &&
-              existing.authorContinuation && continuationIntent(mission.requests.at(-1)!.text, false) !== "contrary") {
+              existing.authorContinuation) {
+            const requests = [...existing.requests,
+              ...mission.requests.filter(request => !existing.requests.some(old => old.id === request.id))];
             const selection = structuredClone(existing.authorContinuation);
-            if (continuationIntent(mission.requests.at(-1)!.text, true) === "contrary") {
+            const keepAuthor = effectiveContinuationIntent(requests, false) !== "contrary";
+            if (effectiveContinuationIntent(requests, true) === "contrary") {
               delete selection.reviewerQuote;
               delete selection.reviewer;
             }
             mission = await missions.update(context.sessionID, state => {
-              state.requests = [...existing.requests, ...state.requests.filter(request => !existing.requests.some(old => old.id === request.id))];
-              state.authorContinuation = { ...selection, blocked: selection.child ? "predecessor_not_proven" : selection.blocked };
-              state.preferredExecutor = "coordinator";
+              state.requests = requests;
+              if (keepAuthor) {
+                state.authorContinuation = { ...selection, blocked: selection.child ? "predecessor_not_proven" : selection.blocked };
+                state.preferredExecutor = "coordinator";
+              }
             });
           }
           if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
