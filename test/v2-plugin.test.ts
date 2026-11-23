@@ -2643,6 +2643,9 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-declarative"],
+  ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-conflict"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-optional"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
@@ -2925,9 +2928,11 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
     if (workspace.startsWith("git-replace")) {
-      const optionalAuthor = workspace === "git-replace-earlier-author-optional";
+      const optionalAuthor = workspace.startsWith("git-replace-earlier-author-optional");
       const optionalReviewer = workspace === "git-replace-earlier-reviewer-optional";
-      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change" || optionalAuthor;
+      const authorReviewerConflict = workspace === "git-replace-earlier-author-conflict";
+      const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change" ||
+        optionalAuthor && !reviewerQuote;
       const changedReviewer = workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" || optionalReviewer;
       if (workspace === "git-replace-running") {
         const activeDispatch = await before("root", "subagent", nativeTask(second.task));
@@ -2954,19 +2959,23 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         agents.author!.outcome = "interrupted";
       }
       if (workspace.startsWith("git-replace-earlier-")) {
-        await prompt("root", optionalAuthor ? "You don't have to use the same author for this change."
+        await prompt("root", workspace === "git-replace-earlier-author-optional-declarative" ? "The same author is not required for this change."
+          : optionalAuthor ? "You don't have to use the same author for this change."
           : optionalReviewer ? "You do not need to use the same reviewer for this change."
-          : changedAuthor ? "Actually, select a different author for this work."
+          : authorReviewerConflict ? "Actually, select a different author for this work."
+          : changedAuthor ? "Actually, select a different author for this work. You do not need to use the same reviewer."
           : "Actually, select a different reviewer for this work.");
         await tool("root", "start_mission", { requirements });
       }
       const previousBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
       await prompt("root", workspace === "git-replace-change"
-        ? "Actually, select a different author for this work."
+        ? "Actually, select a different author for this work. You do not need to use the same reviewer."
         : workspace === "git-replace-reviewer-change" ? "Actually, select a different reviewer for this work."
         : "Limit the implementation to result.txt; keep the other requirements unchanged.");
-      const changedRequirements = ["Only change result.txt", ...(optionalAuthor ? ["The same author is not required"]
+      const changedRequirements = ["Only change result.txt", ...(optionalAuthor ? [reviewerQuote
+        ? "The same author is optional; retain the same reviewer" : "The same author is not required"]
         : optionalReviewer ? ["Use the same author; the same reviewer is not required"]
+        : authorReviewerConflict ? ["Use a different author and retain the same reviewer"]
         : changedAuthor ? ["Use a different author"]
         : changedReviewer ? ["Use the same author and a different reviewer"] : requirements)];
       if (workspace === "git-replace") active = { author: { type: "running" } };
@@ -2988,12 +2997,40 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         previousBudget.consumed_units + (workspace === "git-replace-running" ? 1 : 0),
         "a stopped admitted unit is settled, not refunded or reused");
       assert.equal(replacementBudget.max_units, previousBudget.max_units);
+      if (authorReviewerConflict) {
+        assert.equal(replaced.status, "mission-author-continuation-unavailable");
+        assert.equal(replaced.reason, "requested_author_reviewer_lineage_conflict");
+        assert.equal(replaced.task, undefined, "an excluded author and their required native Reviewer cannot be silently replaced");
+        assert.equal(replacement.authorContinuation!.reviewer, "reviewer");
+        assert.equal(replacement.coordinator, null);
+        assert.equal(replacement.dispatchOpen, false);
+        const held = await tool("root", "operator_status");
+        assert.equal(held.task, undefined);
+        assert.match(held.next_action, /do not reparent/u);
+        await assert.rejects(before("root", "subagent", nativeTask(second.task)),
+          /mission-author-continuation-not-authorized:requested_author_reviewer_lineage_conflict/u);
+        await prompt("root", "Use the same author and the same reviewer after all.");
+        replaced = await tool("root", "start_mission", { intent: "replace",
+          requirements: ["Only change result.txt", "Use the same author and the same reviewer"] });
+        const recovered = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        assert.equal(replaced.task.task_id, "author");
+        assert.equal(recovered.authorContinuation!.reviewer, "reviewer");
+        assert.equal(recovered.coordinator, null);
+        assert.equal(recovered.runID, null);
+        assert.equal(recovered.review, undefined);
+      }
       if (changedAuthor) {
         assert.equal(replacement.authorContinuation, undefined);
         assert.equal(replaced.task.task_id, undefined);
         return;
       }
       assert.equal(replaced.task.task_id, "author", "narrowing the same work must retain the user's selected author");
+      if (optionalAuthor && reviewerQuote) {
+        assert.equal(replacement.authorContinuation!.reviewerQuote, reviewerQuote,
+          "releasing only the author obligation cannot release the still-required same Reviewer");
+        assert.equal(replacement.authorContinuation!.reviewer, "reviewer");
+        assert.ok(replacement.requests.some(item => item.text === request));
+      }
       assert.equal(replacement.authorContinuation!.reviewer, changedReviewer ? undefined : "reviewer");
       assert.equal(replacement.coordinator, null);
       assert.equal(replacement.dispatchOpen, false);
@@ -3256,7 +3293,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(current.review!.result, report);
     assert.notEqual(current.review!.runID, oldRun.runID);
     assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
-    if (workspace === "git-glob-all" || workspace.startsWith("git-add-reviewer")) {
+    if (workspace === "git-glob-all" || workspace.startsWith("git-add-reviewer") ||
+        workspace.startsWith("git-replace-earlier-author-optional") || workspace === "git-replace-earlier-author-conflict") {
       await tool("author", "submit_mission", { status: "ready", summary: "Current result reviewed and ready" });
       agents.author!.outcome = "succeeded";
       await after(methodDispatch, "Current result ready", { sessionID: "author" });

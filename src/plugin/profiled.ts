@@ -2559,7 +2559,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     const continuationHint = `Keep this Mission and the user's restriction. For an explicit same-author request call ${startMission} with the same requirements and author_continuation: {request_quote: "exact short phrase from the current user request", work_directory: "absolute actual work directory", reviewer_quote: "exact user phrase when the same Reviewer is also required"}. Omit reviewer_quote otherwise. If the reported predecessor, location, native lineage, terminal, active snapshot or inbox cannot be established, retain the limitation; wait only for genuinely active work and do not fabricate proof. Never add an old session ID or dispatch a different author.`;
     function continuationPacket(mission: OperatorMission) {
       return { status: "mission-author-continuation-unavailable", mission_id: mission.id,
-        reason: mission.authorContinuation?.blocked ?? "predecessor_not_proven", next_action: continuationHint };
+        reason: mission.authorContinuation?.blocked ?? "predecessor_not_proven",
+        next_action: mission.authorContinuation?.blocked === "requested_author_reviewer_lineage_conflict"
+          ? "The user excludes the previous author but still requires that author's same native Reviewer. Preserve both choices: do not reparent the Reviewer, select a substitute or dispatch another author. A user change allowing the previous author or relaxing the same-Reviewer requirement resolves this actual lineage conflict; merely narrowing scope does not."
+          : continuationHint };
     }
     function insideDirectory(directory: string, path: string): boolean {
       const rel = relative(directory, path);
@@ -2603,7 +2606,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return undefined;
     }
-    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false, contraryOnly = false): boolean {
+    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false, negated?: "contrary" | "optional"): boolean {
       // Select the person as the noun-phrase head, not a role-qualified artifact.
       // Recognize grammatical boundaries instead of enumerating artifact nouns.
       const actorAdverb = String.raw`(?:again|now|then|here|there|once|twice|only|unchanged|immediately|directly|exclusively|please)`;
@@ -2638,9 +2641,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       };
       const target = targetFor(englishBoundary), causativeTarget = targetFor(causativeBoundary);
       const verb = String.raw`(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)`;
-      // A negated obligation also negates the embedded selection, without
-      // treating negation of an unrelated object as a change of author.
-      const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}(?:(?:have|need)\s+to\s+${verbModifiers})?`;
+      // Releasing an obligation permits the same person; excluding that person
+      // does not. Keep this distinction when another role is still fixed.
+      const negation = String.raw`\b(?:do\s+not|don['’]t|never|not)\s+${verbModifiers}`;
+      const optionalObligation = String.raw`${negation}(?:have|need)\s+to\s+${verbModifiers}`;
+      const selectionNegation = String.raw`${negation}(?:(?:have|need)\s+to\s+${verbModifiers})?`;
       const directiveEnd = String.raw`\s*(?:(?:こと\s*)?(?:[。.!！]|$)|ように)`;
       const negativeInflection = String.raw`(?:(?:し|[いわが])?(?:な[いく]|ません)|(?:する|る|う)な)`;
       const requestedAction = String.raw`(?:任せ(?!${negativeInflection}|た|てい[たる]|る(?!${directiveEnd}))|依頼(?!${negativeInflection}|した|してい[たる]|する(?!${directiveEnd})))`;
@@ -2649,10 +2654,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // actor. "別の担当のAPI" names an artifact, not another person to select.
       const japaneseSelection = String.raw`\s*(?:を(?:(?:継続|再開|引き継|引継|使|維持)(?!${negativeInflection})|変えない|替えない)|に${requestedWork}${requestedAction}|で(?:続け|続行|進め|再開|お願い)(?!${negativeInflection})|が(?:続け(?!${negativeInflection}|た)|担当(?!${negativeInflection}|した|してい[たる]|する(?!${directiveEnd})))|は(?:変えない|替えない))`;
       const japaneseNegation = String.raw`\s*(?:(?:を|は|が|で|に)?\s*(?:(?:継続|再開|引き継|引継|使|維持|続け|続行|進め|お願い|担当)${negativeInflection}|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|に${requestedWork}(?:任せ|依頼)${negativeInflection})`;
-      const negatedTarget = new RegExp(String.raw`${negation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?(?:not\s+(?:be\s+)?(?:used|assigned|selected|required|needed)|unnecessary)\b|${target}${japaneseNegation}`, "iu");
+      const actorPredicate = String.raw`${target}\s+(?:(?:must|should|shall|will|would|can|could|is|are|was|were)\s+)?`;
+      const negatedTarget = new RegExp(String.raw`${negation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${actorPredicate}not\s+(?:be\s+)?(?:used|assigned|selected)\b|${target}${japaneseNegation}`, "iu");
+      const optionalTarget = new RegExp(String.raw`${optionalObligation}(?:${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?)?(?:the\s+)?${target}|${actorPredicate}(?:not\s+(?:be\s+)?(?:required|needed)|unnecessary)\b`, "iu");
       const otherSelection = new RegExp(String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:(?:a\s+)?different|another)\s+${actor}`, "giu");
       const causative = String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`;
       const negatedCausative = new RegExp(String.raw`${negation}have\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`, "iu");
+      const optionalCausative = new RegExp(String.raw`${optionalObligation}have\s+${verbModifiers}(?:the\s+)?${causativeTarget}${causativeTail}`, "iu");
       const negatedActionTail = String.raw`\s+${verbModifiers}not\s+${verbModifiers}${causativeAction}\b`;
       const negatedActionTarget = targetFor(String.raw`(?:${englishBoundary}|(?=${negatedActionTail}))`);
       const negatedAction = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${negatedActionTarget}${negatedActionTail}|${target}\s+(?:must|should|shall|will|would|can|could)\s+not\s+${verbModifiers}${causativeAction}\b`, "iu");
@@ -2662,25 +2670,27 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const contrary = negatedTarget.test(text) || negatedCausative.test(text) || negatedAction.test(text) ||
         new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
         [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
-          !new RegExp(String.raw`${negation}$`, "iu").test(text.slice(0, match.index)));
-      if (contraryOnly) return contrary;
-      if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary) return false;
+          !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)));
+      const optional = optionalTarget.test(text) || optionalCausative.test(text);
+      if (negated) return negated === "contrary" ? contrary : optional && !contrary;
+      if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
       const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
       const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
       return selection.test(text);
     }
-    function continuationIntent(text: string, reviewer: boolean): "selected" | "contrary" | undefined {
-      let result: "selected" | "contrary" | undefined;
+    function continuationIntent(text: string, reviewer: boolean): "selected" | "contrary" | "optional" | undefined {
+      let result: "selected" | "contrary" | "optional" | undefined;
       for (const sentence of text.split(/[\r\n。.!?！？]+/u)) {
-        if (explicitContinuationQuote(sentence, reviewer, false, true)) result = "contrary";
+        if (explicitContinuationQuote(sentence, reviewer, false, "contrary")) result = "contrary";
+        else if (explicitContinuationQuote(sentence, reviewer, false, "optional")) result = "optional";
         else if (explicitContinuationQuote(sentence, reviewer, true)) result = "selected";
       }
       return result;
     }
     function effectiveContinuationIntent(requests: OperatorMission["requests"], reviewer: boolean) {
-      let result: "selected" | "contrary" | undefined;
+      let result: "selected" | "contrary" | "optional" | undefined;
       for (const request of requests) result = continuationIntent(request.text, reviewer) ?? result;
       return result;
     }
@@ -2758,15 +2768,25 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // selections without a separate binding quoted the author's same turn.
       const reviewerRequest = mission.requests.find(item => item.id === (selection.reviewerRequestID ?? selection.requestID));
       const reviewerSentences = reviewerRequest?.text.split(/[\r\n。.!?]+/u) ?? [];
-      if (!request || effectiveContinuationIntent(mission.requests, false) !== "selected" ||
+      const authorIntent = effectiveContinuationIntent(mission.requests, false);
+      const reviewerIntent = effectiveContinuationIntent(mission.requests, true);
+      if (!request ||
           !explicitContinuationQuote(selection.quote, false) ||
           !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
-          selection.reviewerQuote && (effectiveContinuationIntent(mission.requests, true) !== "selected" ||
+          selection.reviewerQuote && (reviewerIntent !== "selected" ||
             !explicitContinuationQuote(selection.reviewerQuote, true) ||
             !reviewerSentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
         return { reason: "user_intent_quote_unavailable" };
       }
-      if (effectiveContinuationIntent(mission.requests, true) === "selected" &&
+      if (authorIntent === "contrary" && reviewerIntent === "selected") {
+        return { reason: "requested_author_reviewer_lineage_conflict" };
+      }
+      // An optional author can still be chosen to retain the required Reviewer's
+      // native parent. This is a fresh admission, not a transferred reviewer grant.
+      if (authorIntent !== "selected" && !(authorIntent === "optional" && reviewerIntent === "selected")) {
+        return { reason: "user_intent_quote_unavailable" };
+      }
+      if (reviewerIntent === "selected" &&
           !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
       const directory = isAbsolute(selection.directory) ? await realpath(selection.directory).catch(() => undefined) : undefined;
       if (!directory || directory !== selection.directory) return { reason: "work_directory_unavailable_or_changed" };
@@ -2935,8 +2955,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const requests = [...existing.requests,
               ...mission.requests.filter(request => !existing.requests.some(old => old.id === request.id))];
             const selection = structuredClone(existing.authorContinuation);
-            const keepAuthor = effectiveContinuationIntent(requests, false) !== "contrary";
-            if (effectiveContinuationIntent(requests, true) === "contrary") {
+            const authorIntent = effectiveContinuationIntent(requests, false);
+            const reviewerIntent = effectiveContinuationIntent(requests, true);
+            const keepAuthor = authorIntent === "selected" || reviewerIntent === "selected";
+            if (reviewerIntent === "contrary" || reviewerIntent === "optional") {
               delete selection.reviewerQuote;
               delete selection.reviewerRequestID;
               delete selection.reviewer;
