@@ -245,6 +245,12 @@ export interface OperatorMission {
   requirementsReplaced?: boolean;
   phase: "open" | "running" | "submitted" | "completed" | "cancelled";
   coordinator: string | null;
+  /** A new Mission's requested author is not an inherited grant, review, or validation. */
+  authorContinuation?: {
+    requestID: string; quote: string; directory: string; reviewerQuote?: string;
+    predecessorRunID?: string; predecessorMissionID?: string; child?: string; reviewer?: string;
+    blocked?: string;
+  };
   callID: string | null;
   dispatchOpen: boolean;
   runID: string | null;
@@ -671,6 +677,24 @@ export class OperatorMissionRuntime {
     }
     return matches.length === 1 ? matches[0] : undefined;
   }
+  /** Only an unambiguous completed Mission for this root and run can identify a prior author. */
+  async completedRun(root: string, runID: string): Promise<OperatorMission | undefined> {
+    const directory = join(this.projectRoot, this.profile.stateDirectory, "missions");
+    let entries: string[];
+    try { entries = await readdir(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    const prefix = `${digest(root)}.mission-`;
+    const matches: OperatorMission[] = [];
+    for (const name of entries.filter(name => name.startsWith(prefix) &&
+      /^mission-[a-f0-9-]+\.json$/u.test(name.slice(digest(root).length + 1)))) {
+      const state = await this.load<OperatorMission>(join(directory, name));
+      if (state?.root !== root || state.runID !== runID) continue;
+      if (state.version !== "0.12" || state.phase !== "completed" ||
+          state.id !== name.slice(prefix.length - "mission-".length, -".json".length)) return undefined;
+      matches.push(state);
+    }
+    return matches.length === 1 ? matches[0] : undefined;
+  }
   private async save(file: string, value: unknown): Promise<void> {
     if (record(value) && value.version === "0.12" && typeof value.root === "string") {
       const mission = value as unknown as OperatorMission;
@@ -908,16 +932,24 @@ export class OperatorMissionRuntime {
   task(state: OperatorMission): OperatorTask {
     return { subagent_type: profileAgent(this.profile, "dog-operator"), description: state.requirements[0]!.text.slice(0, 100),
       prompt: `${MISSION_REFERENCE}${JSON.stringify({ r: state.root, m: state.id, h: digest(JSON.stringify(state.requirements)) })}`,
-      ...(state.coordinator ? { task_id: state.coordinator } : {}) };
+      ...(state.coordinator ?? state.authorContinuation?.child ? { task_id: state.coordinator ?? state.authorContinuation!.child } : {}) };
   }
   admit(root: string, callID: string, args: Record<string, unknown>): Promise<OperatorMission> {
     return this.update(root, state => {
       const expected = this.task(state);
       const resume = state.coordinator !== null && args.task_id === state.coordinator && typeof args.prompt === "string" && args.prompt.trim();
+      const continuation = state.coordinator === null && state.authorContinuation;
+      if (continuation && !continuation.child && args.task_id) {
+        throw new Error(`mission-dispatch-not-authorized: this location owns Coordinator not yet claimed, not ${String(args.task_id)}`);
+      }
+      if (continuation && (!continuation.child || continuation.blocked ||
+          args.prompt !== expected.prompt || args.task_id !== continuation.child)) {
+        throw new Error("mission-author-continuation-not-authorized: use the current host-generated Task after resolving the reported predecessor proof; do not dispatch a substitute");
+      }
       // The description is a presentation label. The opaque prompt binds the original request and
       // requirements; changing only the label must not force a second Coordinator dispatch.
       if (["cancelled", "completed"].includes(state.phase) || state.dispatchOpen || args.subagent_type !== expected.subagent_type ||
-          (!resume && (args.prompt !== expected.prompt || args.task_id))) {
+          (!resume && !continuation && (args.prompt !== expected.prompt || args.task_id))) {
         const reason = ["cancelled", "completed"].includes(state.phase) ? `mission is ${state.phase}`
           : state.dispatchOpen ? "Coordinator Task is still admitted; read operator_status to reconcile its native completion"
             : args.task_id && args.task_id !== state.coordinator ? `this location owns Coordinator ${state.coordinator ?? "not yet claimed"}, not ${String(args.task_id)}`
@@ -938,7 +970,9 @@ export class OperatorMissionRuntime {
   async claim(root: string, child: string, prompt: string): Promise<string> {
     const state = await this.update(root, state => {
       if (state.phase !== "running" || !state.dispatchOpen || !state.callID ||
-          (state.coordinator !== null ? state.coordinator !== child : prompt !== this.task(state).prompt)) {
+          (state.coordinator !== null ? state.coordinator !== child :
+            prompt !== this.task(state).prompt || !!state.authorContinuation &&
+              (state.authorContinuation.blocked !== undefined || state.authorContinuation.child !== child))) {
         throw new Error("mission-coordinator-claim-invalid");
       }
       state.coordinator = child;

@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createServer } from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { availableParallelism } from "node:os";
 import test from "node:test";
 import { createProjectPaths, createWriteGate } from "../dist/plugin/gate.js";
@@ -2383,6 +2383,267 @@ test('requires exclusive execution', async () => {
   }
 });
 
+test("V2 new Mission rejects an unclaimed prior Coordinator rather than transferring authority", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-prior-coordinator-"));
+  const fixture = contextFixture();
+  const history: Record<string, unknown[]> = { root: [], previous: [] };
+  const context: OpenCodeV2Context = { ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: sessionID === "root" ? "dog-operator" : "dogs-coordinator",
+        ...(sessionID === "root" ? {} : { parentID: "root" }), model: { providerID: "openai", id: "gpt-6-sol" } }),
+      context: async ({ sessionID }) => history[sessionID] ?? [],
+    } };
+  const cleanup = await V2Plugin.setup(context);
+  try {
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.capture("root", { id: "msg_previous", text: "Complete the prior work" });
+    const previous = await missions.start("root", ["Complete the prior work"]);
+    await missions.update("root", state => { state.coordinator = "previous"; state.phase = "completed"; state.dispatchOpen = false; });
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
+      prompt: { text: "Use the same author for new work" } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }>;
+    };
+    const packet = JSON.parse((await start.execute({ requirements: ["Use the same author for new work"],
+      preferred_executor: "coordinator" }, { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.notEqual(packet.mission_id, previous.id);
+    assert.equal(packet.status, "mission-author-continuation-unavailable");
+    assert.equal(packet.reason, "explicit_author_continuation_input_required");
+    assert.equal(packet.task, undefined, "the explicit author restriction must not offer a substitute Task");
+    const task = missions.task(await missions.required("root"));
+    assert.equal(task.task_id, undefined);
+    const dispatch = { sessionID: "root", agent: "dog-operator", tool: "subagent", id: "call_old_author",
+      input: { agent: task.subagent_type, description: task.description,
+        prompt: task.prompt, sessionID: "previous" } };
+    await assert.rejects(fixture.toolHooks.get("execute.before")!(dispatch),
+      /mission-dispatch-not-authorized: this location owns Coordinator not yet claimed, not previous/u);
+    await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...dispatch, id: "call_substitute",
+      input: { agent: task.subagent_type, description: task.description, prompt: task.prompt } }),
+    /mission-author-continuation-not-authorized/u);
+    const current = await missions.required("root");
+    assert.equal(current.coordinator, null);
+    assert.equal(current.dispatchOpen, false);
+    const unproven = JSON.parse((await start.execute({ requirements: ["Use the same author for new work"],
+      preferred_executor: "coordinator", author_continuation: { request_quote: "same author", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_start_continuation" })).content);
+    assert.equal(unproven.status, "mission-author-continuation-unavailable");
+    assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
+    assert.equal(unproven.task, undefined);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("V2 author continuation cannot use a quote that negates the user's instruction", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-author-intent-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
+      prompt: { text: "Do not use the same author for this new work." } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const packet = JSON.parse((await start.execute({ requirements: ["Use a different author"],
+      author_continuation: { request_quote: "same author", work_directory: directory } },
+    { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.equal(packet.status, "mission-author-continuation-unavailable");
+    assert.equal(packet.reason, "user_intent_quote_unavailable");
+    assert.equal(packet.task, undefined);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("V2 explicitly continues the completed actual author and reviews the new candidate without old authority", async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-author-continuation-"));
+  const fixture = contextFixture(), exec = promisify(execFile);
+  const history: Record<string, Record<string, unknown>[]> = {};
+  const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
+    root: { agent: "dog-operator" }, author: { agent: "dogs-coordinator", parentID: "root" },
+    reviewer: { agent: "dog-reviewer-v010", parentID: "author" },
+  };
+  let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session, active: async () => active,
+      inbox: { list: async ({ sessionID }) => inbox[sessionID] ?? [] },
+      list: async ({ parentID }) => {
+        const children = Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        return { data: duplicateChildren && parentID === "author" ? [...children, ...children] : children, cursor: {} };
+      },
+      get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory },
+        model: { providerID: "openai", id: "fixture" } }),
+      context: async ({ sessionID }) => history[sessionID] ?? [] },
+    message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
+      : history[sessionID] ?? [], cursor: {} }) } });
+  const prompt = async (sessionID: string, text: string) => {
+    const messageID = `msg_${++counter}`;
+    const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
+    await fixture.sessionHooks.get("prompt")!(event);
+    (history[sessionID] ??= []).push({ id: messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    return event.prompt.text;
+  };
+  const before = async (sessionID: string, tool: string, input: Record<string, unknown>) => {
+    const event = { sessionID, agent: agents[sessionID]!.agent, tool, id: `call_${++counter}`, input };
+    await fixture.toolHooks.get("execute.before")!(event);
+    return event;
+  };
+  const after = async (event: Record<string, unknown>, content: string, metadata: Record<string, unknown> = {}) => {
+    const sessionID = String(event.sessionID), now = Date.now();
+    (history[sessionID] ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: agents[sessionID]!.agent,
+      finish: "tool-calls", time: { created: now, completed: now }, content: [{ type: "tool", name: event.tool, id: event.id,
+        state: { status: "completed", input: event.input, content: [{ type: "text", text: content }], metadata },
+        time: { created: now, ran: now, completed: now } }] });
+    await fixture.toolHooks.get("execute.after")!({ ...event, status: "completed", result: { content, metadata } });
+  };
+  const tool = async (sessionID: string, name: string, input: Record<string, unknown> = {}) => {
+    const event = await before(sessionID, `sortie_v010_${name}`, input);
+    const definition = fixture.tools.find(item => item.name === `sortie_v010_${name}`) as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const result = await definition.execute(event.input, { sessionID, agent: agents[sessionID]!.agent, callID: event.id });
+    await after(event, result.content);
+    return JSON.parse(result.content);
+  };
+  const nativeTask = (task: Record<string, unknown>) => ({ agent: task.subagent_type, prompt: task.prompt,
+    description: task.description, ...(task.task_id ? { sessionID: task.task_id } : {}) });
+  const edit = async (from: string | undefined, to: string) => {
+    const patchText = from === undefined ? `*** Begin Patch\n*** Add File: result.txt\n+${to}\n*** End Patch`
+      : `*** Begin Patch\n*** Update File: result.txt\n@@\n-${from}\n+${to}\n*** End Patch`;
+    const event = await before("author", "patch", { patchText });
+    await writeFile(join(directory, "result.txt"), `${to}\n`);
+    await after(event, "updated");
+  };
+  const validate = async (expected: string) => {
+    const event = await before("author", "shell", { command: `node check.mjs ${expected}`, workdir: directory });
+    const result = await exec(process.execPath, ["check.mjs", expected], { cwd: directory });
+    await after(event, result.stdout, { exit: 0 });
+  };
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: directory });
+    await writeFile(join(directory, "check.mjs"), 'import assert from "node:assert/strict"; import {readFileSync} from "node:fs"; assert.equal(readFileSync("result.txt","utf8").trim(),process.argv[2]);');
+    await prompt("root", "Create the first result and review it.");
+    const old = await tool("root", "start_mission", { requirements: ["Create the first result"], preferred_executor: "coordinator" });
+    const firstDispatch = await before("root", "subagent", nativeTask(old.task));
+    await prompt("author", String(firstDispatch.input.prompt));
+    const unit = (expected: string) => ({ title: "Result", objective: `Write ${expected}`, read: ["check.mjs"],
+      write: ["result.txt"], validation: [`node check.mjs ${expected}`] });
+    await tool("author", "plan_units", { executor: "self", units: [unit("first")] });
+    await edit(undefined, "first");
+    await validate("first");
+    await tool("author", "finish_direct_unit");
+    const oldReview = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+    const firstReview = await before("author", "subagent", nativeTask(oldReview.task));
+    await prompt("reviewer", String(firstReview.input.prompt));
+    agents.reviewer!.outcome = "succeeded";
+    const oldReport = "PASS\nThe first candidate is correct.", now = Date.now();
+    (history.reviewer ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010",
+      finish: "stop", time: { created: now, completed: now }, content: [{ type: "text", text: oldReport }] });
+    await after(firstReview, oldReport, { sessionID: "reviewer" });
+    await tool("author", "submit_mission", { status: "ready", summary: "First result ready" });
+    agents.author!.outcome = "succeeded";
+    await after(firstDispatch, "First result ready", { sessionID: "author" });
+    assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+    const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(oldRun.phase, "completed");
+
+    const request = "Use the same author and the same reviewer for the new result.";
+    await prompt("root", request);
+    const requirements = ["Use the same author and reviewer to write the new result"];
+    const selection = { request_quote: "same author", reviewer_quote: "same reviewer", work_directory: directory };
+    const start = (choice = selection) => tool("root", "start_mission", {
+      requirements, preferred_executor: "coordinator", author_continuation: choice });
+    const wrongQuote = await start({ ...selection, request_quote: "different author" });
+    assert.equal(wrongQuote.status, "mission-author-continuation-unavailable");
+    assert.equal(wrongQuote.reason, "user_intent_quote_unavailable");
+    assert.equal(wrongQuote.task, undefined);
+    assert.equal((await tool("root", "operator_status")).task, undefined);
+    await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
+      /mission-author-continuation-author-required/u);
+    assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
+      author_continuation: { request_quote: "same author", work_directory: directory } })).reason,
+    "explicit_reviewer_continuation_input_required", "an explicit same-Reviewer request cannot become a silent substitution");
+    await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
+      /mission-author-continuation-author-required/u);
+    assert.equal((await start({ ...selection, work_directory: join(directory, "missing") })).reason, "work_directory_unavailable_or_changed");
+    assert.equal((await start({ ...selection, work_directory: dirname(directory) })).reason, "predecessor_native_write_unproven",
+      "a common ancestor is not the actual repository where the prior author wrote");
+    agents.author!.parentID = "other-root";
+    assert.match((await start()).reason, /native_lineage/u);
+    agents.author!.parentID = "root";
+    delete agents.author!.outcome;
+    assert.equal((await start()).reason, "native_terminal_unknown");
+    agents.author!.outcome = "succeeded";
+    active = undefined;
+    assert.equal((await start()).reason, "native_activity_unavailable");
+    active = { author: { type: "running" } };
+    assert.equal((await start()).reason, "native_session_active");
+    active = {};
+    duplicateChildren = true;
+    assert.equal((await start()).reason, "native_lineage_duplicate_or_too_large");
+    duplicateChildren = false;
+    inbox.author = [{ id: "queued" }];
+    assert.equal((await start()).reason, "native_inbox_not_empty");
+    inbox = {};
+    const second = await start();
+    assert.notEqual(second.mission_id, old.mission_id);
+    assert.equal(second.task.task_id, "author");
+    const state = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(state.coordinator, null, "the new Task has not been claimed or granted an old write scope");
+    assert.equal(state.runID, null);
+    assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
+    const bad = nativeTask(second.task);
+    await assert.rejects(before("root", "subagent", { ...bad, sessionID: "wrong" }), /mission-author-continuation-not-authorized|mission-coordinator-location-mismatch/u);
+    active = { author: { type: "running" } };
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)), /mission-author-continuation-not-authorized:native_session_active/u);
+    active = {};
+    const dispatch = await before("root", "subagent", nativeTask(second.task));
+    await assert.rejects(before("root", "subagent", nativeTask(second.task)), /mission-dispatch-not-authorized/u);
+    delete agents.author!.outcome;
+    await prompt("author", String(dispatch.input.prompt));
+    const claimed = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(claimed.coordinator, "author");
+    await assert.rejects(before("author", "subagent", { agent: "dog-worker-v010", description: "other writer", prompt: "Implement" }),
+      /mission-author-continuation-author-required/u);
+    await assert.rejects(tool("author", "plan_units", { executor: "worker", units: [unit("second")] }),
+      /mission-author-continuation-author-required/u);
+    const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
+    assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
+    assert.equal(direct.status, "direct-unit-running");
+    await edit("first", "second");
+    await validate("second");
+    await tool("author", "finish_direct_unit");
+    const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.deepEqual(newRun.units[0]!.directExecution!.checks.map(check => check.command), [["node check.mjs second"]]);
+    assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
+    assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    await missions.update("root", current => { current.sourceAuthors = [...(current.sourceAuthors ?? []), "reviewer"]; });
+    await assert.rejects(tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] }),
+      /mission-review-requested-reviewer-not-independent/u);
+    await missions.update("root", current => { current.sourceAuthors = current.sourceAuthors!.filter(id => id !== "reviewer"); });
+    active = { reviewer: { type: "running" } };
+    await assert.rejects(tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] }),
+      /mission-review-requested-reviewer-unavailable:native_session_active/u);
+    active = {};
+    const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [] });
+    assert.equal(review.status, "review-required");
+    assert.equal(review.task.task_id, "reviewer");
+    const reviewDispatch = await before("author", "subagent", nativeTask(review.task));
+    delete agents.reviewer!.outcome;
+    assert.match(await prompt("reviewer", String(reviewDispatch.input.prompt)), /second/u,
+      "the current candidate, not the prior verdict, is reviewed");
+    agents.reviewer!.outcome = "succeeded";
+    const report = "PASS\nThe second candidate and its current check are correct.", end = Date.now();
+    history.reviewer!.push({ id: `msg_${++counter}`, type: "assistant", agent: "dog-reviewer-v010", finish: "stop",
+      time: { created: end, completed: end }, content: [{ type: "text", text: report }] });
+    await after(reviewDispatch, report, { sessionID: "reviewer" });
+    const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+    assert.equal(current.review!.child, "reviewer");
+    assert.equal(current.review!.result, report);
+    assert.notEqual(current.review!.runID, oldRun.runID);
+    assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "second\n");
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("V2 interrupted Coordinator Task reconciles its native error despite a live dispatch owner", async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/mission-interrupted-dispatch-"));
@@ -3522,6 +3783,7 @@ async function registeredHost(run: (host: { requests: URL[]; pid: number; repeat
     if (url.pathname === "/api/info") { response.end(JSON.stringify({ pid: host.pid, version: "2.0.18" })); return; }
     if (host.fail) { response.writeHead(503).end(JSON.stringify({ message: "unavailable" })); return; }
     if (url.pathname === "/api/session/active") { response.end(JSON.stringify({ data: { ses_live: { type: "running" } } })); return; }
+    if (url.pathname === "/api/session/ses_previous/inbox") { response.end(JSON.stringify({ data: [] })); return; }
     if (host.malformed) { response.end(JSON.stringify({ data: [] })); return; }
     const parent = url.searchParams.get("parentID"), cursor = url.searchParams.get("cursor");
     const ids = parent !== "ses_coordinator" ? [] : cursor === null ? ["ses_worker"] : cursor === "page-2" ? ["ses_reviewer"] : [];
@@ -3584,6 +3846,8 @@ test("V2 activity fallback reads only the exact registered owning service", asyn
   try {
     assert.deepEqual(await client.session.active(), { data: { ses_live: { type: "running" } } });
     assert.ok(host.requests.some(url => url.pathname === "/api/session/active"));
+    assert.deepEqual(await client.session.inbox({ path: { id: "ses_previous" } }), { data: [] });
+    assert.ok(host.requests.some(url => url.pathname === "/api/session/ses_previous/inbox"));
   } finally { cleanup?.(); }
   host.pid = process.pid + 1;
   await host.register(host.pid);
@@ -3591,7 +3855,9 @@ test("V2 activity fallback reads only the exact registered owning service", asyn
   try {
     const before = host.requests.length;
     await assert.rejects(client.session.active(), /v2-history-owning-service-unavailable/);
+    await assert.rejects(client.session.inbox({ path: { id: "ses_previous" } }), /v2-history-owning-service-unavailable/);
     assert.ok(!host.requests.slice(before).some(url => url.pathname === "/api/session/active"));
+    assert.ok(!host.requests.slice(before).some(url => url.pathname === "/api/session/ses_previous/inbox"));
   } finally { foreignCleanup?.(); }
 }));
 

@@ -8,8 +8,8 @@ import { CANONICAL_AGENT_ROLES, canonicalAgent, profileAgent, profileTool, V010_
 import { SortieDogsPlugin as canonicalPlugin, realAttachmentParts, type OpenCodeHooks, type OpenCodePlugin, type OpenCodePluginInput } from "./index.js";
 import { taskChildSessionID } from "./task-result-repair.js";
 import type { MissionImplementationAdmission, RuntimeBridge } from "./runtime-bridge.js";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { readFile, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { BUILT_IN_MODEL_CATALOG, type CatalogModel } from "./model-routing.js";
 import { goalFingerprint } from "../core/goal-bound.js";
@@ -1266,6 +1266,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         "Preserve required checks through lawful registration/replanning and reuse current evidence. Otherwise continue normally; no extra approval or logging-only step.";
       const packet: Record<string, unknown> = { ...missionPacket(mission, run), project_root: input.directory,
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
+      if (mission.coordinator === null && mission.authorContinuation?.blocked && !["completed", "cancelled"].includes(mission.phase)) {
+        return { ...packet, ...continuationPacket(mission) };
+      }
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           run?.units.some(unit => unit.status === "running")) {
         return { ...packet, next_action: `If the native Worker Task is still active, wait for it; do not start a duplicate. ` +
@@ -2538,12 +2541,166 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       description: "For an operation: the actual run/grade commands, not a preflight or NO_START check. Host observes their native shell completion separately from successful exits; no handwritten proof file is needed. For run-once/result collection, validate the collected result without rerunning the operation.", "x-sortie-optional": true };
     const handoffContextSchema = { type: "string", "x-sortie-optional": true,
       description: "Optional current working notes: intent/rationale, known environment and paths, completed setup/checks with results, failed approaches and remaining work. Reuse known facts with source references; no required form or new approval. Public history and Mission observations are also supplied automatically. Omit when already sufficient; do not recopy the original request." };
+    const authorContinuationSchema = { type: "object", additionalProperties: false,
+      properties: { request_quote: { type: "string", minLength: 1 },
+        work_directory: { type: "string", minLength: 1 },
+        reviewer_quote: { type: "string", minLength: 1 } },
+      required: ["request_quote", "work_directory"], "x-sortie-optional": true,
+      description: "Only when the current user explicitly requires the same previous author: quote that exact short user phrase and name the actual work directory. Optionally quote the user's explicit same-Reviewer requirement. Never supply a previous session ID. The host checks the completed predecessor and current native state, and either returns a newly authorized Task or holds without a substitute." };
+    const continuationHint = `Keep this Mission and the user's restriction. For an explicit same-author request call ${startMission} with the same requirements and author_continuation: {request_quote: "exact short phrase from the current user request", work_directory: "absolute actual work directory", reviewer_quote: "exact user phrase when the same Reviewer is also required"}. Omit reviewer_quote otherwise. If the reported predecessor, location, native lineage, terminal, active snapshot or inbox cannot be established, retain the limitation; wait only for genuinely active work and do not fabricate proof. Never add an old session ID or dispatch a different author.`;
+    function continuationPacket(mission: OperatorMission) {
+      return { status: "mission-author-continuation-unavailable", mission_id: mission.id,
+        reason: mission.authorContinuation?.blocked ?? "predecessor_not_proven", next_action: continuationHint };
+    }
+    function insideDirectory(directory: string, path: string): boolean {
+      const rel = relative(directory, path);
+      return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+    }
+    function continuationScopeIncludes(directory: string, paths: readonly string[]): boolean {
+      return paths.some(path => {
+        const wildcard = path.search(/[*?[\]{}]/u);
+        const concrete = wildcard < 0 ? path : path.slice(0, wildcard);
+        return concrete.length > 0 && insideDirectory(directory, resolve(input.directory, concrete));
+      });
+    }
+    async function sameWorkLocation(directory: string, path: string): Promise<"repository" | "no-repository" | undefined> {
+      const wildcard = path.search(/[*?[\]{}]/u);
+      let target = resolve(input.directory, wildcard < 0 ? path : path.slice(0, wildcard));
+      if (!insideDirectory(directory, target)) return undefined;
+      // A not-yet-created output is identified by its nearest existing ancestor.
+      while (true) {
+        const actual = await realpath(target).catch(() => undefined);
+        if (actual) {
+          if (!insideDirectory(directory, actual)) return undefined;
+          const info = await lstat(actual).catch(() => undefined);
+          if (!info) return undefined;
+          target = info.isDirectory() ? actual : dirname(actual);
+          break;
+        }
+        if (target === directory) return undefined;
+        target = dirname(target);
+      }
+      while (insideDirectory(directory, target)) {
+        try {
+          const markerPath = join(target, ".git"), marker = await lstat(markerPath);
+          const resolvedMarker = marker.isSymbolicLink() ? await stat(markerPath).catch(() => undefined) : marker;
+          if (!resolvedMarker || !resolvedMarker.isFile() && !resolvedMarker.isDirectory()) return undefined;
+          return target === directory ? "repository" : undefined;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        }
+        if (target === directory) return "no-repository";
+        target = dirname(target);
+      }
+      return undefined;
+    }
+    function explicitContinuationQuote(text: string, reviewer: boolean): boolean {
+      const actor = reviewer ? /reviewer|reviewing|レビュー担当|レビュアー|レビュー者/iu
+        : /author|writer|implementer|developer|作業者|実装者|作者|担当|書き手/iu;
+      const same = /same|previous|prior|original|existing|continue|同じ|前回|前の|既存|引き継|継続|変えない|替えない|切り替えない/iu;
+      const contrary = /(?:do not|don't|never|not|different|another).{0,40}(?:same|previous|prior|original|existing)|(?:same|previous|prior|original|existing).{0,60}(?:not (?:be )?(?:used|assigned|selected|required|needed)|unnecessary)|(?:同じ|前回|前の|既存).{0,40}(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の(?:作者|担当|書き手|実装者|作業者|レビュアー)/iu;
+      return actor.test(text) && same.test(text) && !contrary.test(text);
+    }
+    async function continuationNativeIdle(root: string, id: string, role: "dog-operator" | "dog-reviewer", parent: string): Promise<string | undefined> {
+      const ids = new Set<string>();
+      const visit = async (child: string, owner: string, expected?: CanonicalAgentRole): Promise<string | undefined> => {
+        if (ids.has(child) || ids.size >= 256) return "native_lineage_duplicate_or_too_large";
+        ids.add(child);
+        const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+        if (!record(info) || info.id !== child || info.parentID !== owner ||
+            typeof info.agent !== "string" || expected && canonicalAgent(profile, info.agent) !== expected) return "native_lineage_unavailable_or_mismatch";
+        const location = record(info.location) ? info.location.directory : info.directory;
+        if (typeof location !== "string" || !isAbsolute(location) ||
+            await realpath(location).catch(() => undefined) !== await realpath(input.directory).catch(() => undefined)) return "native_location_unavailable_or_mismatch";
+        if (!["succeeded", "failed", "interrupted"].includes(String(info.outcome))) return "native_terminal_unknown";
+        const inbox = payload(await session("inbox", { path: { id: child } }).catch(() => undefined));
+        if (!Array.isArray(inbox)) return "native_inbox_unavailable";
+        if (inbox.length) return "native_inbox_not_empty";
+        const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+        if (!Array.isArray(children)) return "native_children_unavailable";
+        for (const entry of children) {
+          if (!record(entry) || typeof entry.id !== "string" || entry.parentID !== child) return "native_lineage_unavailable_or_mismatch";
+          const reason = await visit(entry.id, child);
+          if (reason) return reason;
+        }
+        return undefined;
+      };
+      const reason = await visit(id, parent, role);
+      if (reason) return reason;
+      const active = payload(await session("active", {}).catch(() => undefined));
+      if (!record(active) || !Object.values(active).every(value => record(value) &&
+          ["running", "retry"].includes(String(value.type)))) return "native_activity_unavailable";
+      if ([...ids].some(child => Object.hasOwn(active, child))) return "native_session_active";
+      return undefined;
+    }
+    async function proveAuthorContinuation(root: string, mission: OperatorMission, previous: OperatorState | undefined): Promise<{
+      reason?: string; predecessor?: OperatorMission; child?: string; reviewer?: string;
+    }> {
+      const selection = mission.authorContinuation;
+      if (!selection) return { reason: "explicit_user_intent_missing" };
+      const request = mission.requests.find(item => item.id === selection.requestID);
+      const sentences = request?.text.split(/[\r\n。.!?]+/u) ?? [];
+      if (sentences.some(line => explicitContinuationQuote(line, true)) &&
+          !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
+      if (!request || !explicitContinuationQuote(selection.quote, false) ||
+          !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false)) ||
+          selection.reviewerQuote && (!explicitContinuationQuote(selection.reviewerQuote, true) ||
+            !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true)))) {
+        return { reason: "user_intent_quote_unavailable" };
+      }
+      const directory = isAbsolute(selection.directory) ? await realpath(selection.directory).catch(() => undefined) : undefined;
+      if (!directory || directory !== selection.directory) return { reason: "work_directory_unavailable_or_changed" };
+      if (!previous || previous.phase !== "completed" || previous.rootSessionID !== root ||
+          selection.predecessorRunID && selection.predecessorRunID !== previous.runID) return { reason: "completed_predecessor_run_unavailable" };
+      const predecessor = await missions.completedRun(root, previous.runID).catch(() => undefined);
+      if (!predecessor || predecessor.dispatchOpen || !predecessor.coordinator || !predecessor.callID ||
+          previous.operatorSessionID !== predecessor.coordinator ||
+          selection.predecessorMissionID && selection.predecessorMissionID !== predecessor.id ||
+          !predecessor.sourceAuthors?.includes(predecessor.coordinator)) return { reason: "completed_predecessor_author_unproven" };
+      const child = predecessor.coordinator;
+      if (selection.child && selection.child !== child) return { reason: "predecessor_author_changed" };
+      const authorUnits = previous.units.filter(unit => unit.status === "succeeded" && unit.directExecution?.actor === child &&
+        unit.directExecution.finishedAt && continuationScopeIncludes(directory, unit.unit.write));
+      if (!authorUnits.length) return { reason: "predecessor_work_location_unproven" };
+      let history: readonly Record<string, unknown>[];
+      try { history = await reviewMessages(child, undefined, true); }
+      catch { return { reason: "predecessor_native_history_unavailable" }; }
+      let observed = false;
+      for (const message of history) for (const part of Array.isArray(message.parts) ? message.parts : []) {
+        if (!record(part) || part.type !== "tool" || !record(part.state) || part.state.status !== "completed" ||
+            !record(part.state.time) || typeof part.state.time.start !== "number" || typeof part.state.time.end !== "number") continue;
+        const start = part.state.time.start, end = part.state.time.end;
+        const units = authorUnits.filter(unit => Date.parse(unit.directExecution!.startedAt) <= start &&
+          end <= Date.parse(unit.directExecution!.finishedAt!));
+        if (!units.length) continue;
+        const writes = observedWritePaths(String(part.tool), part.state.input, input.directory);
+        if (writes.unresolved) continue;
+        for (const path of writes.paths) {
+          const location = await sameWorkLocation(directory, path);
+          if (location === "repository" || location === "no-repository" && units.some(unit =>
+            Object.values(unitValidationCwd(unit) ?? {}).some(cwd => resolve(cwd) === directory))) observed = true;
+        }
+      }
+      if (!observed) return { reason: "predecessor_native_write_unproven" };
+      const idle = await continuationNativeIdle(root, child, "dog-operator", root);
+      if (idle) return { reason: idle };
+      let reviewer: string | undefined;
+      if (selection.reviewerQuote) {
+        reviewer = predecessor.review?.child;
+        if (!reviewer || !missionReviewIndependent(predecessor, reviewer) ||
+            selection.reviewer && selection.reviewer !== reviewer) return { reason: "previous_independent_reviewer_unproven" };
+        const reviewerIdle = await continuationNativeIdle(root, reviewer, "dog-reviewer", child);
+        if (reviewerIdle) return { reason: `reviewer_${reviewerIdle}` };
+      }
+      return { predecessor, child, reviewer };
+    }
     function initialMissionAction(mission: OperatorMission): string {
+      if (mission.authorContinuation?.child) return "Dispatch this exact newly authorized Coordinator Task, including the host-selected task_id. The previous write grant, checks, approval and Review are not transferred. The same author must use executor=self.";
       return mission.preferredExecutor === "coordinator"
         ? "Dispatch this Coordinator Task now with the supplied recommendation/context. Coordinator owns substantial implementation and can use plan_units executor=self or delegate remaining work when useful. Start useful work, not a route-selection investigation."
         : "Use the recommendation and already-known context: when a meaningful formal check and useful unit are already known, plan_units can dispatch its Worker directly. Otherwise dispatch this Coordinator Task now; it may implement here or delegate during actual work. Do not investigate merely to decide the route or discover a check for Operator planning.";
     }
-    tools[startMission] = { description: `Operator: save current requirements and recommend preferred_executor from the original instruction and already-known context, without a routing investigation. The host retains the original request verbatim. Clear bounded work normally suits Worker; coupled design, ambiguous requirements or cross-system integration normally suit Coordinator direct execution. Follow explicit user choices. Coordinator may revise this advisory recommendation during useful work, not a mandatory reassessment. With known unit facts and meaningful formal checks, include unit now (and execution for an operation): worker/default can dispatch its Worker directly; coordinator retains these facts for its own execution choice. Unknown checks are resolved during actual work, not an Operator preflight. Investigation/edit/check/requested commit stay with the chosen author before applicable Review. ${MISSION_GIT_SCOPE} intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
+    tools[startMission] = { description: `Operator: save current requirements and recommend preferred_executor from the original instruction and already-known context, without a routing investigation. The host retains the original request verbatim. Clear bounded work normally suits Worker; coupled design, ambiguous requirements or cross-system integration normally suit Coordinator direct execution. Follow explicit user choices. When the user explicitly requires the same prior author, supply author_continuation with the exact short user quote and actual work directory; include reviewer_quote for an explicit same-Reviewer requirement. Never manually append an old session ID. Coordinator may revise this advisory recommendation during useful work, not a mandatory reassessment. With known unit facts and meaningful formal checks, include unit now (and execution for an operation): worker/default can dispatch its Worker directly; coordinator retains these facts for its own execution choice. Unknown checks are resolved during actual work, not an Operator preflight. Investigation/edit/check/requested commit stay with the chosen author before applicable Review. ${MISSION_GIT_SCOPE} intent=replace follows an actual user requirement change, retaining unchanged constraints and cumulative spend; for mission-source-reconciliation-required use the saved requirements when they reflect that change. intent=new is separate work in another location.`,
       args: { requirements: { ...stringList, minItems: 1, maxItems: 64 } as never,
         vision: missionVisionSchema as never,
         work_quantities: { type: ["array", "object", "string", "number", "boolean", "null"], items: {}, additionalProperties: true, "x-sortie-optional": true,
@@ -2556,6 +2713,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         handoff_context: handoffContextSchema as never,
         confirmed_conditions: conditionsSchema as never,
         prohibited_write: { ...stringList, description: "Only explicit path prohibitions from the user or applicable instructions. Never infer a parent glob from project/repository names, semantic 'do not modify the product', or the complement of estimated unit.write. Preserve the authorized clone and exact prohibited paths; semantic constraints stay in requirements.", "x-sortie-optional": true } as never,
+        author_continuation: authorContinuationSchema as never,
         kind: { type: "string", enum: ["implementation", "operation"], description: "Use operation for running an existing benchmark, command or procedure. The host records its actual execution separately from setup and checks.", "x-sortie-optional": true } as never,
         intent: { type: "string", enum: ["", "continue", "new", "replace"], "x-sortie-optional": true } as never }, execute: async (args, context) => {
         await requireRoot(context.sessionID);
@@ -2565,6 +2723,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           const existing = await reconcileMissionDispatch(context.sessionID);
           const prior = await operators.read(context.sessionID);
           const requirements = (args as Record<string, unknown>).requirements;
+          const authorRequest = (args as Record<string, unknown>).author_continuation;
+          if (authorRequest !== undefined && (!record(authorRequest) ||
+              typeof authorRequest.request_quote !== "string" || !authorRequest.request_quote.trim() ||
+              typeof authorRequest.work_directory !== "string" || !authorRequest.work_directory.trim() ||
+              authorRequest.reviewer_quote !== undefined && (typeof authorRequest.reviewer_quote !== "string" || !authorRequest.reviewer_quote.trim()) ||
+              Object.keys(authorRequest).some(key => !["request_quote", "work_directory", "reviewer_quote"].includes(key)))) {
+            throw new Error("mission-author-continuation-input-invalid");
+          }
+          if (authorRequest && existing && !["completed", "cancelled"].includes(existing.phase) &&
+              (existing.coordinator !== null || existing.dispatchOpen || existing.runID !== null || args.intent === "replace")) {
+            return JSON.stringify({ ...missionDispatchPacket(existing, prior), status: "mission-author-continuation-existing-work",
+              next_action: "The current Mission already has an owner, admission or run. Preserve it and its budget; do not stop, replace or duplicate work to select an earlier author." });
+          }
           if (args.intent !== "replace" && existing && !["cancelled", "completed"].includes(existing.phase) &&
               prior && prior.runID === existing.runID && Array.isArray(requirements) &&
               JSON.stringify(requirements) !== JSON.stringify(existing.requirements.map(item => item.text))) {
@@ -2602,8 +2773,53 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               ...(args.intent === "replace" && cancelled?.phase === "cancelled" ? { cancelledRunID: cancelled.runID } : {}),
             });
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
+          if (!authorRequest && !mission.authorContinuation && mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
+            const request = mission.requests.at(-1)!;
+            const explicit = request.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false));
+            if (explicit) mission = await missions.update(context.sessionID, state => {
+              state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: "explicit_author_continuation_input_required" };
+              state.preferredExecutor = "coordinator";
+            });
+          }
+          if (record(authorRequest)) {
+            const request = mission.requests.at(-1)!;
+            const directory = isAbsolute(String(authorRequest.work_directory))
+              ? await realpath(String(authorRequest.work_directory)).catch(() => String(authorRequest.work_directory))
+              : String(authorRequest.work_directory);
+            const saved = mission.authorContinuation;
+            if (saved?.child && (saved.requestID !== request.id || saved.quote !== authorRequest.request_quote ||
+                saved.directory !== directory || saved.reviewerQuote !== authorRequest.reviewer_quote)) {
+              throw new Error("mission-author-continuation-selection-frozen");
+            }
+            mission = await missions.update(context.sessionID, state => {
+              state.preferredExecutor = "coordinator";
+              state.authorContinuation = { requestID: request.id, quote: String(authorRequest.request_quote), directory,
+                ...(typeof authorRequest.reviewer_quote === "string" ? { reviewerQuote: authorRequest.reviewer_quote } : {}),
+                ...(saved?.predecessorRunID ? { predecessorRunID: saved.predecessorRunID } : {}),
+                ...(saved?.predecessorMissionID ? { predecessorMissionID: saved.predecessorMissionID } : {}),
+                ...(saved?.child ? { child: saved.child } : {}), ...(saved?.reviewer ? { reviewer: saved.reviewer } : {}),
+                blocked: "predecessor_not_proven" };
+            });
+            const proof = await proveAuthorContinuation(context.sessionID, mission, prior);
+            mission = await missions.update(context.sessionID, state => {
+              if (state.id !== mission.id || state.runID !== null || state.coordinator !== null || state.dispatchOpen) {
+                throw new Error("mission-author-continuation-stale");
+              }
+              if (proof.reason || !proof.predecessor || !proof.child) {
+                state.authorContinuation!.blocked = proof.reason ?? "predecessor_not_proven";
+                return;
+              }
+              Object.assign(state.authorContinuation!, { predecessorRunID: proof.predecessor.runID!,
+                predecessorMissionID: proof.predecessor.id, child: proof.child,
+                ...(proof.reviewer ? { reviewer: proof.reviewer } : {}) });
+              delete state.authorContinuation!.blocked;
+              // These are authorship facts for the inherited candidate, not old Review or check evidence.
+              state.sourceAuthors = [...new Set([...(state.sourceAuthors ?? []), ...(proof.predecessor.sourceAuthors ?? []),
+                ...(proof.predecessor.corrections ?? []).filter(item => !(item.status === "failed" && item.noWriteReceipt)).map(item => item.author)])];
+            });
+          }
           if (args.preferred_executor !== undefined) mission = await missions.update(context.sessionID, state => {
-            state.preferredExecutor = args.preferred_executor as "coordinator" | "worker";
+            state.preferredExecutor = state.authorContinuation ? "coordinator" : args.preferred_executor as "coordinator" | "worker";
           });
           const suggestedUnit = (args as Record<string, unknown>).unit;
           if (mission.preferredExecutor === "coordinator" && record(suggestedUnit) && mission.runID === null && !mission.dispatchOpen) {
@@ -2618,6 +2834,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (sourceReconciliationRequired(mission, cancelled)) return JSON.stringify({ ...locationObservation(context.sessionID),
             ...missionDispatchPacket(mission, cancelled), budget: await control!.currentBudget(context.sessionID) });
           mission = await retainCancelledMissionAcceptance(context.sessionID, mission, cancelled);
+          if (mission.coordinator === null && mission.authorContinuation?.blocked) {
+            return JSON.stringify({ ...locationObservation(context.sessionID), ...continuationPacket(mission),
+              budget: await control!.currentBudget(context.sessionID) });
+          }
           if (args.intent === "continue" && mission.dispatchOpen && mission.coordinator) {
             if (mission.phase !== "running") return JSON.stringify({ ...missionDispatchPacket(mission, cancelled),
               status: "mission-steering-awaits-submission-decision",
@@ -3304,6 +3524,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const emptyImplementationExecution = mission.kind === "implementation" && (execution === "" || execution === null || record(execution) &&
         Array.isArray(execution.commands) && execution.commands.length === 0);
       const plan = missionPlan(mission, raw, input.directory);
+      if (mission.authorContinuation) {
+        const directory = mission.authorContinuation.directory;
+        const paths = plan.units.flatMap(unit => unit.write).filter(path => continuationScopeIncludes(directory, [path]));
+        const locations = await Promise.all(paths.map(path => sameWorkLocation(directory, path)));
+        if (!locations.some(Boolean)) {
+          throw new Error("mission-author-continuation-work-location-mismatch: declare the requested same work location; do not dispatch a substitute");
+        }
+      }
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) {
         // A submitted Coordinator still owns corrective planning. Return its actual
@@ -3614,6 +3842,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
+            const currentAuthor = (await missions.required(root)).authorContinuation;
+            if (currentAuthor && (context.sessionID !== currentAuthor.child || args.executor !== "self" ||
+                (args as Record<string, unknown>).parallel === true)) {
+              throw new Error("mission-author-continuation-author-required: the explicitly requested author must use executor=self; do not dispatch a substitute");
+            }
             if (args.purpose_decision !== undefined) {
               validatePurposeDecision(await missions.required(root), args.purpose_decision);
               await missions.recordPurposeDecision(root, args.purpose_decision);
@@ -3743,6 +3976,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (!root) throw new Error(RUNTIME_PROFILE_SESSION_INACTIVE);
         return serializeDispatchTransition(root, async () => {
           let mission = await missions.required(root);
+          if (mission.authorContinuation) {
+            throw new Error("mission-author-continuation-author-required: return findings to the requested author for correction; do not change writers");
+          }
           const run = await operators.required(root);
            const existing = mission.corrections?.find(item => item.runID === run.runID);
            let review = mission.review;
@@ -3961,11 +4197,21 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
            // an obligation to keep one actor forever.
             const retainedReviewer = mission.review?.child;
             if (retainedReviewer) mission = await restoreReviewAuthorship(root, mission, retainedReviewer);
-            const selectedReviewer = typeof args.reviewer_session_id === "string" && args.reviewer_session_id.trim() ? args.reviewer_session_id : undefined;
-            if (selectedReviewer) {
-              if (!await ownedReviewer(root, mission, selectedReviewer)) throw new Error("mission-review-selected-reviewer-unavailable");
-              mission = await restoreReviewAuthorship(root, mission, selectedReviewer);
-            }
+             const explicitReviewer = typeof args.reviewer_session_id === "string" && args.reviewer_session_id.trim() ? args.reviewer_session_id : undefined;
+             const fixedReviewer = mission.authorContinuation?.reviewerQuote ? mission.authorContinuation.reviewer : undefined;
+             if (mission.authorContinuation?.reviewerQuote && (!fixedReviewer || explicitReviewer && explicitReviewer !== fixedReviewer)) {
+               throw new Error("mission-review-requested-reviewer-unavailable: retain the user's choice; do not silently select another Reviewer");
+             }
+             const selectedReviewer = explicitReviewer ?? fixedReviewer;
+             if (selectedReviewer) {
+               if (!await ownedReviewer(root, mission, selectedReviewer)) throw new Error("mission-review-selected-reviewer-unavailable");
+               mission = await restoreReviewAuthorship(root, mission, selectedReviewer);
+               if (fixedReviewer) {
+                 if (!missionReviewIndependent(mission, fixedReviewer)) throw new Error("mission-review-requested-reviewer-not-independent: retain the user's choice and report the conflict");
+                 const idle = await continuationNativeIdle(root, fixedReviewer, "dog-reviewer", mission.coordinator ?? root);
+                 if (idle) throw new Error(`mission-review-requested-reviewer-unavailable:${idle}`);
+               }
+             }
             const independentRequested = secondReview || args.mode === "independent" ||
               selectedReviewer !== undefined && missionReviewIndependent(mission, selectedReviewer);
              const selfRecheck = !independentRequested && (args.mode === "self-recheck" || !!correction ||
@@ -4034,7 +4280,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               `candidate_id: ${mission.id}`, `review_phase: ${phase}`, "canonical_validation_exit: 0", `risk_tags: [${risk.join(", ")}]`,
               `review_mode: ${selfRecheck ? "self-recheck" : "independent"}`,
               selfRecheck ? `Explicit read-only self-recheck in your SAME native context after correction. Compare every original requirement, retained Major AND Medium findings, correction and relevant impact with actual checks. Correct known defects before acceptance. This is NOT independent approval. First line: SELF_RECHECKED. Next line: self_recheck: ${JSON.stringify({ candidate: source.fingerprint, unresolved_findings: [], residual_major: null })}. Put known unresolved Major/Medium defects in unresolved_findings. Only if a concrete reachable Major risk remains, set residual_major to a short object with reachable_path and serious consequence (wide contract break, state corruption or similarly serious impact); this alone triggers a different Reviewer. Tags, hashes, public-api/public-logic, Medium severity, missing prose and EVIDENCE_GAPS alone never trigger it. Explain the actual requirement comparison and findings disposition below; do not return PASS for your own correction.`
-                : input.reviewerCorrectionPermissions && run.units.some(unit => unit.unit.write.length)
+                : !mission.authorContinuation && input.reviewerCorrectionPermissions && run.units.some(unit => unit.unit.write.length)
                   ? `Review this candidate independently for Major AND Medium defects. Investigate the material issues first. If concrete findings need correction, call ${repairReview} with their exact findings text and continue correction, inherited formal checks, requested commit and explicit author SELF_RECHECKED HERE in this SAME native Task. Do not end with interim FINDINGS or ask the Operator to re-dispatch you. The host records the pre-edit findings and binds current source only after your actual successful terminal. No independent approval of your own edits. With no correction needed, first line PASS or EVIDENCE_GAPS. Use the language of the requirements.`
                   : "Review this candidate independently for Major AND Medium defects. Use the language of the requirements. First line: exactly PASS, FINDINGS or EVIDENCE_GAPS. Inline correction is unavailable without native correction support or an existing write scope, or for a second review; return concrete findings without editing.",
               "Read/search relevant source and existing results directly when useful, widening relevant search as needed; do not ask another agent to transcribe diff or long traces. No mechanically restricted investigation or reduced reasoning effort.",
@@ -4569,6 +4815,19 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           }
         }
         const args = record(output.args) ? output.args : {};
+        const authorRestricted = await missions.read(root);
+        if (authorRestricted?.authorContinuation && !["completed", "cancelled"].includes(authorRestricted.phase)) {
+          if (request.tool === "task" && ["dog-worker", "dog-luna-worker"].includes(
+              String(canonicalAgent(profile, typeof args.subagent_type === "string" ? args.subagent_type : undefined)))) {
+            throw new Error("mission-author-continuation-author-required: do not start another implementation writer");
+          }
+          if (request.sessionID === root && !ownTools.has(request.tool) && request.tool !== "task") {
+            const extracted = extractWritePaths(request.tool, args, input.directory);
+            if (extracted.ambiguous || extracted.paths.length > 0 || extracted.gitMutation === true) {
+              throw new Error("mission-author-continuation-author-required: the user requested the existing author; root must not replace that writer");
+            }
+          }
+        }
         if (!writer && ["bash", "shell"].includes(request.tool.toLowerCase()) && typeof args.command === "string" &&
             args.background !== true && await operators.admitFabricValidation(root, request.sessionID, request.callID,
               args.command, resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."),
@@ -4612,7 +4871,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (request.tool === "task" && args.subagent_type === profileAgent(profile, "dog-operator") &&
              mission && !["completed", "cancelled"].includes(mission.phase)) {
           await requireRoot(request.sessionID);
-          await reconcileMissionDispatch(root);
+          const current = await reconcileMissionDispatch(root) ?? mission;
+          if (current.coordinator === null && current.authorContinuation &&
+              (!args.task_id || args.task_id === current.authorContinuation.child)) {
+            const proof = await proveAuthorContinuation(root, current, await operators.read(root));
+            if (proof.reason || proof.child !== current.authorContinuation.child) {
+              throw new Error(`mission-author-continuation-not-authorized:${proof.reason ?? "predecessor_author_changed"}; ${continuationHint}`);
+            }
+          }
           await missions.admit(root, request.callID, args);
           taskOwners.set(request.callID, { root, actor: request.sessionID, operator: false, mission: true });
           return;
@@ -4647,6 +4913,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
                 (review.mode !== "self-recheck" && typeof reviewerID === "string" &&
                   (!missionReviewIndependent(reconciled.mission, reviewerID) || !await ownedReviewer(root, reconciled.mission, reviewerID)))) {
               throw new Error("mission-review-task-required: dispatch review_mission's generated task");
+            }
+            if (reconciled.mission.authorContinuation?.reviewerQuote && reviewerID === reconciled.mission.authorContinuation.reviewer) {
+              const idle = await continuationNativeIdle(root, String(reviewerID), "dog-reviewer", reconciled.mission.coordinator ?? root);
+              if (idle) throw new Error(`mission-review-requested-reviewer-unavailable:${idle}`);
             }
             // Continuing an owned independent Reviewer does not make it the candidate's author.
             // Keep the native context by default when the generated Task names an existing child.
