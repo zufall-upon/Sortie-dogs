@@ -2396,6 +2396,7 @@ for (const [request, quote] of [
   ["Use the same author now.", "same author"],
   ["You have to use the same author for this change.", "same author"],
   ["You need to use the same author for this change.", "same author"],
+  ["You may use the same author, but you must use the same author for this change.", "same author"],
   ["Continue with the previous developer immediately.", "previous developer"],
   ["Continue with the previous developer for new work", "previous developer"],
   ["Keep the same developer for new work", "same developer"],
@@ -2405,8 +2406,11 @@ for (const [request, quote] of [
   ["Use the same author and do not use a different author.", "same author"],
   ["Use the same author and do not automatically select a different author.", "same author"],
   ["Use the same author and you don't have to use a different author.", "same author"],
+  ["Use the same author and you may use a different author.", "same author"],
   ["Use the same author and you don't have to use the same author's API.", "same author"],
   ["Use the same author and you do not need to use the same reviewer.", "same author"],
+  ["Use the same author, but you may use the same reviewer for this work.", "same author"],
+  ["Use the same author, but you can have the same reviewer review the change.", "same author"],
   ["Use a different author. Actually, use the same author for this work.", "same author"],
   ["Use the same author. Do not change the existing API.", "same author"],
   ["Use the same author and the same reviewer. Actually, select a different reviewer.", "same author"],
@@ -2466,6 +2470,8 @@ for (const [request, quote] of [
     assert.equal(unproven.task, undefined);
     if (request === "Have the same author implement the change and do not have the same reviewer review it." ||
         request === "Use the same author and you do not need to use the same reviewer." ||
+        request === "Use the same author, but you may use the same reviewer for this work." ||
+        request === "Use the same author, but you can have the same reviewer review the change." ||
         request === "Have the same author implement the change and have the same reviewer review notes available." ||
         request === "Use the same author and the same reviewer. Actually, select a different reviewer.") {
       const rejectedReviewer = JSON.parse((await start.execute({ requirements: [request],
@@ -2527,6 +2533,12 @@ for (const request of [
   "Do not automatically select the same author for new work.",
   "You don't have to use the same author for this change.",
   "You do not need to use the same author for this change.",
+  "You may use the same author for this change, but it is not required",
+  "You can use the same author for this change.",
+  "You may have the same author implement the change.",
+  "You are allowed to use the same author for this change.",
+  "You may use the same developer documentation to fix the bug.",
+  "You may not use the same author for this change.",
   "Do not have the same author implement the change.",
   "Have the same author not implement the change.",
   "Do not have the same author review source code.",
@@ -2554,8 +2566,18 @@ for (const request of [
     const rejected = JSON.parse((await start.execute({ requirements: [request],
       author_continuation: { request_quote: "same author", work_directory: directory } },
     { sessionID: "root", agent: "dog-operator", callID: "call_invalid_choice" })).content);
-    assert.equal(rejected.reason, "user_intent_quote_unavailable");
+    const optionalAuthor = [
+      "You don't have to use the same author for this change.",
+      "You do not need to use the same author for this change.",
+      "You may use the same author for this change, but it is not required",
+      "You can use the same author for this change.",
+      "You may have the same author implement the change.",
+      "You are allowed to use the same author for this change.",
+    ].includes(request);
+    assert.equal(rejected.reason, optionalAuthor ? "completed_predecessor_run_unavailable" : "user_intent_quote_unavailable");
     assert.equal(rejected.task, undefined);
+    assert.equal((await missions.required("root")).authorContinuation, undefined,
+      "an unproven optional choice must not create a mandatory restriction");
     const corrected = JSON.parse((await start.execute({ requirements: [request], preferred_executor: "coordinator" },
       { sessionID: "root", agent: "dog-operator", callID: "call_corrected_choice" })).content);
     assert.equal(corrected.mission_id, packet.mission_id, "correcting an invalid option does not replace the Mission");
@@ -2583,8 +2605,57 @@ for (const request of [
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
+for (const [request, reason] of [
+  ["You may use the same author, but you must use the same reviewer.", "explicit_author_continuation_input_required"],
+  ["Do not use the same author, but use the same reviewer.", "requested_author_reviewer_lineage_conflict"],
+]) test(`V2 preserves a required reviewer when the author's choice is not mandatory: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-optional-author-reviewer-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const prompt = (messageID: string, text: string) =>
+      fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID, prompt: { text } });
+    const call = async (callID: string) => JSON.parse((await start.execute(
+      { requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID })).content);
+    await prompt("msg_request", request);
+    const held = await call("call_start");
+    assert.equal(held.reason, reason);
+    assert.equal(held.task, undefined);
+    const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    assert.equal((await missions.required("root")).authorContinuation!.blocked, reason);
+    if (reason === "requested_author_reviewer_lineage_conflict") {
+      await prompt("msg_allow_author", "You may use the same author for this work.");
+      const corrected = await call("call_allow_author");
+      assert.equal(corrected.mission_id, held.mission_id);
+      assert.equal(corrected.reason, "explicit_author_continuation_input_required");
+      assert.equal(corrected.task, undefined);
+    }
+    await prompt("msg_allow_reviewer", "You may use the same reviewer for this work.");
+    const released = await call("call_allow_reviewer");
+    assert.equal(released.mission_id, held.mission_id);
+    assert.ok(released.task, "releasing both choices must restore an ordinary Task");
+    assert.equal(released.task.task_id, undefined);
+    const status = fixture.tools.find(tool => tool.name === "sortie_v010_operator_status") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const observed = JSON.parse((await status.execute({ view: "progress" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_status" })).content);
+    assert.deepEqual(observed.budget, held.budget);
+    const current = await missions.required("root");
+    assert.equal(current.authorContinuation, undefined);
+    assert.equal(current.coordinator, null);
+    assert.equal(current.runID, null);
+    assert.equal(current.dispatchOpen, false);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
 for (const [request, quote] of [
   ["Do not use the same author for this new work.", "same author"],
+  ["You may not use the same author for this change.", "same author"],
   ["Do not automatically select the same author for new work.", "same author"],
   ["Do not have the same author implement the change.", "same author"],
   ["Do not have the same author review source code.", "same author"],
@@ -2626,6 +2697,9 @@ for (const [request, quote] of [
 
 for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git"],
+  ["Use the same author and the same reviewer, but you may select a different reviewer.", "same author", "same reviewer", "git"],
+  ["You may use the same author, but you must use the same reviewer for the new result.", "same author", "same reviewer", "git-optional-author-required-reviewer"],
+  ["You may use the same author for the new result, but it is not required.", "same author", undefined, "git-optional-author-selected"],
   ["Have the same author implement the change, and have the same reviewer review it.", "same author", "same reviewer", "git"],
   ["Have the same author implement the change, and have the same reviewer review code.", "same author", "same reviewer", "git"],
   ["Have the same author implement the change, and have the same reviewer review source code.", "same author", "same reviewer", "git"],
@@ -2644,9 +2718,14 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-change"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-declarative"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-optional-permission"],
   ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone"],
+  ["Use the same author for the new result.", "same author", undefined, "git-replace-earlier-author-optional-alone-permission"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-author-conflict"],
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-optional"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-replace-earlier-reviewer-permission"],
+  ["Use the same author for the new result.", "same author", undefined, "git-permission-author-no-replace"],
+  ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
@@ -2805,14 +2884,20 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(wrongQuote.status, "mission-author-continuation-unavailable");
     assert.equal(wrongQuote.reason, "user_intent_quote_unavailable");
     assert.equal(wrongQuote.task, undefined);
-    assert.equal((await tool("root", "operator_status")).task, undefined);
-    await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
-      /mission-author-continuation-author-required/u);
+    if (workspace === "git-optional-author-selected") {
+      assert.ok((await tool("root", "operator_status")).task, "an invalid optional choice cannot block ordinary work");
+    } else {
+      assert.equal((await tool("root", "operator_status")).task, undefined);
+      await assert.rejects(before("root", "patch", { patchText: "*** Begin Patch\n*** Add File: substitute.txt\n+wrong author\n*** End Patch" }),
+        /mission-author-continuation-author-required/u);
+    }
     if (reviewerQuote) assert.equal((await tool("root", "start_mission", { requirements, preferred_executor: "coordinator",
       author_continuation: { request_quote: requestQuote, work_directory: directory } })).reason,
     "explicit_reviewer_continuation_input_required", "an explicit same-Reviewer request cannot become a silent substitution");
-    await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
-      /mission-author-continuation-author-required/u);
+    if (workspace !== "git-optional-author-selected") {
+      await assert.rejects(tool("root", "plan_units", { executor: "self", units: [unit("second")] }),
+        /mission-author-continuation-author-required/u);
+    }
     assert.equal((await start({ ...selection, work_directory: join(directory, "missing") })).reason, "work_directory_unavailable_or_changed");
     assert.equal((await start({ ...selection, work_directory: dirname(directory) })).reason, "predecessor_native_write_unproven",
       "a common ancestor is not the actual repository where the prior author wrote");
@@ -2927,9 +3012,39 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal(state.coordinator, null, "the new Task has not been claimed or granted an old write scope");
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
+    if (workspace === "git-optional-author-selected") {
+      const retained = await tool("root", "start_mission", { requirements });
+      assert.equal(retained.mission_id, second.mission_id);
+      assert.equal(retained.task.task_id, "author", "an explicit optional choice remains usable on a later call");
+      assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).authorContinuation!.child, "author");
+    }
+    if (workspace === "git-permission-author-no-replace" || workspace === "git-permission-reviewer-no-replace") {
+      const missions = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const beforeBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await prompt("root", workspace === "git-permission-author-no-replace"
+        ? "You may use the same author for this change, but it is not required."
+        : "You may use the same reviewer for this change, but it is not required.");
+      const updated = await tool("root", "start_mission", { requirements });
+      const current = await missions.required("root");
+      assert.equal(updated.mission_id, second.mission_id);
+      assert.equal(current.coordinator, null);
+      assert.equal(current.runID, null);
+      assert.equal(current.dispatchOpen, false);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, beforeBudget);
+      if (workspace === "git-permission-author-no-replace") {
+        assert.equal(current.authorContinuation, undefined);
+        assert.equal(updated.task.task_id, undefined, "the newly optional author must not be fixed");
+        return;
+      }
+      assert.equal(current.authorContinuation!.child, "author");
+      assert.equal(current.authorContinuation!.reviewer, undefined);
+      assert.equal(current.authorContinuation!.reviewerQuote, undefined);
+      assert.equal(updated.task.task_id, "author");
+      second = updated;
+    }
     if (workspace.startsWith("git-replace")) {
       const optionalAuthor = workspace.startsWith("git-replace-earlier-author-optional");
-      const optionalReviewer = workspace === "git-replace-earlier-reviewer-optional";
+      const optionalReviewer = workspace === "git-replace-earlier-reviewer-optional" || workspace === "git-replace-earlier-reviewer-permission";
       const authorReviewerConflict = workspace === "git-replace-earlier-author-conflict";
       const changedAuthor = workspace === "git-replace-change" || workspace === "git-replace-earlier-author-change" ||
         optionalAuthor && !reviewerQuote;
@@ -2960,6 +3075,9 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       }
       if (workspace.startsWith("git-replace-earlier-")) {
         await prompt("root", workspace === "git-replace-earlier-author-optional-declarative" ? "The same author is not required for this change."
+          : workspace === "git-replace-earlier-author-optional-permission" || workspace === "git-replace-earlier-author-optional-alone-permission"
+            ? "You may use the same author for this change, but it is not required."
+          : workspace === "git-replace-earlier-reviewer-permission" ? "You may use the same reviewer for this change, but it is not required."
           : optionalAuthor ? "You don't have to use the same author for this change."
           : optionalReviewer ? "You do not need to use the same reviewer for this change."
           : authorReviewerConflict ? "Actually, select a different author for this work."
@@ -3253,7 +3371,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.ok(newRun.units[0]!.evidence.length > 0, "the new check has its own current evidence");
     assert.notDeepEqual(newRun.units[0]!.evidence, oldRun.units[0]!.evidence);
     if (workspace === "git-replace-reviewer-change" || workspace === "git-replace-earlier-reviewer-change" ||
-        workspace === "git-replace-earlier-reviewer-optional") {
+        workspace === "git-replace-earlier-reviewer-optional" || workspace === "git-replace-earlier-reviewer-permission" ||
+        workspace === "git-permission-reviewer-no-replace" || workspace === "git-optional-author-selected") {
       agents.otherReviewer = { agent: "dog-reviewer-v010", parentID: "author", outcome: "succeeded" };
       const review = await tool("author", "review_mission", { risk_tags: ["public-logic"], traces: [], reviewer_session_id: "otherReviewer" });
       assert.equal(review.task.task_id, "otherReviewer", "a genuine reviewer change removes the old selection, not the author's");

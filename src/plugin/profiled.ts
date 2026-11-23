@@ -2665,20 +2665,28 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const negatedActionTarget = targetFor(String.raw`(?:${englishBoundary}|(?=${negatedActionTail}))`);
       const negatedAction = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:the\s+)?${negatedActionTarget}${negatedActionTail}|${target}\s+(?:must|should|shall|will|would|can|could)\s+not\s+${verbModifiers}${causativeAction}\b`, "iu");
       const otherCausative = new RegExp(String.raw`\bhave\s+${verbModifiers}(?:(?:a\s+)?different|another)\s+${actors(causativeBoundary).actor}${causativeTail}`, "giu");
+      // Classify the same person-directed selection for either role by its
+      // governing modality. A permission does not cancel a separate command.
+      const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
+      const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "giu");
+      const permissionPrefix = new RegExp(String.raw`\b(?:(?:may|can|could|might)\s+|(?:is|are)\s+(?:free|allowed|permitted)\s+to\s+)${verbModifiers}$`, "iu");
+      const optionalPrefix = new RegExp(String.raw`${optionalObligation}$`, "iu");
+      const selections = [...text.matchAll(selection)];
+      const permitted = (index: number) => permissionPrefix.test(text.slice(0, index));
+      const requiredSelection = selections.some(match => !permitted(match.index) && !optionalPrefix.test(text.slice(0, match.index)));
       // Negation and alternatives must govern the selected person, not an
       // unrelated object in another clause (such as an existing API).
       const contrary = negatedTarget.test(text) || negatedCausative.test(text) || negatedAction.test(text) ||
         new RegExp(String.raw`別の\s*${actor}${japaneseSelection}`, "iu").test(text) ||
         [...text.matchAll(otherSelection), ...text.matchAll(otherCausative)].some(match =>
-          !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)));
-      const optional = optionalTarget.test(text) || optionalCausative.test(text);
+          !new RegExp(String.raw`${selectionNegation}$`, "iu").test(text.slice(0, match.index)) && !permitted(match.index));
+      const optional = optionalTarget.test(text) || optionalCausative.test(text) ||
+        !requiredSelection && selections.some(match => permitted(match.index));
       if (negated) return negated === "contrary" ? contrary : optional && !contrary;
       if ((!new RegExp(target, "iu").test(text) && !new RegExp(causative, "iu").test(text)) || contrary || optional) return false;
       if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
       // Match selection of an actor, not an action on an artifact described as their work.
-      const command = String.raw`\b${verb}\s+${verbModifiers}(?:(?:with|using|to)\s+)?(?:the\s+)?${target}`;
-      const selection = new RegExp(String.raw`${command}|${causative}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}${japaneseSelection}`, "iu");
-      return selection.test(text);
+      return requiredSelection;
     }
     function continuationIntent(text: string, reviewer: boolean): "selected" | "contrary" | "optional" | undefined {
       let result: "selected" | "contrary" | "optional" | undefined;
@@ -2772,7 +2780,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const reviewerIntent = effectiveContinuationIntent(mission.requests, true);
       if (!request ||
           !explicitContinuationQuote(selection.quote, false) ||
-          !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
+          !sentences.some(line => line.includes(selection.quote) &&
+            (continuationIntent(line, false) === "selected" ||
+              authorIntent === "optional" && continuationIntent(line, false) === "optional")) ||
           selection.reviewerQuote && (reviewerIntent !== "selected" ||
             !explicitContinuationQuote(selection.reviewerQuote, true) ||
             !reviewerSentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
@@ -2781,9 +2791,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (authorIntent === "contrary" && reviewerIntent === "selected") {
         return { reason: "requested_author_reviewer_lineage_conflict" };
       }
-      // An optional author can still be chosen to retain the required Reviewer's
-      // native parent. This is a fresh admission, not a transferred reviewer grant.
-      if (authorIntent !== "selected" && !(authorIntent === "optional" && reviewerIntent === "selected")) {
+      // An optional author may be chosen, but is never required merely by that
+      // permission. This is a fresh admission, not a transferred grant.
+      if (authorIntent !== "selected" && authorIntent !== "optional") {
         return { reason: "user_intent_quote_unavailable" };
       }
       if (reviewerIntent === "selected" &&
@@ -2974,29 +2984,65 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
             const saved = mission.authorContinuation;
             const savedRequest = saved && mission.requests.find(item => item.id === saved.requestID);
+            const authorIntent = effectiveContinuationIntent(mission.requests, false);
+            const reviewerIntent = effectiveContinuationIntent(mission.requests, true);
+            const conflict = authorIntent === "contrary" && reviewerIntent === "selected";
+            const needsSelection = authorIntent === "selected" || authorIntent === "optional" && reviewerIntent === "selected";
             // Older rejected caller input could leave a restriction the user never
             // requested. Only recover an unadmitted, unselected invalid quote; a
             // genuine author instruction or any selected child remains binding.
             if (saved?.blocked === "user_intent_quote_unavailable" && !saved.child && savedRequest &&
-                continuationIntent(savedRequest.text, false) !== "selected") {
+                !needsSelection && !conflict) {
               mission = await missions.update(context.sessionID, state => {
                 if (state.id === mission.id && state.coordinator === null && state.runID === null && !state.dispatchOpen &&
                     isDeepStrictEqual(state.authorContinuation, saved)) delete state.authorContinuation;
               });
             }
+            // A selected but unadmitted child is not an irrevocable user choice.
+            // Apply later role-specific changes before re-proving its native state.
+            const selected = mission.authorContinuation;
+            const releaseAuthor = reviewerIntent !== "selected" && (authorIntent === "contrary" ||
+              authorIntent !== "selected" && !!savedRequest && continuationIntent(savedRequest.text, false) !== "optional");
+            const releaseReviewer = (reviewerIntent === "contrary" || reviewerIntent === "optional") &&
+              !!(selected?.reviewerQuote || selected?.reviewer);
+            if (selected && (releaseAuthor || selected.child && releaseReviewer)) {
+              mission = await missions.update(context.sessionID, state => {
+                if (state.id !== mission.id || state.coordinator !== null || state.runID !== null || state.dispatchOpen ||
+                    !isDeepStrictEqual(state.authorContinuation, selected)) throw new Error("mission-author-continuation-stale");
+                if (releaseAuthor) delete state.authorContinuation;
+                else {
+                  delete state.authorContinuation!.reviewerQuote;
+                  delete state.authorContinuation!.reviewerRequestID;
+                  delete state.authorContinuation!.reviewer;
+                }
+              });
+            }
             const request = mission.requests.at(-1)!;
-            const explicit = continuationIntent(request.text, false) === "selected";
-            if (explicit && !mission.authorContinuation) mission = await missions.update(context.sessionID, state => {
-              state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: "explicit_author_continuation_input_required" };
+            const pending = mission.authorContinuation;
+            if (pending && !pending.child && !pending.quote &&
+                (pending.blocked === "explicit_author_continuation_input_required" || pending.blocked === "requested_author_reviewer_lineage_conflict") &&
+                (!needsSelection || conflict !== (pending.blocked === "requested_author_reviewer_lineage_conflict"))) {
+              mission = await missions.update(context.sessionID, state => {
+                if (conflict || needsSelection) state.authorContinuation!.blocked = conflict
+                  ? "requested_author_reviewer_lineage_conflict" : "explicit_author_continuation_input_required";
+                else delete state.authorContinuation;
+              });
+            }
+            if ((needsSelection || conflict) && !mission.authorContinuation) mission = await missions.update(context.sessionID, state => {
+              state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: conflict
+                ? "requested_author_reviewer_lineage_conflict" : "explicit_author_continuation_input_required" };
               state.preferredExecutor = "coordinator";
             });
           }
           if (record(authorRequest)) {
             const saved = mission.authorContinuation;
+            const allowOptionalAuthor = effectiveContinuationIntent(mission.requests, false) === "optional";
+            const requiresReviewer = effectiveContinuationIntent(mission.requests, true) === "selected";
             const request = (saved && saved.quote === authorRequest.request_quote
               ? mission.requests.find(item => item.id === saved.requestID) : undefined) ??
               [...mission.requests].reverse().find(item => item.text.includes(String(authorRequest.request_quote)) &&
-                continuationIntent(item.text, false) === "selected") ?? mission.requests.at(-1)!;
+                (continuationIntent(item.text, false) === "selected" ||
+                  allowOptionalAuthor && continuationIntent(item.text, false) === "optional")) ?? mission.requests.at(-1)!;
             const directory = isAbsolute(String(authorRequest.work_directory))
               ? await realpath(String(authorRequest.work_directory)).catch(() => String(authorRequest.work_directory))
               : String(authorRequest.work_directory);
@@ -3023,11 +3069,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const proposed = { ...mission, authorContinuation: selection };
             const proof = await proveAuthorContinuation(context.sessionID, proposed,
               await continuationPredecessor(context.sessionID, proposed, cancelled));
-            if (proof.reason === "user_intent_quote_unavailable") {
+            if (proof.reason === "user_intent_quote_unavailable" ||
+                proof.reason && allowOptionalAuthor && !requiresReviewer && !saved?.child) {
               return JSON.stringify({ ...locationObservation(context.sessionID), ...continuationPacket(proposed),
                 reason: proof.reason,
                 next_action: mission.authorContinuation ? continuationHint
-                  : `The supplied author_continuation is not supported by the current user instruction. Retry ${startMission} with the same requirements and correct or omit that option; this rejected selection did not create a user restriction or authorize any Task.`,
+                  : `The supplied author_continuation could not be proven from the current user instruction and native predecessor. Retry ${startMission} with the same requirements and correct or omit that option; this rejected selection did not create a user restriction or authorize any Task.`,
                 budget: await control!.currentBudget(context.sessionID) });
             }
             mission = await missions.update(context.sessionID, state => {
