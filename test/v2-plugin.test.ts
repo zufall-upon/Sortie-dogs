@@ -2443,10 +2443,13 @@ for (const request of [
   "Use the API written by the previous developer.",
   "Use the previous developer's API to fix the bug.",
   "Keep the original author’s tests passing.",
+  "Use the same author and reviewer’s API to fix the bug.",
+  "Use the same reviewer and author's API to fix the bug.",
   "Fix the same bug reported by the developer.",
   "前回の実装担当の引継ぎが止まった原因を調べて。",
   "前回の実装担当が担当したAPIを使って修正して。",
   "同じ実装担当が担当しているAPIを使って修正して。",
+  "同じ実装担当が担当するAPIを使って修正して。",
 ]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
