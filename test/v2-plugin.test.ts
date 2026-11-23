@@ -2383,7 +2383,11 @@ test('requires exclusive execution', async () => {
   }
 });
 
-test("V2 new Mission rejects an unclaimed prior Coordinator rather than transferring authority", async () => {
+for (const [request, quote] of [
+  ["Use the same author for new work", "same author"],
+  ["Continue with the previous developer for new work", "previous developer"],
+  ["前回の実装担当で続けて", "前回の実装担当"],
+]) test(`V2 new Mission retains an explicit author choice without transferring authority: ${request}`, async () => {
   await mkdir(resolve("_testenv"), { recursive: true });
   const directory = await mkdtemp(resolve("_testenv/v2-prior-coordinator-"));
   const fixture = contextFixture();
@@ -2401,11 +2405,11 @@ test("V2 new Mission rejects an unclaimed prior Coordinator rather than transfer
     const previous = await missions.start("root", ["Complete the prior work"]);
     await missions.update("root", state => { state.coordinator = "previous"; state.phase = "completed"; state.dispatchOpen = false; });
     await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request",
-      prompt: { text: "Use the same author for new work" } });
+      prompt: { text: request } });
     const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
       execute(input: unknown, context: unknown): Promise<{ content: string }>;
     };
-    const packet = JSON.parse((await start.execute({ requirements: ["Use the same author for new work"],
+    const packet = JSON.parse((await start.execute({ requirements: [request],
       preferred_executor: "coordinator" }, { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
     assert.notEqual(packet.mission_id, previous.id);
     assert.equal(packet.status, "mission-author-continuation-unavailable");
@@ -2424,12 +2428,36 @@ test("V2 new Mission rejects an unclaimed prior Coordinator rather than transfer
     const current = await missions.required("root");
     assert.equal(current.coordinator, null);
     assert.equal(current.dispatchOpen, false);
-    const unproven = JSON.parse((await start.execute({ requirements: ["Use the same author for new work"],
-      preferred_executor: "coordinator", author_continuation: { request_quote: "same author", work_directory: directory } },
+    const unproven = JSON.parse((await start.execute({ requirements: [request],
+      preferred_executor: "coordinator", author_continuation: { request_quote: quote, work_directory: directory } },
     { sessionID: "root", agent: "dog-operator", callID: "call_start_continuation" })).content);
     assert.equal(unproven.status, "mission-author-continuation-unavailable");
     assert.equal(unproven.reason, "completed_predecessor_run_unavailable");
     assert.equal(unproven.task, undefined);
+  } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const request of [
+  "Keep the same authorization checks while fixing this bug.",
+  "The previous developer left a bug; fix it.",
+  "Use the API written by the previous developer.",
+  "Fix the same bug reported by the developer.",
+  "前回の実装担当の引継ぎが止まった原因を調べて。",
+]) test(`V2 ordinary Mission does not infer an author restriction: ${request}`, async () => {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const directory = await mkdtemp(resolve("_testenv/v2-author-no-restriction-")), fixture = contextFixture();
+  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+    session: { ...fixture.context.session,
+      get: async ({ sessionID }) => ({ id: sessionID, agent: "dog-operator", location: { directory } }) } });
+  try {
+    await fixture.sessionHooks.get("prompt")!({ sessionID: "root", messageID: "msg_request", prompt: { text: request } });
+    const start = fixture.tools.find(tool => tool.name === "sortie_v010_start_mission") as {
+      execute(input: unknown, context: unknown): Promise<{ content: string }> };
+    const packet = JSON.parse((await start.execute({ requirements: [request], preferred_executor: "coordinator" },
+      { sessionID: "root", agent: "dog-operator", callID: "call_start" })).content);
+    assert.ok(packet.task, "a description of earlier work or authorization is not a same-author instruction");
+    assert.equal(packet.task.task_id, undefined);
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).authorContinuation, undefined);
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -2590,6 +2618,24 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     assert.equal(state.coordinator, null, "the new Task has not been claimed or granted an old write scope");
     assert.equal(state.runID, null);
     assert.equal(state.review, undefined, "the prior Review verdict is not transferred");
+    const interruptedDispatch = await before("root", "subagent", nativeTask(second.task));
+    const terminal = (callID: string, input: Record<string, unknown>) => ({
+      id: `msg_${++counter}`, type: "assistant", agent: "dog-operator", content: [{
+        type: "tool", id: callID, name: "subagent", state: { status: "error", input,
+          error: { type: "aborted", message: "Interrupted before claim; after-hook was lost" } },
+      }],
+    });
+    assert.equal((await tool("root", "operator_status")).coordinator_dispatch, "active");
+    history.root!.push(terminal("other-call", interruptedDispatch.input),
+      terminal(interruptedDispatch.id, { ...interruptedDispatch.input, sessionID: "wrong" }),
+      terminal(interruptedDispatch.id, { ...interruptedDispatch.input, prompt: "wrong reference" }));
+    assert.equal((await tool("root", "operator_status")).coordinator_dispatch, "active",
+      "unrelated terminals cannot release a newly authorized unclaimed Task");
+    history.root!.push(terminal(interruptedDispatch.id, interruptedDispatch.input));
+    const recovered = await tool("root", "operator_status");
+    assert.equal(recovered.coordinator_dispatch, "resumable", "the exact native terminal recovers a lost after-hook before claim");
+    assert.equal(recovered.task.task_id, "author");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, null);
     const bad = nativeTask(second.task);
     await assert.rejects(before("root", "subagent", { ...bad, sessionID: "wrong" }), /mission-author-continuation-not-authorized|mission-coordinator-location-mismatch/u);
     active = { author: { type: "running" } };
@@ -2608,6 +2654,34 @@ test("V2 explicitly continues the completed actual author and reviews the new ca
     const direct = await tool("author", "plan_units", { executor: "self", units: [unit("second")] });
     assert.notEqual(direct.run_id, oldRun.runID, "the new work has a new contract and accounting");
     assert.equal(direct.status, "direct-unit-running");
+    const proposed = { ...unit("second"), objective: "Use the current result to produce second without repeating setup" };
+    const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+    const missionsForProposal = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+    const assertProposal = async (status: string) => {
+      const priorRun = await operators.required("root"), priorMission = await missionsForProposal.required("root");
+      const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      const proposal = await tool("root", "plan_units", { executor: "self", units: [proposed],
+        reason: "Recover the retained same author's method", handoff_context: "Keep the existing check and cumulative budget." });
+      assert.equal(proposal.status, status);
+      assert.deepEqual(await operators.required("root"), priorRun, "root only forwards the proposal; it cannot admit a replacement contract");
+      assert.deepEqual(await missionsForProposal.required("root"), priorMission);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, budget);
+      return proposal;
+    };
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined);
+    await after(dispatch, "Interrupted with the direct unit retained", { sessionID: "author" });
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "an unknown native outcome is not idle proof");
+    agents.author!.outcome = "interrupted";
+    history.author!.push({ id: "pending-shell", type: "assistant", content: [{
+      type: "tool", id: "call_pending_shell", name: "shell", state: { status: "completed", metadata: { status: "running" } },
+    }] });
+    assert.equal((await assertProposal("mission-coordinator-active")).task, undefined, "a background tool still prevents duplicate continuation");
+    history.author!.pop();
+    const proposal = await assertProposal("mission-coordinator-required");
+    assert.equal(proposal.task.task_id, "author");
+    const methodDispatch = await before("root", "subagent", nativeTask(proposal.task));
+    delete agents.author!.outcome;
+    assert.match(await prompt("author", String(methodDispatch.input.prompt)), /Use the current result to produce second/u);
     await edit("first", "second");
     await validate("second");
     await tool("author", "finish_direct_unit");

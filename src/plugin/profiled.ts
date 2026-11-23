@@ -1204,16 +1204,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // owner then survives even though the host has already persisted a terminal tool part.
       // The native record, not that cache, decides whether this exact dispatch can be resumed.
       const history = await messages(root);
+      const expected = missions.task(mission);
       const finished = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
         record(part) && part.type === "tool" && part.tool === "task" && part.callID === mission.callID &&
         record(part.state) && ["completed", "error"].includes(String(part.state.status)) &&
         record(part.state.input) && part.state.input.subagent_type === profileAgent(profile, "dog-operator") &&
-        (part.state.input.task_id === undefined || part.state.input.task_id === mission.coordinator) &&
-        (mission.coordinator !== null || (part.state.input.prompt === missions.task(mission).prompt &&
-          part.state.input.task_id === undefined)));
+        (mission.coordinator !== null
+          ? part.state.input.task_id === undefined || part.state.input.task_id === mission.coordinator
+          : part.state.input.prompt === expected.prompt && part.state.input.task_id === expected.task_id));
       if (finished.length !== 1) return mission;
-      if (mission.coordinator !== null) {
-        const who = await identity(mission.coordinator);
+      const child = mission.coordinator ?? mission.authorContinuation?.child;
+      if (child) {
+        const who = await identity(child);
         if (who.parent !== root || who.role !== "dog-operator") return mission;
       }
       const reconciled = await missions.reconcileFinishedDispatch(root, mission.id, mission.callID);
@@ -2594,12 +2596,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       }
       return undefined;
     }
-    function explicitContinuationQuote(text: string, reviewer: boolean): boolean {
-      const actor = reviewer ? /reviewer|reviewing|レビュー担当|レビュアー|レビュー者/iu
-        : /author|writer|implementer|developer|作業者|実装者|作者|担当|書き手/iu;
-      const same = /same|previous|prior|original|existing|continue|同じ|前回|前の|既存|引き継|継続|変えない|替えない|切り替えない/iu;
+    function explicitContinuationQuote(text: string, reviewer: boolean, instruction = false): boolean {
+      const actor = reviewer ? String.raw`(?:\breviewer\b|レビュー担当|レビュアー|レビュー者)`
+        : String.raw`(?:\b(?:author|writer|implementer|developer)\b|作業者|実装者|実装担当|作者|担当者?|書き手)`;
+      const target = String.raw`(?:\b(?:same|previous|prior|original|existing)\s+(?:(?:implementation|code)\s+)?${actor}|(?:同じ|前回の|前の|既存の)\s*${actor})`;
       const contrary = /(?:do not|don't|never|not|different|another).{0,40}(?:same|previous|prior|original|existing)|(?:same|previous|prior|original|existing).{0,60}(?:not (?:be )?(?:used|assigned|selected|required|needed)|unnecessary)|(?:同じ|前回|前の|既存).{0,40}(?:使わない|使えない|不要|ではない|ではなく|変える|変更する|切り替える)|別の(?:作者|担当|書き手|実装者|作業者|レビュアー)/iu;
-      return actor.test(text) && same.test(text) && !contrary.test(text);
+      if (!new RegExp(target, "iu").test(text) || contrary.test(text)) return false;
+      if (!instruction) return true; // A short quoted selection is checked in its full user sentence below.
+      // Match selection of an actor, not an action on an artifact described as their work.
+      const otherActor = String.raw`\b(?:same|previous|prior|original|existing)\s+(?:author|writer|implementer|developer|reviewer)\b`;
+      const command = String.raw`\b(?:use|reuse|keep|retain|resume|continue|assign|select|have|ask)\s+(?:(?:with|using|to)\s+)?(?:the\s+)?(?:${otherActor}\s*(?:,|and|&)\s*(?:the\s+)?)?${target}`;
+      const selection = new RegExp(String.raw`${command}|${target}\s+(?:must|should|shall|needs?\s+to)\s+(?:continue|resume|write|implement|develop|handle|work)|${target}(?:\s*(?:と|・|、)\s*(?:同じ|前回の|前の|既存の)?\s*(?:Reviewer|レビュー担当|レビュアー|実装担当|担当者?))?\s*(?:を(?:継続|再開|引き継|引継|使|維持|変えない|替えない)|に(?:任せ|依頼)|で(?:続け|続行|進め|再開|お願い)|が(?:続け|担当)|は(?:変えない|替えない))`, "iu");
+      return selection.test(text);
     }
     async function continuationNativeIdle(root: string, id: string, role: "dog-operator" | "dog-reviewer", parent: string): Promise<string | undefined> {
       const ids = new Set<string>();
@@ -2640,12 +2648,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (!selection) return { reason: "explicit_user_intent_missing" };
       const request = mission.requests.find(item => item.id === selection.requestID);
       const sentences = request?.text.split(/[\r\n。.!?]+/u) ?? [];
-      if (sentences.some(line => explicitContinuationQuote(line, true)) &&
+      if (sentences.some(line => explicitContinuationQuote(line, true, true)) &&
           !selection.reviewerQuote) return { reason: "explicit_reviewer_continuation_input_required" };
       if (!request || !explicitContinuationQuote(selection.quote, false) ||
-          !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false)) ||
+          !sentences.some(line => line.includes(selection.quote) && explicitContinuationQuote(line, false, true)) ||
           selection.reviewerQuote && (!explicitContinuationQuote(selection.reviewerQuote, true) ||
-            !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true)))) {
+            !sentences.some(line => line.includes(selection.reviewerQuote!) && explicitContinuationQuote(line, true, true)))) {
         return { reason: "user_intent_quote_unavailable" };
       }
       const directory = isAbsolute(selection.directory) ? await realpath(selection.directory).catch(() => undefined) : undefined;
@@ -2775,7 +2783,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           mission = await missions.retainContext(context.sessionID, context.sessionID, history, args.handoff_context);
           if (!authorRequest && !mission.authorContinuation && mission.coordinator === null && mission.runID === null && !mission.dispatchOpen) {
             const request = mission.requests.at(-1)!;
-            const explicit = request.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false));
+            const explicit = request.text.split(/[\r\n。.!?]+/u).some(line => explicitContinuationQuote(line, false, true));
             if (explicit) mission = await missions.update(context.sessionID, state => {
               state.authorContinuation = { requestID: request.id, quote: "", directory: "", blocked: "explicit_author_continuation_input_required" };
               state.preferredExecutor = "coordinator";
@@ -3842,8 +3850,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         if (args.executor !== undefined && !["self", "worker"].includes(args.executor)) throw new Error("mission-executor-invalid");
         try {
           return await serializeDispatchTransition(root, async () => {
-            const currentAuthor = (await missions.required(root)).authorContinuation;
-            if (currentAuthor && (context.sessionID !== currentAuthor.child || args.executor !== "self" ||
+            const currentMission = await missions.required(root), currentAuthor = currentMission.authorContinuation;
+            // Root may propose a correction to the claimed SAME author. declareMissionUnits
+            // only returns routing advice here; it never admits root or changes the retained run.
+            const rootProposal = context.sessionID === root && currentMission.coordinator !== null &&
+              currentMission.coordinator === currentAuthor?.child && args.units !== undefined;
+            if (currentAuthor && (context.sessionID !== currentAuthor.child && !rootProposal || args.executor !== "self" ||
                 (args as Record<string, unknown>).parallel === true)) {
               throw new Error("mission-author-continuation-author-required: the explicitly requested author must use executor=self; do not dispatch a substitute");
             }
