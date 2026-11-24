@@ -136,7 +136,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
         update: (name, update) => { const tool = tools.find(tool => tool.name === name); if (tool) update(tool as never); } }); return { dispose() {} }; },
         hook: async (name, callback) => { toolHooks.set(name, callback); return { dispose() {} }; } },
       session: { ...(options.syncedLog ? { log: async function* () { yield { type: "log.synced" }; } } : {}),
-        ...(options.activity ? { active: async () => active,
+        ...(options.activity !== false ? { active: async () => active,
         inbox: { list: async ({ sessionID }: { sessionID: string }) => inbox[sessionID] ?? [] } } : {}), get: async ({ sessionID }) => {
         if (!agents[sessionID]) throw { _tag: "SessionNotFoundError", sessionID };
         if (sessionID === "author" && agents.author!.outcome === "interrupted" && projection.failRestorationLookup) {
@@ -225,6 +225,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
     await sessionHooks.get("prompt")!(event);
     if (!(history[sessionID] ??= []).some(message => message.id === messageID)) history[sessionID]!.push({ id: event.messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    active[sessionID] = { type: "running" };
     return event.prompt.text;
   };
   const tool = async (sessionID: string, name: string, input: ObjectValue = {}) => {
@@ -251,6 +252,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     await after(event, output.stdout, { exit: "code" in output ? output.code : exit });
   };
   const terminal = (child: string, text: string, failed = false) => {
+    delete active[child];
     agents[child]!.outcome = failed ? "failed" : "succeeded";
     (history[child] ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: agents[child]!.agent, finish: "stop",
       model: { providerID: "openai", id: "gpt-6.1-sol" }, tokens: { input: 100, output: 20, cache: { read: 0, write: 0 }, reasoning: 0 },

@@ -69,6 +69,11 @@ export class NativeBackgroundLifecycle {
     if (!this.context.storage) throw new Error("native-background-storage-unavailable");
     await this.context.storage.set(key(parent), dispatches);
   }
+  private async correctionWritersHeld(dispatch: NativeBackgroundDispatch): Promise<boolean> {
+    if (dispatch.agent !== "dog-reviewer-v010" || !dispatch.child || !this.correctionAlias) return false;
+    const current = await this.context.session.get({ sessionID: dispatch.child }).catch(() => undefined);
+    return !object(current) || await this.correctionAlias(dispatch, current.agent) === false;
+  }
   async admit(parent: string, callID: string, input: ObjectValue, owner?: ObjectValue): Promise<void> {
     await this.serial(parent, async () => {
       const dispatches = await this.read(parent);
@@ -122,6 +127,9 @@ export class NativeBackgroundLifecycle {
       dispatch.terminal = terminal;
       dispatch.foregroundOutput = text;
       await this.write(parent, dispatches);
+      // A native foreground return ends this invocation, not independent jobs
+      // started by its correction writer. Retain its owner and terminal to retry.
+      if (await this.correctionWritersHeld(dispatch)) return;
       // Ordinary accounting may inspect outstanding reservations. Exclude only
       // this call while it runs; other native Jobs retain their normal hold.
       this.completingForeground.add(identity);
@@ -308,13 +316,9 @@ export class NativeBackgroundLifecycle {
       // A persisted execution event is not proof that an inline correction's
       // delegated shell jobs and queued prompts have stopped. The same exact
       // correction ownership and writer-tree check applies to log terminals.
-      if (dispatch.terminal === "failed" && dispatch.child && dispatch.agent === "dog-reviewer-v010") {
-        const current = await this.context.session.get({ sessionID: dispatch.child }).catch(() => undefined);
-        if (this.correctionAlias && (!object(current) ||
-            await this.correctionAlias(dispatch, current.agent) === false)) {
-          delete dispatch.terminal;
-          continue;
-        }
+      if (await this.correctionWritersHeld(dispatch)) {
+        delete dispatch.terminal;
+        continue;
       }
       // Retain the terminal observation if accounting throws; a later context/status boundary retries it.
       await this.write(parent, dispatches);
