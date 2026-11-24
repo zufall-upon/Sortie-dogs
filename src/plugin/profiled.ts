@@ -942,7 +942,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             (unit.reviewerCorrection && (unit.reviewerCorrection.author !== child ||
               unit.reviewerCorrection.promptID !== admission.promptID || !await reviewerCorrection(child))))) return undefined;
         return unit ? { projectRoot: unit.fabricRoot ?? operators.projectRoot, manifestPath: unit.manifestPath,
-          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
+          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]!,
+          ...(unit.directExecution?.actor === child && unit.validationRegistration
+            ? { directValidation: unitValidation(unit) } : {}) } : undefined;
       },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {

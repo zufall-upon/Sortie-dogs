@@ -1102,13 +1102,16 @@ while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) aw
 process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
     if (directActivation) {
+      if (directActivation === "verified") await writeFile(join(directory, "launch.mjs"),
+        'import { appendFileSync } from "node:fs"; appendFileSync("result.txt", "ready\\n");\n');
       await prompt("root", "Run the requested operation once without replay");
       const started = await tool("root", "start_mission", { kind: "operation", requirements: ["Run the operation once"] });
       const dispatch = await before("root", "subagent", nativeTask(started.task));
       await prompt("coordinator", String(dispatch.input.prompt));
       const command = "node launch.mjs";
       const declaration = { title: "Run once", objective: "Run the operation once",
-        read: ["check.mjs"], write: ["result.txt"], validation: ["tar -xzf archive.tar.gz"] };
+        read: ["check.mjs", ...(directActivation === "verified" ? ["launch.mjs"] : [])],
+        write: ["result.txt"], validation: ["tar -xzf archive.tar.gz"] };
       // The real host handoff checker refuses an unclassified artifact command.
       // No declared shell process is started by either failed call.
       await assert.rejects(tool("coordinator", "plan_units", { executor: "self", units: [declaration],
@@ -1162,6 +1165,70 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
       assert.equal(status.acceptance_summary.operation.terminal_complete, false);
       assert.equal((await missionRuntime.required("root")).id, started.mission_id);
       await assert.rejects(readFile(join(directory, "result.txt")), { code: "ENOENT" });
+      if (directActivation === "verified") {
+        const stillInvalid = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["tar -xzf other.tar.gz"] }],
+          reason: "Try a corrected validation recipe" });
+        assert.equal(stillInvalid.status, "direct-unit-registration-corrected");
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "a corrected but still unclassified recipe remains denied");
+        const corrected = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["node check.mjs ready"] }],
+          reason: "Correct the invalid validation recipe without replaying the refused operation" });
+        assert.equal(corrected.status, "direct-unit-registration-corrected", JSON.stringify(corrected));
+        assert.equal(corrected.run_id, run.runID);
+        const correctedRun = await operators.required("root");
+        assert.deepEqual(correctedRun.units[0]!.hashes, unit.hashes, "the admission's original controls remain pinned");
+        assert.equal(correctedRun.units[0]!.callID, unit.callID);
+        const correctedBudget = (await tool("root", "operator_status")).budget;
+        for (const key of ["max_units", "consumed_units", "reserved_units"]) assert.equal(correctedBudget[key], status.budget[key]);
+        const launch = await before("coordinator", "shell", { command, workdir: directory, timeout: 120_000 });
+        const launched = await exec(process.execPath, ["launch.mjs"], { cwd: directory });
+        await after(launch, launched.stdout, { exit: 0, status: "completed" });
+        assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
+        const changed = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["tar -xzf other.tar.gz"] }],
+          reason: "Exercise the current registration after activation" });
+        assert.equal(changed.status, "direct-unit-registration-corrected");
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "an active binding cannot reuse the previous recipe's inspection");
+        cleanup?.(); await start();
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "a cold binding also checks the current recipe");
+        const restored = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["node check.mjs ready"] }],
+          reason: "Restore the valid result check" });
+        assert.equal(restored.status, "direct-unit-registration-corrected");
+        assert.equal(restored.run_id, run.runID);
+        await assert.rejects(before("coordinator", "shell", { command, workdir: directory, timeout: 120_000 }),
+          /mission-operation-already-admitted/u);
+        const check = await before("coordinator", "shell", { command: "node check.mjs ready", workdir: directory });
+        const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+        await after(check, checked.stdout, { exit: 0, status: "completed" });
+        const finished = await tool("coordinator", "finish_direct_unit");
+        assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+        assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+          proof.execution.command.includes("node check.mjs ready")), "the actual result check is formal evidence");
+        const operation = (await tool("root", "operator_status")).acceptance_summary.operation;
+        assert.equal(operation.status, "executed");
+        assert.equal(operation.process_succeeded, true);
+        assert.equal(operation.terminal_complete, true);
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === event.id).outcome, "not-started");
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === event.id).exit, undefined);
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === launch.id).exit, 0);
+        const review = await tool("coordinator", "review_mission", { risk_tags: [], traces: [] });
+        assert.equal(review.status, "skipped-low-risk");
+        const submitted = await tool("coordinator", "submit_mission", { status: "ready", summary: "The first launch and its result were validated." });
+        assert.equal(submitted.acceptance_summary.operation.status, "executed");
+        assert.equal((await missionRuntime.required("root")).submission?.status, "ready");
+        agents.coordinator!.outcome = "succeeded";
+        await after(dispatch, "Candidate ready", { sessionID: "coordinator" });
+        const completed = await tool("root", "complete_mission");
+        assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+        assert.equal(completed.receipt.status, "succeeded");
+        assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+        assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
+      }
       return;
     }
     if (operatorRecovery) {
@@ -4535,6 +4602,40 @@ test("V2 reconciles the explicitly selected predecessor shell after a corrected 
     assert.equal(observation.exit, 0);
     assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 2);
     assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+    for (const command of [build, launch]) await assert.rejects(
+      hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: `duplicate-${command}` },
+        { args: { command, workdir: directory } }), /mission-operation-already-admitted/u);
+    const validation = { command: "node check.mjs", workdir: directory }, validationStart = Date.now();
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "recovered-check" }, { args: validation });
+    const validated = await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: directory });
+    (history.coordinator ??= []).push({ id: "msg_recovered_check", type: "assistant", agent: "dogs-coordinator",
+      time: { created: validationStart, completed: Date.now() }, content: [{ type: "tool", id: "recovered-check", name: "shell",
+        time: { created: validationStart, ran: validationStart, completed: Date.now() },
+        state: { status: "completed", input: validation, metadata: { status: "completed", exit: 0 },
+          content: [{ type: "text", text: validated.stdout }] } }] });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "recovered-check" },
+      { output: validated.stdout, metadata: { status: "completed", exit: 0 } });
+    const finished = await tool("finish_direct_unit", "coordinator");
+    assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+    assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+      proof.execution.command.includes("node check.mjs")), "the collected result has actual formal validation");
+    const review = await tool("review_mission", "coordinator", { risk_tags: [], traces: [] });
+    assert.equal(review.status, "skipped-low-risk");
+    const submitted = await tool("submit_mission", "coordinator", { status: "ready", summary: "Retained operation result validated without replay." });
+    assert.equal(submitted.acceptance_summary.operation.status, "executed");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).submission?.status, "ready");
+    identities.coordinator!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+      { output: "Candidate ready", metadata: { sessionId: "coordinator" } });
+    const completed = await tool("complete_mission", "root");
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    assert.equal(completed.receipt.status, "succeeded");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, started.mission_id);
+    const final = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(final.status, "executed");
+    assert.deepEqual(final.observations.filter((item: { outcome: string }) => item.outcome === "executed")
+      .map((item: { callID: string }) => item.callID).sort(), ["call_original_build", "launch"],
+    "neither already executed operation was replayed");
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -4761,15 +4862,47 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       assert.equal(item.outcome, "not-started");
       assert.ok(item.nativeInputHash && item.nativeCallHash && item.nativeExecutionHash);
     }
+    const launchStarted = Date.now();
     await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" }, { args });
-    await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
+    const launched = await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
+    if (variant === "verified") (history.coordinator ??= []).push({ id: "msg_real_once", type: "assistant", agent: "dogs-coordinator",
+      time: { created: launchStarted, completed: Date.now() }, content: [{ type: "tool", id: "real-once", name: "shell",
+        time: { created: launchStarted, ran: launchStarted, completed: Date.now() },
+        state: { status: "completed", input: args, metadata: { status: "completed", exit: 0 },
+          content: [{ type: "text", text: launched.stdout }] } }] });
     await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" },
-      { output: "", metadata: { status: "completed", exit: 0 } });
+      { output: launched.stdout, metadata: { status: "completed", exit: 0 } });
     assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "duplicate" }, { args }),
       /mission-operation-already-admitted/u);
     assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
     assert.notEqual((await missionRuntime.required("root")).phase, "completed");
+    if (variant === "verified") {
+      const finished = await tool("finish_direct_unit", "coordinator");
+      assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+      assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+        proof.execution.command.includes(command)), "the one real launch is the registered native check");
+      const operation = (await tool("operator_status", "root")).acceptance_summary.operation;
+      assert.equal(operation.status, "executed");
+      assert.equal(operation.process_succeeded, true);
+      assert.equal(operation.terminal_complete, true);
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "rejected-call").outcome, "not-started");
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "rejected-call").exit, undefined);
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "real-once").exit, 0);
+      const review = await tool("review_mission", "coordinator", { risk_tags: [], traces: [] });
+      assert.equal(review.status, "skipped-low-risk");
+      const submitted = await tool("submit_mission", "coordinator", { status: "ready", summary: "The first launch was validated." });
+      assert.equal(submitted.acceptance_summary.operation.status, "executed");
+      assert.equal((await missionRuntime.required("root")).submission?.status, "ready");
+      identities.coordinator!.outcome = "succeeded";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { output: "Candidate ready", metadata: { sessionId: "coordinator" } });
+      const completed = await tool("complete_mission", "root");
+      assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+      assert.equal(completed.receipt.status, "succeeded");
+      assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+      assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
+    }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 

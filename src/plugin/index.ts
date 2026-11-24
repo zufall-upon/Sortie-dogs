@@ -546,6 +546,7 @@ interface InspectionCacheEntry {
   fingerprint: string;
   handoffHash: string;
   manifestHash?: string;
+  directValidationKey?: string;
   expiresAt: number;
   handoffPath: string;
   manifestPath: string;
@@ -568,6 +569,7 @@ interface SessionAuthorization {
   suspended: boolean;
   taskID: string;
   dispatchCallID?: string;
+  directValidationKey?: string;
   validationCommands: ReadonlySet<string>;
   writeScopes: readonly string[];
 }
@@ -5761,7 +5763,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
   async function inspect(
     path: string,
     sessionID: string | undefined,
-    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly expectedHandoffHash?: string } = {},
+    options: { readonly report?: boolean; readonly rescueSessionID?: string; readonly expectedHandoffHash?: string;
+      readonly directValidation?: readonly string[] } = {},
   ): Promise<InspectedContractIdentity | undefined> {
     const unregistered = (code: string): void => {
       if (!options.report) return;
@@ -5907,8 +5910,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       });
     }
     const preparedDirectories: string[] = [];
-    for (let index = 0; index < manifest.validation.length; index += 1) {
-      const command = manifest.validation[index];
+    // A direct admission may correct its check registration without changing the
+    // frozen handoff or write scope. Inspect the current host-owned recipe on rebind.
+    const validationCommands = options.directValidation ?? manifest.validation;
+    for (let index = 0; index < validationCommands.length; index += 1) {
+      const command = validationCommands[index]!;
       let extractions: { extraction: ReturnType<typeof extractWritePaths>; artifact: boolean }[];
       try {
         const extraction = extractWritePaths("bash", { command });
@@ -5995,6 +6001,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       fingerprint,
       handoffHash,
       manifestHash,
+      ...(options.directValidation ? { directValidationKey: JSON.stringify(options.directValidation) } : {}),
       expiresAt: now + INSPECTION_CACHE.ttlMilliseconds,
       handoffPath: absolutePath,
       manifestPath,
@@ -6721,14 +6728,21 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
 
   /** The pin is either the approved admission identity or an actual completed full Read snapshot.
    * This inspects/binds authority only; it does not claim the model has read the handoff. */
-  async function activateMissionBinding(sessionID: string, handoffPath: string,
-    binding: NonNullable<Awaited<ReturnType<NonNullable<RuntimeBridge["missionReadBinding"]>>>>): Promise<Record<string, unknown>> {
+  async function inspectMissionBinding(sessionID: string, handoffPath: string,
+    binding: NonNullable<Awaited<ReturnType<NonNullable<RuntimeBridge["missionReadBinding"]>>>>): Promise<void> {
     const key = `${sessionID}\u0000${handoffPath}`;
     await inspectionOperations.get(key)?.catch(() => undefined);
     const cached = inspected.get(key);
-    if (cached?.handoffHash !== binding.handoffHash || cached.manifestHash !== binding.manifestHash) {
-      await inspect(handoffPath, sessionID, { expectedHandoffHash: binding.handoffHash });
+    const directValidationKey = binding.directValidation === undefined ? undefined : JSON.stringify(binding.directValidation);
+    if (cached?.handoffHash !== binding.handoffHash || cached.manifestHash !== binding.manifestHash ||
+        cached.directValidationKey !== directValidationKey) {
+      await inspect(handoffPath, sessionID, { expectedHandoffHash: binding.handoffHash, directValidation: binding.directValidation });
     }
+  }
+
+  async function activateMissionBinding(sessionID: string, handoffPath: string,
+    binding: NonNullable<Awaited<ReturnType<NonNullable<RuntimeBridge["missionReadBinding"]>>>>): Promise<Record<string, unknown>> {
+    await inspectMissionBinding(sessionID, handoffPath, binding);
     return JSON.parse(await bindWriteGate(sessionID, binding.projectRoot, binding.manifestPath,
       binding.handoffHash, binding.manifestHash));
   }
@@ -9414,7 +9428,16 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       if (!await recoverCoordinatorRoot(root)) throw new Error("mission-direct-root-unavailable");
       const existing = sessionAuthorizations.get(actor);
       if (existing?.taskID === direct.taskID && existing.dispatchCallID === direct.callID &&
-          !existing.suspended && activeSessionStatus(actor) === "active" && !activeSessions.get(actor)?.released) return;
+          !existing.suspended && activeSessionStatus(actor) === "active" && !activeSessions.get(actor)?.released) {
+        const binding = await input.runtimeBridge?.missionReadBinding?.(root, actor, handoffPath);
+        if (!binding) throw new Error("mission-direct-grant-stale");
+        const key = binding.directValidation === undefined ? undefined : JSON.stringify(binding.directValidation);
+        if (existing.directValidationKey !== key) {
+          await inspectMissionBinding(actor, handoffPath, binding);
+          existing.directValidationKey = key;
+        }
+        return;
+      }
       const previous = sessionAuthorizations.get(actor);
       if (previous && (previous.taskID !== direct.taskID || previous.dispatchCallID !== direct.callID)) {
         await releaseWriteGate(actor);
@@ -9446,6 +9469,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       const result = await activateMissionBinding(actor, handoffPath, binding);
       if (result.status !== "bound") throw new Error(`mission-direct-activation:${String(result.reason)}${
         Array.isArray(result.conflicts) && result.conflicts.length ? `:${JSON.stringify(result.conflicts)}` : ""}`);
+      const authorization = sessionAuthorizations.get(actor);
+      if (authorization) authorization.directValidationKey =
+        binding.directValidation === undefined ? undefined : JSON.stringify(binding.directValidation);
       bootstrapRequired = false;
       bootstrapCompleted = true;
     }),
