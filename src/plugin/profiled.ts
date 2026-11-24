@@ -2837,11 +2837,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         ...(unit.directExecution ? [unit.directExecution.actor] : []),
         ...(unit.directHandoffs ?? []).map(item => item.actor),
       ]));
-      if (directActors.has(root)) {
+      // Controllers retain native tool authority even when every formal unit was
+      // delegated. A settled Worker run does not settle its controller's tools.
+      if (owner === root || directActors.has(root)) {
         try { await assertDirectPlanningQuiescent(root, currentCallID, currentTool); }
         catch { return "previous_root_tools_active_or_unproven"; }
       }
-      if (owner !== root && directActors.has(owner)) {
+      if (owner !== root) {
         const reason = await continuationNativeIdle(owner, "dog-operator", root);
         if (reason) return `previous_writer_${reason}`;
       }

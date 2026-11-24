@@ -928,7 +928,8 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
 });
 
 for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery, directActivation } of [
-  ...["ended", "live", "unknown", "background", "interrupted", "previous-root", "previous-root-background"].map(operatorRecovery =>
+  ...["ended", "live", "unknown", "background", "interrupted", "previous-root", "previous-root-background",
+    "previous-root-worker-background"].map(operatorRecovery =>
     ({ legacy: false, commit: false, cancel: false, operatorRecovery })),
   ...["verified", "changed-input", "changed-timeout", "process-evidence", "history-unavailable"].map(directActivation =>
     ({ legacy: false, commit: false, cancel: false, directActivation })),
@@ -1164,25 +1165,39 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
       return;
     }
     if (operatorRecovery) {
-      delete agents.first; delete agents.second; delete agents.reviewer; delete agents.unrelated;
+      if (operatorRecovery !== "previous-root-worker-background") delete agents.first;
+      delete agents.second; delete agents.reviewer; delete agents.unrelated;
       let oldRootBackground: Record<string, unknown> | undefined;
       if (operatorRecovery.startsWith("previous-root")) {
+        const delegated = operatorRecovery === "previous-root-worker-background";
+        if (delegated) agents.first!.parentID = "root";
         await prompt("root", "Create the earlier root-owned result");
         const previous = await tool("root", "start_mission", { requirements: ["Create the earlier result"] });
-        const first = await tool("root", "plan_units", { executor: "self", units: [{ title: "First", objective: "Write the first result",
+        const first = await tool("root", "plan_units", { executor: delegated ? "worker" : "self", units: [{ title: "First", objective: "Write the first result",
           read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs ready"] }] });
-        assert.equal(first.status, "direct-unit-running");
-        const write = await before("root", "write", { path: "result.txt", content: "ready\n" });
+        let workerCall: Awaited<ReturnType<typeof before>> | undefined;
+        const actor = delegated ? "first" : "root";
+        if (delegated) {
+          workerCall = await before("root", "subagent", nativeTask(first.task));
+          const expanded = await prompt(actor, String(workerCall.input.prompt));
+          const handoff = /^handoff_path: (.+)$/mu.exec(expanded)![1]!;
+          const read = await before(actor, "read", { path: handoff, limit: 2000 });
+          await after(read, await readFile(resolve(directory, handoff), "utf8"));
+        } else assert.equal(first.status, "direct-unit-running");
+        const write = await before(actor, "write", { path: "result.txt", content: "ready\n" });
         await writeFile(join(directory, "result.txt"), "ready\n"); await after(write, "written");
-        const check = await before("root", "shell", { command: "node check.mjs ready", workdir: directory });
+        const check = await before(actor, "shell", { command: "node check.mjs ready", workdir: directory });
         const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
         await after(check, checked.stdout, { exit: 0 });
-        await tool("root", "finish_direct_unit");
+        if (workerCall) {
+          agents.first!.outcome = "succeeded";
+          await after(workerCall, "First result ready", { sessionID: actor });
+        } else await tool("root", "finish_direct_unit");
         await tool("root", "review_mission", { risk_tags: [], traces: [] });
         assert.equal((await tool("root", "complete_mission")).status, "succeeded");
         assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
         assert.notEqual(previous.mission_id, undefined);
-        if (operatorRecovery === "previous-root-background") {
+        if (operatorRecovery.endsWith("background")) {
           const background = await before("root", "shell", { command: "node old-writer.mjs", background: true });
           await after(background, "Background process running", { status: "running" });
           oldRootBackground = (history.root!.at(-1)!.content as Record<string, unknown>[])[0]!;
@@ -2960,6 +2975,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
   ...["ended", "interrupted", "unknown", "background"].map(mode =>
     ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-run-${mode}`] as const),
+  ...["ended", "unknown", "background"].map(mode =>
+    ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-worker-run-${mode}`] as const),
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer and you do not need to change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
@@ -2978,6 +2995,9 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     root: { agent: "dog-operator" }, author: { agent: "dogs-coordinator", parentID: "root" },
     reviewer: { agent: "dog-reviewer-v010", parentID: "author" },
   };
+  const previousWorkerRun = workspace.startsWith("git-previous-worker-run-");
+  if (previousWorkerRun) agents.worker = { agent: "dog-worker-v010", parentID: "author" };
+  const firstWriter = previousWorkerRun ? "worker" : "author";
   let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
   const startFixture = async () => {
     fixture = contextFixture();
@@ -3028,7 +3048,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   const edit = async (from: string | undefined, to: string) => {
     const patchText = from === undefined ? `*** Begin Patch\n*** Add File: ${resultFile}\n+${to}\n*** End Patch`
       : `*** Begin Patch\n*** Update File: ${resultFile}\n@@\n-${from}\n+${to}\n*** End Patch`;
-    const event = await before("author", "patch", { patchText });
+    const event = await before(firstWriter, "patch", { patchText });
     await writeFile(join(directory, resultFile), `${to}\n`);
     await after(event, "updated");
   };
@@ -3038,7 +3058,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       ? [{ cwd: directory, suffix: " --secondary" }]
       : workspace === "non-git-partial-cwd" && expected === "first" ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
     for (const check of checks) {
-      const event = await before("author", "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
+      const event = await before(firstWriter, "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
       const result = await exec(process.execPath, ["check.mjs", expected, ...(check.suffix ? ["--secondary"] : [])], { cwd: check.cwd });
       await after(event, result.stdout, { exit: 0 });
     }
@@ -3064,7 +3084,15 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         : workspace === "non-git-partial-cwd" && expected === "first"
           ? { validation_cwd: { [`node check.mjs ${expected} --secondary`]: otherCwd } } : {}) });
     const originalUnit = unit("first");
-    await tool("author", "plan_units", { executor: "self", units: [originalUnit] });
+    const firstPlan = await tool("author", "plan_units", { executor: previousWorkerRun ? "worker" : "self", units: [originalUnit] });
+    let workerCall: Awaited<ReturnType<typeof before>> | undefined;
+    if (previousWorkerRun) {
+      workerCall = await before("author", "subagent", nativeTask(firstPlan.task));
+      const expanded = await prompt(firstWriter, String(workerCall.input.prompt));
+      const handoff = /^handoff_path: (.+)$/mu.exec(expanded)![1]!;
+      const read = await before(firstWriter, "read", { path: handoff, limit: 2000 });
+      await after(read, await readFile(resolve(directory, handoff), "utf8"));
+    }
     if (workspace.startsWith("non-git-registered")) {
       const { validation_cwd: _initialCwd, ...withoutCwd } = originalUnit;
       const corrected = workspace === "non-git-registered-default" ? withoutCwd
@@ -3074,7 +3102,11 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     }
     await edit(undefined, "first");
     await validate("first");
-    assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
+    if (workerCall) {
+      agents.worker!.outcome = "succeeded";
+      await after(workerCall, "First result ready", { sessionID: firstWriter });
+      assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "succeeded");
+    } else assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
     const authorBackground = await before("author", "shell", { command: "node retained-writer.mjs", background: true });
     await after(authorBackground, "Background process running", { status: "running" });
     const authorTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
@@ -3099,8 +3131,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
-    if (workspace.startsWith("git-previous-run-")) {
-      const mode = workspace.slice("git-previous-run-".length);
+    if (workspace.startsWith("git-previous-run-") || previousWorkerRun) {
+      const mode = workspace.slice((previousWorkerRun ? "git-previous-worker-run-" : "git-previous-run-").length);
       (reviewerTool.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
       (authorTool.state as Record<string, unknown>).metadata = mode === "background" ? { status: "running" } : { status: "completed", exit: 0 };
       if (mode === "unknown") delete agents.author!.outcome;
