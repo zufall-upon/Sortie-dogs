@@ -3835,7 +3835,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       });
     }
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown, executor?: string) {
       await control!.currentBudget(root);
       mission = actor === root ? await reconcileMissionDispatch(root) ?? await missions.required(root) : await missions.required(root);
       let previous = await operators.read(root);
@@ -3870,6 +3870,29 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       }
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
+      // An ended read-only Coordinator can return a blocked Mission before it ever
+      // prepared a run. The root's explicit direct plan must not loop back to that
+      // same child. Prove the native lineage and quiescence before relinquishing
+      // the controller; an unknown or active child keeps the original routing.
+      if (actor === root && executor === "self" && plan.units.length === 1 && !previous &&
+          mission.runID === null && mission.phase === "submitted" && mission.submission?.status === "blocked" &&
+          mission.coordinator && mission.callID && !mission.dispatchOpen && !mission.authorContinuation &&
+          !mission.review) {
+        const coordinator = mission.coordinator, callID = mission.callID;
+        const idle = await continuationNativeIdle(coordinator, "dog-operator", root);
+        if (!idle) {
+          mission = await missions.update(root, item => {
+            if (item.id !== mission.id || item.coordinator !== coordinator || item.callID !== callID ||
+                item.dispatchOpen || item.runID !== null || item.phase !== "submitted" ||
+                item.submission?.status !== "blocked" || item.authorContinuation || item.review) {
+              throw new Error("mission-direct-controller-release-stale");
+            }
+            (item.coordinatorReleases ??= []).push({ coordinator, callID, at: new Date().toISOString() });
+            item.coordinator = null;
+            item.callID = null;
+          });
+        }
+      }
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) {
         // A submitted Coordinator still owns corrective planning. Return its actual
         // continuation instead of referring to a Task that the rejection never supplied.
@@ -4216,7 +4239,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, await missions.required(root),
-              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
+              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities, args.executor);
             // The selection above survives a refused plan. If planning changed the run,
             // also retain this explicit selection in that run's context; it is still
             // only a model observation, never proof of independence or execution.

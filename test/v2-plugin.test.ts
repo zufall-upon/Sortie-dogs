@@ -927,7 +927,9 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery } of [
+  ...["ended", "live", "unknown", "background"].map(operatorRecovery =>
+    ({ legacy: false, commit: false, cancel: false, operatorRecovery })),
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
@@ -952,7 +954,8 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
+test(operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${operatorRecovery}` :
+  nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
   nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
   nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
   nestedBackground ? "V2 Coordinator reconciles an implicitly background Worker with a failed check" :
@@ -1034,10 +1037,11 @@ test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackgroun
       } }) } } : {}),
       session: { ...fixture.context.session,
         active: async () => ({}),
+        inbox: { list: async () => [] },
         interrupt: async () => ({ interrupted: false }),
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
           .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
-        get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
+        get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory }, model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
         ...(nestedBackground ? { log: async function* ({ sessionID }: { sessionID: string }) {
@@ -1091,6 +1095,57 @@ const deadline = Date.now() + 15000;
 while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
 process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
+    if (operatorRecovery) {
+      delete agents.first; delete agents.second; delete agents.reviewer; delete agents.unrelated;
+      await prompt("root", "Continue the work in this same root session");
+      const mission = await tool("root", "start_mission", { requirements: ["The root author implements and validates the result"] });
+      const dispatch = await before("root", "subagent", nativeTask(mission.task));
+      await prompt("coordinator", String(dispatch.input.prompt));
+      const declaration = { title: "Root implementation", objective: "Write and validate the result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs ready"] };
+      const rejected = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      assert.equal(rejected.status, "mission-coordinator-active");
+      assert.equal(rejected.task, undefined, "the active Coordinator is never duplicated");
+      await tool("coordinator", "submit_mission", { status: "blocked", summary: "Only the root author may implement" });
+      if (operatorRecovery !== "live") {
+        if (operatorRecovery !== "unknown") agents.coordinator!.outcome = "succeeded";
+        await after(dispatch, "Root author must continue", { sessionID: "coordinator" });
+      }
+      if (operatorRecovery === "background") history.coordinator!.push({
+        id: `msg_${++counter}`, type: "assistant", agent: "dogs-coordinator", finish: "tool-calls",
+        time: { created: Date.now(), completed: Date.now() }, content: [{ type: "tool", name: "shell",
+          id: "still-running", state: { status: "completed", input: { command: "background work" },
+            content: [], metadata: { status: "running" } } }],
+      });
+      await assert.rejects(tool("root", "start_direct_unit"), /operator-run-missing/u);
+      const planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      if (operatorRecovery !== "ended") {
+        assert.notEqual(planned.status, "direct-unit-running");
+        assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
+        return;
+      }
+      assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+      const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(current.id, mission.mission_id);
+      assert.equal(current.coordinatorReleases?.[0]?.coordinator, "coordinator");
+      assert.equal(current.coordinator, null);
+      const repeated = await tool("root", "start_direct_unit");
+      assert.equal(repeated.run_id, planned.run_id, "retry binds the same direct admission");
+      assert.equal(repeated.unit_id, planned.unit_id);
+      const write = await before("root", "write", { path: "result.txt", content: "ready\n" });
+      await writeFile(join(directory, "result.txt"), "ready\n"); await after(write, "written");
+      const check = await before("root", "shell", { command: "node check.mjs ready", workdir: directory });
+      const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+      await after(check, checked.stdout, { exit: 0 });
+      const finished = await tool("root", "finish_direct_unit");
+      assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+      const status = await tool("root", "operator_status", { view: "progress" });
+      assert.equal(status.mission_id, mission.mission_id);
+      assert.equal(status.budget.consumed_units, 1);
+      assert.equal(status.budget.reserved_units, 0);
+      assert.notEqual(status.mission_phase, "completed");
+      return;
+    }
     if (fabric) {
       await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(`${process.argv[2]}.txt`, "utf8") !== "ready\\n") process.exit(1); console.log("PASS");\n');
       await exec("git", ["add", "check.mjs"], { cwd: directory });

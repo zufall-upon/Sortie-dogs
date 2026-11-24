@@ -245,6 +245,8 @@ export interface OperatorMission {
   requirementsReplaced?: boolean;
   phase: "open" | "running" | "submitted" | "completed" | "cancelled";
   coordinator: string | null;
+  /** Ended Coordinator dispatches relinquished to the root for a new direct admission. */
+  coordinatorReleases?: { coordinator: string; callID: string; at: string }[];
   /** A new Mission's requested author is not an inherited grant, review, or validation. */
   authorContinuation?: {
     requestID: string; quote: string; directory: string; reviewerQuote?: string; reviewerRequestID?: string;
