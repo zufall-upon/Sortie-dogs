@@ -309,6 +309,11 @@ test("lost failed inline Reviewer callback reconciles before same-Mission direct
       assert.deepEqual((await f.ledger()).state.outstanding_reservations, held.state.outstanding_reservations);
     };
     await assertHeld();
+    // The same interrupted correction must remain recoverable when its already
+    // settled native lineage is larger than the former 256-session cutoff.
+    for (let i = 0; i < 260; i++) f.agents[`settled-${i}`] = {
+      agent: "build", parentID: "author", outcome: "succeeded",
+    };
     // A native shell completion notification proves the independent job ended;
     // neither the child's failed outcome nor its idle session proves that.
     f.history.generator!.push({ id: "generator-job-ended", type: "synthetic", description: "node delayed-write.mjs",

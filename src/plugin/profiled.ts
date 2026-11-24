@@ -2816,30 +2816,41 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
     async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string,
       finishing?: { callID?: string; tool: string }): Promise<string | undefined> {
       const ids = new Set<string>();
-      const visit = async (child: string, owner: string, expected?: CanonicalAgentRole): Promise<string | undefined> => {
-        if (ids.has(child) || ids.size >= 256) return "native_lineage_duplicate_or_too_large";
-        ids.add(child);
-        const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-        if (!record(info) || info.id !== child || info.parentID !== owner ||
-            typeof info.agent !== "string" || expected && canonicalAgent(profile, info.agent) !== expected) return "native_lineage_unavailable_or_mismatch";
-        const location = record(info.location) ? info.location.directory : info.directory;
-        if (typeof location !== "string" || !isAbsolute(location) ||
-            await realpath(location).catch(() => undefined) !== await realpath(input.directory).catch(() => undefined)) return "native_location_unavailable_or_mismatch";
-        // A live author's explicit finish is not its native terminal. Only that
-        // root execution/current call is exempt; all delegated writers must end.
-        if (!(finishing && child === id) &&
-            !["succeeded", "failed", "interrupted"].includes(String(info.outcome))) return "native_terminal_unknown";
-        const inbox = payload(await session("inbox", { path: { id: child } }).catch(() => undefined));
-        if (!Array.isArray(inbox)) return "native_inbox_unavailable";
-        if (inbox.length) return "native_inbox_not_empty";
-        const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-        if (!Array.isArray(children)) return "native_children_unavailable";
-        const terminalChildren = new Set<string>();
-        for (const entry of children) {
+      // Keep child-first proofs without recursion or a size cutoff; ids rejects
+      // both cycles and duplicate descendants.
+      const stack: Array<{ child: string; owner: string; expected?: CanonicalAgentRole; children?: unknown[];
+        next: number; terminalChildren: Set<string> }> = [
+        { child: id, owner: parent, expected: role, next: 0, terminalChildren: new Set() },
+      ];
+      while (stack.length) {
+        const frame = stack[stack.length - 1]!;
+        const { child, owner, expected, terminalChildren } = frame;
+        if (!frame.children) {
+          if (ids.has(child)) return "native_lineage_duplicate_or_too_large"; // Preserve the existing public reason.
+          ids.add(child);
+          const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+          if (!record(info) || info.id !== child || info.parentID !== owner ||
+              typeof info.agent !== "string" || expected && canonicalAgent(profile, info.agent) !== expected) return "native_lineage_unavailable_or_mismatch";
+          const location = record(info.location) ? info.location.directory : info.directory;
+          if (typeof location !== "string" || !isAbsolute(location) ||
+              await realpath(location).catch(() => undefined) !== await realpath(input.directory).catch(() => undefined)) return "native_location_unavailable_or_mismatch";
+          // A live author's explicit finish is not its native terminal. Only that
+          // root execution/current call is exempt; all delegated writers must end.
+          if (!(finishing && child === id) &&
+              !["succeeded", "failed", "interrupted"].includes(String(info.outcome))) return "native_terminal_unknown";
+          const inbox = payload(await session("inbox", { path: { id: child } }).catch(() => undefined));
+          if (!Array.isArray(inbox)) return "native_inbox_unavailable";
+          if (inbox.length) return "native_inbox_not_empty";
+          const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+          if (!Array.isArray(children)) return "native_children_unavailable";
+          frame.children = children;
+        }
+        if (frame.next < frame.children.length) {
+          const entry = frame.children[frame.next++]!;
           if (!record(entry) || typeof entry.id !== "string" || entry.parentID !== child) return "native_lineage_unavailable_or_mismatch";
-          const reason = await visit(entry.id, child);
-          if (reason) return reason;
           terminalChildren.add(entry.id);
+          stack.push({ child: entry.id, owner: child, next: 0, terminalChildren: new Set() });
+          continue;
         }
         let history: readonly Record<string, unknown>[];
         try { history = await reviewMessages(child, undefined, true); }
@@ -2863,14 +2874,14 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? taskChildSessionID({ metadata: part.state.metadata, output: part.state.output }) : undefined;
           if (!taskChild || !terminalChildren.has(taskChild)) return "native_tools_active_or_unproven";
         }
-        return undefined;
-      };
-      const reason = await visit(id, parent, role);
-      if (reason) return reason;
+        stack.pop();
+      }
       const active = payload(await session("active", {}).catch(() => undefined));
       if (!record(active) || !Object.values(active).every(value => record(value) &&
           ["running", "retry"].includes(String(value.type)))) return "native_activity_unavailable";
-      if ([...ids].some(child => !(finishing && child === id) && Object.hasOwn(active, child))) return "native_session_active";
+      for (const child of ids) {
+        if (!(finishing && child === id) && Object.hasOwn(active, child)) return "native_session_active";
+      }
       return undefined;
     }
     async function backgroundCorrectionMatch(parent: string, callID: string, child: string, promptID: string, generation: number): Promise<boolean | undefined> {

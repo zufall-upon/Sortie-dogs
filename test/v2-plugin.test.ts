@@ -3051,7 +3051,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
-  ...["ended", "interrupted", "unknown", "background"].map(mode =>
+  ...["ended", "interrupted", "unknown", "background", "large"].map(mode =>
     ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-run-${mode}`] as const),
   ...["ended", "unknown", "background"].map(mode =>
     ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-worker-run-${mode}`] as const),
@@ -3077,17 +3077,25 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   if (previousWorkerRun) agents.worker = { agent: "dog-worker-v010", parentID: "author" };
   const firstWriter = previousWorkerRun ? "worker" : "author";
   let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
+  let cyclicChild: string | undefined, deepestIdleVisited = false;
   const startFixture = async () => {
     fixture = contextFixture();
     cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
     session: { ...fixture.context.session, active: async () => active,
       inbox: { list: async ({ sessionID }) => inbox[sessionID] ?? [] },
       list: async ({ parentID }) => {
-        const children = Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        const idleParent = /^idle-(\d+)$/u.exec(parentID ?? "");
+        const nextIdle = idleParent ? `idle-${Number(idleParent[1]) + 1}` : undefined;
+        const children = idleParent ? nextIdle && agents[nextIdle] ? [{ id: nextIdle, ...agents[nextIdle] }] : []
+          : Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        if (cyclicChild && parentID === cyclicChild) children.push({ id: "author", agent: "dogs-coordinator", parentID });
         return { data: duplicateChildren && parentID === "author" ? [...children, ...children] : children, cursor: {} };
       },
-      get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory },
-        model: { providerID: "openai", id: "fixture" } }),
+      get: async ({ sessionID }) => {
+        if (sessionID === "idle-11999") deepestIdleVisited = true;
+        return { id: sessionID, ...agents[sessionID], location: { directory },
+          model: { providerID: "openai", id: "fixture" } };
+      },
       context: async ({ sessionID }) => history[sessionID] ?? [] },
     message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
       : history[sessionID] ?? [], cursor: {} }) } });
@@ -3227,6 +3235,48 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs second"] };
       const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
       const priorBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      if (mode === "large") {
+        // A long, otherwise idle lineage is a valid completed run, not an active writer.
+        for (let i = 0; i < 300; i++) agents[`idle-${i}`] = {
+          agent: "build", parentID: i ? `idle-${i - 1}` : "author", outcome: "succeeded",
+        };
+        const leaf = "idle-299";
+        const ready = await tool("root", "operator_status");
+        assert.match(ready.next_action, /plan_units with executor=self/u);
+        const assertHeld = async (reason: string) => {
+          const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+          assert.equal(held.status, "mission-coordinator-active");
+          assert.equal(held.reason, `previous_writer_${reason}`);
+          assert.equal(held.task, undefined);
+          assert.equal((await missionRuntime.required("root")).id, next.mission_id);
+          assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, oldRun.runID);
+          assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+        };
+        delete agents[leaf]!.outcome;
+        await assertHeld("native_terminal_unknown");
+        agents[leaf]!.outcome = "succeeded";
+        active = { [leaf]: { type: "running" } };
+        await assertHeld("native_session_active");
+        active = {};
+        inbox[leaf] = [{ id: "queued" }];
+        await assertHeld("native_inbox_not_empty");
+        delete inbox[leaf];
+        history[leaf] = [{ id: "late-shell", type: "assistant", agent: "build", finish: "tool-calls",
+          content: [{ type: "tool", name: "shell", id: "late-shell-call",
+            state: { status: "completed", input: { command: "long-running", background: true }, metadata: { status: "running" } } }] }];
+        await assertHeld("native_tools_active_or_unproven");
+        delete history[leaf];
+        cyclicChild = leaf;
+        await assertHeld("native_lineage_duplicate_or_too_large");
+        cyclicChild = undefined;
+        duplicateChildren = true;
+        await assertHeld("native_lineage_duplicate_or_too_large");
+        duplicateChildren = false;
+        // The final recovery also crosses ordinary JavaScript recursion depths.
+        for (let i = 300; i < 12_000; i++) agents[`idle-${i}`] = {
+          agent: "build", parentID: `idle-${i - 1}`, outcome: "succeeded",
+        };
+      }
       if (mode === "unknown" || mode === "background") {
         const status = await tool("root", "operator_status");
         assert.equal(status.task, undefined);
@@ -3271,6 +3321,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       }
       const planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
       assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+      if (mode === "large") assert.equal(deepestIdleVisited, true, "recovery must inspect the deepest settled descendant");
       assert.notEqual(planned.run_id, oldRun.runID);
       const current = await missionRuntime.required("root");
       assert.equal(current.id, next.mission_id);
