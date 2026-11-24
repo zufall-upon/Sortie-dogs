@@ -267,6 +267,20 @@ test("lost failed inline Reviewer callback reconciles before same-Mission direct
     const started = await initial(f, { keepReviewOpen: true });
     await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
     const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    // Preserve a client-owned native opt-in instead of assuming the shipped
+    // Reviewer's default subagent denial makes descendants impossible.
+    f.agents.author!.permissions = [{ action: "subagent", resource: "build", effect: "allow" }];
+    assert.equal(await f.permission("author", "subagent", "build"), "allow");
+    const childTask = await f.before("author", "subagent",
+      { agent: "build", description: "Generate result", prompt: "Generate result.txt" });
+    f.agents.generator = { agent: "build", parentID: "author", outcome: "failed" };
+    const launchTime = Date.now();
+    f.history.generator = [{ id: "generator-background", type: "assistant", agent: "build", finish: "tool-calls",
+      time: { created: launchTime, completed: launchTime }, content: [{ type: "tool", name: "shell", id: "generator-shell",
+        state: { status: "error", input: { command: "node delayed-write.mjs", background: true },
+          metadata: { shellID: "generator-job", status: "running" } },
+        time: { created: launchTime, ran: launchTime, completed: launchTime } }] }];
+    await f.after(childTask, "Native generator failed", { sessionID: "generator", status: "failed" }, "error");
     f.terminal("author", "Native correction failed", true);
     const now = Date.now();
     f.history.root!.push({ id: "lost-callback", type: "assistant", agent: f.agents.root!.agent, finish: "tool-calls",
@@ -287,6 +301,24 @@ test("lost failed inline Reviewer callback reconciles before same-Mission direct
     assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
     f.agents.author!.parentID = "root";
     await f.start();
+    const held = await f.ledger();
+    const assertHeld = async () => {
+      assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+      assert.equal((await f.run()).runID, old.runID);
+      assert.equal((await f.run()).units[0]!.status, "running");
+      assert.deepEqual((await f.ledger()).state.outstanding_reservations, held.state.outstanding_reservations);
+    };
+    await assertHeld();
+    // A native shell completion notification proves the independent job ended;
+    // neither the child's failed outcome nor its idle session proves that.
+    f.history.generator!.push({ id: "generator-job-ended", type: "synthetic", description: "node delayed-write.mjs",
+      metadata: { source: "shell", shellID: "generator-job", state: "completed" }, time: { created: Date.now() } });
+    f.inbox.author = [{ id: "later-author-prompt", payload: { text: "Continue work" } }];
+    await assertHeld();
+    delete f.inbox.author;
+    f.inbox.generator = [{ id: "later-generator-prompt", payload: { text: "Continue generation" } }];
+    await assertHeld();
+    delete f.inbox.generator;
     const resumed = await f.tool("root", "plan_units", declaration);
     assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
     assert.notEqual(resumed.run_id, old.runID);

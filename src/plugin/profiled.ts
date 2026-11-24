@@ -4006,27 +4006,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           message.info.sessionID === owner && Array.isArray(message.parts) ? message.parts : [])
           .filter(part => record(part) && part.type === "tool" && part.tool === "task" && part.callID === review.callID) ?? [];
         const state = calls.length === 1 && record(calls[0]) && record(calls[0].state) ? calls[0].state : undefined;
-        const descendants = new Set<string>();
-        const descendantsTerminal = async (parent: string): Promise<boolean> => {
-          const children = payload(await session("children", { path: { id: parent }, query: { directory: input.directory } }).catch(() => undefined));
-          if (!Array.isArray(children)) return false;
-          for (const child of children) {
-            if (!record(child) || typeof child.id !== "string" || child.parentID !== parent ||
-                descendants.has(child.id) || child.id === inline.author ||
-                !["succeeded", "completed", "failed", "interrupted", "cancelled"].includes(String(child.outcome)) ||
-                !await nativeChildInactive(child.id)) return false;
-            descendants.add(child.id);
-            if (!await descendantsTerminal(child.id)) return false;
-          }
-          return true;
-        };
         if (record(native) && native.id === inline.author && native.parentID === owner &&
             canonicalAgent(profile, String(native.agent)) === "dog-reviewer" && native.outcome === "failed" &&
             record(execution) && execution.active === false && execution.queued === false &&
             state?.status === "error" && record(state.input) &&
             missionTaskFingerprint(state.input) === missionTaskFingerprint({ ...review.task }) &&
             (taskChildSessionID(state) === undefined || taskChildSessionID(state) === inline.author) &&
-            await descendantsTerminal(inline.author)) {
+            // Session failure/idle does not end independent shell jobs or queued
+            // prompts. Reuse the existing full native writer-tree proof.
+            !await continuationNativeIdle(inline.author, "dog-reviewer", owner)) {
           try {
             await assertDirectPlanningQuiescent(inline.author);
             await control!.failDirectUnit(root, inline.author);
