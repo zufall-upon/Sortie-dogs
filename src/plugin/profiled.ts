@@ -3980,6 +3980,63 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       await control!.currentBudget(root);
       mission = actor === root ? await reconcileMissionDispatch(root) ?? await missions.required(root) : await missions.required(root);
       let previous = await operators.read(root);
+      // Recover only the exact failed inline Review invocation. The synthetic
+      // direct call is not itself a native Task, so its Review parent supplies
+      // the terminal; an active, queued, ambiguous or unrelated writer stays held.
+      const review = mission.review;
+      const inline = previous && mission.runID === previous.runID && review?.callID && review.promptID
+        ? mission.corrections?.find(item => item.runID === previous!.runID && item.status === "running" &&
+          item.inlineReview?.callID === review.callID && item.inlineReview?.promptID === review.promptID &&
+          item.inlineReview?.reviewIdentity === item.reviewIdentity) : undefined;
+      const unit = inline && previous?.units.find(item => item.status === "running" &&
+        item.directExecution?.actor === inline.author && item.reviewerCorrection?.author === inline.author &&
+        item.reviewerCorrection.promptID === review?.promptID && item.reviewerCorrection.reviewIdentity === inline.reviewIdentity);
+      const taskID = unit && /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+      const attempts = inline && unit && mission.attempts?.filter(item => item.runID === previous?.runID &&
+        item.unitID === unit.unit.id && item.taskID === taskID && item.callID === unit.callID &&
+        item.childSessionID === inline.author && item.kind === "direct_execution" && item.status === "dispatched");
+      if (inline && unit && unit.callID && unit.childSessionID === inline.author && taskID && attempts?.length === 1 &&
+          review?.task && review.child === inline.author) {
+        const owner = previous!.operatorSessionID ?? root;
+        const native = payload(await session("get", { path: { id: inline.author }, query: { directory: input.directory } }).catch(() => undefined));
+        const execution = payload(await session("reviewExecution", { path: { id: inline.author }, promptID: review.promptID,
+          prompt: review.task.prompt, admittedAt: review.admittedAt, parent: owner }).catch(() => undefined));
+        const history = await messages(owner).catch(() => undefined);
+        const calls = history?.flatMap(message => record(message.info) && message.info.role === "assistant" &&
+          message.info.sessionID === owner && Array.isArray(message.parts) ? message.parts : [])
+          .filter(part => record(part) && part.type === "tool" && part.tool === "task" && part.callID === review.callID) ?? [];
+        const state = calls.length === 1 && record(calls[0]) && record(calls[0].state) ? calls[0].state : undefined;
+        const descendants = new Set<string>();
+        const descendantsTerminal = async (parent: string): Promise<boolean> => {
+          const children = payload(await session("children", { path: { id: parent }, query: { directory: input.directory } }).catch(() => undefined));
+          if (!Array.isArray(children)) return false;
+          for (const child of children) {
+            if (!record(child) || typeof child.id !== "string" || child.parentID !== parent ||
+                descendants.has(child.id) || child.id === inline.author ||
+                !["succeeded", "completed", "failed", "interrupted", "cancelled"].includes(String(child.outcome)) ||
+                !await nativeChildInactive(child.id)) return false;
+            descendants.add(child.id);
+            if (!await descendantsTerminal(child.id)) return false;
+          }
+          return true;
+        };
+        if (record(native) && native.id === inline.author && native.parentID === owner &&
+            canonicalAgent(profile, String(native.agent)) === "dog-reviewer" && native.outcome === "failed" &&
+            record(execution) && execution.active === false && execution.queued === false &&
+            state?.status === "error" && record(state.input) &&
+            missionTaskFingerprint(state.input) === missionTaskFingerprint({ ...review.task }) &&
+            (taskChildSessionID(state) === undefined || taskChildSessionID(state) === inline.author) &&
+            await descendantsTerminal(inline.author)) {
+          try {
+            await assertDirectPlanningQuiescent(inline.author);
+            await control!.failDirectUnit(root, inline.author);
+            mission = await missions.required(root);
+            previous = await operators.read(root);
+          } catch (error) {
+            if (!(error instanceof Error) || !error.message.startsWith("mission-replan-terminal-unreconciled:")) throw error;
+          }
+        }
+      }
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +

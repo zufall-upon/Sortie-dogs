@@ -1105,13 +1105,14 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
       if (directActivation === "verified") await writeFile(join(directory, "launch.mjs"),
         'import { appendFileSync } from "node:fs"; appendFileSync("result.txt", "ready\\n");\n');
       await prompt("root", "Run the requested operation once without replay");
-      const started = await tool("root", "start_mission", { kind: "operation", requirements: ["Run the operation once"] });
+      const started = await tool("root", "start_mission", { kind: "operation", requirements: ["Run the operation once"],
+        prohibited_write: ["forbidden.txt"] });
       const dispatch = await before("root", "subagent", nativeTask(started.task));
       await prompt("coordinator", String(dispatch.input.prompt));
       const command = "node launch.mjs";
       const declaration = { title: "Run once", objective: "Run the operation once",
         read: ["check.mjs", ...(directActivation === "verified" ? ["launch.mjs"] : [])],
-        write: ["result.txt"], validation: ["tar -xzf archive.tar.gz"] };
+        write: ["result.txt"], validation: ["tar -xzf archive.tar.gz", "node check.mjs ready > forbidden.txt"] };
       // The real host handoff checker refuses an unclassified artifact command.
       // No declared shell process is started by either failed call.
       await assert.rejects(tool("coordinator", "plan_units", { executor: "self", units: [declaration],
@@ -1177,6 +1178,15 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
           reason: "Correct the invalid validation recipe without replaying the refused operation" });
         assert.equal(corrected.status, "direct-unit-registration-corrected", JSON.stringify(corrected));
         assert.equal(corrected.run_id, run.runID);
+        const assertCurrentGate = async () => {
+          await assert.rejects(before("coordinator", "shell", { command: "node check.mjs ready > forbidden.txt", workdir: directory }),
+            /mission-explicit-write-prohibition/u, "a withdrawn recipe is subject to the ordinary write gate");
+          await assert.rejects(before("coordinator", "shell", { command: "printf forbidden > forbidden.txt", workdir: directory }),
+            /mission-explicit-write-prohibition/u, "ordinary diagnostics cannot write an explicitly prohibited path");
+          const diagnostic = await before("coordinator", "shell", { command: "printf diagnostic", workdir: directory });
+          await after(diagnostic, "diagnostic", { exit: 0, status: "completed" });
+        };
+        await assertCurrentGate();
         const correctedRun = await operators.required("root");
         assert.deepEqual(correctedRun.units[0]!.hashes, unit.hashes, "the admission's original controls remain pinned");
         assert.equal(correctedRun.units[0]!.callID, unit.callID);
@@ -1200,6 +1210,7 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
           reason: "Restore the valid result check" });
         assert.equal(restored.status, "direct-unit-registration-corrected");
         assert.equal(restored.run_id, run.runID);
+        await assertCurrentGate();
         await assert.rejects(before("coordinator", "shell", { command, workdir: directory, timeout: 120_000 }),
           /mission-operation-already-admitted/u);
         const check = await before("coordinator", "shell", { command: "node check.mjs ready", workdir: directory });

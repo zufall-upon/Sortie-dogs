@@ -261,6 +261,50 @@ test("an unfinished inline correction cannot borrow a native terminal and releas
   } finally { await f.dispose(); }
 });
 
+test("lost failed inline Reviewer callback reconciles before same-Mission direct replanning", async () => {
+  const f = await fixture({ activity: true });
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    f.terminal("author", "Native correction failed", true);
+    const now = Date.now();
+    f.history.root!.push({ id: "lost-callback", type: "assistant", agent: f.agents.root!.agent, finish: "tool-calls",
+      time: { created: now, completed: now }, content: [{ type: "tool", name: "subagent", id: started.dispatch.id,
+        state: { status: "error", input: started.dispatch.input, error: { message: "Native correction failed" },
+          metadata: { sessionID: "author" } }, time: { created: now, ran: now, completed: now } }] });
+    const declaration = { executor: "self", reason: "Continue incomplete work after the native failure",
+      units: [{ title: "Finish output", objective: "Correct and validate the retained result", read: ["check.mjs"],
+        write: ["result.txt"], validation: ["node check.mjs"] }] };
+    f.active.author = { type: "running" };
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    delete f.active.author;
+    f.agents.author!.outcome = undefined;
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    f.agents.author!.outcome = "failed";
+    f.agents.other = { agent: "build", parentID: "root" };
+    f.agents.author!.parentID = "other";
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    f.agents.author!.parentID = "root";
+    await f.start();
+    const resumed = await f.tool("root", "plan_units", declaration);
+    assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
+    assert.notEqual(resumed.run_id, old.runID);
+    assert.equal((await f.missions.required("root")).id, missionID);
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 1);
+    const oldTaskID = /^task_id: (.+)$/mu.exec(old.units[0]!.task.prompt)![1];
+    assert((await f.ledger()).records.some(({ event }: any) => event.kind === "unit.settled" &&
+      event.unit_id === oldTaskID && event.disposition === "failed" && event.evidence.length === 0),
+    "the interrupted correction is settled as a failure, not a passing check");
+    await assert.rejects(f.edit("author", "old grant must not write"));
+    await f.edit("root", "ready recovered");
+    await f.shell("root", "git add -- result.txt && git commit -m recovered");
+    await f.shell("root", "node check.mjs");
+    assert.equal((await f.tool("root", "finish_direct_unit")).status, "awaiting-acceptance");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+  } finally { await f.dispose(); }
+});
+
 test("continuous Reviewer background Task survives cold reload before and after direct validation", async () => {
   const f = await fixture();
   try {

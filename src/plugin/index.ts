@@ -5987,7 +5987,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       handoffID: validation.value.id,
       manifestPath,
       projectRoot: inspectedProjectRoot,
-      validationCommands: new Set(manifest.validation.map(normalizeCommand)),
+      validationCommands: new Set(validationCommands.map(normalizeCommand)),
       acceptanceContinuity: continuity.ledger,
       acceptanceContinuityError: continuity.error,
     };
@@ -6237,6 +6237,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           scope: relativeScope,
         });
       };
+      const currentValidation: readonly string[] = inspectedEntry.directValidationKey === undefined
+        ? validation.value.validation : JSON.parse(inspectedEntry.directValidationKey);
       if (existingAuthorization !== undefined) {
         if (conflictsWithActiveAuthorization(
           existingAuthorization.writeScopes,
@@ -6268,6 +6270,11 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
               : deny("durable-scope-unavailable");
           }
         }
+        if (existingAuthorization.directValidationKey !== inspectedEntry.directValidationKey) {
+          existingAuthorization.gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation);
+          existingAuthorization.validationCommands = new Set(currentValidation.map(normalizeCommand));
+          existingAuthorization.directValidationKey = inspectedEntry.directValidationKey;
+        }
         existingAuthorization.expiresAt = now + ACTIVE_SESSION_CACHE.ttlMilliseconds;
         existingAuthorization.suspended = false;
         const activeState = activeSessions.get(sessionID);
@@ -6279,7 +6286,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           idempotent: true,
         });
       }
-      const gate = await createWriteGate(candidate, validation.value, input.directory);
+      const gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation);
       const readScopes = await canonicalManifestReadScopes(candidate, validation.value);
       const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value);
       const dispatchCallID = await input.runtimeBridge?.missionDispatchCall?.(inspectedEntry.rootSessionID, sessionID, handoffValidation.value.id);
@@ -6324,7 +6331,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           suspended: false,
           taskID: handoffValidation.value.id,
           dispatchCallID,
-          validationCommands: new Set(validation.value.validation.map(normalizeCommand)),
+          validationCommands: new Set(currentValidation.map(normalizeCommand)),
+          directValidationKey: inspectedEntry.directValidationKey,
           writeScopes,
         });
       } catch (error) {
@@ -6480,7 +6488,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
             }
           }
         };
-        const gate = await createWriteGate(project, manifest, input.directory);
+        const gate = await createWriteGate(project, manifest, input.directory,
+          authorization.directValidationKey === undefined ? undefined : JSON.parse(authorization.directValidationKey));
         const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
         const restore = async () => {
           if (oldScope) await old.lease!.replaceScope(oldScope);
@@ -9433,8 +9442,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
         if (!binding) throw new Error("mission-direct-grant-stale");
         const key = binding.directValidation === undefined ? undefined : JSON.stringify(binding.directValidation);
         if (existing.directValidationKey !== key) {
-          await inspectMissionBinding(actor, handoffPath, binding);
-          existing.directValidationKey = key;
+          const result = await activateMissionBinding(actor, handoffPath, binding);
+          if (result.status !== "bound") throw new Error(`mission-direct-activation:${String(result.reason)}`);
         }
         return;
       }

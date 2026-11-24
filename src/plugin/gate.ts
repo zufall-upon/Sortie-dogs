@@ -2103,16 +2103,18 @@ export async function createProjectPaths(rootCandidate: string): Promise<Project
   };
 }
 
-export async function createWriteGate(project: ProjectPaths, value: unknown, toolDirectory = project.root): Promise<WriteGate> {
+export async function createWriteGate(project: ProjectPaths, value: unknown, toolDirectory = project.root,
+  validationOverride?: readonly string[]): Promise<WriteGate> {
   const validated = validateOperationManifestSchema(value);
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
   // A build or test command may touch any path its toolchain owns, so it can never be classified by
   // path extraction. The manifest already declares the commands this candidate is allowed to run,
   // so an exact match against that declaration is the only accepted form.
-  const declaredValidation = new Set(manifest.validation.map(normalizeCommand));
+  const validationCommands = validationOverride ?? manifest.validation;
+  const declaredValidation = new Set(validationCommands.map(normalizeCommand));
   const declaredDirectories = new Set<string>();
-  for (const command of manifest.validation) {
+  for (const command of validationCommands) {
     let directories: readonly string[];
     try {
       directories = extractWritePaths("bash", { command }).createdDirectories ?? [];

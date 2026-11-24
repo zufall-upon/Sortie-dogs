@@ -51,7 +51,7 @@ after(async () => {
 });
 
 export async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number; compactedHistory?: boolean;
-  nativeReplay?: boolean } = {}) {
+  nativeReplay?: boolean; activity?: boolean } = {}) {
   const seed = await (repositorySeed ??= createRepositorySeed());
   const directory = await mkdtemp(resolve("_testenv/reviewer-correction-"));
   try {
@@ -65,6 +65,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     author: { agent: "dog-reviewer-v010", parentID: "root" }, final: { agent: "dog-reviewer-v010", parentID: "root" } };
   const history: Record<string, ObjectValue[]> = {}, storage = new Map<string, unknown>(), rules: ObjectValue[] = [], switches: ObjectValue[] = [];
   const globalRules: Rule[] = [];
+  const active: Record<string, { type: "running" | "retry" }> = {};
   const agentRules: Record<string, Rule[]> = {};
   let registry: Record<string, ObjectValue>;
   let tools: ObjectValue[], toolHooks: Map<string, Function>, sessionHooks: Map<string, Function>, permissionHook: Function, hooks: OpenCodeHooks;
@@ -128,7 +129,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
       tool: { transform: async callback => { callback({ add: tool => tools.push(tool),
         update: (name, update) => { const tool = tools.find(tool => tool.name === name); if (tool) update(tool as never); } }); return { dispose() {} }; },
         hook: async (name, callback) => { toolHooks.set(name, callback); return { dispose() {} }; } },
-      session: { get: async ({ sessionID }) => {
+      session: { ...(options.activity ? { active: async () => active, inbox: { list: async () => [] } } : {}), get: async ({ sessionID }) => {
         if (!agents[sessionID]) throw { _tag: "SessionNotFoundError", sessionID };
         if (sessionID === "author" && agents.author!.outcome === "interrupted" && projection.failRestorationLookup) {
           throw new Error("native-session-lookup-transient");
@@ -263,7 +264,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     throw new Error("fixture-goal-ledger-missing");
   };
   await start();
-  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, registry: () => registry,
+  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, active, registry: () => registry,
     replayAgents: () => replayAgents(), pluginDisabled: () => pluginDisabled, toolNames: () => tools.map(tool => tool.name),
     start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
     launch: (event: ObjectValue) => tools.find(tool => tool.name === "subagent")!.execute(event.input, { id: event.id, sessionID: event.sessionID }),
