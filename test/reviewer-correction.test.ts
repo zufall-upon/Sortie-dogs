@@ -337,6 +337,67 @@ test("lost failed inline Reviewer callback reconciles before same-Mission direct
   } finally { await f.dispose(); }
 });
 
+for (const mode of ["root", "nested", "legacy-nested"] as const) test(`failed background inline correction reconciles its exact native idle and replans: ${mode}`, async () => {
+  const nested = mode !== "root";
+  const f = await fixture({ activity: true, syncedLog: true, legacyReviewLaunch: mode === "legacy-nested" });
+  try {
+    const owner = nested ? "coordinator" : "root";
+    const started = await initial(f, { keepReviewOpen: true, backgroundReview: !nested, nested });
+    await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    assert.match(f.agents.author!.agent, /^dog-reviewer-correction-v010-/);
+    const busy = Date.now();
+    f.terminal("author", "Native correction failed", true);
+    const idle = Date.now();
+    f.agents.author!.time = { busy, idle };
+    f.history.author!.push({ id: "failed-idle", type: "idle", outcome: "failed", time: { created: idle } });
+    await f.start();
+    const declaration = { executor: "self", reason: "Continue after the exact failed native Review",
+      units: [{ title: "Finish output", objective: "Correct and validate the retained result", read: ["check.mjs"],
+        write: ["result.txt"], validation: ["node check.mjs"] }] };
+    const held = (await f.ledger()).state.outstanding_reservations;
+    const assertHeld = async () => {
+      const result = await f.tool(owner, "plan_units", declaration);
+      assert.match(result.status, /mission-replan-terminal-unreconciled/);
+      assert.equal((await f.run()).runID, old.runID);
+      assert.deepEqual((await f.ledger()).state.outstanding_reservations, held);
+    };
+    f.active.author = { type: "running" };
+    await assertHeld();
+    delete f.active.author;
+    const alias = f.agents.author!.agent;
+    f.agents.author!.agent = "dog-reviewer-correction-v010-0000000000000000";
+    await assertHeld();
+    f.agents.author!.agent = alias;
+    f.inbox.author = [{ id: "queued", payload: { text: "Continue work" } }];
+    await assertHeld();
+    delete f.inbox.author;
+    const terminalIdle = f.history.author!.pop()!;
+    await assertHeld();
+    f.history.author!.push(terminalIdle);
+    f.history.author!.push({ id: "later-turn", type: "user", text: "A newer turn", time: { created: idle + 1 } },
+      { id: "later-idle", type: "idle", outcome: "failed", time: { created: idle + 2 } });
+    f.agents.author!.time = { busy: idle + 1, idle: idle + 2 };
+    await assertHeld();
+    f.history.author!.splice(-2);
+    f.agents.author!.time = { busy, idle };
+    const resumed = await f.tool(owner, "plan_units", declaration);
+    assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
+    assert.notEqual(resumed.run_id, old.runID);
+    assert.equal((await f.missions.required("root")).id, missionID);
+    const oldTaskID = /^task_id: (.+)$/mu.exec(old.units[0]!.task.prompt)![1];
+    assert((await f.ledger()).records.some(({ event }: any) => event.kind === "unit.settled" &&
+      event.unit_id === oldTaskID && event.disposition === "failed" && event.evidence.length === 0));
+    await assert.rejects(f.edit("author", "old grant must not write"));
+    await f.edit(owner, "ready recovered");
+    await f.shell(owner, "git add -- result.txt && git commit -m recovered-background");
+    await f.shell(owner, "node check.mjs");
+    assert.equal((await f.tool(owner, "finish_direct_unit")).status, "awaiting-acceptance");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+  } finally { await f.dispose(); }
+});
+
 test("continuous Reviewer background Task survives cold reload before and after direct validation", async () => {
   const f = await fixture();
   try {

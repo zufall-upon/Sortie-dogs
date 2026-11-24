@@ -55,7 +55,8 @@ export class NativeBackgroundLifecycle {
   constructor(private readonly context: OpenCodeV2Context,
     private readonly settle: (dispatch: NativeBackgroundDispatch, text: string) => Promise<string | void>,
     private readonly owner?: (callID: string, restore?: ObjectValue) => ObjectValue | undefined,
-    private readonly recoverResult?: (parent: string, callID: string, child: string, promptID?: string) => Promise<string | undefined>) {}
+    private readonly recoverResult?: (parent: string, callID: string, child: string, promptID?: string) => Promise<string | undefined>,
+    private readonly correctionAlias?: (dispatch: NativeBackgroundDispatch, agent: unknown) => Promise<boolean | undefined>) {}
   private async serial<T>(parent: string, operation: () => Promise<T>): Promise<T> {
     const next = (this.operations.get(parent) ?? Promise.resolve()).catch(() => undefined).then(operation);
     this.operations.set(parent, next);
@@ -280,7 +281,9 @@ export class NativeBackgroundLifecycle {
         // Synthetic input can resume the same child without another user prompt.
         // An intervening idle ends this prompt's turn; a later idle is not its terminal.
         const laterTurn = fresh.slice(0, -1).some(item => item.type === "idle");
-        if (object(info) && info.id === dispatch.child && info.parentID === parent && info.agent === dispatch.agent &&
+        const exactAgent = object(info) && (info.agent === dispatch.agent ||
+          await this.correctionAlias?.(dispatch, info.agent) === true);
+        if (object(info) && info.id === dispatch.child && info.parentID === parent && exactAgent &&
             (dispatch.input.sessionID === undefined || dispatch.input.sessionID === dispatch.child) &&
             prompt?.type === "user" && typeof promptTime === "number" &&
             object(idle) && idle.type === "idle" && ["succeeded", "failed", "interrupted"].includes(String(idle.outcome)) &&
@@ -302,6 +305,17 @@ export class NativeBackgroundLifecycle {
         if (state === "succeeded" || state === "failed" || state === "interrupted") dispatch.terminal = state;
       }
       if (!dispatch.terminal) continue;
+      // A persisted execution event is not proof that an inline correction's
+      // delegated shell jobs and queued prompts have stopped. The same exact
+      // correction ownership and writer-tree check applies to log terminals.
+      if (dispatch.terminal === "failed" && dispatch.child && dispatch.agent === "dog-reviewer-v010") {
+        const current = await this.context.session.get({ sessionID: dispatch.child }).catch(() => undefined);
+        if (this.correctionAlias && (!object(current) ||
+            await this.correctionAlias(dispatch, current.agent) === false)) {
+          delete dispatch.terminal;
+          continue;
+        }
+      }
       // Retain the terminal observation if accounting throws; a later context/status boundary retries it.
       await this.write(parent, dispatches);
       const text = dispatch.foregroundOutput ??

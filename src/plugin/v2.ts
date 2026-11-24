@@ -327,9 +327,32 @@ function legacyClient(context: OpenCodeV2Context): JsonObject {
           }
         }
       }
+      const nativeHistory = await context.session.context({ sessionID: id }).catch(() => undefined);
+      const nativeInfo = await context.session.get({ sessionID: id }).catch(() => undefined);
+      const history = Array.isArray(nativeHistory) ? nativeHistory : undefined;
+      const promptIndex = history?.findIndex(item => record(item) && item.id === request.promptID) ?? -1;
+      const prompt = promptIndex >= 0 ? history![promptIndex] : undefined;
+      const fresh = promptIndex >= 0 ? history!.slice(promptIndex + 1) : [];
+      const idle = fresh.at(-1);
+      const infoTime = record(nativeInfo) && record(nativeInfo.time) ? nativeInfo.time : undefined;
+      const promptTime = record(prompt) && record(prompt.time) ? prompt.time.created : undefined;
+      const idleTime = record(idle) && record(idle.time) ? idle.time.created : undefined;
+      const exactIdle = record(prompt) && prompt.type === "user" && typeof promptTime === "number" &&
+        record(idle) && idle.type === "idle" && ["succeeded", "failed", "interrupted"].includes(String(idle.outcome)) &&
+        record(nativeInfo) && nativeInfo.id === id && nativeInfo.outcome === idle.outcome &&
+        typeof idleTime === "number" && idleTime >= promptTime && infoTime?.idle === idleTime &&
+        typeof infoTime.busy === "number" && infoTime.busy >= Number(request.admittedAt) &&
+        infoTime.busy <= idleTime && !fresh.some(item => record(item) && item.type === "user") &&
+        !fresh.slice(0, -1).some(item => record(item) && item.type === "idle");
+      const correction = record(nativeInfo) && nativeInfo.agent === correctionAgentID(id)
+        ? await context.storage?.get(`${correctionStoragePrefix}${id}`).catch(() => undefined) : undefined;
+      const correctionGeneration = record(nativeInfo) && nativeInfo.agent === correctionAgentID(id) &&
+        record(correction) && correction.agent === "dog-reviewer-v010" && typeof correction.generation === "number"
+        ? correction.generation : undefined;
       return { data: { ...(record(activity) ? { active: Object.hasOwn(activity, id),
         parentActive: typeof request.parent === "string" && Object.hasOwn(activity, request.parent) } : {}), queued,
-        ...(terminal ? { terminal } : {}) } };
+        ...(terminal ? { terminal } : {}), ...(exactIdle ? { exactIdle: true } : {}),
+        ...(correctionGeneration === undefined ? {} : { correctionGeneration }) } };
     },
     message: async (request: unknown) => {
       const id = sessionID(request), wanted = messageID(request);
@@ -832,15 +855,15 @@ async function registerV2Hooks(context: OpenCodeV2Context, hooks: OpenCodeHooks,
       const requestedBackground = event.input.background === true;
       const owner = hooks.backgroundOwner?.(String(event.id));
       try {
-        const nestedWorker = ["dog-worker-v010", "dog-luna-worker-v010"].includes(String(event.input.agent));
-        const info = requestedBackground || (owner && nestedWorker && context.storage)
+        const nestedManaged = ["dog-worker-v010", "dog-luna-worker-v010", "dog-reviewer-v010"].includes(String(event.input.agent));
+        const info = requestedBackground || (owner && nestedManaged && context.storage)
           ? await context.session.get({ sessionID: String(event.sessionID) }) : undefined;
         const nested = record(info) && typeof info.parentID === "string";
         if (requestedBackground && nested) delete event.input.background;
         // Native V2 may return a running Job even when the caller did not request
-        // background execution. Capture a nested Worker's admitted owner before
+        // background execution. Capture a nested Worker's or Reviewer's admitted owner before
         // launch; an actual foreground result still settles normally.
-        if ((requestedBackground && !nested) || (nested && nestedWorker && owner && context.storage)) {
+        if ((requestedBackground && !nested) || (nested && nestedManaged && owner && context.storage)) {
           await background.admit(String(event.sessionID), String(event.id), event.input, owner);
         }
       } catch (error) {
@@ -1070,7 +1093,18 @@ export function createSortieDogsV2Plugin(legacyFactory: OpenCodePlugin = SortieD
           } catch { /* Ordinary native outputs are not necessarily JSON. */ }
           return output.output;
         }, (callID, restore) => hooks.backgroundOwner?.(callID, restore),
-        (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined));
+        (parent, callID, child, promptID) => hooks.backgroundResult?.(parent, callID, child, promptID) ?? Promise.resolve(undefined),
+        async (dispatch, agent) => {
+          if (dispatch.agent !== "dog-reviewer-v010" || !dispatch.child || !dispatch.promptID) return undefined;
+          const scope = await hooks.reviewerCorrectionScope?.(dispatch.child);
+          if (!scope) return agent === dispatch.agent ? undefined : false;
+          if (agent !== correctionAgentID(dispatch.child)) return false;
+          const saved = await context.storage?.get(`${correctionStoragePrefix}${dispatch.child}`);
+          if (!record(saved) || saved.agent !== dispatch.agent || typeof saved.generation !== "number" ||
+              saved.generation !== scope.generation) return false;
+          return await hooks.backgroundCorrectionMatch?.(dispatch.parent, dispatch.callID, dispatch.child,
+            dispatch.promptID, saved.generation);
+        });
         hooks = await legacyFactory({ directory: context.location.directory, client: legacyClient(context) as never,
           nativeBackground: background, returnReportTransport: "tool-result",
           reviewerCorrectionPermissions: !!context.agent?.get && !!context.storage && !!context.session.switchAgent,
