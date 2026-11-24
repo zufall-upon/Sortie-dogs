@@ -935,6 +935,7 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
     ({ legacy: false, commit: false, cancel: false, directActivation })),
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
+  { legacy: false, commit: false, cancel: false, directRecovery: "settled-task" },
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
     .map(permission => ({ legacy: false, commit: false, cancel: false, fabric: true, permission })),
   { legacy: false, commit: false, cancel: false }, { legacy: false, commit: false, cancel: false, join: true },
@@ -1002,6 +1003,7 @@ test(directActivation ? `V2 direct operation records actual handoff refusal: ${d
   const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
   let operationHistoryUnavailable = false;
+  let activeSessions: Record<string, { type: string }> = {};
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
@@ -1041,7 +1043,7 @@ test(directActivation ? `V2 direct operation records actual handoff refusal: ${d
         providerID: "openai", id: "gpt-6-luna-fast", variant: "max",
       } }) } } : {}),
       session: { ...fixture.context.session,
-        active: async () => ({}),
+        active: async () => activeSessions,
         inbox: { list: async () => [] },
         interrupt: async () => ({ interrupted: false }),
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
@@ -1896,9 +1898,44 @@ test('requires exclusive execution', async () => {
     if (directRecovery) {
       const unit = { title: "Ready result", objective: "Create ready result", read: ["check.mjs"], write: ["result.txt"],
         validation: ["node check.mjs ready"] };
+      if (directRecovery === "settled-task") {
+        // V2 paginated history may return a boundary page containing an older
+        // completed Task whose launch metadata remains "running".
+        (history.coordinator ??= []).push({ id: "old-background", type: "assistant", agent: "dogs-coordinator",
+          time: { created: 1, completed: 2 }, content: [{ type: "tool", id: "old-task", name: "subagent",
+            state: { status: "completed", input: { agent: "dog-worker-v010", prompt: "Earlier work" },
+              content: [{ type: "text", text: "Worker started" }], metadata: { status: "running", sessionID: "first" } } }] });
+        agents.first!.outcome = "succeeded";
+      }
       const initial = await tool("coordinator", "plan_units", { executor: "self", units: [unit] });
       assert.equal(initial.status, "direct-unit-running");
       const readRun = () => new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root"), originalRun = await readRun();
+      if (directRecovery === "settled-task") {
+        const originalMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        const budget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        const handoff = () => tool("coordinator", "plan_units", { executor: "worker", units: "",
+          handoff_context: "Continue the retained unit." });
+        for (const outcome of [undefined, "running"]) {
+          agents.first!.outcome = outcome;
+          assert.equal((await handoff()).status, "direct-handoff-awaits-tools");
+          assert.equal((await readRun()).units[0]!.status, "running");
+          assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, originalMission.id);
+        }
+        agents.first!.outcome = "succeeded";
+        activeSessions = { first: { type: "running" } };
+        assert.equal((await handoff()).status, "direct-handoff-awaits-tools", "a live native child stays protected");
+        activeSessions = {};
+        const handed = await handoff();
+        assert.ok(handed.task, JSON.stringify(handed));
+        const current = await readRun();
+        assert.equal(current.runID, originalRun.runID);
+        assert.equal(current.units[0]!.callID, originalRun.units[0]!.callID);
+        assert.equal(current.units[0]!.directHandoffs?.length, 1);
+        assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, originalMission.id);
+        const afterBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+        for (const key of ["max_units", "consumed_units", "reserved_units"]) assert.equal(afterBudget[key], budget[key]);
+        return;
+      }
       // The interrupted execution never delivered execute.after; only native history survives.
       const patch = await before("coordinator", "patch", { patchText: "*** Begin Patch\n*** Add File: result.txt\n+ready\n*** End Patch" });
       loseNextAfter = true; await after(patch, "Tool execution interrupted");
