@@ -927,9 +927,11 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery } of [
-  ...["ended", "live", "unknown", "background", "interrupted"].map(operatorRecovery =>
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery, directActivation } of [
+  ...["ended", "live", "unknown", "background", "interrupted", "previous-root", "previous-root-background"].map(operatorRecovery =>
     ({ legacy: false, commit: false, cancel: false, operatorRecovery })),
+  ...["verified", "changed-input", "changed-timeout", "process-evidence", "history-unavailable"].map(directActivation =>
+    ({ legacy: false, commit: false, cancel: false, directActivation })),
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
@@ -954,7 +956,8 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${operatorRecovery}` :
+test(directActivation ? `V2 direct operation records actual handoff refusal: ${directActivation}` :
+  operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${operatorRecovery}` :
   nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
   nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
   nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
@@ -997,6 +1000,7 @@ test(operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${op
   let joinedPermission!: () => void;
   const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
+  let operationHistoryUnavailable = false;
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
@@ -1047,9 +1051,10 @@ test(operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${op
         ...(nestedBackground ? { log: async function* ({ sessionID }: { sessionID: string }) {
           for (const event of logs[sessionID] ?? []) yield event;
         } } : {}),
-      }, message: { list: async ({ sessionID, order }) => ({
-        data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {},
-      }) } });
+      }, message: { list: async ({ sessionID, order }) => {
+        if (operationHistoryUnavailable && sessionID === "coordinator") throw new Error("fixture operation history unavailable");
+        return { data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {} };
+      } } });
   };
   const prompt = async (sessionID: string, text: string) => {
     const messageID = `msg_${++counter}`;
@@ -1095,8 +1100,94 @@ const deadline = Date.now() + 15000;
 while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
 process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
+    if (directActivation) {
+      await prompt("root", "Run the requested operation once without replay");
+      const started = await tool("root", "start_mission", { kind: "operation", requirements: ["Run the operation once"] });
+      const dispatch = await before("root", "subagent", nativeTask(started.task));
+      await prompt("coordinator", String(dispatch.input.prompt));
+      const command = "node launch.mjs";
+      const declaration = { title: "Run once", objective: "Run the operation once",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["tar -xzf archive.tar.gz"] };
+      // The real host handoff checker refuses an unclassified artifact command.
+      // No declared shell process is started by either failed call.
+      await assert.rejects(tool("coordinator", "plan_units", { executor: "self", units: [declaration],
+        execution: { commands: [command], directory } }), /Handoff denied.*artifact_command_unclassified/u);
+      const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+      const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const run = await operators.required("root"), unit = run.units[0]!;
+      assert.equal(unit.directExecution?.actor, "coordinator");
+      const base = { sessionID: "coordinator", agent: agents.coordinator!.agent, tool: "shell" };
+      for (const [id, input] of [
+        ["other-command", { command: "node different.mjs", workdir: directory }],
+        ["other-cwd", { command, workdir: join(directory, "other") }],
+        ["background", { command, workdir: directory, background: true }],
+      ] as const) {
+        await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...base, id, input }),
+          /Handoff denied.*artifact_command_unclassified/u);
+      }
+      await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...base, id: "other-actor",
+        sessionID: "first", agent: agents.first!.agent, input: { command, workdir: directory } }));
+      assert.deepEqual((await missionRuntime.required("root")).execution!.observations, [],
+        "other actors, commands, directories and background calls do not receive operation receipts");
+      const at = Date.now();
+      const event = { ...base, id: "actual-refusal", input: { command, workdir: directory, timeout: 120_000 } };
+      operationHistoryUnavailable = directActivation === "history-unavailable";
+      await assert.rejects(fixture.toolHooks.get("execute.before")!(event), /Handoff denied.*artifact_command_unclassified/u);
+      const saved = (await missionRuntime.required("root")).execution!.observations.find(item => item.callID === event.id);
+      operationHistoryUnavailable = false;
+      if (directActivation === "history-unavailable") assert.equal(saved, undefined, "unavailable native history stays unknown");
+      else {
+        assert.equal(saved?.sessionID, "coordinator");
+        assert.equal(saved?.command, command);
+        assert.equal(saved?.directory, directory);
+        assert.equal(saved?.status, "error");
+        assert.equal(saved?.outcome, "not-started");
+        assert.equal(saved?.prelaunchRejection?.runID, run.runID);
+        assert.equal(saved?.prelaunchRejection?.source, "host-before-hook");
+        assert.equal(saved?.exit, undefined);
+      }
+      const nativeInput = { ...event.input };
+      if (directActivation === "changed-input") nativeInput.command += " --different";
+      if (directActivation === "changed-timeout") nativeInput.timeout = 60_000;
+      history.coordinator!.push({ id: `msg_${++counter}`, type: "assistant", agent: agents.coordinator!.agent,
+        time: { created: at, completed: Date.now() }, content: [{ type: "tool", id: event.id, name: "shell", executed: false,
+          time: { created: at, ran: at, completed: Date.now() }, state: { status: "error", input: nativeInput,
+            error: { message: "Handoff denied: manifest /validation/0 artifact_command_unclassified" },
+            ...(directActivation === "process-evidence" ? { metadata: { exit: 0 } } : {}) } }] });
+      cleanup?.(); await start();
+      const status = await tool("root", "operator_status");
+      assert.equal(status.acceptance_summary.operation.status, directActivation === "verified" ? "not-started" : "recovery-blocked");
+      assert.equal(status.acceptance_summary.operation.process_succeeded, null);
+      assert.equal(status.acceptance_summary.operation.terminal_complete, false);
+      assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+      await assert.rejects(readFile(join(directory, "result.txt")), { code: "ENOENT" });
+      return;
+    }
     if (operatorRecovery) {
       delete agents.first; delete agents.second; delete agents.reviewer; delete agents.unrelated;
+      let oldRootBackground: Record<string, unknown> | undefined;
+      if (operatorRecovery.startsWith("previous-root")) {
+        await prompt("root", "Create the earlier root-owned result");
+        const previous = await tool("root", "start_mission", { requirements: ["Create the earlier result"] });
+        const first = await tool("root", "plan_units", { executor: "self", units: [{ title: "First", objective: "Write the first result",
+          read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs ready"] }] });
+        assert.equal(first.status, "direct-unit-running");
+        const write = await before("root", "write", { path: "result.txt", content: "ready\n" });
+        await writeFile(join(directory, "result.txt"), "ready\n"); await after(write, "written");
+        const check = await before("root", "shell", { command: "node check.mjs ready", workdir: directory });
+        const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+        await after(check, checked.stdout, { exit: 0 });
+        await tool("root", "finish_direct_unit");
+        await tool("root", "review_mission", { risk_tags: [], traces: [] });
+        assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+        assert.notEqual(previous.mission_id, undefined);
+        if (operatorRecovery === "previous-root-background") {
+          const background = await before("root", "shell", { command: "node old-writer.mjs", background: true });
+          await after(background, "Background process running", { status: "running" });
+          oldRootBackground = (history.root!.at(-1)!.content as Record<string, unknown>[])[0]!;
+        }
+      }
       await prompt("root", "Continue the work in this same root session");
       const mission = await tool("root", "start_mission", { requirements: ["The root author implements and validates the result"] });
       const dispatch = await before("root", "subagent", nativeTask(mission.task));
@@ -1117,13 +1208,21 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
           id: "still-running", state: { status: "completed", input: { command: "background work" },
             content: [], metadata: { status: "running" } } }],
       });
-      await assert.rejects(tool("root", "start_direct_unit"), /operator-run-missing/u);
+      await assert.rejects(tool("root", "start_direct_unit"),
+        operatorRecovery.startsWith("previous-root") ? /mission-run-registration-incomplete/u : /operator-run-missing/u);
       const retained = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
       const retainedBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
       await assert.rejects(before("root", "subagent", nativeTask(mission.task)), /mission-dispatch-not-authorized/u,
         "the old initial Task cannot start another child or erase a blocked submission");
       assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), retained);
       assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, retainedBudget);
+      if (oldRootBackground) {
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.match(held.reason, /previous_root_tools_active_or_unproven/u);
+        assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, null);
+        (oldRootBackground.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      }
       if (operatorRecovery === "ended" || operatorRecovery === "interrupted") {
         const status = await tool("root", "operator_status", { view: "progress" });
         assert.match(status.next_action, /plan_units with executor=self/u);
@@ -2859,6 +2958,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
+  ...["ended", "interrupted", "unknown", "background"].map(mode =>
+    ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-run-${mode}`] as const),
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer and you do not need to change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
@@ -2870,14 +2971,17 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     : join(tmpdir(), "v2-author-continuation-"));
   const otherCwd = join(directory, "checks");
   const resultFile = workspace === "git-glob-ts" ? "result.ts" : "result.txt";
-  const fixture = contextFixture(), exec = promisify(execFile);
+  let fixture = contextFixture(), cleanup: (() => void) | void;
+  const exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
     root: { agent: "dog-operator" }, author: { agent: "dogs-coordinator", parentID: "root" },
     reviewer: { agent: "dog-reviewer-v010", parentID: "author" },
   };
   let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
-  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+  const startFixture = async () => {
+    fixture = contextFixture();
+    cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
     session: { ...fixture.context.session, active: async () => active,
       inbox: { list: async ({ sessionID }) => inbox[sessionID] ?? [] },
       list: async ({ parentID }) => {
@@ -2889,6 +2993,8 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       context: async ({ sessionID }) => history[sessionID] ?? [] },
     message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
       : history[sessionID] ?? [], cursor: {} }) } });
+  };
+  await startFixture();
   const prompt = async (sessionID: string, text: string) => {
     const messageID = `msg_${++counter}`;
     const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
@@ -2993,6 +3099,88 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
+    if (workspace.startsWith("git-previous-run-")) {
+      const mode = workspace.slice("git-previous-run-".length);
+      (reviewerTool.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      (authorTool.state as Record<string, unknown>).metadata = mode === "background" ? { status: "running" } : { status: "completed", exit: 0 };
+      if (mode === "unknown") delete agents.author!.outcome;
+      agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+      await prompt("root", "Different follow-up mission: root implements a second result");
+      const next = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+      assert.notEqual(next.mission_id, old.mission_id);
+      const blocked = await before("root", "subagent", nativeTask(next.task));
+      await prompt("coordinator", String(blocked.input.prompt));
+      await tool("coordinator", "submit_mission", { status: "blocked", summary: "The root author must implement" });
+      agents.coordinator!.outcome = "succeeded";
+      await after(blocked, "The root author must implement", { sessionID: "coordinator" });
+      const declaration = { title: "Second", objective: "Write second",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs second"] };
+      const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const priorBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      if (mode === "unknown" || mode === "background") {
+        const status = await tool("root", "operator_status");
+        assert.equal(status.task, undefined);
+        assert.match(status.next_action, /previous run.s writer/u);
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.equal(held.task, undefined);
+        assert.equal((await missionRuntime.required("root")).coordinator, "coordinator");
+        await assert.rejects(before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",
+          prompt: "Continue", description: "Continue" }), /mission-coordinator-active-or-unproven/u);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+        agents.author!.outcome = "succeeded";
+        (authorTool.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      }
+      if (mode === "interrupted") {
+        const originalPrepare = OperatorRuntime.prototype.prepareMission;
+        try {
+          OperatorRuntime.prototype.prepareMission = async () => { throw new Error("fixture previous-run preparation interrupted"); };
+          await assert.rejects(tool("root", "plan_units", { executor: "self", units: [declaration] }),
+            /fixture previous-run preparation interrupted/u);
+        } finally { OperatorRuntime.prototype.prepareMission = originalPrepare; }
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, oldRun.runID);
+        cleanup?.(); await startFixture();
+        const pending = await tool("root", "operator_status");
+        assert.equal(pending.task, undefined);
+        assert.match(pending.next_action, /plan_units with executor=self/u);
+        const continued = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+        assert.equal(continued.mission_id, next.mission_id);
+        assert.equal(continued.task, undefined);
+        await assert.rejects(before("root", "subagent", nativeTask(next.task)), /mission-direct-registration-pending/u);
+        delete agents.author!.outcome;
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.match((await tool("root", "operator_status")).next_action, /previous run.s writer/u);
+        const heldStart = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+        assert.equal(heldStart.status, "mission-coordinator-active");
+        assert.equal(heldStart.task, undefined);
+        assert.match(heldStart.next_action, /previous run.s writer/u);
+        assert.equal((await missionRuntime.required("root")).runID, null);
+        agents.author!.outcome = "succeeded";
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+      }
+      const planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+      assert.notEqual(planned.run_id, oldRun.runID);
+      const current = await missionRuntime.required("root");
+      assert.equal(current.id, next.mission_id);
+      assert.equal(current.coordinator, null);
+      assert.equal(current.coordinatorReleases?.[0]?.coordinator, "coordinator");
+      assert.deepEqual(current.requirements.map(item => item.text), ["Write a second independent result"]);
+      assert.equal(current.review, undefined, "the old Mission's Review is not reused");
+      const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.notEqual(newRun.units[0]!.task.prompt, oldRun.units[0]!.task.prompt);
+      assert.equal(newRun.units[0]!.evidence.length, 0, "the old Mission's checks do not validate the new unit");
+      const write = await before("root", "write", { path: resultFile, content: "second\n" });
+      await writeFile(join(directory, resultFile), "second\n"); await after(write, "written");
+      const check = await before("root", "shell", { command: "node check.mjs second", workdir: directory });
+      const checked = await exec(process.execPath, ["check.mjs", "second"], { cwd: directory });
+      await after(check, checked.stdout, { exit: 0 });
+      assert.equal((await tool("root", "finish_direct_unit")).status, "awaiting-acceptance");
+      assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
+      assert.equal((await missionRuntime.required("root")).id, next.mission_id);
+      return;
+    }
     if (workspace === "git-glob-ts") assert.ok(oldRun.units[0]!.unit.write.includes("*.ts"));
     if (workspace === "non-git-registered-default") {
       assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first": otherCwd });
