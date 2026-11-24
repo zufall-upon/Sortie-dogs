@@ -337,16 +337,22 @@ test("lost failed inline Reviewer callback reconciles before same-Mission direct
   } finally { await f.dispose(); }
 });
 
-for (const [outcome, callback, tracked, finish, ready] of [
-  ["failed", false, true, false, false], ["interrupted", false, true, false, false], ["succeeded", false, true, false, false],
-  ["failed", true, false, false, false], ["failed", true, true, false, false], ["succeeded", false, true, true, false],
-  ["succeeded", false, true, false, true],
-] as const) test(`inline correction retains delegated writers across native ${outcome}, callback=${callback}, tracked=${tracked}, finish=${finish}, ready=${ready}`, async () => {
-  const f = await fixture({ activity: true, syncedLog: true });
+for (const [outcome, callback, tracked, finish, ready, resumedTask] of [
+  ["failed", false, true, false, false, false], ["interrupted", false, true, false, false, false], ["succeeded", false, true, false, false, false],
+  ["failed", true, false, false, false, false], ["failed", true, true, false, false, false], ["succeeded", false, true, true, false, false],
+  ["succeeded", false, true, false, true, false],
+  ["failed", true, false, false, false, true], ["failed", true, true, false, false, true], ["failed", false, true, false, false, true],
+] as const) test(`${resumedTask ? "resumed" : "inline"} correction retains delegated writers across native ${outcome}, callback=${callback}, tracked=${tracked}, finish=${finish}, ready=${ready}`, async () => {
+  const f = await fixture({ activity: true, syncedLog: true, legacyReviewLaunch: resumedTask && !tracked });
   try {
-    const started = await initial(f, { keepReviewOpen: true, backgroundReview: tracked });
+    const started = await initial(f, { keepReviewOpen: !resumedTask, backgroundReview: tracked });
+    if (resumedTask) {
+      const prepared = await f.tool("root", "repair_review");
+      started.dispatch = await f.before("root", "subagent", { ...f.task(prepared.task), ...(tracked ? { background: true } : {}) });
+      await f.prompt("author", started.dispatch.input.prompt); await f.bind("author");
+    }
     if (!callback) await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
-    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    if (!resumedTask) await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
     const old = await f.run(), missionID = (await f.missions.required("root")).id;
     if (ready) {
       await f.edit("author", "ready before delegation");

@@ -856,6 +856,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // settlement; never mistake a prior parent response for this unit's completion.
         if (unit.directExecution && run.phase !== "cancelled") return undefined;
         if (run.phase !== "cancelled") {
+          if (input.nativeBackground && unit.reviewerCorrection && unit.childSessionID &&
+              await continuationNativeIdle(unit.childSessionID, "dog-reviewer", run.operatorSessionID ?? root)) return undefined;
           // Root budget recovery must not bypass a nested Job's exact terminal
           // reconciliation with a later outcome from the same reusable child.
           if (unit.childSessionID && await input.nativeBackground?.awaiting(unit.childSessionID)) return undefined;
@@ -1132,6 +1134,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (attempt.runID !== run.runID || !unit || unit.callID !== attempt.callID ||
           unit.childSessionID !== attempt.childSessionID || /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] !== attempt.taskID) {
         return { status: "non_rescue", reason: "terminal_identity_conflict" };
+      }
+      if (checkLiveOutcome && input.nativeBackground && unit.reviewerCorrection &&
+          await continuationNativeIdle(attempt.childSessionID, "dog-reviewer", run.operatorSessionID ?? root)) {
+        return { status: "non_rescue", reason: "native_correction_writer_active" };
       }
       if (unit.directExecution) {
         if (!unit.directExecution.finishedAt || unit.status === "running") return { status: "non_rescue", reason: "direct_unit_still_running" };
@@ -2550,7 +2556,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
          return serializeDispatchTransition(root, async () => {
             const direct = await activateDirect(context.sessionID) ?? correction;
             if (!direct) throw new Error("mission-direct-unit-not-running");
-            if (input.nativeBackground && direct.unit.directExecution && direct.unit.reviewerCorrection) {
+            if (input.nativeBackground && direct.unit.reviewerCorrection) {
               const held = await continuationNativeIdle(context.sessionID, "dog-reviewer", direct.run.operatorSessionID ?? root,
                 { callID: context.callID, tool: finishDirectUnit });
               if (held) return JSON.stringify({ status: "direct-unit-awaits-native-writers", reason: held,
@@ -2873,20 +2879,24 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       const mission = await missions.read(root), run = await operators.read(root);
       if (!mission || !run) return false;
       if (!mission.corrections?.some(item => item.runID === run.runID && item.author === child &&
-          ["running", "ready"].includes(item.status) && item.inlineReview)) return undefined;
+          ["running", "ready"].includes(item.status))) return undefined;
       if (mission.runID !== run.runID || run.generation !== generation ||
-          (run.operatorSessionID ?? root) !== parent || ["completed", "cancelled"].includes(mission.phase) ||
-          mission.review?.callID !== callID || mission.review.promptID !== promptID || mission.review.child !== child) return false;
+          (run.operatorSessionID ?? root) !== parent || ["completed", "cancelled"].includes(mission.phase)) return false;
       const correction = mission.corrections?.find(item => item.runID === run.runID && item.author === child &&
-        ["running", "ready"].includes(item.status) && item.inlineReview?.callID === callID && item.inlineReview?.promptID === promptID &&
-        item.inlineReview?.reviewIdentity === item.reviewIdentity);
+        ["running", "ready"].includes(item.status));
+      if (correction?.inlineReview && (mission.review?.callID !== callID || mission.review.promptID !== promptID ||
+          mission.review.child !== child || correction.inlineReview.callID !== callID ||
+          correction.inlineReview.promptID !== promptID || correction.inlineReview.reviewIdentity !== correction.reviewIdentity)) return false;
       const finished = correction?.status === "ready";
       const unit = correction && run.units.find(item => item.status === (finished ? "succeeded" : "running") && item.childSessionID === child &&
-        item.directExecution?.actor === child && item.reviewerCorrection?.author === child &&
-        item.reviewerCorrection.promptID === promptID && item.reviewerCorrection.reviewIdentity === correction.reviewIdentity);
+        (correction.inlineReview ? item.directExecution?.actor === child : !item.directExecution && item.callID === callID) &&
+        item.reviewerCorrection?.author === child &&
+        (item.reviewerCorrection.promptID === promptID || !correction.inlineReview && item.reviewerCorrection.promptID === undefined) &&
+        item.reviewerCorrection.reviewIdentity === correction.reviewIdentity);
       const taskID = unit && /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
       const attempts = unit && mission.attempts?.filter(item => item.runID === run.runID && item.unitID === unit.unit.id &&
-        item.kind === "direct_execution" && item.status === (finished ? "succeeded" : "dispatched") && item.callID === unit.callID &&
+        item.kind === (correction?.inlineReview ? "direct_execution" : "reviewer_correction") &&
+        item.status === (finished ? "succeeded" : "dispatched") && item.callID === unit.callID &&
         item.childSessionID === child && item.taskID === taskID);
       return !!unit?.callID && !!taskID && attempts?.length === 1 && !await continuationNativeIdle(child, "dog-reviewer", parent);
     }
@@ -4241,6 +4251,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           `mission-budget-exhausted: plan needs ${plan.units.length} units; ${capacity.remaining_units} remain. The current run is retained.`);
         for (const unit of previous.units) {
           if (!unit.childSessionID) continue;
+          if (input.nativeBackground && unit.reviewerCorrection &&
+              await continuationNativeIdle(unit.childSessionID, "dog-reviewer", previous.operatorSessionID ?? root)) {
+            throw new Error("mission-replan-terminal-unreconciled:native_correction_writer_active");
+          }
           const attempt = [...(mission.attempts ?? [])].reverse().find(item =>
             item.runID === previousRunID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
           const terminal = attempt ? await missionWorkerTerminalProof(root, mission, previous, attempt) :
@@ -6082,6 +6096,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const afterIdentity = !ownership ? await identity(id) : undefined;
         const repairAccess = !ownership && (afterIdentity?.role === "dog-worker" || !!await reviewerCorrection(id))
           ? await operators.repairValidationAccess((await rootFor(id))!, id) : null;
+        if (input.nativeBackground && ownership && request.tool === "task") {
+          const run = await operators.read(ownership.root);
+          const unit = run?.units.find(item => item.callID === request.callID && item.reviewerCorrection);
+          const held = unit?.childSessionID && await continuationNativeIdle(unit.childSessionID, "dog-reviewer", run!.operatorSessionID ?? ownership.root);
+          if (held) {
+            output.output = JSON.stringify({ status: "review-correction-awaits-native-writers", reason: held,
+              next_action: "Retain this correction run, reservation and current checks until its native tools, descendants and inboxes settle. Retry the existing Mission recovery; do not launch another writer." });
+            return;
+          }
+        }
         const mapped = translate(output, false) as typeof output;
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);

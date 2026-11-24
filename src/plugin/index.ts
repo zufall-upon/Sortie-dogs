@@ -238,7 +238,7 @@ export interface OpenCodeHooks {
   reviewerCorrectionScope?: (sessionID: string) => Promise<{ write: readonly string[]; validation: readonly string[]; generation: number } | undefined>;
   /** Durable correction authors for cleanup, including after cancellation or agent change. */
   reviewerCorrectionSessions?: (sessionID: string) => Promise<readonly string[]>;
-  /** Exact inline Review ownership and native writer-tree quiescence for a correction alias. */
+  /** Exact correction Task/inline Review ownership and native writer-tree quiescence for a correction alias. */
   backgroundCorrectionMatch?: (parent: string, callID: string, child: string, promptID: string, generation: number) => Promise<boolean | undefined>;
   /** Internal adapter transport; retains the existing profile owner across reload. */
   backgroundOwner?: (callID: string, restore?: Record<string, unknown>) => Record<string, unknown> | undefined;
