@@ -928,7 +928,7 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
 });
 
 for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery } of [
-  ...["ended", "live", "unknown", "background"].map(operatorRecovery =>
+  ...["ended", "live", "unknown", "background", "interrupted"].map(operatorRecovery =>
     ({ legacy: false, commit: false, cancel: false, operatorRecovery })),
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
@@ -1118,11 +1118,38 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
             content: [], metadata: { status: "running" } } }],
       });
       await assert.rejects(tool("root", "start_direct_unit"), /operator-run-missing/u);
-      const planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
-      if (operatorRecovery !== "ended") {
+      if (operatorRecovery === "ended" || operatorRecovery === "interrupted") {
+        const status = await tool("root", "operator_status", { view: "progress" });
+        assert.match(status.next_action, /plan_units with executor=self/u);
+      }
+      if (operatorRecovery === "interrupted") {
+        const originalPrepare = OperatorRuntime.prototype.prepareMission;
+        try {
+          OperatorRuntime.prototype.prepareMission = async () => { throw new Error("fixture preparation interrupted"); };
+          await assert.rejects(tool("root", "plan_units", { executor: "self", units: [declaration] }),
+            /fixture preparation interrupted/u);
+        } finally { OperatorRuntime.prototype.prepareMission = originalPrepare; }
+        cleanup?.(); await start();
+        const pending = await tool("root", "operator_status");
+        assert.equal(pending.task, undefined, "interrupted root registration must not offer another author");
+        assert.match(pending.next_action, /plan_units with executor=self/u);
+      }
+      let planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      if (operatorRecovery === "live") {
         assert.notEqual(planned.status, "direct-unit-running");
         assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
         return;
+      }
+      if (operatorRecovery === "unknown" || operatorRecovery === "background") {
+        assert.equal(planned.status, "mission-coordinator-active");
+        assert.equal(planned.task, undefined, "unproven native work cannot offer a duplicate Task");
+        const held = await tool("root", "operator_status");
+        assert.equal(held.task, undefined, "status cannot suggest the same unsafe dispatch");
+        await assert.rejects(before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",
+          prompt: "Continue", description: "Continue" }), /mission-coordinator-active-or-unproven/u);
+        agents.coordinator!.outcome = "succeeded";
+        if (operatorRecovery === "background") history.coordinator!.pop();
+        planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
       }
       assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
       const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");

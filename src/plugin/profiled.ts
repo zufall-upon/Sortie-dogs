@@ -1271,6 +1271,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (mission.coordinator === null && mission.authorContinuation?.blocked && !["completed", "cancelled"].includes(mission.phase)) {
         return { ...packet, ...continuationPacket(mission) };
       }
+      if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen &&
+          mission.phase === "submitted" && mission.coordinatorReleases?.length) {
+        return { ...packet, next_action: `The ended Coordinator was released for root direct planning, but no run is bound yet. ` +
+          `Operator: retry ${profile.toolPrefix}plan_units with executor=self and the intended unit; ` +
+          "retain this Mission and its budget. Do not dispatch a new Coordinator merely to recover registration." };
+      }
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           run?.units.some(unit => unit.status === "running")) {
         return { ...packet, next_action: `If the native Worker Task is still active, wait for it; do not start a duplicate. ` +
@@ -1827,14 +1833,29 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           mission = await reconcileMissionExecution(root!, mission, run);
           const completion = run?.phase === "awaiting-acceptance" ? await operatorCompletionReadiness(root!, run) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
-           const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
+            const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
                 completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
                 ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
                   `one corrective unit to validate the current candidate; then obtain a fresh Review. ` +
                   `Keep the same mission and cumulative budget; old validation or Review cannot complete it.\n` +
                   completion.blockers.map(item => item.next_action).join("\n")
-                 : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
+                  : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
+            if (input.nativeBackground && context.sessionID === root && mission.phase === "submitted" && mission.submission?.status === "blocked" &&
+                mission.runID === null && !mission.dispatchOpen && mission.coordinator &&
+                !sourceReconciliationRequired(mission, run)) {
+              const idle = await continuationNativeIdle(mission.coordinator, "dog-operator", root!);
+              if (idle) {
+                delete packet.task;
+                packet.coordinator_dispatch = "active-or-unproven";
+                packet.next_action = `The prior Coordinator or its tools are active or not proven quiescent (${idle}). ` +
+                  "Do not dispatch it or a replacement writer. Recheck after the native work settles; retain this Mission and budget.";
+              } else if (!mission.authorContinuation) {
+                packet.next_action = `The prior Coordinator has ended without preparing a run. Operator may use ` +
+                  `${planUnits} with executor=self and one useful unit to continue directly in this same Mission, ` +
+                  "or resume the existing Coordinator when the original requirements permit it. Retain the budget and checks.";
+              }
+            }
            const ownUnit = run?.units.find(unit => unit.childSessionID === context.sessionID && unit.status === "running");
            if (ownUnit) {
              packet.next_action = ownUnit.directExecution
@@ -3874,13 +3895,17 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       // prepared a run. The root's explicit direct plan must not loop back to that
       // same child. Prove the native lineage and quiescence before relinquishing
       // the controller; an unknown or active child keeps the original routing.
-      if (actor === root && executor === "self" && plan.units.length === 1 && !previous &&
+      if (input.nativeBackground && actor === root && executor === "self" && plan.units.length === 1 && !previous &&
           mission.runID === null && mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           mission.coordinator && mission.callID && !mission.dispatchOpen && !mission.authorContinuation &&
           !mission.review) {
         const coordinator = mission.coordinator, callID = mission.callID;
         const idle = await continuationNativeIdle(coordinator, "dog-operator", root);
-        if (!idle) {
+        if (idle) {
+          const { task: _task, ...packet } = missionDispatchPacket(mission, previous);
+          return JSON.stringify({ ...packet, status: "mission-coordinator-active", reason: idle,
+            next_action: "The prior Coordinator or its tools are active or not proven quiescent. Do not dispatch it or another writer; retry after native work settles." });
+        } else {
           mission = await missions.update(root, item => {
             if (item.id !== mission.id || item.coordinator !== coordinator || item.callID !== callID ||
                 item.dispatchOpen || item.runID !== null || item.phase !== "submitted" ||
@@ -5236,6 +5261,11 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              mission && !["completed", "cancelled"].includes(mission.phase)) {
           await requireRoot(request.sessionID);
           const current = await reconcileMissionDispatch(root) ?? mission;
+          if (input.nativeBackground && current.coordinator && args.task_id === current.coordinator && !current.dispatchOpen &&
+              current.phase === "submitted" && current.submission?.status === "blocked" && current.runID === null) {
+            const idle = await continuationNativeIdle(current.coordinator, "dog-operator", root);
+            if (idle) throw new Error(`mission-coordinator-active-or-unproven:${idle}`);
+          }
           if (current.coordinator === null && current.authorContinuation &&
               (!args.task_id || args.task_id === current.authorContinuation.child)) {
             const proof = await proveAuthorContinuation(root, current,
