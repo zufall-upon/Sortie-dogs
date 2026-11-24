@@ -2510,9 +2510,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         for (const message of history) if (record(message.info) && message.info.sessionID === actor && Array.isArray(message.parts)) {
           for (const part of message.parts) if (record(part) && part.type === "tool" && typeof part.callID === "string" && part.callID !== callID) calls.set(part.callID, part);
         }
-        if ([...calls.values()].some(part => !record(part.state) || !["completed", "error"].includes(String(part.state.status)) ||
-            record(part.state.metadata) && ["running", "pending", "unknown"].includes(String(part.state.metadata.status)))) {
-          return JSON.stringify({ status: "direct-handoff-awaits-tools", next_action: "Finish the existing native command before handing off this unit; retain its result and continue here or delegate afterwards." });
+        for (const part of calls.values()) {
+          if (!record(part.state) || !["completed", "error"].includes(String(part.state.status))) {
+            return JSON.stringify({ status: "direct-handoff-awaits-tools", next_action: "Finish the existing native command before handing off this unit; retain its result and continue here or delegate afterwards." });
+          }
+          if (!record(part.state.metadata) || !["running", "pending", "unknown"].includes(String(part.state.metadata.status))) continue;
+          const child = part.tool === "task" && part.state.status === "completed"
+            ? taskChildSessionID({ metadata: part.state.metadata, output: part.state.output }) : undefined;
+          const role = record(part.state.input) && typeof part.state.input.subagent_type === "string"
+            ? canonicalAgent(profile, part.state.input.subagent_type) : undefined;
+          if (!child || !role || await continuationNativeIdle(child, role, actor)) {
+            return JSON.stringify({ status: "direct-handoff-awaits-tools", next_action: "Finish the existing native command before handing off this unit; retain its result and continue here or delegate afterwards." });
+          }
         }
         // Yielding execution is management, not an artifact write. In particular, a
         // direct admission can exist even when its writer could not bind because another
