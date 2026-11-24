@@ -497,7 +497,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       mission = await missions.required(root);
       const review = mission.review;
       if (!review?.callID || !review.child || ["completed", "cancelled"].includes(mission.phase)) return { mission, active: false };
-      const inline = mission.corrections?.some(item => item.inlineReview?.callID === review.callID &&
+      const inline = mission.corrections?.find(item => item.inlineReview?.callID === review.callID &&
         ["prepared", "running", "ready"].includes(item.status) && !item.selfRecheck);
       if (review.verdict !== "pending" && !inline) return { mission, active: false };
       const native = payload(await session("get", { path: { id: review.child } }));
@@ -519,7 +519,31 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         prompt >= 0 && complete && (!record(native.time) || Number(native.time.idle) >= (review.admittedAt ?? Infinity)) ? String(native.outcome) : undefined;
       const outcome = failed ? "failed" : nativeEnd;
       if (outcome) {
-        taskOwners.set(review.callID, { root, actor: parent, operator: false, consultation: "dog-reviewer", reviewIdentity: missionReviewIdentity(mission) });
+        if (input.nativeBackground && inline &&
+            await continuationNativeIdle(review.child, "dog-reviewer", parent)) return { mission, active: true };
+        if (inline?.status === "running" && outcome === "failed") {
+          const calls = history.flatMap(message => Array.isArray(message.parts) ? message.parts : []).filter(part =>
+            record(part) && part.type === "tool" && part.tool === "task" && part.callID === review.callID);
+          const last = prompt >= 0 ? childHistory.slice(prompt + 1) : [];
+          const failure = [...last].reverse().find(message => record(message.info) && message.info.role === "assistant");
+          if (calls.length !== 1 || !review.task || !review.promptID || inline.author !== review.child ||
+              inline.inlineReview?.promptID !== review.promptID || inline.inlineReview.reviewIdentity !== inline.reviewIdentity ||
+              !record(state?.input) || missionTaskFingerprint(state.input) !== missionTaskFingerprint({ ...review.task }) ||
+              taskChildSessionID(state) !== review.child || !record(native) || native.id !== review.child ||
+              native.parentID !== parent || native.outcome !== "failed" || !record(native.time) ||
+              typeof native.time.idle !== "number" || native.time.idle < inline.inlineReview.admittedAt ||
+              !record(execution) || execution.active !== false || execution.queued !== false ||
+              execution.terminal !== "failed" && execution.exactIdle !== true ||
+              typeof execution.correctionGeneration !== "number" ||
+              last.some(message => record(message.info) && message.info.role === "user") ||
+              !record(failure?.info) || !failure.info.error || !record(failure.info.time) ||
+              typeof failure.info.time.completed !== "number" || failure.info.time.completed > native.time.idle ||
+              failure.info.time.completed < inline.inlineReview.admittedAt ||
+              !await backgroundCorrectionMatch(parent, review.callID, review.child, review.promptID,
+                execution.correctionGeneration)) return { mission, active: true };
+        }
+        taskOwners.set(review.callID, { root, actor: parent, operator: false, consultation: "dog-reviewer",
+          reviewIdentity: inline?.inlineReview?.reviewIdentity ?? missionReviewIdentity(mission) });
         const successful = ["succeeded", "completed"].includes(outcome);
         const text = successful && Array.isArray(terminal?.parts) ? terminal.parts.filter(record).filter(part => part.type === "text").map(part => part.text).join("\n") :
           successful ? "Native Review finished without a recoverable invocation-specific report." : "Native Review failed or was interrupted; retain the same context for recovery.";
@@ -832,6 +856,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // settlement; never mistake a prior parent response for this unit's completion.
         if (unit.directExecution && run.phase !== "cancelled") return undefined;
         if (run.phase !== "cancelled") {
+          if (input.nativeBackground && unit.reviewerCorrection && unit.childSessionID &&
+              await continuationNativeIdle(unit.childSessionID, "dog-reviewer", run.operatorSessionID ?? root)) return undefined;
           // Root budget recovery must not bypass a nested Job's exact terminal
           // reconciliation with a later outcome from the same reusable child.
           if (unit.childSessionID && await input.nativeBackground?.awaiting(unit.childSessionID)) return undefined;
@@ -942,7 +968,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             (unit.reviewerCorrection && (unit.reviewerCorrection.author !== child ||
               unit.reviewerCorrection.promptID !== admission.promptID || !await reviewerCorrection(child))))) return undefined;
         return unit ? { projectRoot: unit.fabricRoot ?? operators.projectRoot, manifestPath: unit.manifestPath,
-          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]! } : undefined;
+          handoffHash: unit.hashes[0]!, manifestHash: unit.hashes[1]!,
+          ...(unit.directExecution?.actor === child && unit.validationRegistration
+            ? { directValidation: unitValidation(unit) } : {}) } : undefined;
       },
       defaultModelCatalog: { global: previewModelCatalog() },
       transformConfiguration: value => {
@@ -1107,6 +1135,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           unit.childSessionID !== attempt.childSessionID || /^task_id: (.+)$/m.exec(unit.task.prompt)?.[1] !== attempt.taskID) {
         return { status: "non_rescue", reason: "terminal_identity_conflict" };
       }
+      if (checkLiveOutcome && input.nativeBackground && unit.reviewerCorrection &&
+          await continuationNativeIdle(attempt.childSessionID, "dog-reviewer", run.operatorSessionID ?? root)) {
+        return { status: "non_rescue", reason: "native_correction_writer_active" };
+      }
       if (unit.directExecution) {
         if (!unit.directExecution.finishedAt || unit.status === "running") return { status: "non_rescue", reason: "direct_unit_still_running" };
         if (unit.directExecution.actor !== attempt.childSessionID) return { status: "non_rescue", reason: "terminal_identity_conflict" };
@@ -1270,6 +1302,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         coordinator_dispatch: mission.dispatchOpen ? "active" : ["completed", "cancelled"].includes(mission.phase) ? "terminal" : "resumable" };
       if (mission.coordinator === null && mission.authorContinuation?.blocked && !["completed", "cancelled"].includes(mission.phase)) {
         return { ...packet, ...continuationPacket(mission) };
+      }
+      if (mission.coordinator === null && mission.runID === null && !mission.dispatchOpen &&
+          mission.phase === "submitted" && mission.coordinatorReleases?.length) {
+        return { ...packet, next_action: `The ended Coordinator was released for root direct planning, but no run is bound yet. ` +
+          `Operator: retry ${profile.toolPrefix}plan_units with executor=self and the intended unit; ` +
+          "retain this Mission and its budget. Do not dispatch a new Coordinator merely to recover registration." };
       }
       if (mission.phase === "submitted" && mission.submission?.status === "blocked" &&
           run?.units.some(unit => unit.status === "running")) {
@@ -1827,15 +1865,41 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           mission = await reconcileMissionExecution(root!, mission, run);
           const completion = run?.phase === "awaiting-acceptance" ? await operatorCompletionReadiness(root!, run) : undefined;
            const acceptanceSummary = await missionAcceptanceSummary(mission, run, operators, acceptanceValidationObservation);
-           const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
+            const packet: Record<string, unknown> = { acceptance_summary: acceptanceSummary, ...missionDispatchPacket(mission, run), budget,
             ...(completion ? { completion, ...(!completion.ready ? { next_action: mission.coordinator === null &&
                 completion.blockers.some(item => item.reason === "source-changed" || item.reason === "candidate-changed")
                 ? `Fast-lane: source or candidate changed after formal validation. Call ${planUnits} with reason and ` +
                   `one corrective unit to validate the current candidate; then obtain a fresh Review. ` +
                   `Keep the same mission and cumulative budget; old validation or Review cannot complete it.\n` +
                   completion.blockers.map(item => item.next_action).join("\n")
-                 : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
-           const ownUnit = run?.units.find(unit => unit.childSessionID === context.sessionID && unit.status === "running");
+                  : completion.blockers.map(item => item.next_action).join("\n") } : {}) } : {}) };
+            if (input.nativeBackground && context.sessionID === root && mission.phase === "submitted" && mission.submission?.status === "blocked" &&
+                mission.runID === null && !mission.dispatchOpen && mission.coordinator &&
+                !sourceReconciliationRequired(mission, run)) {
+              const idle = await continuationNativeIdle(mission.coordinator, "dog-operator", root!) ??
+                await completedRunWritersIdle(root!, run, context.callID, status);
+              if (idle) {
+                delete packet.task;
+                packet.coordinator_dispatch = "active-or-unproven";
+                packet.next_action = `The prior Coordinator or a previous run's writer is active or not proven quiescent (${idle}). ` +
+                  "Do not dispatch it or a replacement writer. Recheck after the native work settles; retain this Mission and budget.";
+              } else if (!mission.authorContinuation) {
+                packet.next_action = `The prior Coordinator has ended without preparing a run. Operator may use ` +
+                  `${planUnits} with executor=self and one useful unit to continue directly in this same Mission, ` +
+                  "or resume the existing Coordinator when the original requirements permit it. Retain the budget and checks.";
+              }
+            }
+             if (input.nativeBackground && context.sessionID === root && mission.phase === "submitted" &&
+                 mission.runID === null && !mission.dispatchOpen && mission.coordinator === null && mission.coordinatorReleases?.length) {
+               const idle = await completedRunWritersIdle(root!, run, context.callID, status);
+               if (idle) {
+                 delete packet.task;
+                 packet.coordinator_dispatch = "active-or-unproven";
+                 packet.next_action = `A previous run's writer is active or not proven quiescent (${idle}). ` +
+                   "Do not start another writer. Recheck after the native work settles; retain this Mission and budget.";
+               }
+             }
+            const ownUnit = run?.units.find(unit => unit.childSessionID === context.sessionID && unit.status === "running");
            if (ownUnit) {
              packet.next_action = ownUnit.directExecution
                ? `Continue implementation/correction and declared checks HERE, then ${finishDirectUnit}. No Worker handoff needed.`
@@ -2358,8 +2422,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           direct.unit.directExecution?.validationRegisteredAt?.[last] ?? direct.unit.directExecution?.startedAt ??
           direct.unit.reviewerCorrection?.admittedAt ?? direct.run.createdAt, requireLiveReservation);
     }
-    async function activateDirect(actor: string) {
-      const direct = await directExecution(actor);
+    async function activateDirect(actor: string, captured?: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
+      const direct = captured ?? await directExecution(actor);
       if (direct) {
         await control!.activateDirectUnit(direct.root, actor, direct.unit.task.prompt, direct.unit.handoffPath);
         // Recover a crash between durable registration and its goal-ledger projection
@@ -2490,9 +2554,15 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
          const root = inline?.unit.reviewerCorrection
            ? inline.root : correction?.root ?? (await missionAuthority(context.sessionID)).root;
          return serializeDispatchTransition(root, async () => {
-           const direct = await activateDirect(context.sessionID) ?? correction;
-           if (!direct) throw new Error("mission-direct-unit-not-running");
-           const checks = await runtimeBridge.reviewerCorrectionValidation!(root, direct.unit.callID!, context.sessionID,
+            const direct = await activateDirect(context.sessionID) ?? correction;
+            if (!direct) throw new Error("mission-direct-unit-not-running");
+            if (input.nativeBackground && direct.unit.reviewerCorrection) {
+              const held = await continuationNativeIdle(context.sessionID, "dog-reviewer", direct.run.operatorSessionID ?? root,
+                { callID: context.callID, tool: finishDirectUnit });
+              if (held) return JSON.stringify({ status: "direct-unit-awaits-native-writers", reason: held,
+                next_action: "Retain this unit, reservation and current checks until its native tools, descendants and inboxes settle, then finish_direct_unit here. Do not repeat unchanged checks or launch another writer." });
+            }
+            const checks = await runtimeBridge.reviewerCorrectionValidation!(root, direct.unit.callID!, context.sessionID,
              Date.parse(direct.unit.directExecution?.startedAt ?? direct.unit.reviewerCorrection!.admittedAt ?? direct.run.createdAt));
            if (!checks?.ready) return JSON.stringify({ status: "direct-unit-awaits-validation", ...checks,
              next_action: checks?.next_action ?? "Correct the actual failure or run the missing/affected checks in this same session, then finish_direct_unit. Preserve successful current evidence; do not dispatch a validation-only Worker." });
@@ -2743,29 +2813,44 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
       if (current?.phase !== "cancelled" || !mission.requirementsReplaced || mission.supersededRunID !== current.runID) return undefined;
       return await operators.completedRun(root, runID);
     }
-    async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string): Promise<string | undefined> {
+    async function continuationNativeIdle(id: string, role: CanonicalAgentRole, parent: string,
+      finishing?: { callID?: string; tool: string }): Promise<string | undefined> {
       const ids = new Set<string>();
-      const visit = async (child: string, owner: string, expected?: CanonicalAgentRole): Promise<string | undefined> => {
-        if (ids.has(child) || ids.size >= 256) return "native_lineage_duplicate_or_too_large";
-        ids.add(child);
-        const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-        if (!record(info) || info.id !== child || info.parentID !== owner ||
-            typeof info.agent !== "string" || expected && canonicalAgent(profile, info.agent) !== expected) return "native_lineage_unavailable_or_mismatch";
-        const location = record(info.location) ? info.location.directory : info.directory;
-        if (typeof location !== "string" || !isAbsolute(location) ||
-            await realpath(location).catch(() => undefined) !== await realpath(input.directory).catch(() => undefined)) return "native_location_unavailable_or_mismatch";
-        if (!["succeeded", "failed", "interrupted"].includes(String(info.outcome))) return "native_terminal_unknown";
-        const inbox = payload(await session("inbox", { path: { id: child } }).catch(() => undefined));
-        if (!Array.isArray(inbox)) return "native_inbox_unavailable";
-        if (inbox.length) return "native_inbox_not_empty";
-        const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
-        if (!Array.isArray(children)) return "native_children_unavailable";
-        const terminalChildren = new Set<string>();
-        for (const entry of children) {
+      // Keep child-first proofs without recursion or a size cutoff; ids rejects
+      // both cycles and duplicate descendants.
+      const stack: Array<{ child: string; owner: string; expected?: CanonicalAgentRole; children?: unknown[];
+        next: number; terminalChildren: Set<string> }> = [
+        { child: id, owner: parent, expected: role, next: 0, terminalChildren: new Set() },
+      ];
+      while (stack.length) {
+        const frame = stack[stack.length - 1]!;
+        const { child, owner, expected, terminalChildren } = frame;
+        if (!frame.children) {
+          if (ids.has(child)) return "native_lineage_duplicate_or_too_large"; // Preserve the existing public reason.
+          ids.add(child);
+          const info = payload(await session("get", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+          if (!record(info) || info.id !== child || info.parentID !== owner ||
+              typeof info.agent !== "string" || expected && canonicalAgent(profile, info.agent) !== expected) return "native_lineage_unavailable_or_mismatch";
+          const location = record(info.location) ? info.location.directory : info.directory;
+          if (typeof location !== "string" || !isAbsolute(location) ||
+              await realpath(location).catch(() => undefined) !== await realpath(input.directory).catch(() => undefined)) return "native_location_unavailable_or_mismatch";
+          // A live author's explicit finish is not its native terminal. Only that
+          // root execution/current call is exempt; all delegated writers must end.
+          if (!(finishing && child === id) &&
+              !["succeeded", "failed", "interrupted"].includes(String(info.outcome))) return "native_terminal_unknown";
+          const inbox = payload(await session("inbox", { path: { id: child } }).catch(() => undefined));
+          if (!Array.isArray(inbox)) return "native_inbox_unavailable";
+          if (inbox.length) return "native_inbox_not_empty";
+          const children = payload(await session("children", { path: { id: child }, query: { directory: input.directory } }).catch(() => undefined));
+          if (!Array.isArray(children)) return "native_children_unavailable";
+          frame.children = children;
+        }
+        if (frame.next < frame.children.length) {
+          const entry = frame.children[frame.next++]!;
           if (!record(entry) || typeof entry.id !== "string" || entry.parentID !== child) return "native_lineage_unavailable_or_mismatch";
-          const reason = await visit(entry.id, child);
-          if (reason) return reason;
           terminalChildren.add(entry.id);
+          stack.push({ child: entry.id, owner: child, next: 0, terminalChildren: new Set() });
+          continue;
         }
         let history: readonly Record<string, unknown>[];
         try { history = await reviewMessages(child, undefined, true); }
@@ -2778,6 +2863,8 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           calls.set(part.callID, part);
         }
         for (const part of calls.values()) {
+          if (finishing && child === id && finishing.callID && part.callID === finishing.callID &&
+              part.tool === finishing.tool) continue;
           if (!record(part.state) || !["completed", "error"].includes(String(part.state.status))) return "native_tools_active_or_unproven";
           if (!record(part.state.metadata) || !["running", "pending", "unknown"].includes(String(part.state.metadata.status))) continue;
           // A background Task's launch marker can remain "running" after its exact
@@ -2787,14 +2874,71 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             ? taskChildSessionID({ metadata: part.state.metadata, output: part.state.output }) : undefined;
           if (!taskChild || !terminalChildren.has(taskChild)) return "native_tools_active_or_unproven";
         }
-        return undefined;
-      };
-      const reason = await visit(id, parent, role);
-      if (reason) return reason;
+        stack.pop();
+      }
       const active = payload(await session("active", {}).catch(() => undefined));
       if (!record(active) || !Object.values(active).every(value => record(value) &&
           ["running", "retry"].includes(String(value.type)))) return "native_activity_unavailable";
-      if ([...ids].some(child => Object.hasOwn(active, child))) return "native_session_active";
+      for (const child of ids) {
+        if (!(finishing && child === id) && Object.hasOwn(active, child)) return "native_session_active";
+      }
+      return undefined;
+    }
+    async function backgroundCorrectionMatch(parent: string, callID: string, child: string, promptID: string, generation: number): Promise<boolean | undefined> {
+      const root = await rootFor(parent);
+      if (!root) return false;
+      const mission = await missions.read(root), run = await operators.read(root);
+      if (!mission || !run) return false;
+      if (!mission.corrections?.some(item => item.runID === run.runID && item.author === child &&
+          ["running", "ready"].includes(item.status))) return undefined;
+      if (mission.runID !== run.runID || run.generation !== generation ||
+          (run.operatorSessionID ?? root) !== parent || ["completed", "cancelled"].includes(mission.phase)) return false;
+      const correction = mission.corrections?.find(item => item.runID === run.runID && item.author === child &&
+        ["running", "ready"].includes(item.status));
+      if (correction?.inlineReview && (mission.review?.callID !== callID || mission.review.promptID !== promptID ||
+          mission.review.child !== child || correction.inlineReview.callID !== callID ||
+          correction.inlineReview.promptID !== promptID || correction.inlineReview.reviewIdentity !== correction.reviewIdentity)) return false;
+      const finished = correction?.status === "ready";
+      const unit = correction && run.units.find(item => item.status === (finished ? "succeeded" : "running") && item.childSessionID === child &&
+        (correction.inlineReview ? item.directExecution?.actor === child : !item.directExecution && item.callID === callID) &&
+        item.reviewerCorrection?.author === child &&
+        (item.reviewerCorrection.promptID === promptID || !correction.inlineReview && item.reviewerCorrection.promptID === undefined) &&
+        item.reviewerCorrection.reviewIdentity === correction.reviewIdentity);
+      const taskID = unit && /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+      const attempts = unit && mission.attempts?.filter(item => item.runID === run.runID && item.unitID === unit.unit.id &&
+        item.kind === (correction?.inlineReview ? "direct_execution" : "reviewer_correction") &&
+        item.status === (finished ? "succeeded" : "dispatched") && item.callID === unit.callID &&
+        item.childSessionID === child && item.taskID === taskID);
+      return !!unit?.callID && !!taskID && attempts?.length === 1 && !await continuationNativeIdle(child, "dog-reviewer", parent);
+    }
+    async function completedRunWritersIdle(root: string, run: OperatorState | undefined, currentCallID?: string,
+      currentTool = planUnits): Promise<string | undefined> {
+      if (!run || run.phase !== "completed") return undefined;
+      const owner = run.operatorSessionID ?? root;
+      const directActors = new Set(run.units.flatMap(unit => [
+        ...(unit.directExecution ? [unit.directExecution.actor] : []),
+        ...(unit.directHandoffs ?? []).map(item => item.actor),
+      ]));
+      // Controllers retain native tool authority even when every formal unit was
+      // delegated. A settled Worker run does not settle its controller's tools.
+      if (owner === root || directActors.has(root)) {
+        try { await assertDirectPlanningQuiescent(root, currentCallID, currentTool); }
+        catch { return "previous_root_tools_active_or_unproven"; }
+      }
+      if (owner !== root) {
+        const reason = await continuationNativeIdle(owner, "dog-operator", root);
+        if (reason) return `previous_writer_${reason}`;
+      }
+      for (const unit of run.units) {
+        const actors = new Set([...(unit.childSessionID ? [unit.childSessionID] : []),
+          ...(unit.directExecution ? [unit.directExecution.actor] : []),
+          ...(unit.directHandoffs ?? []).map(item => item.actor)]);
+        for (const actor of actors) {
+          if (actor === root || actor === owner) continue;
+          const reason = await continuationNativeIdle(actor, unit.reviewerCorrection?.author === actor ? "dog-reviewer" : "dog-worker", owner);
+          if (reason) return `previous_writer_${reason}`;
+        }
+      }
       return undefined;
     }
     async function proveAuthorContinuation(root: string, mission: OperatorMission, previous: OperatorState | undefined): Promise<{
@@ -3197,7 +3341,18 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const operation = declaredMissionExecution(mission, (args as Record<string, unknown>).execution);
             if (operation) mission = await missions.update(context.sessionID, state => { state.kind = "operation"; state.execution = operation; });
           }
-          return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
+          const rootRegistrationPending = mission.coordinator === null && mission.runID === null &&
+            mission.phase === "submitted" && !!mission.coordinatorReleases?.length;
+          if (input.nativeBackground && rootRegistrationPending) {
+            const prior = await operators.read(context.sessionID);
+            const idle = await completedRunWritersIdle(context.sessionID, prior, context.callID, startMission);
+            if (idle) {
+              const { task: _task, ...packet } = missionDispatchPacket(mission, prior);
+              return JSON.stringify({ ...locationObservation(context.sessionID), ...packet, status: "mission-coordinator-active",
+                reason: idle, next_action: "A previous run's writer is active or not proven quiescent. Do not start another writer; retry after native work settles." });
+            }
+          }
+          return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen || rootRegistrationPending
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
               ...(mission.preferredExecutor ? { preferred_executor: mission.preferredExecutor } : {}),
@@ -3835,10 +3990,127 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       });
     }
-    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown) {
+    async function recordOperationPrelaunchRejection(root: string, mission: OperatorMission | undefined,
+      request: { sessionID: string; callID: string; tool: string }, operationArgs: Record<string, unknown>,
+      declaredOperation: string | undefined, operationAdmission: boolean,
+      direct?: NonNullable<Awaited<ReturnType<typeof directExecution>>>) {
+      if (!mission?.runID || !mission.execution || declaredOperation === undefined || operationArgs.background === true ||
+          !request.callID) return;
+      if (direct) {
+        const taskID = /^task_id: (.+)$/mu.exec(direct.unit.task.prompt)?.[1];
+        if (!taskID || !direct.unit.callID || direct.root !== root || direct.unit.childSessionID !== request.sessionID ||
+            direct.unit.directExecution?.actor !== request.sessionID) return;
+        // Read the same native window first: an older result or an unavailable
+        // history must not be overwritten by a new before-hook refusal.
+        await reconcileMissionExecution(root, mission, direct.run, { sessionID: request.sessionID, callID: request.callID });
+        const current = await directExecution(request.sessionID);
+        if (!current || current.mission.id !== mission.id || current.run.runID !== direct.run.runID ||
+            current.unit.unit.id !== direct.unit.unit.id || current.unit.callID !== direct.unit.callID ||
+            current.unit.childSessionID !== request.sessionID ||
+            current.unit.directExecution?.startedAt !== direct.unit.directExecution.startedAt ||
+            /^task_id: (.+)$/mu.exec(current.unit.task.prompt)?.[1] !== taskID || current.mission.execution?.recovery) return;
+      }
+      await missions.update(root, current => {
+        if (current.id !== mission.id || !current.execution || current.runID !== mission.runID ||
+            ["completed", "cancelled"].includes(current.phase) || current.execution.directory !== mission.execution!.directory ||
+            !current.execution.commands.includes(declaredOperation)) return;
+        if (direct) {
+          const taskID = /^task_id: (.+)$/mu.exec(direct.unit.task.prompt)?.[1];
+          const attempts = (current.attempts ?? []).filter(item => item.runID === direct.run.runID &&
+            item.unitID === direct.unit.unit.id && item.taskID === taskID && item.callID === direct.unit.callID &&
+            item.childSessionID === request.sessionID && item.kind === "direct_execution" && item.status === "dispatched");
+          if (current.execution.recovery || attempts.length !== 1) return;
+        }
+        const inputHash = missionOperationInputHash(request.tool, String(operationArgs.command), current.execution.directory);
+        let observation = current.execution.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
+        if (observation && (observation.command !== declaredOperation || observation.directory !== current.execution.directory ||
+            observation.nativeInputHash && observation.nativeInputHash !== inputHash ||
+            observation.nativeCallHash && observation.nativeCallHash !== missionOperationCallHash(operationArgs, current.execution.directory) ||
+            observation.prelaunchRejection && observation.prelaunchRejection.inputHash !== inputHash)) {
+          observation.conflicting = true;
+          return;
+        }
+        // Never turn a previous admission of this SAME call into a refusal receipt.
+        if (observation && !operationAdmission) {
+          if (observation.hostAdmitted || observation.prelaunchRejection) return;
+          if (observation.status !== "running" || observation.completedAt || observation.nativeInputHash !== inputHash) {
+            observation.conflicting = true;
+            return;
+          }
+        }
+        if (!observation) {
+          observation = { command: declaredOperation, directory: current.execution.directory,
+            callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString(),
+            nativeCallHash: missionOperationCallHash(operationArgs, current.execution.directory) };
+          current.execution.observations.push(observation);
+        }
+        if (observation.conflicting || observation.nativeProcessObserved || observation.outcome !== undefined ||
+            observation.exit !== undefined || observation.shellID) {
+          observation.conflicting = true;
+          return;
+        }
+        observation.completedAt = new Date().toISOString();
+        observation.status = "error";
+        observation.outcome = "not-started";
+        observation.nativeCallHash ??= missionOperationCallHash(operationArgs, current.execution.directory);
+        observation.prelaunchRejection = { source: "host-before-hook", runID: current.runID!, tool: request.tool, inputHash };
+      });
+    }
+    async function declareMissionUnits(root: string, actor: string, mission: OperatorMission, raw: unknown, reason?: string, execution?: unknown, planningCallID?: string, handoffNotes?: string, workQuantities?: unknown, executor?: string) {
       await control!.currentBudget(root);
       mission = actor === root ? await reconcileMissionDispatch(root) ?? await missions.required(root) : await missions.required(root);
+      if (mission.corrections?.some(item => ["running", "ready"].includes(item.status) && item.inlineReview && !item.selfRecheck)) {
+        const reconciled = await reconcileReview(root, mission);
+        mission = reconciled.mission;
+        if (reconciled.active && mission.corrections?.some(item => item.status === "ready" && item.inlineReview && !item.selfRecheck)) {
+          return JSON.stringify({ status: "mission-replan-terminal-unreconciled:native_correction_writer_active",
+            mission_id: mission.id, run_id: mission.runID,
+            next_action: "Retain this correction run and its current checks until the native author, tools, descendants and inboxes settle. Do not launch another writer." });
+        }
+      }
       let previous = await operators.read(root);
+      // Foreground Review invocations may have no background lifecycle record.
+      // An exact native error can still settle their interrupted correction.
+      const review = mission.review;
+      const inline = previous && mission.runID === previous.runID && review?.callID && review.promptID
+        ? mission.corrections?.find(item => item.runID === previous!.runID && item.status === "running" &&
+          item.inlineReview?.callID === review.callID && item.inlineReview?.promptID === review.promptID &&
+          item.inlineReview?.reviewIdentity === item.reviewIdentity) : undefined;
+      const unit = inline && previous?.units.find(item => item.status === "running" &&
+        item.directExecution?.actor === inline.author && item.reviewerCorrection?.author === inline.author &&
+        item.reviewerCorrection.promptID === review?.promptID && item.reviewerCorrection.reviewIdentity === inline.reviewIdentity);
+      const taskID = unit && /^task_id: (.+)$/mu.exec(unit.task.prompt)?.[1];
+      const attempts = inline && unit && mission.attempts?.filter(item => item.runID === previous?.runID &&
+        item.unitID === unit.unit.id && item.taskID === taskID && item.callID === unit.callID &&
+        item.childSessionID === inline.author && item.kind === "direct_execution" && item.status === "dispatched");
+      if (inline && unit && unit.callID && unit.childSessionID === inline.author && taskID && attempts?.length === 1 &&
+          review?.task && review.child === inline.author) {
+        const owner = previous!.operatorSessionID ?? root;
+        const native = payload(await session("get", { path: { id: inline.author }, query: { directory: input.directory } }).catch(() => undefined));
+        const execution = payload(await session("reviewExecution", { path: { id: inline.author }, promptID: review.promptID,
+          prompt: review.task.prompt, admittedAt: review.admittedAt, parent: owner }).catch(() => undefined));
+        const history = await messages(owner).catch(() => undefined);
+        const calls = history?.flatMap(message => record(message.info) && message.info.role === "assistant" &&
+          message.info.sessionID === owner && Array.isArray(message.parts) ? message.parts : [])
+          .filter(part => record(part) && part.type === "tool" && part.tool === "task" && part.callID === review.callID) ?? [];
+        const state = calls.length === 1 && record(calls[0]) && record(calls[0].state) ? calls[0].state : undefined;
+        if (record(native) && native.id === inline.author && native.parentID === owner &&
+            canonicalAgent(profile, String(native.agent)) === "dog-reviewer" && native.outcome === "failed" &&
+            record(execution) && execution.active === false && execution.queued === false &&
+            state?.status === "error" && record(state.input) &&
+            missionTaskFingerprint(state.input) === missionTaskFingerprint({ ...review.task }) &&
+            (taskChildSessionID(state) === undefined || taskChildSessionID(state) === inline.author) &&
+            !await continuationNativeIdle(inline.author, "dog-reviewer", owner)) {
+          try {
+            await assertDirectPlanningQuiescent(inline.author);
+            await control!.failDirectUnit(root, inline.author);
+            mission = await missions.required(root);
+            previous = await operators.read(root);
+          } catch (error) {
+            if (!(error instanceof Error) || !error.message.startsWith("mission-replan-terminal-unreconciled:")) throw error;
+          }
+        }
+      }
       if (sourceReconciliationRequired(mission, previous)) return JSON.stringify({ ...missionDispatchPacket(mission, previous),
         next_action: `Coordinator: do not repeat plan_units. Call ${submitMission} with status=blocked and report the saved ` +
           `requirements to Operator. Operator can relink this mission in place via ${startMission} intent=replace ` +
@@ -3870,6 +4142,45 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
       }
       assertMissionWritePaths(mission, plan.units.flatMap(unit => unit.write));
+      if (input.nativeBackground && actor === root && executor === "self" && plan.units.length === 1 &&
+          mission.runID === null && mission.phase === "submitted" && !mission.dispatchOpen &&
+          mission.coordinator === null && mission.coordinatorReleases?.length) {
+        const idle = await completedRunWritersIdle(root, previous, planningCallID);
+        if (idle) {
+          const { task: _task, ...packet } = missionDispatchPacket(mission, previous);
+          return JSON.stringify({ ...packet, status: "mission-coordinator-active", reason: idle,
+            next_action: "A previous run's writer is active or not proven quiescent. Do not start another writer; retry after native work settles." });
+        }
+      }
+      // An ended read-only Coordinator can return a blocked Mission before it ever
+      // prepared a run. The root's explicit direct plan must not loop back to that
+      // same child. Prove the native lineage and quiescence before relinquishing
+      // the controller; an unknown or active child keeps the original routing.
+      if (input.nativeBackground && actor === root && executor === "self" && plan.units.length === 1 &&
+          (!previous || previous.phase === "completed") &&
+          mission.runID === null && mission.phase === "submitted" && mission.submission?.status === "blocked" &&
+          mission.coordinator && mission.callID && !mission.dispatchOpen && !mission.authorContinuation &&
+          !mission.review) {
+        const coordinator = mission.coordinator, callID = mission.callID;
+        const idle = await continuationNativeIdle(coordinator, "dog-operator", root) ??
+          await completedRunWritersIdle(root, previous, planningCallID);
+        if (idle) {
+          const { task: _task, ...packet } = missionDispatchPacket(mission, previous);
+          return JSON.stringify({ ...packet, status: "mission-coordinator-active", reason: idle,
+            next_action: "The prior Coordinator or a previous run's writer is active or not proven quiescent. Do not dispatch it or another writer; retry after native work settles." });
+        } else {
+          mission = await missions.update(root, item => {
+            if (item.id !== mission.id || item.coordinator !== coordinator || item.callID !== callID ||
+                item.dispatchOpen || item.runID !== null || item.phase !== "submitted" ||
+                item.submission?.status !== "blocked" || item.authorContinuation || item.review) {
+              throw new Error("mission-direct-controller-release-stale");
+            }
+            (item.coordinatorReleases ??= []).push({ coordinator, callID, at: new Date().toISOString() });
+            item.coordinator = null;
+            item.callID = null;
+          });
+        }
+      }
       if (actor === root && (mission.coordinator !== null || plan.units.length !== 1)) {
         // A submitted Coordinator still owns corrective planning. Return its actual
         // continuation instead of referring to a Task that the rejection never supplied.
@@ -3951,6 +4262,10 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
           `mission-budget-exhausted: plan needs ${plan.units.length} units; ${capacity.remaining_units} remain. The current run is retained.`);
         for (const unit of previous.units) {
           if (!unit.childSessionID) continue;
+          if (input.nativeBackground && unit.reviewerCorrection &&
+              await continuationNativeIdle(unit.childSessionID, "dog-reviewer", previous.operatorSessionID ?? root)) {
+            throw new Error("mission-replan-terminal-unreconciled:native_correction_writer_active");
+          }
           const attempt = [...(mission.attempts ?? [])].reverse().find(item =>
             item.runID === previousRunID && item.unitID === unit.unit.id && item.childSessionID === unit.childSessionID);
           const terminal = attempt ? await missionWorkerTerminalProof(root, mission, previous, attempt) :
@@ -4216,7 +4531,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             }
             if (args.executor === "worker" && args.units === undefined) return handoffDirect(root, context.sessionID, context.callID, args.handoff_context);
             const planned = await declareMissionUnits(root, context.sessionID, await missions.required(root),
-              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities);
+              (args as Record<string, unknown>).units, args.reason, (args as Record<string, unknown>).execution, context.callID, args.handoff_context, args.work_quantities, args.executor);
             // The selection above survives a refused plan. If planning changed the run,
             // also retain this explicit selection in that run's context; it is still
             // only a model observation, never proof of independence or execution.
@@ -4892,6 +5207,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         }
         return [];
       },
+      backgroundCorrectionMatch,
       backgroundResult: async (parent, callID, child, promptID) => {
         const receipt = await nativeCorrectionReceipt(parent, callID, child, promptID);
         return receipt ? JSON.stringify(receipt) : undefined;
@@ -5126,8 +5442,22 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         // Management can reconcile, yield, stop or report the owner's admission.
         // They must remain reachable when its artifact binding is the thing in conflict.
         // Ordinary tools and the parts of planning that actually write still activate it.
-        const direct = request.tool === status || request.tool === planUnits || request.tool === cancel || request.tool === submitMission
-          ? await directExecution(request.sessionID) : await activateDirect(request.sessionID);
+        const direct = await directExecution(request.sessionID);
+        if (direct && request.tool !== status && request.tool !== planUnits && request.tool !== cancel && request.tool !== submitMission) {
+          try { await activateDirect(request.sessionID, direct); }
+          catch (error) {
+            const args = record(output.args) ? output.args : {}, execution = direct.mission.execution;
+            const command = isShellTool(request.tool) && execution && typeof args.command === "string" &&
+              missionOperationDirectoryMatch(resolve(input.directory, typeof args.workdir === "string" ? args.workdir : "."), execution.directory)
+              ? missionOperationCommandMatch(args.command, execution.commands, execution.directory) : undefined;
+            // Activation is before the native tool starts. Record only an exact
+            // still-owned operation call; a recording failure must preserve the
+            // original refusal and leave recovery conservative.
+            try { await recordOperationPrelaunchRejection(root, direct.mission, request, args, command, false, direct); }
+            catch { /* Missing history or storage remains unknown, not a successful operation. */ }
+            throw error;
+          }
+        }
         const writer = who.role === "dog-worker" || !!direct || !!await reviewerCorrection(request.sessionID);
         if (who.role === "dog-reviewer" && writer) {
           const correction = (await reviewerCorrection(request.sessionID))!;
@@ -5213,6 +5543,12 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
              mission && !["completed", "cancelled"].includes(mission.phase)) {
           await requireRoot(request.sessionID);
           const current = await reconcileMissionDispatch(root) ?? mission;
+          if (input.nativeBackground && current.coordinator && args.task_id === current.coordinator && !current.dispatchOpen &&
+              current.phase === "submitted" && current.submission?.status === "blocked" && current.runID === null) {
+            const idle = await continuationNativeIdle(current.coordinator, "dog-operator", root) ??
+              await completedRunWritersIdle(root, await operators.read(root), request.callID, request.tool);
+            if (idle) throw new Error(`mission-coordinator-active-or-unproven:${idle}`);
+          }
           if (current.coordinator === null && current.authorContinuation &&
               (!args.task_id || args.task_id === current.authorContinuation.child)) {
             const proof = await proveAuthorContinuation(root, current,
@@ -5506,45 +5842,7 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             // worker chat hook above delivers this already-admitted canonical prompt.
           } else Object.assign(output, outward);
         } catch (error) {
-          if (declaredOperation !== undefined && operationArgs.background !== true) await missions.update(root, current => {
-            if (!current.execution || current.runID !== mission?.runID || current.execution.directory !== mission?.execution?.directory ||
-                !current.execution.commands.includes(declaredOperation)) return;
-            const inputHash = missionOperationInputHash(request.tool, String(operationArgs.command), current.execution.directory);
-            let observation = current.execution.observations.find(item => item.sessionID === request.sessionID && item.callID === request.callID);
-            if (observation && (observation.command !== declaredOperation || observation.directory !== current.execution.directory ||
-                observation.nativeInputHash && observation.nativeInputHash !== inputHash ||
-                observation.nativeCallHash && observation.nativeCallHash !== missionOperationCallHash(operationArgs, current.execution.directory) ||
-                observation.prelaunchRejection && observation.prelaunchRejection.inputHash !== inputHash)) {
-              observation.conflicting = true;
-              return;
-            }
-            // A new call can be refused before admission (history outage or run-once).
-            // Never turn a previous admission of this SAME call into a refusal receipt.
-            if (observation && !operationAdmission) {
-              if (observation.hostAdmitted || observation.prelaunchRejection) return;
-              if (observation.status !== "running" || observation.completedAt || observation.nativeInputHash !== inputHash) {
-                observation.conflicting = true;
-                return;
-              }
-            }
-            if (!observation) {
-              observation = { command: declaredOperation, directory: current.execution.directory,
-                callID: request.callID, sessionID: request.sessionID, startedAt: new Date().toISOString(),
-                nativeCallHash: missionOperationCallHash(operationArgs, current.execution.directory) };
-              current.execution.observations.push(observation);
-            }
-            if (observation.conflicting || observation.nativeProcessObserved || observation.outcome !== undefined ||
-                observation.exit !== undefined || observation.shellID) {
-              observation.conflicting = true;
-              return;
-            }
-            observation.completedAt = new Date().toISOString();
-            observation.status = "error";
-            observation.outcome = "not-started";
-            observation.nativeCallHash ??= missionOperationCallHash(operationArgs, current.execution.directory);
-            observation.prelaunchRejection = { source: "host-before-hook", runID: current.runID!, tool: request.tool,
-              inputHash };
-          });
+          await recordOperationPrelaunchRejection(root, mission, request, operationArgs, declaredOperation, operationAdmission);
           if (delegated) {
             taskOwners.delete(request.callID);
             await operators.rejectedAdmission(root, request.callID, error instanceof Error ? error.message : String(error));
@@ -5655,6 +5953,13 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
               const successful = output.status !== "error" && output.status !== "cancelled" &&
                 !["failed", "interrupted", "cancelled", "error"].includes(String(record(output.metadata) ? output.metadata.status : ""));
               const unit = run.units.find(item => item.reviewerCorrection?.author === inline.author && item.directExecution);
+              const held = input.nativeBackground && !inline.selfRecheck
+                ? await continuationNativeIdle(inline.author, "dog-reviewer", ownership.actor) : undefined;
+              if (held) {
+                output.output = JSON.stringify({ status: "review-correction-awaits-native-writers", reason: held,
+                  next_action: "Retain this correction run, its reservation and current checks until its native tools, descendants and inboxes settle. Retry the existing Mission recovery; do not launch another writer." });
+                return;
+              }
               if (unit?.status === "running" && unit.callID) {
                 // A real native failure/unfinished correction releases its direct reservation;
                 // it never acquires success from an older Reviewer terminal.
@@ -5802,6 +6107,16 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
         const afterIdentity = !ownership ? await identity(id) : undefined;
         const repairAccess = !ownership && (afterIdentity?.role === "dog-worker" || !!await reviewerCorrection(id))
           ? await operators.repairValidationAccess((await rootFor(id))!, id) : null;
+        if (input.nativeBackground && ownership && request.tool === "task") {
+          const run = await operators.read(ownership.root);
+          const unit = run?.units.find(item => item.callID === request.callID && item.reviewerCorrection);
+          const held = unit?.childSessionID && await continuationNativeIdle(unit.childSessionID, "dog-reviewer", run!.operatorSessionID ?? ownership.root);
+          if (held) {
+            output.output = JSON.stringify({ status: "review-correction-awaits-native-writers", reason: held,
+              next_action: "Retain this correction run, reservation and current checks until its native tools, descendants and inboxes settle. Retry the existing Mission recovery; do not launch another writer." });
+            return;
+          }
+        }
         const mapped = translate(output, false) as typeof output;
         await core["tool.execute.after"]?.({ ...translate(request, false) as typeof request,
           ...(ownership ? { sessionID: ownership.root } : {}) }, mapped);

@@ -1576,6 +1576,8 @@ test("cold mission reopens only the terminal native dispatch and retains its Coo
   await assert.rejects(cold.reconcileFinishedDispatch("root", started.id, "first-call"), /reconciliation-stale/u);
   const task = cold.task(resumed);
   assert.equal(task.task_id, "coordinator");
+  await assert.rejects(cold.admit("root", "stale-initial-call", cold.task(started)), /not-authorized/u);
+  assert.deepEqual(await cold.required("root"), resumed, "a stale initial reference cannot replace the retained Coordinator dispatch");
   await cold.admit("root", "second-call", task);
   assert.equal((await cold.required("root")).dispatchOpen, true);
 }));

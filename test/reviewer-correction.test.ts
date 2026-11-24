@@ -261,6 +261,239 @@ test("an unfinished inline correction cannot borrow a native terminal and releas
   } finally { await f.dispose(); }
 });
 
+test("lost failed inline Reviewer callback reconciles before same-Mission direct replanning", async () => {
+  const f = await fixture({ activity: true });
+  try {
+    const started = await initial(f, { keepReviewOpen: true });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    // Preserve a client-owned native opt-in instead of assuming the shipped
+    // Reviewer's default subagent denial makes descendants impossible.
+    f.agents.author!.permissions = [{ action: "subagent", resource: "build", effect: "allow" }];
+    assert.equal(await f.permission("author", "subagent", "build"), "allow");
+    const childTask = await f.before("author", "subagent",
+      { agent: "build", description: "Generate result", prompt: "Generate result.txt" });
+    f.agents.generator = { agent: "build", parentID: "author", outcome: "failed" };
+    const launchTime = Date.now();
+    f.history.generator = [{ id: "generator-background", type: "assistant", agent: "build", finish: "tool-calls",
+      time: { created: launchTime, completed: launchTime }, content: [{ type: "tool", name: "shell", id: "generator-shell",
+        state: { status: "error", input: { command: "node delayed-write.mjs", background: true },
+          metadata: { shellID: "generator-job", status: "running" } },
+        time: { created: launchTime, ran: launchTime, completed: launchTime } }] }];
+    await f.after(childTask, "Native generator failed", { sessionID: "generator", status: "failed" }, "error");
+    f.terminal("author", "Native correction failed", true);
+    const now = Date.now();
+    f.history.root!.push({ id: "lost-callback", type: "assistant", agent: f.agents.root!.agent, finish: "tool-calls",
+      time: { created: now, completed: now }, content: [{ type: "tool", name: "subagent", id: started.dispatch.id,
+        state: { status: "error", input: started.dispatch.input, error: { message: "Native correction failed" },
+          metadata: { sessionID: "author" } }, time: { created: now, ran: now, completed: now } }] });
+    const declaration = { executor: "self", reason: "Continue incomplete work after the native failure",
+      units: [{ title: "Finish output", objective: "Correct and validate the retained result", read: ["check.mjs"],
+        write: ["result.txt"], validation: ["node check.mjs"] }] };
+    f.active.author = { type: "running" };
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    delete f.active.author;
+    f.agents.author!.outcome = undefined;
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    f.agents.author!.outcome = "failed";
+    f.agents.other = { agent: "build", parentID: "root" };
+    f.agents.author!.parentID = "other";
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    f.agents.author!.parentID = "root";
+    await f.start();
+    const held = await f.ledger();
+    const assertHeld = async () => {
+      assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+      assert.equal((await f.run()).runID, old.runID);
+      assert.equal((await f.run()).units[0]!.status, "running");
+      assert.deepEqual((await f.ledger()).state.outstanding_reservations, held.state.outstanding_reservations);
+    };
+    await assertHeld();
+    // The same interrupted correction must remain recoverable when its already
+    // settled native lineage is larger than the former 256-session cutoff.
+    for (let i = 0; i < 260; i++) f.agents[`settled-${i}`] = {
+      agent: "build", parentID: "author", outcome: "succeeded",
+    };
+    // A native shell completion notification proves the independent job ended;
+    // neither the child's failed outcome nor its idle session proves that.
+    f.history.generator!.push({ id: "generator-job-ended", type: "synthetic", description: "node delayed-write.mjs",
+      metadata: { source: "shell", shellID: "generator-job", state: "completed" }, time: { created: Date.now() } });
+    f.inbox.author = [{ id: "later-author-prompt", payload: { text: "Continue work" } }];
+    await assertHeld();
+    delete f.inbox.author;
+    f.inbox.generator = [{ id: "later-generator-prompt", payload: { text: "Continue generation" } }];
+    await assertHeld();
+    delete f.inbox.generator;
+    const resumed = await f.tool("root", "plan_units", declaration);
+    assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
+    assert.notEqual(resumed.run_id, old.runID);
+    assert.equal((await f.missions.required("root")).id, missionID);
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 1);
+    const oldTaskID = /^task_id: (.+)$/mu.exec(old.units[0]!.task.prompt)![1];
+    assert((await f.ledger()).records.some(({ event }: any) => event.kind === "unit.settled" &&
+      event.unit_id === oldTaskID && event.disposition === "failed" && event.evidence.length === 0),
+    "the interrupted correction is settled as a failure, not a passing check");
+    await assert.rejects(f.edit("author", "old grant must not write"));
+    await f.edit("root", "ready recovered");
+    await f.shell("root", "git add -- result.txt && git commit -m recovered");
+    await f.shell("root", "node check.mjs");
+    assert.equal((await f.tool("root", "finish_direct_unit")).status, "awaiting-acceptance");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+  } finally { await f.dispose(); }
+});
+
+for (const [outcome, callback, tracked, finish, ready, resumedTask] of [
+  ["failed", false, true, false, false, false], ["interrupted", false, true, false, false, false], ["succeeded", false, true, false, false, false],
+  ["failed", true, false, false, false, false], ["failed", true, true, false, false, false], ["succeeded", false, true, true, false, false],
+  ["succeeded", false, true, false, true, false],
+  ["failed", true, false, false, false, true], ["failed", true, true, false, false, true], ["failed", false, true, false, false, true],
+] as const) test(`${resumedTask ? "resumed" : "inline"} correction retains delegated writers across native ${outcome}, callback=${callback}, tracked=${tracked}, finish=${finish}, ready=${ready}`, async () => {
+  const f = await fixture({ activity: true, syncedLog: true, legacyReviewLaunch: resumedTask && !tracked });
+  try {
+    const started = await initial(f, { keepReviewOpen: !resumedTask, backgroundReview: tracked });
+    if (resumedTask) {
+      const prepared = await f.tool("root", "repair_review");
+      started.dispatch = await f.before("root", "subagent", { ...f.task(prepared.task), ...(tracked ? { background: true } : {}) });
+      await f.prompt("author", started.dispatch.input.prompt); await f.bind("author");
+    }
+    if (!callback) await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
+    if (!resumedTask) await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    if (ready) {
+      await f.edit("author", "ready before delegation");
+      await f.shell("author", "git add -- result.txt && git commit -m ready-before-delegation");
+      await f.shell("author", "node check.mjs");
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+    }
+    f.agents.author!.permissions = [{ action: "subagent", resource: "build", effect: "allow" }];
+    assert.equal(await f.permission("author", "subagent", "build"), "allow");
+    const childTask = await f.before("author", "subagent",
+      { agent: "build", description: "Generate result", prompt: "Generate result.txt" });
+    f.agents.generator = { agent: "build", parentID: "author", outcome: "failed" };
+    const launchTime = Date.now();
+    f.history.generator = [{ id: "generator-background", type: "assistant", agent: "build", finish: "tool-calls",
+      time: { created: launchTime, completed: launchTime }, content: [{ type: "tool", name: "shell", id: "generator-shell",
+        state: { status: "error", input: { command: "node delayed-write.mjs", background: true },
+          metadata: { shellID: "generator-job", status: "running" } },
+        time: { created: launchTime, ran: launchTime, completed: launchTime } }] }];
+    await f.after(childTask, "Native generator failed", { sessionID: "generator", status: "failed" }, "error");
+    if (finish) {
+      await f.edit("author", "ready before the generator ends");
+      await f.shell("author", "git add -- result.txt && git commit -m unfinished-generator");
+      await f.shell("author", "node check.mjs");
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "direct-unit-awaits-native-writers");
+    }
+    const busy = Date.now(), held = (await f.ledger()).state.outstanding_reservations;
+    f.terminal("author", "Native correction ended without finishing its direct unit", outcome === "failed");
+    f.agents.author!.outcome = outcome;
+    const idle = Date.now();
+    f.agents.author!.time = { busy, idle };
+    f.history.author!.push({ id: "writer-idle", type: "idle", outcome, time: { created: idle } });
+    if (callback) await f.after(started.dispatch, "Native correction failed", { sessionID: "author", status: "failed" }, "error");
+    const declaration = { executor: "self", reason: "Continue the exact incomplete correction",
+      units: [{ title: "Finish output", objective: "Correct and validate the retained result", read: ["check.mjs"],
+        write: ["result.txt"], validation: ["node check.mjs"] }] };
+    const assertHeld = async () => {
+      assert.equal((await f.run()).runID, old.runID);
+      assert.equal((await f.run()).units[0]!.status, ready ? "succeeded" : "running");
+      assert.deepEqual((await f.ledger()).state.outstanding_reservations, held);
+    };
+    await assertHeld();
+    await f.start();
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    await assertHeld();
+    f.history.generator!.push({ id: "generator-job-ended", type: "synthetic", description: "node delayed-write.mjs",
+      metadata: { source: "shell", shellID: "generator-job", state: "completed" }, time: { created: Date.now() } });
+    f.inbox.generator = [{ id: "queued-generator", payload: { text: "Continue generation" } }];
+    assert.match((await f.tool("root", "plan_units", declaration)).status, /mission-replan-terminal-unreconciled/);
+    await assertHeld();
+    delete f.inbox.generator;
+    if (finish) {
+      const checks = (await f.run()).units[0]!.reviewerCorrection!.checks;
+      assert.equal((await f.tool("author", "finish_direct_unit")).status, "correction-validated");
+      assert.equal((await f.run()).runID, old.runID);
+      assert.deepEqual((await f.run()).units[0]!.reviewerCorrection!.checks, checks, "quiet descendants do not require unchanged checks to run again");
+      assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+      return;
+    }
+    const resumed = await f.tool("root", "plan_units", declaration);
+    assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
+    assert.notEqual(resumed.run_id, old.runID);
+    assert.equal((await f.missions.required("root")).id, missionID);
+    const oldTaskID = /^task_id: (.+)$/mu.exec(old.units[0]!.task.prompt)![1];
+    assert((await f.ledger()).records.some(({ event }: any) => event.kind === "unit.settled" &&
+      event.unit_id === oldTaskID && (ready ? event.disposition === "succeeded" && event.evidence.length > 0
+        : event.disposition === "failed" && event.evidence.length === 0)));
+    await assert.rejects(f.edit("author", "old grant must not write"));
+    await f.edit("root", "ready recovered");
+    await f.shell("root", "git add -- result.txt && git commit -m recovered-writer-tree");
+    await f.shell("root", "node check.mjs");
+    assert.equal((await f.tool("root", "finish_direct_unit")).status, "awaiting-acceptance");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+  } finally { await f.dispose(); }
+});
+
+for (const mode of ["root", "nested", "legacy-nested"] as const) test(`failed background inline correction reconciles its exact native idle and replans: ${mode}`, async () => {
+  const nested = mode !== "root";
+  const f = await fixture({ activity: true, syncedLog: true, legacyReviewLaunch: mode === "legacy-nested" });
+  try {
+    const owner = nested ? "coordinator" : "root";
+    const started = await initial(f, { keepReviewOpen: true, backgroundReview: !nested, nested });
+    await f.after(started.dispatch, "Native Review Job running", { sessionID: "author", status: "running" });
+    await f.tool("author", "repair_review", { findings: "FINDINGS\nMedium: result must be ready." });
+    const old = await f.run(), missionID = (await f.missions.required("root")).id;
+    assert.match(f.agents.author!.agent, /^dog-reviewer-correction-v010-/);
+    const busy = Date.now();
+    f.terminal("author", "Native correction failed", true);
+    const idle = Date.now();
+    f.agents.author!.time = { busy, idle };
+    f.history.author!.push({ id: "failed-idle", type: "idle", outcome: "failed", time: { created: idle } });
+    await f.start();
+    const declaration = { executor: "self", reason: "Continue after the exact failed native Review",
+      units: [{ title: "Finish output", objective: "Correct and validate the retained result", read: ["check.mjs"],
+        write: ["result.txt"], validation: ["node check.mjs"] }] };
+    const held = (await f.ledger()).state.outstanding_reservations;
+    const assertHeld = async () => {
+      const result = await f.tool(owner, "plan_units", declaration);
+      assert.match(result.status, /mission-replan-terminal-unreconciled/);
+      assert.equal((await f.run()).runID, old.runID);
+      assert.deepEqual((await f.ledger()).state.outstanding_reservations, held);
+    };
+    f.active.author = { type: "running" };
+    await assertHeld();
+    delete f.active.author;
+    const alias = f.agents.author!.agent;
+    f.agents.author!.agent = "dog-reviewer-correction-v010-0000000000000000";
+    await assertHeld();
+    f.agents.author!.agent = alias;
+    f.inbox.author = [{ id: "queued", payload: { text: "Continue work" } }];
+    await assertHeld();
+    delete f.inbox.author;
+    const terminalIdle = f.history.author!.pop()!;
+    await assertHeld();
+    f.history.author!.push(terminalIdle);
+    f.history.author!.push({ id: "later-turn", type: "user", text: "A newer turn", time: { created: idle + 1 } },
+      { id: "later-idle", type: "idle", outcome: "failed", time: { created: idle + 2 } });
+    f.agents.author!.time = { busy: idle + 1, idle: idle + 2 };
+    await assertHeld();
+    f.history.author!.splice(-2);
+    f.agents.author!.time = { busy, idle };
+    const resumed = await f.tool(owner, "plan_units", declaration);
+    assert.equal(resumed.status, "direct-unit-running", JSON.stringify(resumed));
+    assert.notEqual(resumed.run_id, old.runID);
+    assert.equal((await f.missions.required("root")).id, missionID);
+    const oldTaskID = /^task_id: (.+)$/mu.exec(old.units[0]!.task.prompt)![1];
+    assert((await f.ledger()).records.some(({ event }: any) => event.kind === "unit.settled" &&
+      event.unit_id === oldTaskID && event.disposition === "failed" && event.evidence.length === 0));
+    await assert.rejects(f.edit("author", "old grant must not write"));
+    await f.edit(owner, "ready recovered");
+    await f.shell(owner, "git add -- result.txt && git commit -m recovered-background");
+    await f.shell(owner, "node check.mjs");
+    assert.equal((await f.tool(owner, "finish_direct_unit")).status, "awaiting-acceptance");
+    assert.equal((await f.ledger()).state.outstanding_reservations.length, 0);
+  } finally { await f.dispose(); }
+});
+
 test("continuous Reviewer background Task survives cold reload before and after direct validation", async () => {
   const f = await fixture();
   try {

@@ -51,7 +51,7 @@ after(async () => {
 });
 
 export async function fixture(options: { permissionsUnavailable?: boolean; contextWindow?: number; compactedHistory?: boolean;
-  nativeReplay?: boolean } = {}) {
+  nativeReplay?: boolean; activity?: boolean; syncedLog?: boolean; legacyReviewLaunch?: boolean } = {}) {
   const seed = await (repositorySeed ??= createRepositorySeed());
   const directory = await mkdtemp(resolve("_testenv/reviewer-correction-"));
   try {
@@ -65,6 +65,8 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     author: { agent: "dog-reviewer-v010", parentID: "root" }, final: { agent: "dog-reviewer-v010", parentID: "root" } };
   const history: Record<string, ObjectValue[]> = {}, storage = new Map<string, unknown>(), rules: ObjectValue[] = [], switches: ObjectValue[] = [];
   const globalRules: Rule[] = [];
+  const active: Record<string, { type: "running" | "retry" }> = {};
+  const inbox: Record<string, ObjectValue[]> = {};
   const agentRules: Record<string, Rule[]> = {};
   let registry: Record<string, ObjectValue>;
   let tools: ObjectValue[], toolHooks: Map<string, Function>, sessionHooks: Map<string, Function>, permissionHook: Function, hooks: OpenCodeHooks;
@@ -112,7 +114,12 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     rebuild();
     const context: OpenCodeV2Context = {
       location: { directory }, storage: { get: async key => structuredClone(storage.get(key)),
-        set: async (key, value) => { storage.set(key, structuredClone(value)); }, remove: async key => { storage.delete(key); },
+        set: async (key, value) => {
+          // Older adapters did not persist implicitly-background nested Reviewer launches.
+          if (options.legacyReviewLaunch && key.startsWith("v2-background-dispatches:") &&
+              Array.isArray(value) && value.some(item => item.agent === "dog-reviewer-v010")) return;
+          storage.set(key, structuredClone(value));
+        }, remove: async key => { storage.delete(key); },
         scan: async ({ prefix }) => ({ entries: [...storage].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value: structuredClone(value) })) }) },
       ...(!options.permissionsUnavailable ? { agent: { transform: async (callback: Function) => {
         transforms.push(callback);
@@ -128,12 +135,14 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
       tool: { transform: async callback => { callback({ add: tool => tools.push(tool),
         update: (name, update) => { const tool = tools.find(tool => tool.name === name); if (tool) update(tool as never); } }); return { dispose() {} }; },
         hook: async (name, callback) => { toolHooks.set(name, callback); return { dispose() {} }; } },
-      session: { get: async ({ sessionID }) => {
+      session: { ...(options.syncedLog ? { log: async function* () { yield { type: "log.synced" }; } } : {}),
+        ...(options.activity !== false ? { active: async () => active,
+        inbox: { list: async ({ sessionID }: { sessionID: string }) => inbox[sessionID] ?? [] } } : {}), get: async ({ sessionID }) => {
         if (!agents[sessionID]) throw { _tag: "SessionNotFoundError", sessionID };
         if (sessionID === "author" && agents.author!.outcome === "interrupted" && projection.failRestorationLookup) {
           throw new Error("native-session-lookup-transient");
         }
-        return { id: sessionID, model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" }, ...agents[sessionID] };
+        return { id: sessionID, directory, model: { providerID: "openai", id: "gpt-6.1-sol", variant: "xhigh" }, ...agents[sessionID] };
       },
         context: async ({ sessionID }) => options.contextWindow ? (history[sessionID] ?? []).slice(-options.contextWindow) : history[sessionID] ?? [],
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info })), cursor: {} }),
@@ -216,6 +225,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
     await sessionHooks.get("prompt")!(event);
     if (!(history[sessionID] ??= []).some(message => message.id === messageID)) history[sessionID]!.push({ id: event.messageID, type: "user", text: event.prompt.text, time: { created: Date.now() } });
+    active[sessionID] = { type: "running" };
     return event.prompt.text;
   };
   const tool = async (sessionID: string, name: string, input: ObjectValue = {}) => {
@@ -242,6 +252,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     await after(event, output.stdout, { exit: "code" in output ? output.code : exit });
   };
   const terminal = (child: string, text: string, failed = false) => {
+    delete active[child];
     agents[child]!.outcome = failed ? "failed" : "succeeded";
     (history[child] ??= []).push({ id: `msg_${++counter}`, type: "assistant", agent: agents[child]!.agent, finish: "stop",
       model: { providerID: "openai", id: "gpt-6.1-sol" }, tokens: { input: 100, output: 20, cache: { read: 0, write: 0 }, reasoning: 0 },
@@ -263,7 +274,7 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     throw new Error("fixture-goal-ledger-missing");
   };
   await start();
-  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, registry: () => registry,
+  return { directory, agents, history, storage, rules, switches, projection, compaction, globalRules, agentRules, active, inbox, registry: () => registry,
     replayAgents: () => replayAgents(), pluginDisabled: () => pluginDisabled, toolNames: () => tools.map(tool => tool.name),
     start, before, after, prompt, tool, task, run, missions, bind, edit, shell, finish, terminal, ledger, permission, nativeLaunches,
     launch: (event: ObjectValue) => tools.find(tool => tool.name === "subagent")!.execute(event.input, { id: event.id, sessionID: event.sessionID }),
@@ -271,22 +282,29 @@ export async function fixture(options: { permissionsUnavailable?: boolean; conte
     dispose: async () => { cleanup?.(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-export async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; skipOperation?: boolean; validation?: string[]; original?: string; write?: string[]; keepReviewOpen?: boolean; backgroundReview?: boolean } = {}) {
+export async function initial(f: Awaited<ReturnType<typeof fixture>>, options: { readonly?: boolean; operation?: boolean; skipOperation?: boolean; validation?: string[]; original?: string; write?: string[]; keepReviewOpen?: boolean; backgroundReview?: boolean; nested?: boolean } = {}) {
   const original = options.original ?? "Produce ready output, validate, commit it, preserve all constraints and independently review.";
   await f.prompt("root", original);
-  await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
-  const plan = await f.tool("root", "plan_units", { units: [{ title: "Ready output", objective: "Produce ready output",
+  const mission = await f.tool("root", "start_mission", { requirements: ["Output must be ready", "Validate and commit; independent review"], ...(options.operation ? { kind: "operation" } : {}) });
+  const owner = options.nested ? "coordinator" : "root";
+  if (options.nested) {
+    f.agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+    f.agents.worker!.parentID = owner; f.agents.author!.parentID = owner;
+    const dispatch = await f.before("root", "subagent", f.task(mission.task));
+    await f.prompt(owner, dispatch.input.prompt);
+  }
+  const plan = await f.tool(owner, "plan_units", { units: [{ title: "Ready output", objective: "Produce ready output",
      read: ["check.mjs", "required-test.mjs", "generate.mjs", "format.mjs"], write: options.readonly ? [] : options.write ?? ["result.txt"], validation: options.validation ?? ["node check.mjs"] }],
      ...(options.operation ? { execution: { commands: ["node operation.mjs"], directory: f.directory } } : {}) });
   assert(plan.task, JSON.stringify(plan));
-  const worker = await f.before("root", "subagent", f.task(plan.task));
+  const worker = await f.before(owner, "subagent", f.task(plan.task));
   await f.prompt("worker", worker.input.prompt); await f.bind("worker");
   if (!options.readonly) { await f.edit("worker", "wrong"); await f.shell("worker", "git add -- result.txt"); await f.shell("worker", "git commit -m candidate"); }
   for (const command of options.validation ?? ["node check.mjs"]) await f.shell("worker", command);
   if (options.operation && !options.skipOperation) await f.shell("worker", "node operation.mjs");
   await f.finish(worker, "worker", "Implemented");
-  const review = await f.tool("root", "review_mission", { risk_tags: ["public-logic"] });
-  const dispatch = await f.before("root", "subagent", { ...f.task(review.task), ...(options.backgroundReview ? { background: true } : {}) });
+  const review = await f.tool(owner, "review_mission", { risk_tags: ["public-logic"] });
+  const dispatch = await f.before(owner, "subagent", { ...f.task(review.task), ...(options.backgroundReview ? { background: true } : {}) });
   await f.prompt("author", dispatch.input.prompt);
    if (!options.keepReviewOpen) await f.finish(dispatch, "author", "FINDINGS\nMedium: result.txt is wrong rather than ready; correct its content.\nMedium: preserve the ready output contract.\nMedium: keep required validation and clean commit semantics.");
    return { original, dispatch, run: await f.run(), mission: await f.missions.required("root") };

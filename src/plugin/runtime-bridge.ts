@@ -128,6 +128,7 @@ export interface RuntimeBridge {
   missionReadBinding?(rootSessionID: string, childSessionID: string, handoffPath: string,
     admission?: MissionImplementationAdmission): Promise<{
     projectRoot: string; manifestPath: string; handoffHash: string; manifestHash: string;
+    directValidation?: readonly string[];
   } | undefined>;
   onSerialSettlement?(settlement: SerialDispatchSettlement): Promise<void>;
   onRootTerminal?(rootSessionID: string, receipt: GoalTerminalReceipt): Promise<void>;

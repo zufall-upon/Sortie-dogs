@@ -927,7 +927,12 @@ for (const interrupted of [false, true]) test(`V2 durable shell completion recon
   } finally { cleanup?.(); }
 });
 
-for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground } of [
+for (const { legacy, commit, cancel, fabric, permission, directRecovery, interruptedLaunch, join: joinScenario, reviewJoin, managed: managedScenario, objectRestore, nestedBackground, operatorRecovery, directActivation } of [
+  ...["ended", "live", "unknown", "background", "interrupted", "previous-root", "previous-root-background",
+    "previous-root-worker-background"].map(operatorRecovery =>
+    ({ legacy: false, commit: false, cancel: false, operatorRecovery })),
+  ...["verified", "changed-input", "changed-timeout", "process-evidence", "history-unavailable"].map(directActivation =>
+    ({ legacy: false, commit: false, cancel: false, directActivation })),
   ...["replan", "handoff"].flatMap(directRecovery => [false, true].map(interruptedLaunch =>
     ({ legacy: false, commit: false, cancel: false, directRecovery, interruptedLaunch }))),
   ...["allow", "deny", "ask", "cancel", "deny-retry", "ask-retry", "retry-denied", "v1", "v1-no-exit", "v1-cancelled"]
@@ -952,7 +957,9 @@ for (const { legacy, commit, cancel, fabric, permission, directRecovery, interru
   { legacy: true, commit: false, cancel: false }, { legacy: false, commit: true, cancel: false },
   { legacy: false, commit: "linked-identity", cancel: false },
   { legacy: false, commit: false, cancel: true }])
-test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
+test(directActivation ? `V2 direct operation records actual handoff refusal: ${directActivation}` :
+  operatorRecovery ? `V2 root direct recovery after blocked Coordinator: ${operatorRecovery}` :
+  nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackground} reconciles the native idle history` :
   nestedBackground?.startsWith("foreground-") ? `V2 nested Worker ${nestedBackground} preserves exact checks and accounting` :
   nestedBackground === "storage-error" ? "V2 Coordinator settles a Worker whose background admission fails before launch" :
   nestedBackground ? "V2 Coordinator reconciles an implicitly background Worker with a failed check" :
@@ -994,6 +1001,7 @@ test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackgroun
   let joinedPermission!: () => void;
   const joinPermitted = new Promise<void>(resolve => { joinedPermission = resolve; });
   let loseNextAfter = false;
+  let operationHistoryUnavailable = false;
   let projectionRace: { path: string; source: string } | undefined;
   const start = async () => {
     fixture = contextFixture();
@@ -1034,18 +1042,20 @@ test(nestedBackground?.startsWith("idle-") ? `V2 nested Worker ${nestedBackgroun
       } }) } } : {}),
       session: { ...fixture.context.session,
         active: async () => ({}),
+        inbox: { list: async () => [] },
         interrupt: async () => ({ interrupted: false }),
         list: async ({ parentID }) => ({ data: Object.entries(agents).filter(([, info]) => info.parentID === parentID)
           .map(([id, info]) => ({ id, ...info })), cursor: { next: null } }),
-        get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], model: { providerID: "openai",
+        get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory }, model: { providerID: "openai",
           id: agents[sessionID]?.agent === "dog-worker-v010" ? "gpt-6-luna-fast" : "gpt-6-sol", variant: "max" } }),
         context: async ({ sessionID }) => history[sessionID] ?? [],
         ...(nestedBackground ? { log: async function* ({ sessionID }: { sessionID: string }) {
           for (const event of logs[sessionID] ?? []) yield event;
         } } : {}),
-      }, message: { list: async ({ sessionID, order }) => ({
-        data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {},
-      }) } });
+      }, message: { list: async ({ sessionID, order }) => {
+        if (operationHistoryUnavailable && sessionID === "coordinator") throw new Error("fixture operation history unavailable");
+        return { data: order === "desc" ? [...(history[sessionID] ?? [])].reverse() : history[sessionID] ?? [], cursor: {} };
+      } } });
   };
   const prompt = async (sessionID: string, text: string) => {
     const messageID = `msg_${++counter}`;
@@ -1091,6 +1101,286 @@ const deadline = Date.now() + 15000;
 while (!existsSync('.git/sortie-dogs/join-release') && Date.now() < deadline) await new Promise(done => setTimeout(done, 10));
 process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "failed" ? 7 : 0} : 124);\n`);
     await start();
+    if (directActivation) {
+      if (directActivation === "verified") await writeFile(join(directory, "launch.mjs"),
+        'import { appendFileSync } from "node:fs"; appendFileSync("result.txt", "ready\\n");\n');
+      await prompt("root", "Run the requested operation once without replay");
+      const started = await tool("root", "start_mission", { kind: "operation", requirements: ["Run the operation once"],
+        prohibited_write: ["forbidden.txt"] });
+      const dispatch = await before("root", "subagent", nativeTask(started.task));
+      await prompt("coordinator", String(dispatch.input.prompt));
+      const command = "node launch.mjs";
+      const declaration = { title: "Run once", objective: "Run the operation once",
+        read: ["check.mjs", ...(directActivation === "verified" ? ["launch.mjs"] : [])],
+        write: ["result.txt"], validation: ["tar -xzf archive.tar.gz", "node check.mjs ready > forbidden.txt"] };
+      // The real host handoff checker refuses an unclassified artifact command.
+      // No declared shell process is started by either failed call.
+      await assert.rejects(tool("coordinator", "plan_units", { executor: "self", units: [declaration],
+        execution: { commands: [command], directory } }), /Handoff denied.*artifact_command_unclassified/u);
+      const operators = new OperatorRuntime(directory, V010_RUNTIME_PROFILE);
+      const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const run = await operators.required("root"), unit = run.units[0]!;
+      assert.equal(unit.directExecution?.actor, "coordinator");
+      const base = { sessionID: "coordinator", agent: agents.coordinator!.agent, tool: "shell" };
+      for (const [id, input] of [
+        ["other-command", { command: "node different.mjs", workdir: directory }],
+        ["other-cwd", { command, workdir: join(directory, "other") }],
+        ["background", { command, workdir: directory, background: true }],
+      ] as const) {
+        await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...base, id, input }),
+          /Handoff denied.*artifact_command_unclassified/u);
+      }
+      await assert.rejects(fixture.toolHooks.get("execute.before")!({ ...base, id: "other-actor",
+        sessionID: "first", agent: agents.first!.agent, input: { command, workdir: directory } }));
+      assert.deepEqual((await missionRuntime.required("root")).execution!.observations, [],
+        "other actors, commands, directories and background calls do not receive operation receipts");
+      const at = Date.now();
+      const event = { ...base, id: "actual-refusal", input: { command, workdir: directory, timeout: 120_000 } };
+      operationHistoryUnavailable = directActivation === "history-unavailable";
+      await assert.rejects(fixture.toolHooks.get("execute.before")!(event), /Handoff denied.*artifact_command_unclassified/u);
+      const saved = (await missionRuntime.required("root")).execution!.observations.find(item => item.callID === event.id);
+      operationHistoryUnavailable = false;
+      if (directActivation === "history-unavailable") assert.equal(saved, undefined, "unavailable native history stays unknown");
+      else {
+        assert.equal(saved?.sessionID, "coordinator");
+        assert.equal(saved?.command, command);
+        assert.equal(saved?.directory, directory);
+        assert.equal(saved?.status, "error");
+        assert.equal(saved?.outcome, "not-started");
+        assert.equal(saved?.prelaunchRejection?.runID, run.runID);
+        assert.equal(saved?.prelaunchRejection?.source, "host-before-hook");
+        assert.equal(saved?.exit, undefined);
+      }
+      const nativeInput = { ...event.input };
+      if (directActivation === "changed-input") nativeInput.command += " --different";
+      if (directActivation === "changed-timeout") nativeInput.timeout = 60_000;
+      history.coordinator!.push({ id: `msg_${++counter}`, type: "assistant", agent: agents.coordinator!.agent,
+        time: { created: at, completed: Date.now() }, content: [{ type: "tool", id: event.id, name: "shell", executed: false,
+          time: { created: at, ran: at, completed: Date.now() }, state: { status: "error", input: nativeInput,
+            error: { message: "Handoff denied: manifest /validation/0 artifact_command_unclassified" },
+            ...(directActivation === "process-evidence" ? { metadata: { exit: 0 } } : {}) } }] });
+      cleanup?.(); await start();
+      const status = await tool("root", "operator_status");
+      assert.equal(status.acceptance_summary.operation.status, directActivation === "verified" ? "not-started" : "recovery-blocked");
+      assert.equal(status.acceptance_summary.operation.process_succeeded, null);
+      assert.equal(status.acceptance_summary.operation.terminal_complete, false);
+      assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+      await assert.rejects(readFile(join(directory, "result.txt")), { code: "ENOENT" });
+      if (directActivation === "verified") {
+        const stillInvalid = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["tar -xzf other.tar.gz"] }],
+          reason: "Try a corrected validation recipe" });
+        assert.equal(stillInvalid.status, "direct-unit-registration-corrected");
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "a corrected but still unclassified recipe remains denied");
+        const corrected = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["node check.mjs ready"] }],
+          reason: "Correct the invalid validation recipe without replaying the refused operation" });
+        assert.equal(corrected.status, "direct-unit-registration-corrected", JSON.stringify(corrected));
+        assert.equal(corrected.run_id, run.runID);
+        const assertCurrentGate = async () => {
+          await assert.rejects(before("coordinator", "shell", { command: "node check.mjs ready > forbidden.txt", workdir: directory }),
+            /mission-explicit-write-prohibition/u, "a withdrawn recipe is subject to the ordinary write gate");
+          await assert.rejects(before("coordinator", "shell", { command: "printf forbidden > forbidden.txt", workdir: directory }),
+            /mission-explicit-write-prohibition/u, "ordinary diagnostics cannot write an explicitly prohibited path");
+          const diagnostic = await before("coordinator", "shell", { command: "printf diagnostic", workdir: directory });
+          await after(diagnostic, "diagnostic", { exit: 0, status: "completed" });
+        };
+        await assertCurrentGate();
+        const correctedRun = await operators.required("root");
+        assert.deepEqual(correctedRun.units[0]!.hashes, unit.hashes, "the admission's original controls remain pinned");
+        assert.equal(correctedRun.units[0]!.callID, unit.callID);
+        const correctedBudget = (await tool("root", "operator_status")).budget;
+        for (const key of ["max_units", "consumed_units", "reserved_units"]) assert.equal(correctedBudget[key], status.budget[key]);
+        const launch = await before("coordinator", "shell", { command, workdir: directory, timeout: 120_000 });
+        const launched = await exec(process.execPath, ["launch.mjs"], { cwd: directory });
+        await after(launch, launched.stdout, { exit: 0, status: "completed" });
+        assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
+        const changed = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["tar -xzf other.tar.gz"] }],
+          reason: "Exercise the current registration after activation" });
+        assert.equal(changed.status, "direct-unit-registration-corrected");
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "an active binding cannot reuse the previous recipe's inspection");
+        cleanup?.(); await start();
+        await assert.rejects(before("coordinator", "shell", { command: "node different.mjs", workdir: directory }),
+          /Handoff denied.*artifact_command_unclassified/u, "a cold binding also checks the current recipe");
+        const restored = await tool("coordinator", "plan_units", { executor: "self",
+          units: [{ ...declaration, validation: ["node check.mjs ready"] }],
+          reason: "Restore the valid result check" });
+        assert.equal(restored.status, "direct-unit-registration-corrected");
+        assert.equal(restored.run_id, run.runID);
+        await assertCurrentGate();
+        await assert.rejects(before("coordinator", "shell", { command, workdir: directory, timeout: 120_000 }),
+          /mission-operation-already-admitted/u);
+        const check = await before("coordinator", "shell", { command: "node check.mjs ready", workdir: directory });
+        const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+        await after(check, checked.stdout, { exit: 0, status: "completed" });
+        const finished = await tool("coordinator", "finish_direct_unit");
+        assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+        assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+          proof.execution.command.includes("node check.mjs ready")), "the actual result check is formal evidence");
+        const operation = (await tool("root", "operator_status")).acceptance_summary.operation;
+        assert.equal(operation.status, "executed");
+        assert.equal(operation.process_succeeded, true);
+        assert.equal(operation.terminal_complete, true);
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === event.id).outcome, "not-started");
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === event.id).exit, undefined);
+        assert.equal(operation.observations.find((item: { callID: string }) => item.callID === launch.id).exit, 0);
+        const review = await tool("coordinator", "review_mission", { risk_tags: [], traces: [] });
+        assert.equal(review.status, "skipped-low-risk");
+        const submitted = await tool("coordinator", "submit_mission", { status: "ready", summary: "The first launch and its result were validated." });
+        assert.equal(submitted.acceptance_summary.operation.status, "executed");
+        assert.equal((await missionRuntime.required("root")).submission?.status, "ready");
+        agents.coordinator!.outcome = "succeeded";
+        await after(dispatch, "Candidate ready", { sessionID: "coordinator" });
+        const completed = await tool("root", "complete_mission");
+        assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+        assert.equal(completed.receipt.status, "succeeded");
+        assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+        assert.equal(await readFile(join(directory, "result.txt"), "utf8"), "ready\n");
+      }
+      return;
+    }
+    if (operatorRecovery) {
+      if (operatorRecovery !== "previous-root-worker-background") delete agents.first;
+      delete agents.second; delete agents.reviewer; delete agents.unrelated;
+      let oldRootBackground: Record<string, unknown> | undefined;
+      if (operatorRecovery.startsWith("previous-root")) {
+        const delegated = operatorRecovery === "previous-root-worker-background";
+        if (delegated) agents.first!.parentID = "root";
+        await prompt("root", "Create the earlier root-owned result");
+        const previous = await tool("root", "start_mission", { requirements: ["Create the earlier result"] });
+        const first = await tool("root", "plan_units", { executor: delegated ? "worker" : "self", units: [{ title: "First", objective: "Write the first result",
+          read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs ready"] }] });
+        let workerCall: Awaited<ReturnType<typeof before>> | undefined;
+        const actor = delegated ? "first" : "root";
+        if (delegated) {
+          workerCall = await before("root", "subagent", nativeTask(first.task));
+          const expanded = await prompt(actor, String(workerCall.input.prompt));
+          const handoff = /^handoff_path: (.+)$/mu.exec(expanded)![1]!;
+          const read = await before(actor, "read", { path: handoff, limit: 2000 });
+          await after(read, await readFile(resolve(directory, handoff), "utf8"));
+        } else assert.equal(first.status, "direct-unit-running");
+        const write = await before(actor, "write", { path: "result.txt", content: "ready\n" });
+        await writeFile(join(directory, "result.txt"), "ready\n"); await after(write, "written");
+        const check = await before(actor, "shell", { command: "node check.mjs ready", workdir: directory });
+        const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+        await after(check, checked.stdout, { exit: 0 });
+        if (workerCall) {
+          agents.first!.outcome = "succeeded";
+          await after(workerCall, "First result ready", { sessionID: actor });
+        } else await tool("root", "finish_direct_unit");
+        await tool("root", "review_mission", { risk_tags: [], traces: [] });
+        assert.equal((await tool("root", "complete_mission")).status, "succeeded");
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+        assert.notEqual(previous.mission_id, undefined);
+        if (operatorRecovery.endsWith("background")) {
+          const background = await before("root", "shell", { command: "node old-writer.mjs", background: true });
+          await after(background, "Background process running", { status: "running" });
+          oldRootBackground = (history.root!.at(-1)!.content as Record<string, unknown>[])[0]!;
+        }
+      }
+      await prompt("root", "Continue the work in this same root session");
+      const mission = await tool("root", "start_mission", { requirements: ["The root author implements and validates the result"] });
+      const dispatch = await before("root", "subagent", nativeTask(mission.task));
+      await prompt("coordinator", String(dispatch.input.prompt));
+      const declaration = { title: "Root implementation", objective: "Write and validate the result",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs ready"] };
+      const rejected = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      assert.equal(rejected.status, "mission-coordinator-active");
+      assert.equal(rejected.task, undefined, "the active Coordinator is never duplicated");
+      await tool("coordinator", "submit_mission", { status: "blocked", summary: "Only the root author may implement" });
+      if (operatorRecovery !== "live") {
+        if (operatorRecovery !== "unknown") agents.coordinator!.outcome = "succeeded";
+        await after(dispatch, "Root author must continue", { sessionID: "coordinator" });
+      }
+      if (operatorRecovery === "background") history.coordinator!.push({
+        id: `msg_${++counter}`, type: "assistant", agent: "dogs-coordinator", finish: "tool-calls",
+        time: { created: Date.now(), completed: Date.now() }, content: [{ type: "tool", name: "shell",
+          id: "still-running", state: { status: "completed", input: { command: "background work" },
+            content: [], metadata: { status: "running" } } }],
+      });
+      await assert.rejects(tool("root", "start_direct_unit"),
+        operatorRecovery.startsWith("previous-root") ? /mission-run-registration-incomplete/u : /operator-run-missing/u);
+      const retained = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const retainedBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await assert.rejects(before("root", "subagent", nativeTask(mission.task)), /mission-dispatch-not-authorized/u,
+        "the old initial Task cannot start another child or erase a blocked submission");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), retained);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, retainedBudget);
+      if (oldRootBackground) {
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.match(held.reason, /previous_root_tools_active_or_unproven/u);
+        assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, null);
+        (oldRootBackground.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      }
+      if (operatorRecovery === "ended" || operatorRecovery === "interrupted") {
+        const status = await tool("root", "operator_status", { view: "progress" });
+        assert.match(status.next_action, /plan_units with executor=self/u);
+      }
+      if (operatorRecovery === "interrupted") {
+        const originalPrepare = OperatorRuntime.prototype.prepareMission;
+        try {
+          OperatorRuntime.prototype.prepareMission = async () => { throw new Error("fixture preparation interrupted"); };
+          await assert.rejects(tool("root", "plan_units", { executor: "self", units: [declaration] }),
+            /fixture preparation interrupted/u);
+        } finally { OperatorRuntime.prototype.prepareMission = originalPrepare; }
+        cleanup?.(); await start();
+        const pending = await tool("root", "operator_status");
+        assert.equal(pending.task, undefined, "interrupted root registration must not offer another author");
+        assert.match(pending.next_action, /plan_units with executor=self/u);
+        const continued = await tool("root", "start_mission", {
+          requirements: ["The root author implements and validates the result"],
+        });
+        assert.equal(continued.mission_id, mission.mission_id);
+        assert.equal(continued.task, undefined, "start_mission must preserve the pending root registration too");
+        assert.match(continued.next_action, /plan_units with executor=self/u);
+        const pendingMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        await assert.rejects(before("root", "subagent", nativeTask(mission.task)), /mission-direct-registration-pending/u);
+        assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), pendingMission);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, retainedBudget);
+      }
+      let planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      if (operatorRecovery === "live") {
+        assert.notEqual(planned.status, "direct-unit-running");
+        assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).coordinator, "coordinator");
+        return;
+      }
+      if (operatorRecovery === "unknown" || operatorRecovery === "background") {
+        assert.equal(planned.status, "mission-coordinator-active");
+        assert.equal(planned.task, undefined, "unproven native work cannot offer a duplicate Task");
+        const held = await tool("root", "operator_status");
+        assert.equal(held.task, undefined, "status cannot suggest the same unsafe dispatch");
+        await assert.rejects(before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",
+          prompt: "Continue", description: "Continue" }), /mission-coordinator-active-or-unproven/u);
+        agents.coordinator!.outcome = "succeeded";
+        if (operatorRecovery === "background") history.coordinator!.pop();
+        planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      }
+      assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+      const current = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.equal(current.id, mission.mission_id);
+      assert.equal(current.coordinatorReleases?.[0]?.coordinator, "coordinator");
+      assert.equal(current.coordinator, null);
+      const repeated = await tool("root", "start_direct_unit");
+      assert.equal(repeated.run_id, planned.run_id, "retry binds the same direct admission");
+      assert.equal(repeated.unit_id, planned.unit_id);
+      const write = await before("root", "write", { path: "result.txt", content: "ready\n" });
+      await writeFile(join(directory, "result.txt"), "ready\n"); await after(write, "written");
+      const check = await before("root", "shell", { command: "node check.mjs ready", workdir: directory });
+      const checked = await exec(process.execPath, ["check.mjs", "ready"], { cwd: directory });
+      await after(check, checked.stdout, { exit: 0 });
+      const finished = await tool("root", "finish_direct_unit");
+      assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+      const status = await tool("root", "operator_status", { view: "progress" });
+      assert.equal(status.mission_id, mission.mission_id);
+      assert.equal(status.budget.consumed_units, 1);
+      assert.equal(status.budget.reserved_units, 0);
+      assert.notEqual(status.mission_phase, "completed");
+      return;
+    }
     if (fabric) {
       await writeFile(join(directory, "check.mjs"), 'import {readFileSync} from "node:fs"; if(readFileSync(`${process.argv[2]}.txt`, "utf8") !== "ready\\n") process.exit(1); console.log("PASS");\n');
       await exec("git", ["add", "check.mjs"], { cwd: directory });
@@ -2761,6 +3051,10 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", "git-permission-reviewer-no-replace"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer"],
   ["Use the same author for the new result.", "same author", undefined, "git-add-reviewer-replace"],
+  ...["ended", "interrupted", "unknown", "background", "large"].map(mode =>
+    ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-run-${mode}`] as const),
+  ...["ended", "unknown", "background"].map(mode =>
+    ["Use the same author and the same reviewer for the new result.", "same author", "same reviewer", `git-previous-worker-run-${mode}`] as const),
   ["Use the same author and reviewer and do not change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer and you do not need to change the existing API.", "same author", "same author and reviewer", "non-git-default"],
   ["Use the same author and reviewer for the new result.", "same author", "same author and reviewer", "non-git-registered-default"],
@@ -2772,25 +3066,41 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     : join(tmpdir(), "v2-author-continuation-"));
   const otherCwd = join(directory, "checks");
   const resultFile = workspace === "git-glob-ts" ? "result.ts" : "result.txt";
-  const fixture = contextFixture(), exec = promisify(execFile);
+  let fixture = contextFixture(), cleanup: (() => void) | void;
+  const exec = promisify(execFile);
   const history: Record<string, Record<string, unknown>[]> = {};
   const agents: Record<string, { agent: string; parentID?: string; outcome?: string }> = {
     root: { agent: "dog-operator" }, author: { agent: "dogs-coordinator", parentID: "root" },
     reviewer: { agent: "dog-reviewer-v010", parentID: "author" },
   };
+  const previousWorkerRun = workspace.startsWith("git-previous-worker-run-");
+  if (previousWorkerRun) agents.worker = { agent: "dog-worker-v010", parentID: "author" };
+  const firstWriter = previousWorkerRun ? "worker" : "author";
   let active: Record<string, unknown> | undefined = {}, inbox: Record<string, unknown[]> = {}, counter = 0, duplicateChildren = false;
-  const cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
+  let cyclicChild: string | undefined, deepestIdleVisited = false;
+  const startFixture = async () => {
+    fixture = contextFixture();
+    cleanup = await V2Plugin.setup({ ...fixture.context, location: { directory },
     session: { ...fixture.context.session, active: async () => active,
       inbox: { list: async ({ sessionID }) => inbox[sessionID] ?? [] },
       list: async ({ parentID }) => {
-        const children = Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        const idleParent = /^idle-(\d+)$/u.exec(parentID ?? "");
+        const nextIdle = idleParent ? `idle-${Number(idleParent[1]) + 1}` : undefined;
+        const children = idleParent ? nextIdle && agents[nextIdle] ? [{ id: nextIdle, ...agents[nextIdle] }] : []
+          : Object.entries(agents).filter(([, info]) => info.parentID === parentID).map(([id, info]) => ({ id, ...info }));
+        if (cyclicChild && parentID === cyclicChild) children.push({ id: "author", agent: "dogs-coordinator", parentID });
         return { data: duplicateChildren && parentID === "author" ? [...children, ...children] : children, cursor: {} };
       },
-      get: async ({ sessionID }) => ({ id: sessionID, ...agents[sessionID], location: { directory },
-        model: { providerID: "openai", id: "fixture" } }),
+      get: async ({ sessionID }) => {
+        if (sessionID === "idle-11999") deepestIdleVisited = true;
+        return { id: sessionID, ...agents[sessionID], location: { directory },
+          model: { providerID: "openai", id: "fixture" } };
+      },
       context: async ({ sessionID }) => history[sessionID] ?? [] },
     message: { list: async ({ sessionID, order }) => ({ data: order === "desc" ? [...(history[sessionID] ?? [])].reverse()
       : history[sessionID] ?? [], cursor: {} }) } });
+  };
+  await startFixture();
   const prompt = async (sessionID: string, text: string) => {
     const messageID = `msg_${++counter}`;
     const event = { sessionID, messageID, prompt: { text: sessionID === "root" ? text : `You are a subagent spawned by another session.\n${text}` } };
@@ -2824,7 +3134,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
   const edit = async (from: string | undefined, to: string) => {
     const patchText = from === undefined ? `*** Begin Patch\n*** Add File: ${resultFile}\n+${to}\n*** End Patch`
       : `*** Begin Patch\n*** Update File: ${resultFile}\n@@\n-${from}\n+${to}\n*** End Patch`;
-    const event = await before("author", "patch", { patchText });
+    const event = await before(firstWriter, "patch", { patchText });
     await writeFile(join(directory, resultFile), `${to}\n`);
     await after(event, "updated");
   };
@@ -2834,7 +3144,7 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
       ? [{ cwd: directory, suffix: " --secondary" }]
       : workspace === "non-git-partial-cwd" && expected === "first" ? [{ cwd: otherCwd, suffix: " --secondary" }] : [])];
     for (const check of checks) {
-      const event = await before("author", "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
+      const event = await before(firstWriter, "shell", { command: `node check.mjs ${expected}${check.suffix}`, workdir: check.cwd });
       const result = await exec(process.execPath, ["check.mjs", expected, ...(check.suffix ? ["--secondary"] : [])], { cwd: check.cwd });
       await after(event, result.stdout, { exit: 0 });
     }
@@ -2860,7 +3170,15 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
         : workspace === "non-git-partial-cwd" && expected === "first"
           ? { validation_cwd: { [`node check.mjs ${expected} --secondary`]: otherCwd } } : {}) });
     const originalUnit = unit("first");
-    await tool("author", "plan_units", { executor: "self", units: [originalUnit] });
+    const firstPlan = await tool("author", "plan_units", { executor: previousWorkerRun ? "worker" : "self", units: [originalUnit] });
+    let workerCall: Awaited<ReturnType<typeof before>> | undefined;
+    if (previousWorkerRun) {
+      workerCall = await before("author", "subagent", nativeTask(firstPlan.task));
+      const expanded = await prompt(firstWriter, String(workerCall.input.prompt));
+      const handoff = /^handoff_path: (.+)$/mu.exec(expanded)![1]!;
+      const read = await before(firstWriter, "read", { path: handoff, limit: 2000 });
+      await after(read, await readFile(resolve(directory, handoff), "utf8"));
+    }
     if (workspace.startsWith("non-git-registered")) {
       const { validation_cwd: _initialCwd, ...withoutCwd } = originalUnit;
       const corrected = workspace === "non-git-registered-default" ? withoutCwd
@@ -2870,7 +3188,11 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     }
     await edit(undefined, "first");
     await validate("first");
-    assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
+    if (workerCall) {
+      agents.worker!.outcome = "succeeded";
+      await after(workerCall, "First result ready", { sessionID: firstWriter });
+      assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).units[0]!.status, "succeeded");
+    } else assert.match((await tool("author", "finish_direct_unit")).next_action, /This direct unit is validated/u);
     const authorBackground = await before("author", "shell", { command: "node retained-writer.mjs", background: true });
     await after(authorBackground, "Background process running", { status: "running" });
     const authorTool = (history.author!.at(-1)!.content as Record<string, unknown>[])[0]!;
@@ -2895,6 +3217,131 @@ for (const [request, requestQuote, reviewerQuote, workspace] of [
     assert.equal((await tool("root", "complete_mission")).status, "succeeded");
     const oldRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
     assert.equal(oldRun.phase, "completed");
+    if (workspace.startsWith("git-previous-run-") || previousWorkerRun) {
+      const mode = workspace.slice((previousWorkerRun ? "git-previous-worker-run-" : "git-previous-run-").length);
+      (reviewerTool.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      (authorTool.state as Record<string, unknown>).metadata = mode === "background" ? { status: "running" } : { status: "completed", exit: 0 };
+      if (mode === "unknown") delete agents.author!.outcome;
+      agents.coordinator = { agent: "dogs-coordinator", parentID: "root" };
+      await prompt("root", "Different follow-up mission: root implements a second result");
+      const next = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+      assert.notEqual(next.mission_id, old.mission_id);
+      const blocked = await before("root", "subagent", nativeTask(next.task));
+      await prompt("coordinator", String(blocked.input.prompt));
+      await tool("coordinator", "submit_mission", { status: "blocked", summary: "The root author must implement" });
+      agents.coordinator!.outcome = "succeeded";
+      await after(blocked, "The root author must implement", { sessionID: "coordinator" });
+      const declaration = { title: "Second", objective: "Write second",
+        read: ["check.mjs"], write: ["result.txt"], validation: ["node check.mjs second"] };
+      const missionRuntime = new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE);
+      const priorBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      if (mode === "large") {
+        // A long, otherwise idle lineage is a valid completed run, not an active writer.
+        for (let i = 0; i < 300; i++) agents[`idle-${i}`] = {
+          agent: "build", parentID: i ? `idle-${i - 1}` : "author", outcome: "succeeded",
+        };
+        const leaf = "idle-299";
+        const ready = await tool("root", "operator_status");
+        assert.match(ready.next_action, /plan_units with executor=self/u);
+        const assertHeld = async (reason: string) => {
+          const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+          assert.equal(held.status, "mission-coordinator-active");
+          assert.equal(held.reason, `previous_writer_${reason}`);
+          assert.equal(held.task, undefined);
+          assert.equal((await missionRuntime.required("root")).id, next.mission_id);
+          assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, oldRun.runID);
+          assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+        };
+        delete agents[leaf]!.outcome;
+        await assertHeld("native_terminal_unknown");
+        agents[leaf]!.outcome = "succeeded";
+        active = { [leaf]: { type: "running" } };
+        await assertHeld("native_session_active");
+        active = {};
+        inbox[leaf] = [{ id: "queued" }];
+        await assertHeld("native_inbox_not_empty");
+        delete inbox[leaf];
+        history[leaf] = [{ id: "late-shell", type: "assistant", agent: "build", finish: "tool-calls",
+          content: [{ type: "tool", name: "shell", id: "late-shell-call",
+            state: { status: "completed", input: { command: "long-running", background: true }, metadata: { status: "running" } } }] }];
+        await assertHeld("native_tools_active_or_unproven");
+        delete history[leaf];
+        cyclicChild = leaf;
+        await assertHeld("native_lineage_duplicate_or_too_large");
+        cyclicChild = undefined;
+        duplicateChildren = true;
+        await assertHeld("native_lineage_duplicate_or_too_large");
+        duplicateChildren = false;
+        // The final recovery also crosses ordinary JavaScript recursion depths.
+        for (let i = 300; i < 12_000; i++) agents[`idle-${i}`] = {
+          agent: "build", parentID: `idle-${i - 1}`, outcome: "succeeded",
+        };
+      }
+      if (mode === "unknown" || mode === "background") {
+        const status = await tool("root", "operator_status");
+        assert.equal(status.task, undefined);
+        assert.match(status.next_action, /previous run.s writer/u);
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.equal(held.task, undefined);
+        assert.equal((await missionRuntime.required("root")).coordinator, "coordinator");
+        await assert.rejects(before("root", "subagent", { agent: "dogs-coordinator", sessionID: "coordinator",
+          prompt: "Continue", description: "Continue" }), /mission-coordinator-active-or-unproven/u);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+        agents.author!.outcome = "succeeded";
+        (authorTool.state as Record<string, unknown>).metadata = { status: "completed", exit: 0 };
+      }
+      if (mode === "interrupted") {
+        const originalPrepare = OperatorRuntime.prototype.prepareMission;
+        try {
+          OperatorRuntime.prototype.prepareMission = async () => { throw new Error("fixture previous-run preparation interrupted"); };
+          await assert.rejects(tool("root", "plan_units", { executor: "self", units: [declaration] }),
+            /fixture previous-run preparation interrupted/u);
+        } finally { OperatorRuntime.prototype.prepareMission = originalPrepare; }
+        assert.equal((await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root")).runID, oldRun.runID);
+        cleanup?.(); await startFixture();
+        const pending = await tool("root", "operator_status");
+        assert.equal(pending.task, undefined);
+        assert.match(pending.next_action, /plan_units with executor=self/u);
+        const continued = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+        assert.equal(continued.mission_id, next.mission_id);
+        assert.equal(continued.task, undefined);
+        await assert.rejects(before("root", "subagent", nativeTask(next.task)), /mission-direct-registration-pending/u);
+        delete agents.author!.outcome;
+        const held = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+        assert.equal(held.status, "mission-coordinator-active");
+        assert.match((await tool("root", "operator_status")).next_action, /previous run.s writer/u);
+        const heldStart = await tool("root", "start_mission", { requirements: ["Write a second independent result"] });
+        assert.equal(heldStart.status, "mission-coordinator-active");
+        assert.equal(heldStart.task, undefined);
+        assert.match(heldStart.next_action, /previous run.s writer/u);
+        assert.equal((await missionRuntime.required("root")).runID, null);
+        agents.author!.outcome = "succeeded";
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, priorBudget);
+      }
+      const planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
+      assert.equal(planned.status, "direct-unit-running", JSON.stringify(planned));
+      if (mode === "large") assert.equal(deepestIdleVisited, true, "recovery must inspect the deepest settled descendant");
+      assert.notEqual(planned.run_id, oldRun.runID);
+      const current = await missionRuntime.required("root");
+      assert.equal(current.id, next.mission_id);
+      assert.equal(current.coordinator, null);
+      assert.equal(current.coordinatorReleases?.[0]?.coordinator, "coordinator");
+      assert.deepEqual(current.requirements.map(item => item.text), ["Write a second independent result"]);
+      assert.equal(current.review, undefined, "the old Mission's Review is not reused");
+      const newRun = await new OperatorRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      assert.notEqual(newRun.units[0]!.task.prompt, oldRun.units[0]!.task.prompt);
+      assert.equal(newRun.units[0]!.evidence.length, 0, "the old Mission's checks do not validate the new unit");
+      const write = await before("root", "write", { path: resultFile, content: "second\n" });
+      await writeFile(join(directory, resultFile), "second\n"); await after(write, "written");
+      const check = await before("root", "shell", { command: "node check.mjs second", workdir: directory });
+      const checked = await exec(process.execPath, ["check.mjs", "second"], { cwd: directory });
+      await after(check, checked.stdout, { exit: 0 });
+      assert.equal((await tool("root", "finish_direct_unit")).status, "awaiting-acceptance");
+      assert.equal(await readFile(join(directory, resultFile), "utf8"), "second\n");
+      assert.equal((await missionRuntime.required("root")).id, next.mission_id);
+      return;
+    }
     if (workspace === "git-glob-ts") assert.ok(oldRun.units[0]!.unit.write.includes("*.ts"));
     if (workspace === "non-git-registered-default") {
       assert.deepEqual(oldRun.units[0]!.unit.validation_cwd, { "node check.mjs first": otherCwd });
@@ -4217,6 +4664,40 @@ test("V2 reconciles the explicitly selected predecessor shell after a corrected 
     assert.equal(observation.exit, 0);
     assert.equal((await tool("operator_status", "root")).acceptance_summary.operation.observations.length, 2);
     assert.notEqual((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).phase, "completed");
+    for (const command of [build, launch]) await assert.rejects(
+      hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: `duplicate-${command}` },
+        { args: { command, workdir: directory } }), /mission-operation-already-admitted/u);
+    const validation = { command: "node check.mjs", workdir: directory }, validationStart = Date.now();
+    await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "recovered-check" }, { args: validation });
+    const validated = await promisify(execFile)(process.execPath, ["check.mjs"], { cwd: directory });
+    (history.coordinator ??= []).push({ id: "msg_recovered_check", type: "assistant", agent: "dogs-coordinator",
+      time: { created: validationStart, completed: Date.now() }, content: [{ type: "tool", id: "recovered-check", name: "shell",
+        time: { created: validationStart, ran: validationStart, completed: Date.now() },
+        state: { status: "completed", input: validation, metadata: { status: "completed", exit: 0 },
+          content: [{ type: "text", text: validated.stdout }] } }] });
+    await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "recovered-check" },
+      { output: validated.stdout, metadata: { status: "completed", exit: 0 } });
+    const finished = await tool("finish_direct_unit", "coordinator");
+    assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+    assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+      proof.execution.command.includes("node check.mjs")), "the collected result has actual formal validation");
+    const review = await tool("review_mission", "coordinator", { risk_tags: [], traces: [] });
+    assert.equal(review.status, "skipped-low-risk");
+    const submitted = await tool("submit_mission", "coordinator", { status: "ready", summary: "Retained operation result validated without replay." });
+    assert.equal(submitted.acceptance_summary.operation.status, "executed");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).submission?.status, "ready");
+    identities.coordinator!.outcome = "succeeded";
+    await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+      { output: "Candidate ready", metadata: { sessionId: "coordinator" } });
+    const completed = await tool("complete_mission", "root");
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    assert.equal(completed.receipt.status, "succeeded");
+    assert.equal((await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root")).id, started.mission_id);
+    const final = (await tool("operator_status", "root")).acceptance_summary.operation;
+    assert.equal(final.status, "executed");
+    assert.deepEqual(final.observations.filter((item: { outcome: string }) => item.outcome === "executed")
+      .map((item: { callID: string }) => item.callID).sort(), ["call_original_build", "launch"],
+    "neither already executed operation was replayed");
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -4443,15 +4924,47 @@ test(`V2 recovers a failed predecessor's exact prelaunch rejection without repla
       assert.equal(item.outcome, "not-started");
       assert.ok(item.nativeInputHash && item.nativeCallHash && item.nativeExecutionHash);
     }
+    const launchStarted = Date.now();
     await hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" }, { args });
-    await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
+    const launched = await promisify(execFile)(process.execPath, ["launch.mjs"], { cwd: directory });
+    if (variant === "verified") (history.coordinator ??= []).push({ id: "msg_real_once", type: "assistant", agent: "dogs-coordinator",
+      time: { created: launchStarted, completed: Date.now() }, content: [{ type: "tool", id: "real-once", name: "shell",
+        time: { created: launchStarted, ran: launchStarted, completed: Date.now() },
+        state: { status: "completed", input: args, metadata: { status: "completed", exit: 0 },
+          content: [{ type: "text", text: launched.stdout }] } }] });
     await hooks["tool.execute.after"]!({ tool: "shell", sessionID: "coordinator", callID: "real-once" },
-      { output: "", metadata: { status: "completed", exit: 0 } });
+      { output: launched.stdout, metadata: { status: "completed", exit: 0 } });
     assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
     await assert.rejects(hooks["tool.execute.before"]!({ tool: "shell", sessionID: "coordinator", callID: "duplicate" }, { args }),
       /mission-operation-already-admitted/u);
     assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
     assert.notEqual((await missionRuntime.required("root")).phase, "completed");
+    if (variant === "verified") {
+      const finished = await tool("finish_direct_unit", "coordinator");
+      assert.equal(finished.status, "awaiting-acceptance", JSON.stringify(finished));
+      assert.ok(finished.units[0].evidence.some((proof: any) => proof.execution.exit_code === 0 &&
+        proof.execution.command.includes(command)), "the one real launch is the registered native check");
+      const operation = (await tool("operator_status", "root")).acceptance_summary.operation;
+      assert.equal(operation.status, "executed");
+      assert.equal(operation.process_succeeded, true);
+      assert.equal(operation.terminal_complete, true);
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "rejected-call").outcome, "not-started");
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "rejected-call").exit, undefined);
+      assert.equal(operation.observations.find((item: { callID: string }) => item.callID === "real-once").exit, 0);
+      const review = await tool("review_mission", "coordinator", { risk_tags: [], traces: [] });
+      assert.equal(review.status, "skipped-low-risk");
+      const submitted = await tool("submit_mission", "coordinator", { status: "ready", summary: "The first launch was validated." });
+      assert.equal(submitted.acceptance_summary.operation.status, "executed");
+      assert.equal((await missionRuntime.required("root")).submission?.status, "ready");
+      identities.coordinator!.outcome = "succeeded";
+      await hooks["tool.execute.after"]!({ tool: "task", sessionID: "root", callID: "coordinator-call" },
+        { output: "Candidate ready", metadata: { sessionId: "coordinator" } });
+      const completed = await tool("complete_mission", "root");
+      assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+      assert.equal(completed.receipt.status, "succeeded");
+      assert.equal((await missionRuntime.required("root")).id, started.mission_id);
+      assert.equal(await readFile(join(directory, "output", "runs.txt"), "utf8"), "started\n");
+    }
   } finally { cleanup?.(); await rm(directory, { recursive: true, force: true }); }
 });
 
