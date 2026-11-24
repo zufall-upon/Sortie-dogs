@@ -1118,6 +1118,12 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
             content: [], metadata: { status: "running" } } }],
       });
       await assert.rejects(tool("root", "start_direct_unit"), /operator-run-missing/u);
+      const retained = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+      const retainedBudget = (await tool("root", "operator_status", { view: "progress" })).budget;
+      await assert.rejects(before("root", "subagent", nativeTask(mission.task)), /mission-dispatch-not-authorized/u,
+        "the old initial Task cannot start another child or erase a blocked submission");
+      assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), retained);
+      assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, retainedBudget);
       if (operatorRecovery === "ended" || operatorRecovery === "interrupted") {
         const status = await tool("root", "operator_status", { view: "progress" });
         assert.match(status.next_action, /plan_units with executor=self/u);
@@ -1133,6 +1139,16 @@ process.exit(existsSync('.git/sortie-dogs/join-release') ? ${reviewJoin === "fai
         const pending = await tool("root", "operator_status");
         assert.equal(pending.task, undefined, "interrupted root registration must not offer another author");
         assert.match(pending.next_action, /plan_units with executor=self/u);
+        const continued = await tool("root", "start_mission", {
+          requirements: ["The root author implements and validates the result"],
+        });
+        assert.equal(continued.mission_id, mission.mission_id);
+        assert.equal(continued.task, undefined, "start_mission must preserve the pending root registration too");
+        assert.match(continued.next_action, /plan_units with executor=self/u);
+        const pendingMission = await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root");
+        await assert.rejects(before("root", "subagent", nativeTask(mission.task)), /mission-direct-registration-pending/u);
+        assert.deepEqual(await new OperatorMissionRuntime(directory, V010_RUNTIME_PROFILE).required("root"), pendingMission);
+        assert.deepEqual((await tool("root", "operator_status", { view: "progress" })).budget, retainedBudget);
       }
       let planned = await tool("root", "plan_units", { executor: "self", units: [declaration] });
       if (operatorRecovery === "live") {

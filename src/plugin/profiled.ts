@@ -3218,7 +3218,9 @@ export function createProfiledPlugin(profile: RuntimeProfile, assetVersion: stri
             const operation = declaredMissionExecution(mission, (args as Record<string, unknown>).execution);
             if (operation) mission = await missions.update(context.sessionID, state => { state.kind = "operation"; state.execution = operation; });
           }
-          return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen
+          const rootRegistrationPending = mission.coordinator === null && mission.runID === null &&
+            mission.phase === "submitted" && !!mission.coordinatorReleases?.length;
+          return JSON.stringify({ ...locationObservation(context.sessionID), ...(mission.dispatchOpen || rootRegistrationPending
             ? missionDispatchPacket(mission, await operators.read(context.sessionID))
             : { mission_id: mission.id, requirements: mission.requirements, task: missions.task(mission),
               ...(mission.preferredExecutor ? { preferred_executor: mission.preferredExecutor } : {}),

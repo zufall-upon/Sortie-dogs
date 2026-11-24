@@ -938,6 +938,10 @@ export class OperatorMissionRuntime {
   }
   admit(root: string, callID: string, args: Record<string, unknown>): Promise<OperatorMission> {
     return this.update(root, state => {
+      if (state.coordinator === null && state.runID === null && !state.dispatchOpen &&
+          state.phase === "submitted" && state.coordinatorReleases?.length) {
+        throw new Error("mission-direct-registration-pending: retry plan_units with executor=self and the intended unit; retain this Mission and budget");
+      }
       const expected = this.task(state);
       const resume = state.coordinator !== null && args.task_id === state.coordinator && typeof args.prompt === "string" && args.prompt.trim();
       const continuation = state.coordinator === null && state.authorContinuation;
@@ -950,7 +954,10 @@ export class OperatorMissionRuntime {
       }
       // The description is a presentation label. The opaque prompt binds the original request and
       // requirements; changing only the label must not force a second Coordinator dispatch.
+      // Once claimed, the exact child ID is part of admission too. A stale initial
+      // reference must not open a new Task or erase the retained submission.
       if (["cancelled", "completed"].includes(state.phase) || state.dispatchOpen || args.subagent_type !== expected.subagent_type ||
+          state.coordinator !== null && !resume ||
           (!resume && !continuation && (args.prompt !== expected.prompt || args.task_id))) {
         const reason = ["cancelled", "completed"].includes(state.phase) ? `mission is ${state.phase}`
           : state.dispatchOpen ? "Coordinator Task is still admitted; read operator_status to reconcile its native completion"
