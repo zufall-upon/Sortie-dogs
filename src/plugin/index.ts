@@ -6273,7 +6273,8 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         }
         if (existingAuthorization.directValidationKey !== inspectedEntry.directValidationKey) {
-          existingAuthorization.gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation);
+          existingAuthorization.gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation,
+            existingAuthorization.gate.pinnedAppExecEntries());
           existingAuthorization.validationCommands = new Set(currentValidation.map(normalizeCommand));
           existingAuthorization.directValidationKey = inspectedEntry.directValidationKey;
         }
@@ -6288,9 +6289,10 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           idempotent: true,
         });
       }
-      const gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation);
       const readScopes = await canonicalManifestReadScopes(candidate, validation.value);
-      const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value);
+      const appExecPins = new Map();
+      const writeScopes = await canonicalManifestWriteScopes(candidate, validation.value, appExecPins);
+      const gate = await createWriteGate(candidate, validation.value, input.directory, currentValidation, appExecPins);
       const dispatchCallID = await input.runtimeBridge?.missionDispatchCall?.(inspectedEntry.rootSessionID, sessionID, handoffValidation.value.id);
       // Keep conflict detection and registration in one JavaScript turn so competing binds fail closed.
       if (conflictsWithActiveAuthorization(writeScopes, readScopes)) {
@@ -6481,7 +6483,9 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
       await retryPendingDirectReleases(authorization.rootSessionID);
       await input.runtimeBridge.expandMissionScope(authorization.rootSessionID, sessionID, authorization.taskID, paths, async manifest => {
         const project = await createProjectPaths(authorization.projectRoot);
-        const readScopes = await canonicalManifestReadScopes(project, manifest), writeScopes = await canonicalManifestWriteScopes(project, manifest);
+        const appExecPins = new Map(authorization.gate.pinnedAppExecEntries());
+        const readScopes = await canonicalManifestReadScopes(project, manifest);
+        const writeScopes = await canonicalManifestWriteScopes(project, manifest, appExecPins);
         const assertNoConflict = () => {
           for (const [owner, held] of sessionAuthorizations) {
             if (owner === sessionID || held.suspended) continue;
@@ -6491,7 +6495,7 @@ export const SortieDogsPlugin: OpenCodePlugin = async (input, options) => {
           }
         };
         const gate = await createWriteGate(project, manifest, input.directory,
-          authorization.directValidationKey === undefined ? undefined : JSON.parse(authorization.directValidationKey));
+          authorization.directValidationKey === undefined ? undefined : JSON.parse(authorization.directValidationKey), appExecPins);
         const pinned = await readPinnedJson(authorization.manifestPath, INPUT_LIMITS.manifest);
         const restore = async () => {
           if (oldScope) await old.lease!.replaceScope(oldScope);
