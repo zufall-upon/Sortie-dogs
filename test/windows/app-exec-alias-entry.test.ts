@@ -79,6 +79,48 @@ test("Windows AppExecLink exact-entry authorization and strict evidence", async 
     assert.equal(direct.entries[0]![1], "app-execution-alias:entry");
     assert.match(direct.entries[0]![2]!, /^[a-f0-9]{64}$/u);
     assert.match(direct.excerpt, /entry metadata fingerprinted; target not followed/);
+
+    await t.test("slow inspection may finish after 15 seconds but a hung child is stopped", async sub => {
+      const originalSpawn = childProcess.spawn;
+      let started!: () => void;
+      let ready = new Promise<void>(resolveReady => { started = resolveReady; });
+      let hang = false, killed = false;
+      sub.mock.timers.enable({ apis: ["setTimeout"] });
+      const fake = sub.mock.method(childProcess, "spawn", ((file: string, args: readonly string[], options: unknown) => {
+        if (!file.toLowerCase().endsWith("powershell.exe")) return Reflect.apply(originalSpawn, childProcess, [file, args, options]);
+        const child = new EventEmitter() as EventEmitter & { stdin: PassThrough; stdout: PassThrough; kill: () => boolean };
+        child.stdin = new PassThrough(); child.stdout = new PassThrough();
+        child.kill = () => { killed = true; return true; };
+        child.stdin.on("finish", () => {
+          if (!hang) setTimeout(() => {
+            child.stdout.end(JSON.stringify({ ok: true, volume: identity.entryDevice, file: identity.entryFile,
+              data: fakePayload("slow-target").toString("base64") }));
+            setImmediate(() => child.emit("close", 0));
+          }, 16_000);
+          started();
+        });
+        return child;
+      }) as typeof childProcess.spawn);
+      syncBuiltinESMExports();
+      try {
+        const slow = inspectAppExecLink(alias);
+        await ready;
+        sub.mock.timers.tick(16_000);
+        assert.ok(await slow, "valid inspection is not rejected at the former 15-second limit");
+        assert.equal(killed, false);
+
+        hang = true;
+        ready = new Promise<void>(resolveReady => { started = resolveReady; });
+        const stalled = inspectAppExecLink(alias);
+        await ready;
+        sub.mock.timers.tick(30_000);
+        assert.equal(await stalled, undefined);
+        assert.equal(killed, true, "a stalled inspector remains bounded and fails closed");
+      } finally {
+        fake.mock.restore(); syncBuiltinESMExports(); sub.mock.timers.reset();
+      }
+    });
+
     const manifestPath = join(root, "manifest.json"), bytes = Buffer.from(JSON.stringify(manifest));
     await fs.writeFile(manifestPath, bytes);
     const pinned = await protectedSnapshot({ projectRoot: root, manifestPath,

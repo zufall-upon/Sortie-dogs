@@ -146,7 +146,8 @@ async function nativeIdentity(path: string): Promise<NativeIdentity | undefined>
       clearTimeout(timeout);
       resolveResult(value);
     };
-    const timeout = setTimeout(() => { child.kill(); finish(); }, 15_000);
+    // PowerShell startup and Add-Type compilation can be slow on loaded Windows hosts.
+    const timeout = setTimeout(() => { child.kill(); finish(); }, 30_000);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (part: string) => {
       output += part;
