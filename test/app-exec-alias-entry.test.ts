@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { extractWritePaths } from "../dist/plugin/gate.js";
 import { appExecLinkBufferDigest, sameAppExecLink } from "../dist/plugin/windows-app-exec-link.js";
 
 function reparse(fields = ["package", "application", "target", "display"]): Buffer {
@@ -49,4 +50,23 @@ test("entry identity comparison binds both parent and reparse metadata", () => {
     ["entryChange", "9"], ["entryModified", "9"], ["linkHash", "c".repeat(64)],
     ["reparseHash", "c".repeat(64)], ["reparseLength", 43],
   ] as const) assert.equal(sameAppExecLink(original, { ...original, [key]: replacement }), false, key);
+});
+
+test("PowerShell entry-only extraction accepts one direct literal removal", () => {
+  const alias = "/tmp/WindowsApps/python.exe";
+  for (const command of [`Remove-Item -LiteralPath '${alias}' -Force`, `rm '${alias}'`,
+    `Remove-Item -Force -Path '${alias}'`]) {
+    const extracted = extractWritePaths("powershell", { command });
+    assert.deepEqual(extracted.paths, [alias], command);
+    assert.deepEqual(extracted.entryPaths, [0], command);
+    assert.equal(extracted.ambiguous, false, command);
+  }
+  for (const command of [`Remove-Item -LiteralPath '${alias}' -Recurse`,
+    `Remove-Item -Path '/tmp/WindowsApps/*.exe'`, `rm '${alias}' '/tmp/other'`,
+    `Remove-Item -LiteralPath '${alias}/'`,
+    `Remove-Item -LiteralPath '${alias}' -Filter '*.exe'`]) {
+    const extracted = extractWritePaths("powershell", { command });
+    assert.equal(extracted.entryPaths, undefined, command);
+  }
+  assert.throws(() => extractWritePaths("powershell", { command: "Remove-Item -LiteralPath $alias" }));
 });

@@ -70,6 +70,13 @@ test("Windows AppExecLink exact-entry authorization and strict evidence", async 
     // These are gate checks only. Neither command is executed.
     await check(`rm -- '${posixPath}'`);
     await assert.rejects(check(`rm -- '${posixPath}/'`));
+    const checkWindowsShell = (command: string) => gate.check({ tool: "shell", sessionID: "fixture", callID: "entry" },
+      { args: { command } }, { investigativeShell: true });
+    await checkWindowsShell(`Remove-Item -LiteralPath '${alias}' -Force`);
+    await checkWindowsShell(`rm '${alias}'`);
+    await assert.rejects(checkWindowsShell(`Remove-Item -LiteralPath '${alias}' -Recurse`));
+    await assert.rejects(checkWindowsShell(`Remove-Item -LiteralPath '${alias}\\child'`));
+    await assert.rejects(checkWindowsShell(`Remove-Item -LiteralPath '${await fs.readlink(alias)}'`));
     await assert.rejects(gate.checkPath(alias));
     await assert.rejects(gate.checkPath(await fs.readlink(alias)));
     await assert.rejects(gate.checkPath(join(alias, "child")));

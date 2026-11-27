@@ -1410,6 +1410,30 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
     const operandIndices: number[] = [];
     const mkdirOptions = executable === "mkdir" && !powershell ? mkdirOperands(tokens, operandIndices) : undefined;
     const commandOperands = mkdirOptions?.paths ?? operands(tokens, operandIndices);
+    // Only a single direct literal Remove-Item operand is an entry operation.
+    // Unknown options (including recursion or filters) keep the existing path checks.
+    const powerShellEntryOperand = (): number | undefined => {
+      if (!powershell || !["rm", "remove-item"].includes(executable)) return undefined;
+      let selected: number | undefined, named = false, force = false;
+      for (let index = 1; index < tokens.length; index++) {
+        const token = tokens[index]!;
+        if (/^-force$/iu.test(token) && !force) { force = true; continue; }
+        if (/^-(?:path|literalpath)$/iu.test(token) && !named && selected === undefined) {
+          named = true;
+          const next = tokens[++index];
+          if (next === undefined || next.startsWith("-")) return undefined;
+          selected = index;
+          continue;
+        }
+        if (token.startsWith("-") || selected !== undefined) return undefined;
+        selected = index;
+      }
+      if (selected === undefined || incompleteSourceWord(selected)) return undefined;
+      const path = shellTokenPath(tokens, selected);
+      return isLiteralPowerShellPath(path.value, isLiteralDollarPath(path)) && !/[\\/]$/u.test(path.value)
+        ? selected : undefined;
+    };
+    const powerShellEntry = powerShellEntryOperand();
     if (powershell && syntax.activeBrace) {
       pathValues.clear(); knownCwd = undefined;
       if (segmentIndex > 0 && isSafePowerShellForEach(source)) continue;
@@ -1428,6 +1452,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       if (!powershell && ["rm", "unlink", "rmdir"].includes(executable)) {
         entryPaths.push(...commandOperands.flatMap((path, i) => /[\\/]$/u.test(path) ? [] : [paths.length + i]));
       }
+      const powerShellIndex = powerShellEntry === undefined ? -1 : operandIndices.indexOf(powerShellEntry);
+      if (powerShellIndex >= 0) entryPaths.push(paths.length + powerShellIndex);
       commandOperands.forEach((path, index) => appendTokenPath(path, operandIndices[index]));
       if (executable === "mkdir" && (mkdirOptions?.parents ?? tokens.some((token) => token === "-p" || token === "--parents"))) {
         createdDirectories.push(...commandOperands);
@@ -1571,6 +1597,8 @@ function shellPaths(command: string, powershell: boolean, depth = 0, cwd?: strin
       const selectedIndices = named.length > 0 ? named : operandIndices.slice(0, 1);
       const selected = selectedIndices.map(index => tokens[index]!);
       if (selected.length === 0) ambiguous = true;
+      const powerShellIndex = powerShellEntry === undefined ? -1 : selectedIndices.indexOf(powerShellEntry);
+      if (powerShellIndex >= 0) entryPaths.push(paths.length + powerShellIndex);
       selected.forEach((path, index) => appendTokenPath(path, selectedIndices[index]));
       if (executable === "new-item" && tokens.some((token, index) =>
         token.toLowerCase() === "-itemtype" && tokens[index + 1]?.toLowerCase() === "directory")) {
