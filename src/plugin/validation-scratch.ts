@@ -20,11 +20,47 @@ function localScratchPath(directory: string, target: string): string | undefined
 
 const isControl = (path: string) => controlDirectories.has(process.platform === "win32" ? path.split("/")[0]!.toLowerCase() : path.split("/")[0]!);
 
+/** npm accepts case-insensitive config keys, but the shell can retain multiple spellings.
+ * Only use an unambiguous literal environment setting, not npm's defaults or config files. */
+function npmCachePath(directory: string, command: string, inherited: Readonly<Record<string, string | undefined>>): string | undefined {
+  const values = new Map<string, { value: string; expandPwd: boolean; unquoted: boolean }>();
+  const name = (key: string) => process.platform === "win32" ? key.toLowerCase() : key;
+  for (const [key, value] of Object.entries(inherited)) {
+    if (/^npm_config_cache$/iu.test(key) && value !== undefined) values.set(name(key), { value, expandPwd: false, unquoted: false });
+  }
+  // Recognize literal leading shell assignments (also after `env`). Assignments in
+  // later shell segments or arguments cannot safely override the inherited recipe.
+  const prefix = /^\s*(?:env\s+)?((?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']*)\s+)*)/u.exec(command)!;
+  const rest = command.slice(prefix[0].length);
+  if (/\bnpm_config_cache\s*=/iu.test(rest) || /(?:^|\s)--cache(?:=|\s|$)/iu.test(command) ||
+      /\bunset\b[^;&|\n]*\bnpm_config_cache\b/iu.test(command) ||
+      /\benv\b[^;&|\n]*(?:-u\s+|--unset(?:=|\s+))npm_config_cache\b/iu.test(command) ||
+      /\benv\s+(?:-i\b|--ignore-environment\b)/iu.test(command)) return undefined;
+  for (const match of prefix[1]!.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s"']*))/gu)) {
+    if (/^npm_config_cache$/iu.test(match[1]!)) {
+      values.set(name(match[1]!), { value: match[2] ?? match[3] ?? match[4]!, expandPwd: match[3] === undefined, unquoted: match[4] !== undefined });
+    }
+  }
+  const paths = [...values.values()].filter(entry => entry.value !== "").map(entry => {
+    const declared = entry.expandPwd ? entry.value.replace(/^(?:\$\{PWD\}|\$PWD)(?=\/|$)/u, directory) : entry.value;
+    if (/[$`]/u.test(declared) || process.platform !== "win32" && declared.includes("\\") ||
+        entry.unquoted && /[;&|<>(){}[\]*?~]/u.test(declared) ||
+        !isAbsolute(declared) && /\b(?:cd|pushd|popd|set-location)\b/iu.test(command)) return undefined;
+    return nativeScratchPath(directory, declared);
+  });
+  return paths.length && paths.every(path => path !== undefined && path === paths[0]) ? paths[0] : undefined;
+}
+
 /** Only configured tool scratch/cache outputs; no filename, ignored or untracked heuristic. */
 export function validationScratchPaths(directory: string, commands: readonly string[],
   inherited: Readonly<Record<string, string | undefined>> = {}, commandDirectory = directory): string[] {
   const paths = new Set<string>();
   for (const command of commands) {
+    const npmCache = npmCachePath(commandDirectory, command, inherited);
+    if (npmCache) {
+      const scoped = localScratchPath(directory, npmCache);
+      if (scoped && !isControl(scoped)) paths.add(npmCache);
+    }
     const configured = new Map<string, string>();
     for (const key of ["TMPDIR", "GOCACHE", "GOMODCACHE", "GOPATH"]) {
       if (inherited[key]) configured.set(key, inherited[key]!);

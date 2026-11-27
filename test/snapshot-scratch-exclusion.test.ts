@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
-import { isAbsolute, relative, resolve } from "node:path";
+import { exec, execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import test from "node:test";
-import { snapshotScratchExclusion, snapshotScratchExcluded } from "../dist/plugin/protected-snapshot.js";
+import { promisify } from "node:util";
+import { protectedSnapshot, refreshProtectedSnapshot, snapshotScratchExclusion, snapshotScratchExcluded,
+  validationInputSnapshot } from "../dist/plugin/protected-snapshot.js";
 import type { GoalEvidence } from "../dist/core/goal-bound.js";
 import { validationScratchPaths } from "../dist/plugin/validation-scratch.js";
+
+const run = promisify(exec), runFile = promisify(execFile);
 
 test("prepared scratch comparisons preserve the previous lexical protection rules", () => {
   const root = resolve("_testenv/scratch-containment");
@@ -56,3 +63,142 @@ test("configured inherited scratch is captured without guessing names, and comma
   assert.deepEqual(validationScratchPaths(root, ["go test ./..."], { GOCACHE: resolve(root, "../external-cache"),
     TMPDIR: root, GOMODCACHE: resolve(root, ".git/cache"), GOPATH: resolve(root, ".opencode/tools") }), []);
 });
+
+test("npm scratch requires an unambiguous configured cache, with literal command overrides", () => {
+  const root = resolve("_testenv/npm-scratch"), cwd = join(root, "checkout");
+  const cache = join(root, ".sortie-env/npm-cache"), inherited = { npm_config_cache: cache };
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], inherited), [cache]);
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], { NPM_CONFIG_CACHE: cache }), [cache]);
+  assert.deepEqual(validationScratchPaths(root, ["npm test"]), [], "the cache name alone is not a declaration");
+  assert.deepEqual(validationScratchPaths(root, ['npm_config_cache="./new cache" npm test'], inherited, cwd),
+    [join(cwd, "new cache")]);
+  assert.deepEqual(validationScratchPaths(root, ['env npm_config_cache="$PWD/npm-cache" npm test'], inherited, cwd),
+    [join(cwd, "npm-cache")]);
+  for (const command of ['npm_config_cache="" npm test', 'npm_config_cache="$UNKNOWN" npm test',
+    "npm_config_cache='$PWD/cache' npm test", "npm test --cache=./different",
+    "env -u npm_config_cache npm test", "env -i npm test", "npm test && npm_config_cache=./later npm test"]) {
+    assert.deepEqual(validationScratchPaths(root, [command], inherited, cwd), [], command);
+  }
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: "$PWD/cache" }), [],
+    "a literal inherited value must not be expanded as a shell assignment");
+  assert.deepEqual(validationScratchPaths(root, ["cd checkout && npm test"], { npm_config_cache: "./cache" }), [],
+    "relative cache paths with an unpinned command cwd stay visible");
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: root }), []);
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: join(root, ".git/cache") }), []);
+  assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: resolve(root, "../outside") }), []);
+  if (process.platform !== "win32") {
+    assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: cache, NPM_CONFIG_CACHE: join(root, "other") }), [],
+      "conflicting case variants cannot identify one safe exclusion");
+  }
+});
+
+async function fixture(runFixture: (root: string) => Promise<void>) {
+  await mkdir(resolve("_testenv"), { recursive: true });
+  const root = await mkdtemp(resolve("_testenv/npm-scratch-"));
+  const saved = Object.entries(process.env).filter(([key]) => /^npm_config_cache$/iu.test(key));
+  for (const [key] of saved) delete process.env[key];
+  try { await runFixture(root); } finally {
+    for (const key of Object.keys(process.env).filter(key => /^npm_config_cache$/iu.test(key))) delete process.env[key];
+    for (const [key, value] of saved) process.env[key] = value;
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+
+test("npm cache creation preserves real freshness without repairing legacy evidence", async () => fixture(async root => {
+  const parent = join(root, ".sortie-env"), cache = join(parent, "npm-cache");
+  await mkdir(parent);
+  process.env.npm_config_cache = cache;
+  const command = "npm cache verify", manifestPath = join(root, "manifest.json");
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**"],
+    write: [root + "/**"], validation: [command] });
+  await writeFile(manifestPath, bytes);
+  const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) }, { directory: root, command });
+  assert.ok(pinned?.binding.freshness);
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [cache]);
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  const unchanged = { source: pinned.source, candidate: pinned.candidate };
+  const older = structuredClone(pinned.binding);
+  older.freshness!.scratch_paths = [];
+  delete older.freshness!.environment["@npm_config_cache"];
+  const oldInputs = await validationInputSnapshot(root, older), oldSnapshot = await refreshProtectedSnapshot(root, older);
+  assert.ok(inputs && oldInputs && oldSnapshot);
+  await run(command, { cwd: root });
+  assert.ok((await readdir(cache)).length, "npm actually populated the configured cache");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  const oldInputsAfter = await validationInputSnapshot(root, older), oldSnapshotAfter = await refreshProtectedSnapshot(root, older);
+  assert.ok(oldInputsAfter && oldSnapshotAfter);
+  assert.notEqual(oldInputsAfter, oldInputs);
+  assert.notDeepEqual(oldSnapshotAfter, oldSnapshot, "old evidence gains no exclusion");
+  await mkdir(join(parent, "npm-cache-neighbor"));
+  await writeFile(join(parent, "npm-cache-neighbor/input"), "real input");
+  const neighborInputs = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(neighborInputs);
+  assert.notEqual(neighborInputs, inputs, "a similarly named directory stays visible");
+  await rm(join(parent, "npm-cache-neighbor"), { recursive: true });
+  process.env.npm_config_cache = join(parent, "other");
+  let reason: string | undefined;
+  assert.equal(await refreshProtectedSnapshot(root, pinned.binding, value => { reason = value; }), undefined);
+  assert.equal(reason, "validation-environment-changed");
+  assert.ok(await refreshProtectedSnapshot(root, older), "old evidence compares its saved environment recipe");
+  process.env.npm_config_cache = cache;
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  assert.equal(JSON.stringify(pinned.binding), saved);
+}));
+
+test("npm cache exclusions are per call and preserve tracked, read and exact-output descendants", async () => fixture(async root => {
+  const cache = join(root, "checkout/cache");
+  await mkdir(join(cache, "fixtures"), { recursive: true });
+  await runFile("git", ["init", "--quiet"], { cwd: root });
+  for (const name of ["tracked", "fixtures/input", "deliverable"]) await writeFile(join(cache, name), "original");
+  await runFile("git", ["add", "--", "checkout/cache/tracked"], { cwd: root });
+  const commands = ["npm_config_cache=./cache npm test", "node check.mjs"], manifestPath = join(root, "manifest.json");
+  const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit",
+    read: [root + "/**", "checkout/cache/fixtures/**"], write: [root + "/**", "checkout/cache/deliverable"], validation: commands });
+  await writeFile(manifestPath, bytes);
+  const authorization = { projectRoot: root, manifestPath, manifestHash: hash(bytes) }, directory = join(root, "checkout");
+  const inheritedCache = join(directory, "inherited-cache");
+  process.env.npm_config_cache = inheritedCache;
+  const pinned = await protectedSnapshot(authorization, { directory, command: commands[0] });
+  const other = await protectedSnapshot(authorization, { directory, command: commands[1] });
+  const allCommands = await protectedSnapshot(authorization, { directory });
+  assert.ok(pinned?.binding.freshness && other?.binding.freshness && allCommands?.binding.freshness);
+  assert.deepEqual(pinned.binding.freshness.scratch_paths, [cache]);
+  assert.deepEqual(other.binding.freshness.scratch_paths, [inheritedCache]);
+  assert.deepEqual(allCommands.binding.freshness.scratch_paths, [cache, inheritedCache].sort());
+  const saved = JSON.stringify(pinned.binding), inputs = await validationInputSnapshot(root, pinned.binding);
+  assert.ok(inputs);
+  const unchanged = { source: pinned.source, candidate: pinned.candidate };
+  await writeFile(join(cache, "incidental"), "generated");
+  assert.equal(await validationInputSnapshot(root, pinned.binding), inputs);
+  assert.deepEqual(await refreshProtectedSnapshot(root, pinned.binding), unchanged);
+  const otherAfter = await refreshProtectedSnapshot(root, other.binding);
+  assert.ok(otherAfter);
+  assert.notEqual(otherAfter.source, other.source,
+    "the other command does not acquire a cache exemption");
+  await mkdir(inheritedCache);
+  await writeFile(join(inheritedCache, "incidental"), "inherited output");
+  assert.deepEqual(await refreshProtectedSnapshot(root, other.binding), otherAfter);
+  const overrideChanged = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.ok(overrideChanged);
+  assert.notEqual(overrideChanged.source, pinned.source, "the overridden inherited cache is not hidden from the first call");
+  await rm(inheritedCache, { recursive: true });
+  for (const name of ["tracked", "fixtures/input", "deliverable"]) {
+    await writeFile(join(cache, name), "changed");
+    const changedInputs = await validationInputSnapshot(root, pinned.binding);
+    const changed = await refreshProtectedSnapshot(root, pinned.binding);
+    assert.ok(changedInputs && changed, name);
+    assert.notEqual(changedInputs, inputs, name);
+    assert.notEqual(changed.source, pinned.source, name);
+    assert.notEqual(changed.candidate, pinned.candidate, name);
+    await writeFile(join(cache, name), "original");
+  }
+  await writeFile(join(cache, "fixtures/new-input"), "untracked declared input");
+  const childInputs = await validationInputSnapshot(root, pinned.binding), childSnapshot = await refreshProtectedSnapshot(root, pinned.binding);
+  assert.ok(childInputs && childSnapshot);
+  assert.notEqual(childInputs, inputs, "declared input parents protect their children");
+  assert.notDeepEqual(childSnapshot, unchanged);
+  assert.equal(JSON.stringify(pinned.binding), saved);
+}));
