@@ -1,6 +1,6 @@
 import { lstat, mkdir } from "node:fs/promises";
 import { delimiter, isAbsolute, relative, resolve, win32 } from "node:path";
-import { createProjectPaths } from "./gate.js";
+import { createProjectPaths, shellCommandWords } from "./gate.js";
 import { RUNTIME_PROFILES } from "../core/runtime-profile.js";
 
 const controlDirectories = new Set([".git", ".opencode", ...Object.values(RUNTIME_PROFILES).map(profile => profile.stateDirectory)]);
@@ -34,14 +34,31 @@ function npmCachePath(directory: string, command: string, inherited: Readonly<Re
   const rest = command.slice(prefix[0].length);
   if (/\bnpm_config_cache\s*=/iu.test(rest) || /(?:^|\s)--cache(?:=|\s|$)/iu.test(command) ||
       /\bunset\b[^;&|\n]*\bnpm_config_cache\b/iu.test(command) ||
-      /\benv\b[^;&|\n]*(?:-u\s+|--unset(?:=|\s+))npm_config_cache\b/iu.test(command) ||
+      /\benv\b[^;&|\n]*(?:-u\s*|--unset(?:=|\s+))['"]?npm_config_cache\b/iu.test(command) ||
       /\benv\s+(?:-i\b|--ignore-environment\b)/iu.test(command)) return undefined;
+  // Decode ordinary quoted env options too. Unknown env modifiers may change the
+  // environment or cwd, so they cannot justify an inherited cache exemption.
+  const words = shellCommandWords(command);
+  for (let index = 0; index < words.length; index++) {
+    if (!/(?:^|[\\/])env(?:\.exe)?$/iu.test(words[index]!)) continue;
+    for (let option = index + 1; option < words.length && words[option]!.startsWith("-"); option++) {
+      const token = words[option]!;
+      if (token === "--") break;
+      if (token === "-i" || token === "--ignore-environment" || token === "-") return undefined;
+      const attached = /^(?:-u|--unset=)(.+)$/u.exec(token);
+      const key = token === "-u" || token === "--unset" ? words[++option] : attached?.[1];
+      if (key === undefined || /^npm_config_cache$/iu.test(key)) return undefined;
+    }
+  }
   for (const match of prefix[1]!.matchAll(/(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s"']*))/gu)) {
     if (/^npm_config_cache$/iu.test(match[1]!)) {
       values.set(name(match[1]!), { value: match[2] ?? match[3] ?? match[4]!, expandPwd: match[3] === undefined, unquoted: match[4] !== undefined });
     }
   }
   const paths = [...values.values()].filter(entry => entry.value !== "").map(entry => {
+    // npm trims path config and expands home-relative values even when the shell
+    // passes them literally. Do not hide a different project-local pathname.
+    if (entry.value !== entry.value.trim() || /^~(?:[\\/]|$)/u.test(entry.value)) return undefined;
     const declared = entry.expandPwd ? entry.value.replace(/^(?:\$\{PWD\}|\$PWD)(?=\/|$)/u, directory) : entry.value;
     if (/[$`]/u.test(declared) || process.platform !== "win32" && declared.includes("\\") ||
         entry.unquoted && /[;&|<>(){}[\]*?~]/u.test(declared) ||

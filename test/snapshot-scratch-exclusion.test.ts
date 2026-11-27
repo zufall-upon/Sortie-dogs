@@ -76,9 +76,19 @@ test("npm scratch requires an unambiguous configured cache, with literal command
     [join(cwd, "npm-cache")]);
   for (const command of ['npm_config_cache="" npm test', 'npm_config_cache="$UNKNOWN" npm test',
     "npm_config_cache='$PWD/cache' npm test", "npm test --cache=./different",
-    "env -u npm_config_cache npm test", "env -i npm test", "npm test && npm_config_cache=./later npm test"]) {
+    "npm_config_cache='~/cache' npm test", 'npm_config_cache=" ./cache " npm test',
+    "env -u npm_config_cache npm test", "env -u 'npm_config_cache' npm test",
+    'env -u"npm_config_cache" npm test', "env -unpm_config_cache npm test",
+    'env --unset="npm_config_cache" npm test', "env '-u' npm_config_cache npm test",
+    "env -u UNUSED -i npm test", "'env' --ignore-environment npm test",
+    "env -i npm test", "npm test && npm_config_cache=./later npm test"]) {
     assert.deepEqual(validationScratchPaths(root, [command], inherited, cwd), [], command);
   }
+  for (const value of ["~/cache", " cache", "cache "]) {
+    assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: value }, cwd), [], value);
+  }
+  assert.deepEqual(validationScratchPaths(root, ["env -u UNUSED npm test"], inherited), [cache],
+    "removing an unrelated variable does not disable the configured cache");
   assert.deepEqual(validationScratchPaths(root, ["npm test"], { npm_config_cache: "$PWD/cache" }), [],
     "a literal inherited value must not be expanded as a shell assignment");
   assert.deepEqual(validationScratchPaths(root, ["cd checkout && npm test"], { npm_config_cache: "./cache" }), [],
@@ -202,3 +212,36 @@ test("npm cache exclusions are per call and preserve tracked, read and exact-out
   assert.notDeepEqual(childSnapshot, unchanged);
   assert.equal(JSON.stringify(pinned.binding), saved);
 }));
+
+test("unresolved npm cache recipes and disabled calls keep their apparent cache inputs visible", async t => {
+  for (const [label, value, command, apparentCache] of [
+    ["npm home expansion", "~/cache", "npm cache verify", "~/cache"],
+    ["npm whitespace trimming", " cache", "npm cache verify", " cache"],
+    ["quoted env unset", "cache", "env -u 'npm_config_cache' node check.mjs", "cache"],
+    ["attached env unset", "cache", "env -unpm_config_cache node check.mjs", "cache"],
+    ["late env clear", "cache", "env -u UNUSED -i node check.mjs", "cache"],
+    ["quoted env clear", "cache", "'env' --ignore-environment node check.mjs", "cache"],
+  ] as const) await t.test(label, async () => fixture(async root => {
+    process.env.npm_config_cache = value;
+    const input = join(root, apparentCache, "input");
+    await mkdir(join(root, apparentCache), { recursive: true });
+    await writeFile(input, "original");
+    const manifestPath = join(root, "manifest.json");
+    const bytes = JSON.stringify({ version: "0.1.0", task_id: "unit", read: [root + "/**"],
+      write: [root + "/**"], validation: [command] });
+    await writeFile(manifestPath, bytes);
+    const pinned = await protectedSnapshot({ projectRoot: root, manifestPath, manifestHash: hash(bytes) },
+      { directory: root, command });
+    assert.ok(pinned?.binding.freshness);
+    const inputs = await validationInputSnapshot(root, pinned.binding);
+    assert.ok(inputs);
+    await writeFile(input, "changed");
+    const changedInputs = await validationInputSnapshot(root, pinned.binding);
+    const changed = await refreshProtectedSnapshot(root, pinned.binding);
+    assert.ok(changedInputs && changed);
+    assert.notEqual(changedInputs, inputs, "an unresolved or disabled cache setting cannot hide an input change");
+    assert.notEqual(changed.source, pinned.source);
+    assert.notEqual(changed.candidate, pinned.candidate);
+    assert.deepEqual(pinned.binding.freshness.scratch_paths, []);
+  }));
+});
