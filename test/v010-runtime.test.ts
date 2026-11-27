@@ -521,7 +521,7 @@ test("language follow-up marker upgrades the installed language1 preview", async
   assert.equal((await initializeProject(root, "v010")).version, V010_RUNTIME_ASSET_VERSION);
 }));
 
-for (const installed of ["0.11.4", "0.17.5-future-v1"])
+for (const installed of ["0.11.4", "0.17.6-future-v1"])
 test(`Mission refresh rejects incompatible marker ${installed} before mutation`, async () => fixture(async root => {
   await initializeProject(root, "v010");
   const marker = join(root, ".opencode/sortie-dogs-v010.version");
@@ -533,7 +533,7 @@ test(`Mission refresh rejects incompatible marker ${installed} before mutation`,
   assert.equal(await readFile(asset, "utf8"), before);
 }));
 
-for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1", "0.15.3-external-review-links-v1", "0.16.31-reviewer-transform-recovery-v1", "0.17.0-test-optimization-v1", "0.17.1-prelaunch-recovery-v1", "0.17.2-review-collector-recovery-v1", "0.17.3-git-worker-settlement-v1"])
+for (const installed of ["0.12.25-mission-continuity-v1", "0.13.18-direct-settlement-v1", "0.14.9-optional-kofi-v1", "0.15.3-external-review-links-v1", "0.16.31-reviewer-transform-recovery-v1", "0.17.0-test-optimization-v1", "0.17.1-prelaunch-recovery-v1", "0.17.2-review-collector-recovery-v1", "0.17.3-git-worker-settlement-v1", "0.17.4-mission-recovery-v1"])
 test(`Mission refresh accepts the retained marker ${installed}`, async () => fixture(async root => {
   await initializeProject(root, "v010");
   await writeFile(join(root, ".opencode/sortie-dogs-v010.version"), `${installed}\n`);
