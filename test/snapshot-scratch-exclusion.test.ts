@@ -223,6 +223,7 @@ test("unresolved npm cache recipes and disabled calls keep their apparent cache 
     ["late env clear", "cache", "env -u UNUSED -i node check.mjs", "cache"],
     ["quoted env clear", "cache", "'env' --ignore-environment node check.mjs", "cache"],
     ["quoted CLI override", "cache", 'npm cache verify "--cache=./actual"', "cache"],
+    ["assignment in a separate shell statement", "", "npm_config_cache=./apparent\nnpm test", "apparent"],
   ] as const) await t.test(label, async () => fixture(async root => {
     process.env.npm_config_cache = value;
     const input = join(root, apparentCache, "input");
