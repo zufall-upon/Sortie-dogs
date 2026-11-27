@@ -35,8 +35,26 @@ test("Windows AppExecLink exact-entry authorization and strict evidence", async 
   await fs.mkdir(resolve("_testenv"), { recursive: true });
   const root = await fs.mkdtemp(resolve("_testenv/app-exec-entry-"));
   try {
-    const identity = await inspectAppExecLink(alias);
-    assert.ok(identity, "an independently identified OS fixture must be readable");
+    const childObservation = { started: false, killed: false, spawnError: false };
+    const originalSpawn = childProcess.spawn;
+    const observedSpawn = t.mock.method(childProcess, "spawn", ((file: string, args: readonly string[], options: unknown) => {
+      const child = Reflect.apply(originalSpawn, childProcess, [file, args, options]) as ReturnType<typeof childProcess.spawn>;
+      if (file.toLowerCase().endsWith("powershell.exe")) {
+        childObservation.started = true;
+        child.once("error", () => { childObservation.spawnError = true; });
+        const originalKill = child.kill;
+        child.kill = function (...killArgs: Parameters<typeof child.kill>) {
+          childObservation.killed = true;
+          return Reflect.apply(originalKill, this, killArgs);
+        };
+      }
+      return child;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+    let identity;
+    try { identity = await inspectAppExecLink(alias); }
+    finally { observedSpawn.mock.restore(); syncBuiltinESMExports(); }
+    assert.ok(identity, `an independently identified OS fixture must be readable (${JSON.stringify(childObservation)})`);
     const manifest = { version: "0.1.0", task_id: "app-exec-entry", read: [], write: [alias], validation: [] };
     const project = await createProjectPaths(root), pins = new Map();
     const scopes = await canonicalManifestWriteScopes(project, manifest, pins);
