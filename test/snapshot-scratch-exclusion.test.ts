@@ -74,6 +74,10 @@ test("npm scratch requires an unambiguous configured cache, with literal command
     [join(cwd, "new cache")]);
   assert.deepEqual(validationScratchPaths(root, ['env npm_config_cache="$PWD/npm-cache" npm test'], inherited, cwd),
     [join(cwd, "npm-cache")]);
+  for (const quote of ["'", '"']) {
+    assert.deepEqual(validationScratchPaths(root, [`npm_config_cache=${quote}./cache; & | data${quote} npm test`], inherited, cwd),
+      [join(cwd, "cache; & | data")], "quoted separators are path data, not shell boundaries");
+  }
   for (const command of ['npm_config_cache="" npm test', 'npm_config_cache="$UNKNOWN" npm test',
     "npm_config_cache='$PWD/cache' npm test", "npm test --cache=./different",
     'npm test "--cache=./different"', "npm test '--cache' ./different",
@@ -223,9 +227,14 @@ test("unresolved npm cache recipes and disabled calls keep their apparent cache 
     ["late env clear", "cache", "env -u UNUSED -i node check.mjs", "cache"],
     ["quoted env clear", "cache", "'env' --ignore-environment node check.mjs", "cache"],
     ["quoted CLI override", "cache", 'npm cache verify "--cache=./actual"', "cache"],
-    ["assignment in a separate shell statement", "", "npm_config_cache=./apparent\nnpm test", "apparent"],
+    ...[
+      ["newline", "\n"], ["semicolon", " ; "], ["conditional", " && "], ["fallback", " false || "],
+      ["pipeline", " | "], ["background", " & "],
+    ].map(([label, separator]) => [
+      `assignment before ${label}`, undefined, `npm_config_cache=./apparent${separator}npm test`, "apparent",
+    ] as const),
   ] as const) await t.test(label, async () => fixture(async root => {
-    process.env.npm_config_cache = value;
+    if (value !== undefined) process.env.npm_config_cache = value;
     const input = join(root, apparentCache, "input");
     await mkdir(join(root, apparentCache), { recursive: true });
     await writeFile(input, "original");

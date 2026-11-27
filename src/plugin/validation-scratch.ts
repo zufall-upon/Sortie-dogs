@@ -23,9 +23,10 @@ const isControl = (path: string) => controlDirectories.has(process.platform === 
 /** npm accepts case-insensitive config keys, but the shell can retain multiple spellings.
  * Only use an unambiguous literal environment setting, not npm's defaults or config files. */
 function npmCachePath(directory: string, command: string, inherited: Readonly<Record<string, string | undefined>>): string | undefined {
-  // Newlines may separate shell statements, so an assignment on one line
-  // cannot establish the environment of a later command.
-  if (/[\r\n]/u.test(command)) return undefined;
+  // A leading assignment cannot establish the environment of later shell
+  // statements or pipeline members. Quoted separators are ordinary path data.
+  const unquoted = command.replace(/"(?:\\.|[^"\\])*"|'[^']*'/gu, "");
+  if (/[\r\n]/u.test(command) || /[;&|]/u.test(unquoted)) return undefined;
   const values = new Map<string, { value: string; expandPwd: boolean; unquoted: boolean }>();
   const name = (key: string) => process.platform === "win32" ? key.toLowerCase() : key;
   for (const [key, value] of Object.entries(inherited)) {
