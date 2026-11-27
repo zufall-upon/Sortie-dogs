@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readdir, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { inspectAppExecLink, sameAppExecLink, type AppExecLinkIdentity } from "./windows-app-exec-link.js";
 
 const within = (root: string, path: string) => {
   const rest = relative(root, path);
@@ -14,10 +15,22 @@ const within = (root: string, path: string) => {
 export async function declaredArtifacts(paths: readonly string[], previewLimit = 0,
   options: { reportUnreadableDirectories?: boolean; reportUnreadableFile?: (path: string) => boolean | Promise<boolean>; reportOutsideLinks?: boolean } = {}) {
   const roots = [...new Set(paths.map(path => resolve(path)))].sort();
-  const physical = await Promise.all(roots.map(path => realpath(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return path;
-    throw error;
-  })));
+  const aliasRoots = new Map<string, AppExecLinkIdentity>();
+  const physical = await Promise.all(roots.map(async path => {
+    try { return await realpath(path); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return path;
+      if (code === "EACCES" || code === "EPERM") {
+        const identity = await inspectAppExecLink(path);
+        if (identity) {
+          aliasRoots.set(path, identity);
+          return identity.canonicalEntry;
+        }
+      }
+      throw error;
+    }
+  }));
   const entries: Array<readonly [string, string, string?]> = [];
   const excerpts: string[] = [];
   const unreadable: string[] = [];
@@ -32,6 +45,20 @@ export async function declaredArtifacts(paths: readonly string[], previewLimit =
       if (error.code === "ENOENT") return undefined;
       throw error;
     });
+    const pinnedAlias = aliasRoots.get(path);
+    if (pinnedAlias !== undefined) {
+      // Root discovery and walking must observe the same exact entry. A race
+      // or an incomplete reparse read is never converted into "missing".
+      const current = metadata?.isSymbolicLink() ? await inspectAppExecLink(path) : undefined;
+      if (!current || !sameAppExecLink(pinnedAlias, current)) throw new Error("declared-artifact-entry-changed");
+      const digest = createHash("sha256").update(JSON.stringify(current)).digest("hex");
+      entries.push([label, "app-execution-alias:entry", digest]);
+      const notice = Buffer.from(`\n--- external App Execution Alias: ${label} ---\n[entry metadata fingerprinted; target not followed]\n`);
+      const bounded = notice.subarray(0, remaining);
+      if (bounded.length) { excerpts.push(bounded.toString("utf8")); remaining -= bounded.length; }
+      if (bounded.length < notice.length) truncated = true;
+      return;
+    }
     if (!metadata) { entries.push([label, "missing"]); return; }
     if (metadata.isSymbolicLink()) {
       const target = await readlink(path);

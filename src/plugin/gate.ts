@@ -7,6 +7,7 @@ import { RelativePathError, normalizeManifestPath, normalizeManifestScope, norma
 import type { OperationManifest } from "../core/types.js";
 import { validateOperationManifestSchema } from "../core/validate-schema.js";
 import { missionValidationCommand } from "../core/mission-validation-command.js";
+import { inspectAppExecLink, pinnedAppExecLinkMatchesOrIsMissing, sameAppExecLink, type AppExecLinkIdentity } from "./windows-app-exec-link.js";
 
 export interface ToolExecuteBeforeInput {
   tool: string;
@@ -74,6 +75,7 @@ export interface WriteGate {
   }): Promise<void>;
   checkPath(path: string): Promise<void>;
   toRelativePath(path: string): Promise<string>;
+  pinnedAppExecEntries(): ReadonlyMap<string, AppExecLinkIdentity>;
 }
 
 interface Extraction {
@@ -2049,13 +2051,33 @@ function isWithin(root: string, target: string): boolean {
 async function canonicalManifestScopes(
   project: ProjectPaths,
   entries: readonly string[],
+  appExecPins?: Map<string, AppExecLinkIdentity>,
 ): Promise<readonly string[]> {
   const scopes = await Promise.all(entries.map(async (entry) => {
     const normalized = normalizeManifestScope(entry);
     const absolute = normalized.kind === "relative"
       ? project.absolute(normalized.path)
       : resolve(normalized.path);
-    return await canonicalPotentialPath(absolute);
+    const pinned = appExecPins?.get(absolute);
+    if (pinned) {
+      if (normalized.directory || !await pinnedAppExecLinkMatchesOrIsMissing(absolute, pinned)) {
+        throw new Error("app-exec-entry-changed");
+      }
+      return pinned.canonicalEntry;
+    }
+    try {
+      return await canonicalPotentialPath(absolute);
+    } catch (error) {
+      // An AppExecLink grants only its exact directory entry, never its target
+      // or descendants. Other errors and all directory declarations stay strict.
+      if (normalized.directory || !isRecord(error) || !["EACCES", "EPERM"].includes(String(error.code))) throw error;
+      const entry = await inspectAppExecLink(absolute);
+      if (!entry) throw error;
+      const concurrent = appExecPins?.get(absolute);
+      if (concurrent && !sameAppExecLink(concurrent, entry)) throw new Error("app-exec-entry-changed");
+      appExecPins?.set(absolute, entry);
+      return entry.canonicalEntry;
+    }
   }));
   return [...new Set(scopes)];
 }
@@ -2064,8 +2086,9 @@ async function canonicalManifestScopes(
 export async function canonicalManifestWriteScopes(
   project: ProjectPaths,
   manifest: OperationManifest,
+  appExecPins?: Map<string, AppExecLinkIdentity>,
 ): Promise<readonly string[]> {
-  return await canonicalManifestScopes(project, manifest.write);
+  return await canonicalManifestScopes(project, manifest.write, appExecPins);
 }
 
 export async function canonicalManifestReadScopes(
@@ -2104,7 +2127,7 @@ export async function createProjectPaths(rootCandidate: string): Promise<Project
 }
 
 export async function createWriteGate(project: ProjectPaths, value: unknown, toolDirectory = project.root,
-  validationOverride?: readonly string[]): Promise<WriteGate> {
+  validationOverride?: readonly string[], previousAppExecPins?: ReadonlyMap<string, AppExecLinkIdentity>): Promise<WriteGate> {
   const validated = validateOperationManifestSchema(value);
   if (!validated.ok) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
   const manifest: OperationManifest = validated.value;
@@ -2136,6 +2159,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   const writable = new Set<string>();
   const explicitDirectories = new Set<string>();
   const externalEntries: string[] = [];
+  const appExecEntries = new Map(previousAppExecPins);
   try {
     for (const entry of manifest.write) {
       const normalized = normalizeManifestScope(entry);
@@ -2148,6 +2172,17 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
     }
   } catch (error) {
     throw new WriteDeniedError("manifest-unavailable", "<unknown>", { cause: error });
+  }
+  for (const [path, pinned] of appExecEntries) {
+    const declaredDirectory = manifest.write.some(entry => {
+      const scope = normalizeManifestScope(entry);
+      const absolute = scope.kind === "relative" ? project.absolute(scope.path) : resolve(scope.path);
+      return scope.directory && absolute === path;
+    });
+    if (declaredDirectory) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+    if (!await pinnedAppExecLinkMatchesOrIsMissing(path, pinned)) {
+      throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+    }
   }
   // A missing relative descendant is a directory scope when its parent is also declared.
   // This authorizes files below the bounded child without widening the parent declaration.
@@ -2185,8 +2220,35 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   const externalDirectories: { path: string; realPath: string }[] = [];
   const externalFiles: { path: string; realPath?: string; anchorRealPath: string }[] = [];
   const linkEntries = new Map<string, string>();
+  const rememberLink = async (path: string, anchor: string, directory: boolean) => {
+    linkEntries.set(path, anchor);
+    if (process.platform !== "win32") return;
+    const previous = appExecEntries.get(path);
+    try {
+      await realpath(path);
+      if (previous) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+    }
+    catch (error) {
+      if (error instanceof WriteDeniedError) throw error;
+      if (isRecord(error) && ["EACCES", "EPERM"].includes(String(error.code))) {
+        const identity = await inspectAppExecLink(path);
+        if (previous && (!identity || !sameAppExecLink(previous, identity))) {
+          throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+        }
+        if (identity) {
+          if (directory) throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+          appExecEntries.set(path, identity);
+        }
+      } else if (previous) {
+        throw new WriteDeniedError("manifest-unavailable", "<unknown>");
+      }
+    }
+  };
   for (const path of [...exactWritable].map(path => project.absolute(path))) {
-    if (await isSymbolicLink(path)) linkEntries.set(path, await realpath(dirname(path)));
+    if (await isSymbolicLink(path)) {
+      const relativePath = relative(project.root, path).replaceAll("\\", "/");
+      await rememberLink(path, await realpath(dirname(path)), explicitDirectories.has(relativePath));
+    }
   }
   for (const path of externalEntries) {
     try {
@@ -2194,7 +2256,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       if (metadata.isSymbolicLink()) {
         // An exact link grants its entry, not its target or descendants.
         const anchorRealPath = await realpath(dirname(path));
-        linkEntries.set(path, anchorRealPath);
+        await rememberLink(path, anchorRealPath, explicitDirectories.has(path.replaceAll("\\", "/")));
         externalFiles.push({ path, anchorRealPath });
         continue;
       }
@@ -2253,6 +2315,9 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
       throw error;
     }
     const absolutePath = resolve(project.root, manifestPath.path);
+    // A pinned AppExecLink can only be used through the entry-only branch below.
+    // A replacement regular file must not acquire follow/write permission.
+    if (appExecEntries.has(absolutePath)) throw new WriteDeniedError("manifest-scope", path);
     const entryAnchor = linkEntries.get(absolutePath);
     if (entryAnchor !== undefined && await realpath(dirname(absolutePath)) !== entryAnchor) {
       throw new WriteDeniedError("manifest-scope", path);
@@ -2372,6 +2437,7 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
   return {
     checkPath,
     toRelativePath: project.toRelativePath,
+    pinnedAppExecEntries: () => new Map(appExecEntries),
     async check(_input, output, options): Promise<void> {
       const command = isRecord(output.args) && typeof output.args.command === "string"
         ? normalizeCommand(output.args.command)
@@ -2410,7 +2476,14 @@ export async function createWriteGate(project: ProjectPaths, value: unknown, too
           const anchor = linkEntries.get(absolute);
           const entryOnly = !nativeFileTool && extracted.entryPaths?.includes(index) &&
             !/[\\/]$/u.test(path) && !extracted.ambiguous;
-          if (entryOnly && anchor !== undefined && await realpath(dirname(absolute)) === anchor) continue;
+          if (entryOnly && anchor !== undefined && await realpath(dirname(absolute)) === anchor) {
+            const pinned = appExecEntries.get(absolute);
+            if (pinned !== undefined) {
+              const current = await inspectAppExecLink(absolute);
+              if (!current || !sameAppExecLink(pinned, current)) throw new WriteDeniedError("manifest-scope", path);
+            }
+            continue;
+          }
           await checkPath(nativeFileTool ? resolve(toolDirectory, path) : path);
           if (extracted.gitIndexPaths?.includes(index) && options?.assertWritePaths) {
             // A parent directory can also be an alias. Preserve caller prohibitions
