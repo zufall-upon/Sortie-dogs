@@ -76,6 +76,7 @@ test("npm scratch requires an unambiguous configured cache, with literal command
     [join(cwd, "npm-cache")]);
   for (const command of ['npm_config_cache="" npm test', 'npm_config_cache="$UNKNOWN" npm test',
     "npm_config_cache='$PWD/cache' npm test", "npm test --cache=./different",
+    'npm test "--cache=./different"', "npm test '--cache' ./different",
     "npm_config_cache='~/cache' npm test", 'npm_config_cache=" ./cache " npm test',
     "env -u npm_config_cache npm test", "env -u 'npm_config_cache' npm test",
     'env -u"npm_config_cache" npm test', "env -unpm_config_cache npm test",
@@ -221,6 +222,7 @@ test("unresolved npm cache recipes and disabled calls keep their apparent cache 
     ["attached env unset", "cache", "env -unpm_config_cache node check.mjs", "cache"],
     ["late env clear", "cache", "env -u UNUSED -i node check.mjs", "cache"],
     ["quoted env clear", "cache", "'env' --ignore-environment node check.mjs", "cache"],
+    ["quoted CLI override", "cache", 'npm cache verify "--cache=./actual"', "cache"],
   ] as const) await t.test(label, async () => fixture(async root => {
     process.env.npm_config_cache = value;
     const input = join(root, apparentCache, "input");

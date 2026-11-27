@@ -36,9 +36,10 @@ function npmCachePath(directory: string, command: string, inherited: Readonly<Re
       /\bunset\b[^;&|\n]*\bnpm_config_cache\b/iu.test(command) ||
       /\benv\b[^;&|\n]*(?:-u\s*|--unset(?:=|\s+))['"]?npm_config_cache\b/iu.test(command) ||
       /\benv\s+(?:-i\b|--ignore-environment\b)/iu.test(command)) return undefined;
-  // Decode ordinary quoted env options too. Unknown env modifiers may change the
+  // Decode ordinary quoted options too. Unknown env modifiers may change the
   // environment or cwd, so they cannot justify an inherited cache exemption.
   const words = shellCommandWords(command);
+  if (words.some(word => /^--cache(?:=|$)/iu.test(word))) return undefined;
   for (let index = 0; index < words.length; index++) {
     if (!/(?:^|[\\/])env(?:\.exe)?$/iu.test(words[index]!)) continue;
     for (let option = index + 1; option < words.length && words[option]!.startsWith("-"); option++) {
