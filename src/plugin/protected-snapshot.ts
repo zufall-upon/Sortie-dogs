@@ -33,6 +33,9 @@ const environment = (manifest: OperationManifest) => ({
   ...Object.fromEntries([...new Set([...environmentKeys, ...manifest.validation.flatMap(command =>
     [...command.matchAll(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/gu)].map(match => match[1] ?? match[2]!))])]
     .map(key => [key, process.env[key] ?? null])),
+  // Preserve spellings and ordering: npm accepts case-insensitive config names,
+  // while distinct environment variables can coexist on case-sensitive hosts.
+  "@npm_config_cache": JSON.stringify(Object.entries(process.env).filter(([key]) => /^npm_config_cache$/iu.test(key))),
   "@platform": process.platform, "@arch": process.arch, "@runtime": process.version, "@executable": process.execPath,
 });
 const validationContractHash = (manifest: OperationManifest) => goalFingerprint({ read: manifest.read, validation: manifest.validation });
